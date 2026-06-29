@@ -17,6 +17,8 @@ const externalApps = [
   { href: '/gn-lojas.html', label: 'GN Lojas' },
   { href: '/gn-estoque.html', label: 'GN Estoque' },
   { href: '/gn-checklist.html', label: 'GN Check-list' },
+  { href: '/gn-comissoes.html', label: 'GN Comissões' },
+  { href: '/gn-comissoes-mestra.html', label: 'GN Com. Mestra' },
 ];
 
 function App() {

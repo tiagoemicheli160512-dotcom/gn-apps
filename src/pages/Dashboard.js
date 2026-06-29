@@ -41,6 +41,18 @@ const standaloneApps = [
     description: 'Check-list operacional para abertura, fechamento e processos das lojas.',
     icon: '✅',
   },
+  {
+    href: '/gn-comissoes.html',
+    name: 'GN Comissões 2026',
+    description: 'Cálculo e acompanhamento de comissões dos vendedores.',
+    icon: '💰',
+  },
+  {
+    href: '/gn-comissoes-mestra.html',
+    name: 'GN Comissões — MESTRA',
+    description: 'Painel mestre de comissões com visão consolidada.',
+    icon: '👑',
+  },
 ];
 
 function Dashboard() {
