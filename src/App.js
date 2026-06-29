@@ -16,6 +16,7 @@ const navItems = [
 const externalApps = [
   { href: '/gn-lojas.html', label: 'GN Lojas' },
   { href: '/gn-estoque.html', label: 'GN Estoque' },
+  { href: '/gn-checklist.html', label: 'GN Check-list' },
 ];
 
 function App() {

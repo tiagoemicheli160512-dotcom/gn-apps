@@ -35,6 +35,12 @@ const standaloneApps = [
     description: 'Controle de estoque com pedidos, fichas técnicas, vendas e conferência semanal.',
     icon: '📦',
   },
+  {
+    href: '/gn-checklist.html',
+    name: 'GN Check-list Operacional',
+    description: 'Check-list operacional para abertura, fechamento e processos das lojas.',
+    icon: '✅',
+  },
 ];
 
 function Dashboard() {
