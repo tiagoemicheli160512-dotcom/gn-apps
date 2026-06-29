@@ -1,31 +1,19 @@
 # GN Apps
 
-Aplicativo desktop com atualizações automáticas online.
+Plataforma online de gestão empresarial com os seguintes módulos:
+
+- **GE Estoque** - Controle de estoque com entrada, saída e alertas
+- **Comissão** - Cálculo e acompanhamento de comissões
+- **Check-list** - Listas de verificação para processos
+- **Avaliação** - Avaliações de desempenho
 
 ## Desenvolvimento
 
 ```bash
 npm install
-npm run dev
+npm start
 ```
 
-## Build
+## Deploy
 
-```bash
-npm run build          # Build para o OS atual
-npm run build:win      # Build para Windows
-npm run build:mac      # Build para macOS
-npm run build:linux    # Build para Linux
-```
-
-## Publicar nova versão
-
-1. Atualize a versão no `package.json`
-2. Crie uma tag git:
-   ```bash
-   git tag v1.1.0
-   git push origin v1.1.0
-   ```
-3. O GitHub Actions vai buildar e publicar automaticamente
-
-O app instalado vai detectar a nova versão e notificar o usuário.
+O deploy é automático via Vercel a cada push na branch `main`.
