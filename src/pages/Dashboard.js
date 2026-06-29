@@ -53,6 +53,12 @@ const standaloneApps = [
     description: 'Painel mestre de comissões com visão consolidada.',
     icon: '👑',
   },
+  {
+    href: '/gn-avaliacoes.html',
+    name: 'GN Avaliação de Desempenho',
+    description: 'Avaliações de desempenho dos colaboradores.',
+    icon: '⭐',
+  },
 ];
 
 function Dashboard() {
