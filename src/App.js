@@ -4,12 +4,12 @@ import Dashboard from './pages/Dashboard';
 import './App.css';
 
 const apps = [
-  { href: '/gn-lojas.html', label: 'GN Lojas' },
-  { href: '/gn-estoque.html', label: 'GN Estoque' },
-  { href: '/gn-checklist.html', label: 'GN Check-list' },
-  { href: '/gn-comissoes.html', label: 'GN Comissões' },
-  { href: '/gn-comissoes-mestra.html', label: 'GN Com. Mestra' },
-  { href: '/gn-avaliacoes.html', label: 'GN Avaliações' },
+  { href: '/gn-lojas.html', label: 'GN Lojas', icon: '🏪' },
+  { href: '/gn-estoque.html', label: 'GN Estoque', icon: '📦' },
+  { href: '/gn-checklist.html', label: 'GN Check-list', icon: '✅' },
+  { href: '/gn-comissoes.html', label: 'GN Comissões', icon: '💰' },
+  { href: '/gn-comissoes-mestra.html', label: 'GN Com. Mestra', icon: '👑' },
+  { href: '/gn-avaliacoes.html', label: 'GN Avaliações', icon: '⭐' },
 ];
 
 function App() {
@@ -30,9 +30,11 @@ function App() {
               Dashboard
             </Link>
           </li>
+          <li className="nav-section-label">Aplicativos</li>
           {apps.map((item) => (
             <li key={item.href}>
               <a href={item.href} className="nav-link" style={{ textDecoration: 'none' }}>
+                <span style={{ fontSize: '1rem' }}>{item.icon}</span>
                 {item.label}
               </a>
             </li>
