@@ -50,13 +50,13 @@ function App() {
       </main>
 
       <nav className="mobile-bottom-nav">
-        <a href="/gn-comissoes.html" className="mobile-nav-item">
-          <span className="mobile-nav-icon">💰</span>
-          <span className="mobile-nav-label">Comissões</span>
-        </a>
         <a href="/gn-comissoes-mestra.html" className="mobile-nav-item">
           <span className="mobile-nav-icon">👑</span>
           <span className="mobile-nav-label">Mestra</span>
+        </a>
+        <a href="/gn-estoque.html" className="mobile-nav-item">
+          <span className="mobile-nav-icon">📦</span>
+          <span className="mobile-nav-label">Estoque</span>
         </a>
         <a href="/gn-usuarios.html" className="mobile-nav-item mobile-nav-fab-wrap">
           <span className="mobile-nav-fab">⚙️</span>
