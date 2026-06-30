@@ -2,6 +2,13 @@ import React, { useState } from 'react';
 
 const MAIN_HREFS = ['/gn-lojas.html', '/gn-estoque.html', '/gn-checklist.html', '/gn-avaliacoes.html'];
 
+const ICON_COLORS = {
+  '/gn-lojas.html': '#E8580A',
+  '/gn-estoque.html': '#D97706',
+  '/gn-checklist.html': '#22C55E',
+  '/gn-avaliacoes.html': '#EAB308',
+};
+
 const apps = [
   {
     href: '/gn-lojas.html',
@@ -85,7 +92,12 @@ function Dashboard() {
           <div className="mobile-grid">
             {mainApps.map((app) => (
               <a key={app.href} href={app.href} className="mobile-card">
-                <span className="mobile-card-icon">{app.icon}</span>
+                <span
+                  className="mobile-card-icon-wrap"
+                  style={{ background: `${ICON_COLORS[app.href]}26` }}
+                >
+                  <span className="mobile-card-icon">{app.icon}</span>
+                </span>
                 <span className="mobile-card-label">{app.name.replace('GN ', '')}</span>
               </a>
             ))}
