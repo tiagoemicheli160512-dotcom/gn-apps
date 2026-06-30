@@ -118,6 +118,8 @@ input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-
 .count-badge{font-size:12px;font-weight:800;color:#E8580A}
 .alert-box{border-radius:13px;padding:11px 13px;font-size:12px;line-height:1.5}
 .alert-amber{background:rgba(120,53,15,.2);border:1px solid rgba(232,88,10,.3);color:#f5c090}
+.alert-red{background:rgba(127,29,29,.25);border:1px solid rgba(239,68,68,.4);color:#fca5a5}
+.foto-thumb{width:54px;height:54px;object-fit:cover;border-radius:8px;border:1px solid rgba(255,255,255,.12);cursor:pointer}
 
 /* Diferenças */
 .diff-card{border-radius:12px;padding:9px 12px;margin-bottom:4px}
@@ -195,6 +197,7 @@ input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-
   <button class="nav-btn" id="nav-estoque" onclick="goTab('estoque')">
     <span class="nav-icon">&#128722;</span>
     <span class="nav-label">Estoque</span>
+    <span class="nav-dot hidden" id="dot-estoque" style="background:#ef4444"></span>
   </button>
   <button class="nav-btn" id="nav-vendas" onclick="goTab('vendas')">
     <span class="nav-icon">&#128176;</span>
@@ -585,6 +588,8 @@ let loja    = LOJAS[0];
 let semana  = getMonday(new Date());
 let tab     = "home";
 let busca   = "";   // filtro de busca ativo nas abas
+let notaFotoBase64 = "";  // foto da NF em edição (Entradas)
+let notaFotoName   = "";
 
 let estIniAll  = {};   // lojaKey -> {insumo: val}
 let vendasAll  = {};   // lojaKey -> {cod: qtd}
@@ -1082,7 +1087,7 @@ function atualizarPreviewQtd(el) {
   }
 }
 
-function addEntrada(insumo, dataNF, nf, fornecedor, qtd, custoUnit) {
+function addEntrada(insumo, dataNF, nf, fornecedor, qtd, custoUnit, fotoBase64, fotoName) {
   const k = lojaKey();
   if (!entradasAll[k]) entradasAll[k] = [];
   // qtd já vem em unidades base (salvarNota já aplica fator antes de chamar)
@@ -1094,6 +1099,8 @@ function addEntrada(insumo, dataNF, nf, fornecedor, qtd, custoUnit) {
     insumo, dataNF, nf, fornecedor,
     qtd: parseFloat(qtd) || 0,
     custoUnit: parseFloat(custoUnit) || 0,
+    fotoBase64: fotoBase64 || "",
+    fotoName: fotoName || "",
   });
   autoSave();
   showToast("✅ Entrada lançada: " + insumo);
@@ -1128,6 +1135,7 @@ function submitEntradaForm() {
 
 function prevWeek()  { semana = addDays(semana, -7); render(); }
 function nextWeek()  { semana = addDays(semana,  7); render(); }
+function irParaSemana(isoStr) { semana = new Date(isoStr); tab = "relatorio"; render(); }
 function changeLoja(v) { loja = v; tab = "home"; render(); }
 function goTab(t) {
   tab = t;
@@ -2275,6 +2283,54 @@ async function gerarExcelPedido() {
   }
 }
 
+/* ═══════════ FOTO COMPROVANTE (NOTA FISCAL) ═══════════ */
+function compressAndSave(file, cb) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      const MAX = 800; let w = img.width, h = img.height;
+      if (w > MAX) { h = Math.round(h * MAX / w); w = MAX; }
+      if (h > MAX) { w = Math.round(w * MAX / h); h = MAX; }
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      cb(canvas.toDataURL('image/jpeg', 0.7));
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+function handleFotoNota(input) {
+  if (!input.files || !input.files[0]) return;
+  compressAndSave(input.files[0], b64 => {
+    notaFotoBase64 = b64;
+    notaFotoName = input.files[0].name;
+    const prev = document.getElementById('notaFotoPreview');
+    if (prev) prev.innerHTML = notaFotoPreviewHtml();
+    showToast('📷 Foto da nota anexada!');
+  });
+}
+
+function deleteFotoNota() {
+  notaFotoBase64 = "";
+  notaFotoName = "";
+  const prev = document.getElementById('notaFotoPreview');
+  if (prev) prev.innerHTML = "";
+}
+
+function notaFotoPreviewHtml() {
+  if (!notaFotoBase64) return "";
+  return `<div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+    <img src="${notaFotoBase64}" class="foto-thumb" onclick="window.open(this.src)"/>
+    <div style="min-width:0">
+      <div style="font-size:10px;color:#34d399;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">📎 ${notaFotoName||'foto salva'}</div>
+      <button type="button" onclick="deleteFotoNota()" style="background:rgba(239,68,68,.15);border:none;border-radius:8px;color:#fca5a5;font-size:10px;font-weight:700;padding:4px 8px">🗑 Excluir foto</button>
+    </div>
+  </div>`;
+}
+
 /* ═══════════ ENTRADAS MULTI-ITEM (POR NOTA FISCAL) ═══════════ */
 function addLinhaEntrada() {
   const cont = document.getElementById('entItens');
@@ -2338,26 +2394,49 @@ function salvarNota() {
   if (!fornecedor.trim()) { showToast('⚠️ Informe o fornecedor.'); return; }
 
   const linhas = document.querySelectorAll('#entItens > div');
-  let salvos = 0;
+  const itensValidos = [];
+  let temNegativo = false;
   linhas.forEach(linha => {
     const insumo  = (linha.querySelector('.ent-insumo')||{}).value || '';
     const qtdCx   = parseFloat((linha.querySelector('.ent-qtd')||{}).value) || 0;
     const qtdUnd  = parseFloat((linha.querySelector('.ent-und')||{}).value) || 0;
     const custo   = parseFloat((linha.querySelector('.ent-custo')||{}).value) || 0;
     if (!insumo.trim() || (qtdCx === 0 && qtdUnd === 0)) return; // linha vazia
-    const n = insumo.trim().toUpperCase();
-    const fator = getFator(n);
-    const qtdTotal = qtdCx * fator + qtdUnd;
-    addEntrada(n, dataNF, nf || 'S/N', fornecedor.trim().toUpperCase(), qtdTotal, custo);
-    salvos++;
+    if (qtdCx < 0 || qtdUnd < 0 || custo < 0) { temNegativo = true; return; }
+    itensValidos.push({ insumo: insumo.trim().toUpperCase(), qtdCx, qtdUnd, custo });
   });
 
-  if (salvos === 0) { showToast('⚠️ Nenhum item preenchido.'); return; }
+  if (temNegativo) { showToast('⚠️ Quantidades e custo não podem ser negativos.'); return; }
+  if (!itensValidos.length) { showToast('⚠️ Nenhum item preenchido.'); return; }
+
+  const nfNorm = nf.trim().toUpperCase();
+  if (nfNorm && nfNorm !== 'S/N') {
+    const k = lojaKey();
+    const fornNorm = fornecedor.trim().toUpperCase();
+    const jaExiste = (entradasAll[k]||[]).some(e =>
+      (e.nf||'').trim().toUpperCase() === nfNorm && (e.fornecedor||'').trim().toUpperCase() === fornNorm
+    );
+    if (jaExiste && !confirm('⚠️ Já existe uma entrada com a NF "' + nf.trim() + '" para ' + fornecedor.trim() + ' nesta semana.\n\nDeseja salvar mesmo assim?')) {
+      return;
+    }
+  }
+
+  let salvos = 0;
+  itensValidos.forEach(item => {
+    const fator = getFator(item.insumo);
+    const qtdTotal = item.qtdCx * fator + item.qtdUnd;
+    addEntrada(item.insumo, dataNF, nf || 'S/N', fornecedor.trim().toUpperCase(), qtdTotal, item.custo, notaFotoBase64, notaFotoName);
+    salvos++;
+  });
 
   showToast('✅ ' + salvos + ' item(s) da NF salvos! Estoque atualizado.');
   // Limpar form
   document.getElementById('entNF').value = '';
   document.getElementById('entFornecedor').value = '';
+  notaFotoBase64 = "";
+  notaFotoName = "";
+  const prev = document.getElementById('notaFotoPreview');
+  if (prev) prev.innerHTML = "";
   const cont = document.getElementById('entItens');
   if (cont) cont.innerHTML = '';
   addLinhaEntrada();
@@ -2938,6 +3017,7 @@ function render() {
   /* Nav dots */
   document.getElementById("dot-vendas").classList.toggle("hidden", tv === 0);
   document.getElementById("dot-relatorio").classList.toggle("hidden", qd === 0);
+  document.getElementById("dot-estoque").classList.toggle("hidden", qa === 0);
   const dotPedido = document.getElementById("dot-pedido");
   if (dotPedido) dotPedido.classList.toggle("hidden", qtdPreenchidos() === 0);
   const dotTf = document.getElementById("dot-transf");
@@ -3015,6 +3095,7 @@ function render() {
   } else if (tab === "estoque") {
     c.innerHTML = `
     <div class="section">
+      ${qa>0?`<div class="alert-box alert-red">⚠️ <strong>${qa} insumo${qa>1?"s":""}</strong> abaixo do estoque mínimo configurado.</div>`:""}
       <div class="search-bar">
         <div class="search-wrap">
           <span class="search-ico">🔍</span>
@@ -3034,7 +3115,7 @@ function render() {
       <div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;margin-bottom:6px">🥘 Insumos (${getAllInsumos().filter(n=>!isBebida(n)).length})</div>
       <div class="card" style="margin-bottom:12px">
         ${getAllInsumos().filter(n=>!isBebida(n)).map((nome,i) => {
-          const saldo = ei[nome]||0, mn = min[nome]||0, baixo = mn>0&&saldo<mn;
+          const saldo = ei[nome]||0, mn = min[nome]||0, baixo = mn>0&&(teo[nome]||0)<mn;
           const entQtd = ent[nome]||0;
           const empSaiu = getEmprestimosAbertoPorInsumo()[nome]||0;
           const empRecebeu = getEmprestimosRecebidosPorInsumo()[nome]||0;
@@ -3062,7 +3143,7 @@ function render() {
       <div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;margin-bottom:6px;margin-top:10px">🍺 Bebidas (${(SEED.bebidas_insumos||[]).length})</div>
       <div class="card">
         ${(SEED.bebidas_insumos||[]).map((nome) => {
-          const saldo = ei[nome]||0, mn = min[nome]||0, baixo = mn>0&&saldo<mn;
+          const saldo = ei[nome]||0, mn = min[nome]||0, baixo = mn>0&&(teo[nome]||0)<mn;
           const empSaiu = getEmprestimosAbertoPorInsumo()[nome]||0;
           const empRecebeu = getEmprestimosRecebidosPorInsumo()[nome]||0;
           return `<div class="row-item" data-search="${nome}" style="${baixo?"background:rgba(239,68,68,.1)":""}">
@@ -3413,6 +3494,12 @@ function render() {
           <input id="entFornecedor" class="inp-full" type="text" placeholder="ex: COCA-COLA DISTRIBUIDORA" style="font-size:12px;padding:5px 8px"/>
         </div>
 
+        <div style="margin-bottom:10px">
+          <label style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase">📷 Foto da Nota Fiscal</label>
+          <input type="file" accept="image/*" capture="environment" onchange="handleFotoNota(this)" style="font-size:11px"/>
+          <div id="notaFotoPreview">${notaFotoPreviewHtml()}</div>
+        </div>
+
         <!-- Lista de itens da NF -->
         <div style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase;margin-bottom:6px">Itens da Nota *</div>
         <datalist id="${dlId}">${allIns.map(n=>`<option value="${n}"></option>`).join('')}</datalist>
@@ -3446,8 +3533,10 @@ function render() {
           });
           return Object.values(grupos).map(g => {
             const totalNF = g.itens.reduce((s,e)=>(s+(e.qtd||0)*(e.custoUnit||0)),0);
+            const gFoto = g.itens.find(e=>e.fotoBase64);
             return `<div class="card" style="padding:0;overflow:hidden">
               <div style="background:rgba(255,255,255,.04);padding:8px 12px;display:flex;align-items:center;gap:8px">
+                ${gFoto?`<img src="${gFoto.fotoBase64}" class="foto-thumb" onclick="window.open(this.src)"/>`:''}
                 <div style="flex:1;min-width:0">
                   <div style="font-size:12px;font-weight:800;color:#fff">${g.fornecedor||'Fornecedor'}</div>
                   <div style="font-size:10px;color:#64748b">NF ${g.nf} · ${g.data||''} · ${g.itens.length} item(s)</div>
@@ -4004,6 +4093,37 @@ function render() {
           <span>Proteínas</span>
           <span style="font-size:10px;opacity:.8">Sol, Seca, Camarão...</span>
         </button>
+      </div>
+
+      <div class="card" style="padding:13px 14px">
+        <div class="sec-label">📅 Histórico de Semanas</div>
+        <div style="display:flex;flex-direction:column;gap:6px;margin-top:8px">
+          ${(function(){
+            const N = 8;
+            const itens = [];
+            for (let i = 0; i < N; i++) {
+              const wkRef = addDays(semana, -7 * i);
+              const domRef = addDays(wkRef, 6);
+              const lkRef = loja + "|" + wkKey(wkRef);
+              const tvRef = Object.values(vendasAll[lkRef]||{}).reduce((s,x)=>s+(x||0),0);
+              const ctRef = contAll[lkRef]||{};
+              const qcRef = Object.values(ctRef).filter(x=>x!=null).length;
+              const fechada = !!estIniAll[loja + "|" + wkKey(addDays(wkRef,7))];
+              const isAtual = wkKey(wkRef) === wkKey(semana);
+              itens.push({wkRef, domRef, tvRef, qcRef, fechada, isAtual});
+            }
+            return itens.map(it => `
+              <button onclick="irParaSemana('${it.wkRef.toISOString()}')"
+                style="display:flex;align-items:center;gap:8px;width:100%;background:${it.isAtual?'rgba(232,88,10,.12)':'rgba(255,255,255,.04)'};border:1px solid ${it.isAtual?'rgba(232,88,10,.3)':'rgba(255,255,255,.06)'};border-radius:12px;padding:8px 10px;text-align:left;cursor:pointer;color:inherit">
+                <span style="font-size:14px;flex-shrink:0">${it.fechada?'✅':it.qcRef>0?'🟡':'⬜'}</span>
+                <div style="flex:1;min-width:0">
+                  <div style="font-size:12px;font-weight:700;color:#fff">${fmt(it.wkRef)} → ${fmt(it.domRef)}</div>
+                  <div style="font-size:10px;color:#64748b">${it.tvRef} vendas · ${it.qcRef} contados${it.fechada?' · fechada':''}</div>
+                </div>
+                <span style="color:#475569;flex-shrink:0">›</span>
+              </button>`).join('');
+          })()}
+        </div>
       </div>
     </div>`;
   }
