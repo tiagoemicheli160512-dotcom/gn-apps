@@ -10,6 +10,7 @@ const apps = [
   { href: '/gn-comissoes.html', label: 'GN Comissões', icon: '💰' },
   { href: '/gn-comissoes-mestra.html', label: 'GN Com. Mestra', icon: '👑' },
   { href: '/gn-avaliacoes.html', label: 'GN Avaliações', icon: '⭐' },
+  { href: '/gn-usuarios.html', label: 'GN Usuários', icon: '👤' },
 ];
 
 function App() {

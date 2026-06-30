@@ -43,6 +43,13 @@ const apps = [
     icon: '⭐',
     tag: 'RH',
   },
+  {
+    href: '/gn-usuarios.html',
+    name: 'GN Usuários',
+    description: 'Gestão centralizada de usuários: criar, editar, bloquear e controlar acessos.',
+    icon: '👤',
+    tag: 'Admin',
+  },
 ];
 
 function Dashboard() {
