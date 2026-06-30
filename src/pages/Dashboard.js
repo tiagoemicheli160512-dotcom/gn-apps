@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
 const MAIN_HREFS = ['/gn-lojas.html', '/gn-checklist.html', '/gn-avaliacoes.html', '/gn-comissoes.html'];
 
@@ -61,6 +61,112 @@ const apps = [
   },
 ];
 
+function fmtR(v) {
+  return 'R$ ' + (parseFloat(v) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function readChecklistData() {
+  const today = new Date().toISOString().split('T')[0];
+  let dayState = null;
+  let weekState = null;
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key) continue;
+      if (key.startsWith('gn_chk4_day_') && !dayState) {
+        const parsed = JSON.parse(localStorage.getItem(key));
+        if (parsed && parsed.data === today) dayState = parsed;
+      }
+      if (key.startsWith('gn_chk4_week_') && !weekState) {
+        weekState = JSON.parse(localStorage.getItem(key));
+      }
+    }
+  } catch (e) {}
+  return { dayState, weekState, today };
+}
+
+function calcChecklistProgress(dayState) {
+  if (!dayState) return null;
+  let done = 0, total = 0;
+  ['checklist', 'abertura', 'fechamento'].forEach(key => {
+    const section = dayState[key] || {};
+    Object.values(section).forEach(setor => {
+      Object.values(setor).forEach(item => {
+        total++;
+        if (item.checked) done++;
+      });
+    });
+  });
+  return total > 0 ? Math.round((done / total) * 100) : null;
+}
+
+function LiveIndicators() {
+  const [data, setData] = useState(null);
+
+  useEffect(() => {
+    const { dayState, weekState } = readChecklistData();
+    if (!dayState && !weekState) return;
+    const fat = (parseFloat(dayState?.vendaSalao) || 0) + (parseFloat(dayState?.vendaDelivery) || 0);
+    const fatSemanal = weekState?.fat
+      ? ['seg','ter','qua','qui','sex','sab','dom'].reduce((acc, d) => acc + (parseFloat(weekState.fat[d]) || 0), 0)
+      : 0;
+    const meta = parseFloat(weekState?.metaSemanal) || 0;
+    const faltasUrgentes = (dayState?.faltas || []).filter(f => f.urgencia === 'Alta' && f.nome?.trim()).length;
+    const manutPendentes = (dayState?.manutencao || []).filter(m => m.status !== 'Resolvido').length;
+    const checkPct = calcChecklistProgress(dayState);
+    const loja = dayState?.semanaInicio ? null : null;
+    setData({ fat, fatSemanal, meta, faltasUrgentes, manutPendentes, checkPct });
+  }, []);
+
+  if (!data) return null;
+
+  const { fat, fatSemanal, meta, faltasUrgentes, manutPendentes, checkPct } = data;
+  const metaPct = meta > 0 ? Math.min(100, Math.round((fatSemanal / meta) * 100)) : null;
+  const metaColor = metaPct === null ? '#E8580A' : metaPct >= 100 ? '#22C55E' : metaPct >= 70 ? '#E8580A' : '#EF4444';
+
+  return (
+    <div className="kpi-strip">
+      <div className="kpi-card-sm">
+        <div className="kpi-label-sm">💰 Faturamento Hoje</div>
+        <div className="kpi-value-sm" style={{ color: '#E8580A' }}>{fmtR(fat)}</div>
+      </div>
+      <div className="kpi-card-sm">
+        <div className="kpi-label-sm">📅 Faturamento Semana</div>
+        <div className="kpi-value-sm" style={{ color: '#14B8A6' }}>{fmtR(fatSemanal)}</div>
+        {metaPct !== null && (
+          <div className="kpi-meta-bar">
+            <div className="kpi-meta-fill" style={{ width: metaPct + '%', background: metaColor }} />
+          </div>
+        )}
+        {metaPct !== null && (
+          <div className="kpi-meta-label" style={{ color: metaColor }}>{metaPct}% da meta</div>
+        )}
+      </div>
+      {faltasUrgentes > 0 && (
+        <a href="/gn-checklist.html" className="kpi-card-sm kpi-alert">
+          <div className="kpi-label-sm">🍎 Insumos Urgentes</div>
+          <div className="kpi-value-sm" style={{ color: '#EF4444' }}>{faltasUrgentes} item{faltasUrgentes > 1 ? 'ns' : ''}</div>
+        </a>
+      )}
+      {manutPendentes > 0 && (
+        <a href="/gn-checklist.html" className="kpi-card-sm kpi-alert">
+          <div className="kpi-label-sm">🔧 Manutenção Pendente</div>
+          <div className="kpi-value-sm" style={{ color: '#EAB308' }}>{manutPendentes} item{manutPendentes > 1 ? 'ns' : ''}</div>
+        </a>
+      )}
+      {checkPct !== null && (
+        <div className="kpi-card-sm">
+          <div className="kpi-label-sm">✅ Check-list</div>
+          <div className="kpi-value-sm" style={{ color: checkPct === 100 ? '#22C55E' : '#E8580A' }}>{checkPct}%</div>
+          <div className="kpi-meta-bar">
+            <div className="kpi-meta-fill" style={{ width: checkPct + '%', background: checkPct === 100 ? '#22C55E' : '#E8580A' }} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Dashboard() {
   const [tab, setTab] = useState('resumo');
   const mainApps = apps.filter((app) => MAIN_HREFS.includes(app.href));
@@ -89,19 +195,22 @@ function Dashboard() {
           </button>
         </div>
         {tab === 'resumo' && (
-          <div className="mobile-grid">
-            {mainApps.map((app) => (
-              <a key={app.href} href={app.href} className="mobile-card">
-                <span
-                  className="mobile-card-icon-wrap"
-                  style={{ background: `${ICON_COLORS[app.href]}26` }}
-                >
-                  <span className="mobile-card-icon">{app.icon}</span>
-                </span>
-                <span className="mobile-card-label">{app.name.replace('GN ', '')}</span>
-              </a>
-            ))}
-          </div>
+          <>
+            <LiveIndicators />
+            <div className="mobile-grid">
+              {mainApps.map((app) => (
+                <a key={app.href} href={app.href} className="mobile-card">
+                  <span
+                    className="mobile-card-icon-wrap"
+                    style={{ background: `${ICON_COLORS[app.href]}26` }}
+                  >
+                    <span className="mobile-card-icon">{app.icon}</span>
+                  </span>
+                  <span className="mobile-card-label">{app.name.replace('GN ', '')}</span>
+                </a>
+              ))}
+            </div>
+          </>
         )}
       </div>
 
@@ -109,6 +218,8 @@ function Dashboard() {
         <h2>Seus Apps</h2>
         <p>{apps.length} módulos disponíveis</p>
       </div>
+
+      <LiveIndicators />
 
       <div className={`cards-grid ${tab === 'resumo' ? 'mobile-only-hide' : ''}`}>
         {apps.map((app) => (
