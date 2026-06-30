@@ -97,6 +97,7 @@ input.login-in:focus{border-color:var(--or);box-shadow:0 0 0 3px var(--or-glow),
 .cons-card{background:var(--bg3);border:1px solid var(--bd2);border-radius:14px;padding:14px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.2);transition:border-color .2s,box-shadow .2s}
 .cons-card:active{border-color:var(--or);transform:scale(.98)}
 .cons-card.sel{border-color:rgba(242,100,25,.5);background:linear-gradient(135deg,rgba(242,100,25,.06),var(--bg3));box-shadow:0 0 20px rgba(242,100,25,.1)}
+.cons-card.sem-dados{opacity:.45;filter:grayscale(.5)}
 .cc-nome{font-size:11px;font-weight:700;color:var(--gd);margin-bottom:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:.2px}
 .cc-bruto{font-size:9px;color:var(--gy2);font-weight:600;letter-spacing:.3px;text-transform:uppercase}
 .cc-val{font-size:16px;font-weight:700;font-family:Consolas,monospace;color:var(--or2);margin-top:1px}
@@ -1356,11 +1357,24 @@ function render() {
     `<button class="loja-btn${key===state.lojaAtiva?' on':''}" onclick="setLoja('${key}')">${nome}</button>`
   ).join('');
 
+  // Compute alert badge count
+  const _mesesAlerta={};
+  CAL.forEach((w,i)=>{if(!_mesesAlerta[w.month])_mesesAlerta[w.month]=[];_mesesAlerta[w.month].push({...w,idx:i});});
+  let _alertCount=0;
+  LOJAS_LIST.forEach(([key])=>{
+    Object.values(_mesesAlerta).forEach(sems=>{
+      const fMap={};
+      sems.forEach(w=>{const wd=getWDLoja(key,w.idx);wd.funcs.forEach(f=>{if(!f.nome.trim())return;if(!fMap[f.nome])fMap[f.nome]={nFS:0,nAt:0};fMap[f.nome].nFS+=f.dias.filter(s=>['FALTA','SUSPENSÃO'].includes(s)).length;fMap[f.nome].nAt+=f.dias.filter(s=>s==='ATESTADO').length;});});
+      Object.values(fMap).forEach(v=>{if(v.nFS>=2||v.nAt>=2)_alertCount++;});
+    });
+  });
+
   // Tab bar
   const tb=document.getElementById('tab-bar');
-  tb.innerHTML=TABS_MESTRA.map(t=>
-    `<button class="tab${t.id===state.tab?' on':''}" onclick="setTab('${t.id}')">${t.label}</button>`
-  ).join('');
+  tb.innerHTML=TABS_MESTRA.map(t=>{
+    const badge=t.id==='alertas'&&_alertCount>0?` <span style="background:var(--rd);color:#fff;border-radius:9px;padding:1px 5px;font-size:9px;font-weight:800">${_alertCount}</span>`:'';
+    return `<button class="tab${t.id===state.tab?' on':''}" onclick="setTab('${t.id}')">${t.label}${badge}</button>`;
+  }).join('');
 
   const ct=document.getElementById('content');
   if(state.tab==='consolidado') renderConsolidado(ct,sem);
@@ -1388,8 +1402,8 @@ function renderConsolidado(ct, sem) {
     totalPool+=calc.poolRateio;
     const syncSt=syncStatusPorLoja[key]||'—';
     const syncIco=syncSt==='ok'?'✓':syncSt==='err'?'✗':syncSt==='syncing'?'⟳':'—';
-    return `<div class="cons-card${key===state.lojaAtiva?' sel':''}" onclick="setLoja('${key}');setTab('loja')">
-      <div class="cc-nome">${nome}</div>
+    return `<div class="cons-card${key===state.lojaAtiva?' sel':''}${bruto===0?' sem-dados':''}" onclick="setLoja('${key}');setTab('loja')">
+      <div class="cc-nome">${nome}${bruto===0?' <span style=\'font-size:8px;color:var(--gy)\'>sem dados</span>':''}</div>
       <div class="cc-bruto">Bruto: ${fmtBRLShort(bruto)}</div>
       <div class="cc-val">${fmtBRLShort(calc.baseTotal)}</div>
       <div class="cc-pool">Pool: ${fmtBRLShort(calc.poolRateio)}</div>
@@ -1441,15 +1455,18 @@ function renderRanking(ct, sem) {
 
   const posClass=i=>i===0?'gold':i===1?'silver':i===2?'bronze':'';
 
-  const lojaRows=lojaRank.map((l,i)=>`
-    <div class="rank-row" onclick="setLoja('${l.key}');setTab('loja')">
+  const totalBrutoRank=lojaRank.reduce((s,l)=>s+l.bruto,0);
+  const lojaRows=lojaRank.map((l,i)=>{
+    const pct=totalBrutoRank>0?Math.round((l.bruto/totalBrutoRank)*100):0;
+    return `<div class="rank-row" onclick="setLoja('${l.key}');setTab('loja')">
       <div class="rank-pos ${posClass(i)}">${i+1}</div>
       <div class="rank-info">
         <div class="rank-nome">${l.nome}</div>
-        <div class="rank-loja">${l.nAtivos} func · Pool: ${fmtBRLShort(l.pool)}</div>
+        <div class="rank-loja">${l.nAtivos} func · Pool: ${fmtBRLShort(l.pool)}${pct>0?` · <span style="color:var(--or2)">${pct}%</span>`:''}</div>
       </div>
       <div class="rank-val">${fmtBRLShort(l.bruto)}</div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 
   const funcRows=funcRank.slice(0,20).map((f,i)=>`
     <div class="rank-row">
@@ -1584,27 +1601,34 @@ function renderResumoMensal(ct) {
     return {w,bruto,coms,pool};
   });
 
-  // Por loja no mês
-  const lojaRows=LOJAS_LIST.map(([key,nome])=>{
-    const vals=semanas.map(w=>{
+  // Por loja no mês — bruto e comissões
+  const lojaDados=LOJAS_LIST.map(([key,nome])=>{
+    const brutoVals=semanas.map(w=>{
+      const wd=getWDLoja(key,w.idx);
+      return wd.brutos.reduce((s,v)=>s+(parseFloat(v)||0),0);
+    });
+    const comsVals=semanas.map(w=>{
       const wd=getWDLoja(key,w.idx);
       const s=getSaldoAntesLoja(key,w.idx);
       const calc=calcSemana(wd,s);
-      return wd.brutos.reduce((s,v)=>s+(parseFloat(v)||0),0);
+      return calc.funcCalc.reduce((s,f)=>s+f.liquido,0);
     });
-    const tot=vals.reduce((s,v)=>s+v,0);
-    return `<tr><td>${nome}</td>${vals.map(v=>`<td style="color:${v>0?'var(--gd)':'var(--gy)'}">${fmtBRLShort(v).replace('R$ ','')}</td>`).join('')}<td style="color:var(--or);font-weight:700">${fmtBRLShort(tot).replace('R$ ','')}</td></tr>`;
-  }).join('');
+    return {nome,brutoVals,comsVals,totBruto:brutoVals.reduce((s,v)=>s+v,0),totComs:comsVals.reduce((s,v)=>s+v,0)};
+  });
+  const lojaRows=lojaDados.map(l=>`<tr><td>${l.nome}</td>${l.brutoVals.map(v=>`<td style="color:${v>0?'var(--gd)':'var(--gy)'}">${fmtBRLShort(v).replace('R$ ','')}</td>`).join('')}<td style="color:var(--or);font-weight:700">${fmtBRLShort(l.totBruto).replace('R$ ','')}</td></tr>`).join('');
+  const comsRows=lojaDados.map(l=>`<tr style="border-top:none"><td style="color:var(--gy2);font-size:9px;padding-left:12px">↳ Comissões</td>${l.comsVals.map(v=>`<td style="color:${v>0?'var(--wh2)':'var(--gy)'};font-size:10px">${fmtBRLShort(v).replace('R$ ','')}</td>`).join('')}<td style="color:var(--wh2);font-size:10px;font-weight:700">${fmtBRLShort(l.totComs).replace('R$ ','')}</td></tr>`).join('');
 
   const totalGeral=semTotais.reduce((s,t)=>s+t.bruto,0);
-  const totRow=`<tr class="tot"><td>TOTAL</td>${semTotais.map(t=>`<td>${fmtBRLShort(t.bruto).replace('R$ ','')}</td>`).join('')}<td>${fmtBRLShort(totalGeral).replace('R$ ','')}</td></tr>`;
+  const totComsGeral=semTotais.reduce((s,t)=>s+t.coms,0);
+  const totRow=`<tr class="tot"><td>TOTAL BRUTO</td>${semTotais.map(t=>`<td>${fmtBRLShort(t.bruto).replace('R$ ','')}</td>`).join('')}<td>${fmtBRLShort(totalGeral).replace('R$ ','')}</td></tr>
+  <tr style="background:rgba(16,185,129,.06)"><td style="color:var(--wh2);font-weight:700">TOTAL COMISSÕES</td>${semTotais.map(t=>`<td style="color:var(--wh2)">${fmtBRLShort(t.coms).replace('R$ ','')}</td>`).join('')}<td style="color:var(--wh2);font-weight:700">${fmtBRLShort(totComsGeral).replace('R$ ','')}</td></tr>`;
   const thead=`<tr><th>Loja</th>${semanas.map(w=>`<th>S${String(w.num).padStart(2,'0')}</th>`).join('')}<th>Total</th></tr>`;
   const mesTabs=mesArr.map(([m],i)=>`<button class="mt${i===mi?' on':''}" onclick="setMesIdx(${i})">${MESES_PT[m].slice(0,3)}</button>`).join('');
 
   ct.innerHTML=`<div class="pad">
     <div class="mes-tabs">${mesTabs}</div>
     <div class="sec-title">${MESES_PT[mesNum]} 2026 — Bruto por Loja</div>
-    <div style="overflow-x:auto"><table class="rtbl"><thead>${thead}</thead><tbody>${lojaRows}${totRow}</tbody></table></div>
+    <div style="overflow-x:auto"><table class="rtbl"><thead>${thead}</thead><tbody>${lojaRows}${comsRows}${totRow}</tbody></table></div>
     <hr class="div">
     <div class="sec-title">Totais por Semana (todas as lojas)</div>
     ${semTotais.map(t=>`
