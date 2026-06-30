@@ -1,12 +1,13 @@
 import React, { useState } from 'react';
 
-const MAIN_HREFS = ['/gn-lojas.html', '/gn-estoque.html', '/gn-checklist.html', '/gn-avaliacoes.html'];
+const MAIN_HREFS = ['/gn-lojas.html', '/gn-estoque.html', '/gn-checklist.html', '/gn-avaliacoes.html', '/gn-comissoes.html'];
 
 const ICON_COLORS = {
   '/gn-lojas.html': '#E8580A',
   '/gn-estoque.html': '#D97706',
   '/gn-checklist.html': '#22C55E',
   '/gn-avaliacoes.html': '#EAB308',
+  '/gn-comissoes.html': '#14B8A6',
 };
 
 const apps = [
