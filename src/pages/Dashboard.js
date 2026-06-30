@@ -1,4 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
+
+const MAIN_HREFS = ['/gn-lojas.html', '/gn-estoque.html', '/gn-checklist.html', '/gn-avaliacoes.html'];
 
 const apps = [
   {
@@ -53,14 +55,50 @@ const apps = [
 ];
 
 function Dashboard() {
+  const [tab, setTab] = useState('resumo');
+  const mainApps = apps.filter((app) => MAIN_HREFS.includes(app.href));
+
   return (
     <div>
+      <div className="mobile-home">
+        <div className="mobile-topbar">
+          <span className="mobile-topbar-title">Visão Geral</span>
+          <span className="mobile-topbar-sub">{apps.length} módulos disponíveis</span>
+        </div>
+        <div className="mobile-tabs">
+          <button
+            type="button"
+            className={`mobile-tab ${tab === 'resumo' ? 'active' : ''}`}
+            onClick={() => setTab('resumo')}
+          >
+            Resumo
+          </button>
+          <button
+            type="button"
+            className={`mobile-tab ${tab === 'todos' ? 'active' : ''}`}
+            onClick={() => setTab('todos')}
+          >
+            Todos
+          </button>
+        </div>
+        {tab === 'resumo' && (
+          <div className="mobile-grid">
+            {mainApps.map((app) => (
+              <a key={app.href} href={app.href} className="mobile-card">
+                <span className="mobile-card-icon">{app.icon}</span>
+                <span className="mobile-card-label">{app.name.replace('GN ', '')}</span>
+              </a>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div className="page-header">
         <h2>Seus Apps</h2>
         <p>{apps.length} módulos disponíveis</p>
       </div>
 
-      <div className="cards-grid">
+      <div className={`cards-grid ${tab === 'resumo' ? 'mobile-only-hide' : ''}`}>
         {apps.map((app) => (
           <a key={app.href} href={app.href} className="card-link">
             <div className="card">
