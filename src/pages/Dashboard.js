@@ -70,15 +70,39 @@ function readChecklistData() {
   let dayState = null;
   let weekState = null;
   try {
+    // Descobre qual loja está com sessão ativa no checklist
+    let lojaAtiva = null;
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
-      if (!key) continue;
-      if (key.startsWith('gn_chk4_day_') && !dayState) {
-        const parsed = JSON.parse(localStorage.getItem(key));
+      if (!key || !key.startsWith('gn_chk_user_')) continue;
+      try {
+        const u = JSON.parse(localStorage.getItem(key));
+        if (u && u.lojaDisplay) { lojaAtiva = u.lojaDisplay; break; }
+      } catch (e) {}
+    }
+
+    if (lojaAtiva) {
+      // Lê somente os dados da loja do usuário logado
+      const lojaKey = lojaAtiva.replace(/\s+/g, '_');
+      const dayRaw = localStorage.getItem('gn_chk4_day_' + lojaKey);
+      const weekRaw = localStorage.getItem('gn_chk4_week_' + lojaKey);
+      if (dayRaw) {
+        const parsed = JSON.parse(dayRaw);
         if (parsed && parsed.data === today) dayState = parsed;
       }
-      if (key.startsWith('gn_chk4_week_') && !weekState) {
-        weekState = JSON.parse(localStorage.getItem(key));
+      if (weekRaw) weekState = JSON.parse(weekRaw);
+    } else {
+      // Fallback: sem sessão ativa, varre todas as chaves (comportamento anterior)
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key) continue;
+        if (key.startsWith('gn_chk4_day_') && !dayState) {
+          const parsed = JSON.parse(localStorage.getItem(key));
+          if (parsed && parsed.data === today) dayState = parsed;
+        }
+        if (key.startsWith('gn_chk4_week_') && !weekState) {
+          weekState = JSON.parse(localStorage.getItem(key));
+        }
       }
     }
   } catch (e) {}
