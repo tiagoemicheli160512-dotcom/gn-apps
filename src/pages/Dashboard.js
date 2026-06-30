@@ -219,7 +219,9 @@ function Dashboard() {
         <p>{apps.length} módulos disponíveis</p>
       </div>
 
-      <LiveIndicators />
+      <div className="desktop-only">
+        <LiveIndicators />
+      </div>
 
       <div className={`cards-grid ${tab === 'resumo' ? 'mobile-only-hide' : ''}`}>
         {apps.map((app) => (
