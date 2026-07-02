@@ -937,12 +937,102 @@ function qtdDiffs() {
 }
 
 function qtdAlertas() {
-  const ei = getEstIni(), mn = getMin();
-  const teo = getTeorico();
-  return getTodosInsumos().filter(n => {
-    const m = mn[n] || 0;
-    return m > 0 && (teo[n] || 0) < m;
-  }).length;
+  const teo = getTeorico(), mn = getMin();
+  return getTodosInsumos().filter(n => { const m = mn[n]||0; return m > 0 && (teo[n]||0) < m; }).length;
+}
+
+function getAlertasEstoque() {
+  const teo = getTeorico(), mn = getMin();
+  return getTodosInsumos()
+    .filter(n => { const m = mn[n]||0; return m > 0 && (teo[n]||0) < m; })
+    .map(n => ({ nome: n, atual: teo[n]||0, min: mn[n]||0 }))
+    .sort((a,b) => (a.atual/a.min) - (b.atual/b.min));
+}
+
+function gerarMensagemAlertaWpp() {
+  const alertas = getAlertasEstoque();
+  if (!alertas.length) return '';
+  const agora = new Date();
+  const dt = agora.toLocaleDateString('pt-BR') + ' ' + agora.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+  let msg = '🚨 *ALERTA DE ESTOQUE — ' + loja + '*\n📅 ' + dt + '\n\n';
+  msg += '⬇️ *Insumos abaixo do nível mínimo:*\n\n';
+  alertas.forEach(a => {
+    const pct = a.min > 0 ? Math.round((a.atual/a.min)*100) : 0;
+    msg += '▪️ *' + a.nome + '*\n   Atual: ' + a.atual.toFixed(1) + ' | Mínimo: ' + a.min.toFixed(1) + ' (' + pct + '%)\n';
+  });
+  msg += '\n⚠️ Verificar urgência de reposição.';
+  return msg;
+}
+
+function enviarAlertaWpp() {
+  const msg = gerarMensagemAlertaWpp();
+  if (!msg) { showToast('✅ Nenhum item abaixo do mínimo.'); return; }
+  window.open('https://wa.me/?text=' + encodeURIComponent(msg), '_blank');
+}
+
+function _podeCfgMinimos() {
+  try {
+    const cargo = usuarioAtual ? usuarioAtual.cargo : null;
+    const lojaU = usuarioAtual ? usuarioAtual.loja : null;
+    const sv = JSON.parse(localStorage.getItem('gn_session_v1')||'null');
+    const masterFlag = sv ? !!(sv.permissoes && sv.permissoes.master) : false;
+    return ['gerente','sub_gerente','supervisor','compras','mestre'].includes(cargo) || lojaU === 'GERAL' || masterFlag;
+  } catch(e) { return false; }
+}
+
+function abrirModalMinimos() {
+  if (!_podeCfgMinimos()) { showToast('🚫 Acesso restrito.'); return; }
+  if (document.getElementById('modalMinimos')) return;
+  const mn = getMin();
+  const todos = getTodosInsumos();
+  const modal = document.createElement('div');
+  modal.id = 'modalMinimos';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:60;display:flex;align-items:flex-start;justify-content:center;background:rgba(5,10,25,.92);overflow-y:auto;padding:20px 0';
+  modal.innerHTML = `
+    <div style="background:#0f172a;width:95%;max-width:420px;border-radius:20px;padding:20px;border:1px solid rgba(255,255,255,.1);margin:auto">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div style="font-weight:800;font-size:14px;color:#fff">⚙️ Nível Mínimo — ${loja}</div>
+        <button onclick="document.getElementById('modalMinimos').remove()" style="background:none;border:none;color:#64748b;font-size:20px;cursor:pointer;line-height:1">×</button>
+      </div>
+      <div style="font-size:11px;color:#64748b;margin-bottom:12px">Quando o estoque teórico cair abaixo do mínimo, um alerta será gerado e pode ser enviado via WhatsApp.</div>
+      <input id="minSearch" type="text" placeholder="🔍 Filtrar insumo..."
+        oninput="document.querySelectorAll('#minLista .min-row').forEach(r=>{r.style.display=this.value&&!r.dataset.nome.includes(this.value.toLowerCase())?'none':''})"
+        style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:8px 12px;color:#fff;font-size:12px;margin-bottom:8px;outline:none"/>
+      <div id="minLista" style="display:flex;flex-direction:column;gap:3px;max-height:52vh;overflow-y:auto"></div>
+      <button onclick="salvarTodosMinimos(); document.getElementById('modalMinimos').remove(); render();"
+        style="width:100%;background:linear-gradient(135deg,#10b981,#059669);border:none;border-radius:12px;padding:12px;color:#fff;font-weight:800;font-size:13px;margin-top:12px;cursor:pointer">
+        ✅ Salvar Mínimos
+      </button>
+    </div>`;
+  document.body.appendChild(modal);
+  const lista = document.getElementById('minLista');
+  todos.forEach(nome => {
+    const div = document.createElement('div');
+    div.className = 'row-item min-row';
+    div.dataset.nome = nome.toLowerCase();
+    div.style.cssText = 'padding:7px 10px';
+    const span = document.createElement('span');
+    span.style.cssText = 'flex:1;font-size:12px;color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0';
+    span.textContent = nome;
+    const inp = document.createElement('input');
+    inp.type = 'number'; inp.step = '0.001'; inp.min = '0';
+    inp.value = mn[nome] > 0 ? mn[nome] : '';
+    inp.placeholder = '0';
+    inp.dataset.insumo = nome;
+    inp.style.cssText = 'width:72px;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.15);border-radius:8px;padding:5px 8px;color:#fff;font-size:12px;text-align:right;flex-shrink:0';
+    div.appendChild(span); div.appendChild(inp);
+    lista.appendChild(div);
+  });
+  setTimeout(() => document.getElementById('minSearch').focus(), 100);
+}
+
+function salvarTodosMinimos() {
+  if (!minAll[loja]) minAll[loja] = {};
+  document.querySelectorAll('#minLista input[data-insumo]').forEach(inp => {
+    minAll[loja][inp.dataset.insumo] = parseFloat(inp.value) || 0;
+  });
+  sbScheduleSync();
+  showToast('✅ Mínimos salvos!');
 }
 
 function totalVendas() { return Object.values(getVendas()).reduce((s,v) => s + (v||0), 0); }
@@ -3192,6 +3282,22 @@ function render() {
 
       <div id="alertaEmprestimos"></div>
 
+      ${(function(){
+        const al = getAlertasEstoque();
+        if (!al.length) return '';
+        return `<div style="background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:14px;padding:14px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:6px">
+            <div style="font-size:13px;font-weight:800;color:#fca5a5">🚨 Estoque Crítico (${al.length})</div>
+            <button onclick="enviarAlertaWpp()" style="background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);border-radius:10px;padding:6px 12px;color:#4ade80;font-size:11px;font-weight:800;cursor:pointer;white-space:nowrap">📲 Enviar WhatsApp</button>
+          </div>
+          ${al.slice(0,6).map(a=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid rgba(239,68,68,.15)">
+            <span style="font-size:11px;color:#fca5a5;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${a.nome}</span>
+            <span style="font-size:10px;color:#f87171;flex-shrink:0;margin-left:8px;font-weight:700">${a.atual.toFixed(1)} / mín ${a.min.toFixed(1)}</span>
+          </div>`).join('')}
+          ${al.length>6?`<div style="font-size:10px;color:#94a3b8;margin-top:6px;text-align:center">+${al.length-6} mais → aba Estoque</div>`:''}
+        </div>`;
+      })()}
+
       <div>
         <div class="sec-label">Outras lojas</div>
         <div class="lojas-grid">
@@ -3212,7 +3318,12 @@ function render() {
   } else if (tab === "estoque") {
     c.innerHTML = `
     <div class="section">
-      ${qa>0?`<div class="alert-box alert-red">⚠️ <strong>${qa} insumo${qa>1?"s":""}</strong> abaixo do estoque mínimo configurado.</div>`:""}
+      ${qa>0?`
+        <div class="alert-box alert-red" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;padding:10px 12px">
+          <span>⚠️ <strong>${qa} insumo${qa>1?"s":""}</strong> abaixo do mínimo</span>
+          <button onclick="enviarAlertaWpp()" style="background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);border-radius:10px;padding:6px 12px;color:#4ade80;font-size:11px;font-weight:800;cursor:pointer;white-space:nowrap">📲 Alerta WhatsApp</button>
+        </div>`:""}
+      ${_podeCfgMinimos()?`<div style="display:flex;justify-content:flex-end;margin-bottom:6px"><button onclick="abrirModalMinimos()" style="background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:6px 12px;color:#94a3b8;font-size:11px;font-weight:700;cursor:pointer">⚙️ Configurar Mínimos</button></div>`:""}
       <div class="search-bar">
         <div class="search-wrap">
           <span class="search-ico">🔍</span>
