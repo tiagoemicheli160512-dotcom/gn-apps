@@ -1158,6 +1158,44 @@ function _podeNavSemana() {
 function carregarPermissaoSemana() {
   if (!_podeNavSemana()) semana = getMonday(new Date());
 }
+function _podeAcessarHorarioParaCargo(cargo, lojaU, masterFlag) {
+  if (['gerente','sub_gerente','supervisor','compras','mestre'].includes(cargo) || lojaU === 'GERAL' || masterFlag) return true;
+  var agora = new Date();
+  var dia = agora.getDay();
+  var min = agora.getHours() * 60 + agora.getMinutes();
+  if (dia === 0) return false;
+  if (dia >= 1 && dia <= 5) return min >= 480 && min < 1020;
+  if (dia === 6) return min >= 480 && min < 720;
+  return false;
+}
+function _podeAcessarHorario() {
+  try {
+    var cargo = usuarioAtual ? usuarioAtual.cargo : null;
+    var lojaU = usuarioAtual ? usuarioAtual.loja : null;
+    var masterFlag = false;
+    if (!cargo) {
+      var s = JSON.parse(localStorage.getItem('gn_session_v1') || 'null');
+      if (!s || Date.now() - s.ts > 43200000) return false;
+      cargo = s.cargo; lojaU = s.loja; masterFlag = !!(s.permissoes && s.permissoes.master);
+    } else {
+      var sv = JSON.parse(localStorage.getItem('gn_session_v1') || 'null');
+      if (sv) masterFlag = !!(sv.permissoes && sv.permissoes.master);
+    }
+    return _podeAcessarHorarioParaCargo(cargo, lojaU, masterFlag);
+  } catch(e) { return true; }
+}
+var _horarioTimer = null;
+function _iniciarVigiaHorario() {
+  if (_horarioTimer) clearInterval(_horarioTimer);
+  _horarioTimer = setInterval(function() {
+    if (!usuarioAtual) return;
+    if (!_podeAcessarHorario()) {
+      clearInterval(_horarioTimer); _horarioTimer = null;
+      showToast('⏰ Horário de acesso encerrado. Até logo!');
+      setTimeout(trocarUsuario, 2500);
+    }
+  }, 60000);
+}
 function prevWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana, -7); render(); }
 function nextWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana,  7); render(); }
 function irParaSemana(isoStr) { semana = new Date(isoStr); tab = "relatorio"; render(); }
@@ -2593,6 +2631,16 @@ async function confirmarLogin() {
       if (btn) { btn.textContent = '✅ Entrar no Sistema'; btn.disabled = false; }
       return;
     }
+    const masterFlagLogin = !!(u.permissoes && u.permissoes.master);
+    if (!_podeAcessarHorarioParaCargo(u.cargo, u.loja, masterFlagLogin)) {
+      const diaL = new Date().getDay();
+      const msgH = diaL === 0 ? '🚫 Acesso bloqueado aos domingos.'
+                 : diaL === 6 ? '🚫 Acesso liberado sáb das 08h às 12h.'
+                 : '🚫 Acesso liberado seg–sex das 08h às 17h.';
+      erroEl.textContent = msgH;
+      if (btn) { btn.textContent = '✅ Entrar no Sistema'; btn.disabled = false; }
+      return;
+    }
 
     usuarioAtual = { nome: u.nome, cargo: u.cargo, loja: u.loja, id: u.id, validado: true };
 
@@ -2616,6 +2664,7 @@ async function confirmarLogin() {
     carregarPermissaoLoja();
     carregarPermissaoAbas();
     carregarPermissaoSemana();
+    _iniciarVigiaHorario();
     render();
     showToast('👋 Bem-vindo(a), ' + u.nome + '! (' + u.cargo + ')');
   } catch(e) {
@@ -4649,9 +4698,26 @@ if (!verificarSessao()) {
   // Carregar dados primeiro, depois mostrar login
   setTimeout(mostrarLogin, 100);
 } else {
-  carregarPermissaoLoja();
-  carregarPermissaoAbas();
-  carregarPermissaoSemana();
+  if (!_podeAcessarHorario()) {
+    try { sessionStorage.removeItem('gn_usuario'); sessionStorage.removeItem('gn_loja_sessao'); } catch(e) {}
+    usuarioAtual = null;
+    setTimeout(function() {
+      mostrarLogin();
+      setTimeout(function() {
+        var err = document.getElementById('loginErro');
+        var diaI = new Date().getDay();
+        var msgI = diaI === 0 ? '🚫 Acesso bloqueado aos domingos.'
+                 : diaI === 6 ? '🚫 Acesso liberado sáb das 08h às 12h.'
+                 : '🚫 Acesso liberado seg–sex das 08h às 17h.';
+        if (err) err.textContent = msgI;
+      }, 200);
+    }, 100);
+  } else {
+    carregarPermissaoLoja();
+    carregarPermissaoAbas();
+    carregarPermissaoSemana();
+    _iniciarVigiaHorario();
+  }
 }
 
 /* Buscar dados da nuvem assim que abrir, e ligar sincronização automática */
