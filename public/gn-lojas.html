@@ -618,6 +618,7 @@ let fichasCustom  = {};  // cod -> {codigo, nome, insumos:[{insumo,qtd,unidade,q
 let fichasRemoved = [];  // lista de codigos removidos
 let insumosCustom = [];  // novos insumos adicionados pelo master
 let alertasWpp    = [];  // [{nome, numero}] — contatos que recebem alerta de estoque
+let nfMapeamentos = {};  // { "DESCRICAO NF-e": "NOME INSUMO APP" } — mapeamentos permanentes
 let lookup     = Object.assign({}, SEED.ficha_lookup);
 
 /* inicializar minAll */
@@ -775,6 +776,7 @@ async function sbPull(silent) {
             d.insumosCustom.forEach(n => { if (!insumosCustom.includes(n)) insumosCustom.push(n); });
           }
           if (Array.isArray(d.alertasWpp)) alertasWpp = d.alertasWpp;
+          if (d.nfMapeamentos && typeof d.nfMapeamentos === 'object') Object.assign(nfMapeamentos, d.nfMapeamentos);
           return;
         }
         if (d.estIniAll) {
@@ -1192,6 +1194,218 @@ function _salvarContatosAlerta() {
   sbPushMasterConfig();
   showToast('✅ Contatos salvos!');
   document.getElementById('modalContatos').remove();
+}
+
+/* ═══════════════════ NF-e: SCAN QR + IMPORTAR XML ═══════════════════ */
+
+function _normNF(s) {
+  return (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().replace(/[^\w\s]/g, ' ')
+    .replace(/\b(de|da|do|das|dos|e|em|kg|un|cx|sc|fardo|pct|lt|ml|gr|g|caixa|pacote|unidade|unid|saco|lata|pet|und|com|sem|para)\b/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+
+function _fuzzyMatchNF(nfDesc) {
+  const src = _normNF(nfDesc).split(' ').filter(Boolean);
+  if (!src.length) return [];
+  const allIns = getTodosInsumos();
+  return allIns.map(nome => {
+    const tgt = _normNF(nome).split(' ').filter(Boolean);
+    const hits = src.filter(t => tgt.some(u => u.includes(t) || t.includes(u)));
+    const score = hits.length / Math.max(src.length, tgt.length, 1);
+    return { nome, score };
+  }).filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 5);
+}
+
+function abrirScanQRNF() {
+  if (typeof BarcodeDetector === 'undefined') {
+    showToast('⚠️ Seu dispositivo não suporta leitura nativa de QR Code. Use "Importar XML".');
+    return;
+  }
+  const overlay = document.createElement('div');
+  overlay.id = 'modalQRScan';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.95);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px;box-sizing:border-box';
+  overlay.innerHTML = `
+    <div style="width:100%;max-width:420px">
+      <div style="font-size:14px;font-weight:800;color:#fff;text-align:center;margin-bottom:14px">📷 Aponte para o QR Code da NF-e</div>
+      <div style="position:relative;border-radius:16px;overflow:hidden;background:#000;aspect-ratio:1/1;max-height:70vw">
+        <video id="qrVideo" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;display:block"></video>
+        <div style="position:absolute;inset:0;pointer-events:none;display:flex;align-items:center;justify-content:center">
+          <div style="width:55%;height:55%;border:2px solid #6366f1;border-radius:8px;box-shadow:0 0 0 2000px rgba(0,0,0,.45)"></div>
+        </div>
+      </div>
+      <div id="qrStatus" style="text-align:center;color:#94a3b8;font-size:12px;margin-top:14px">Aguardando leitura do QR Code...</div>
+      <button onclick="fecharScanQR()" style="width:100%;background:rgba(255,255,255,.08);border:none;border-radius:13px;padding:13px;color:#94a3b8;font-weight:700;font-size:13px;margin-top:14px;cursor:pointer">✕ Cancelar</button>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  let stream, scanning = true;
+  const detector = new BarcodeDetector({ formats: ['qr_code'] });
+  navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } }).then(s => {
+    stream = s;
+    const video = document.getElementById('qrVideo');
+    if (!video) { fecharScanQR(); return; }
+    video.srcObject = s;
+    video.play();
+    function scan() {
+      if (!scanning) return;
+      if (video.readyState >= video.HAVE_ENOUGH_DATA) {
+        detector.detect(video).then(codes => {
+          if (!scanning || !codes.length) return;
+          scanning = false;
+          const raw = codes[0].rawValue;
+          const match = raw.match(/\d{44}/);
+          const chave = match ? match[0] : null;
+          const st = document.getElementById('qrStatus');
+          if (st) st.textContent = '✅ QR Code lido com sucesso!';
+          setTimeout(() => {
+            fecharScanQR();
+            if (chave) {
+              // Posições 26-34 da chave = número da NF (nNF com 9 dígitos)
+              const nfNum = parseInt(chave.substring(25, 34), 10).toString();
+              const el = document.getElementById('entNF');
+              if (el && !el.value) el.value = nfNum;
+              showToast('✅ Chave lida! NF nº ' + nfNum + '. Importe o XML para mapear os itens.');
+            } else {
+              showToast('✅ QR lido (chave não encontrada). Verifique o Nº da NF.');
+            }
+          }, 600);
+        }).catch(() => {});
+      }
+      if (scanning) requestAnimationFrame(scan);
+    }
+    requestAnimationFrame(scan);
+  }).catch(() => {
+    showToast('⚠️ Câmera não disponível. Verifique as permissões do navegador.');
+    fecharScanQR();
+  });
+  overlay._stopStream = () => { scanning = false; if (stream) stream.getTracks().forEach(t => t.stop()); };
+}
+
+function fecharScanQR() {
+  const m = document.getElementById('modalQRScan');
+  if (m) { if (m._stopStream) m._stopStream(); m.remove(); }
+}
+
+function abrirImportXMLNF() {
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = '.xml,text/xml,application/xml';
+  inp.onchange = e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try {
+        const parser = new DOMParser();
+        const xml = parser.parseFromString(ev.target.result, 'text/xml');
+        if (xml.querySelector('parsererror')) throw new Error('XML inválido');
+        const nfNum   = xml.querySelector('nNF')?.textContent?.trim() || '';
+        const dhEmi   = xml.querySelector('dhEmi,dEmi')?.textContent || '';
+        const dataNF  = dhEmi ? dhEmi.slice(0, 10) : '';
+        const xNome   = xml.querySelector('emit xNome')?.textContent?.trim()
+                     || xml.querySelector('emit xFant')?.textContent?.trim() || '';
+        const dets    = Array.from(xml.querySelectorAll('det'));
+        if (!dets.length) { showToast('⚠️ Nenhum item encontrado no XML.'); return; }
+        const itens = dets.map(det => ({
+          xProd:  det.querySelector('xProd')?.textContent?.trim() || '',
+          qCom:   parseFloat(det.querySelector('qCom')?.textContent || '0'),
+          uCom:   det.querySelector('uCom')?.textContent?.trim() || '',
+          vUnCom: parseFloat(det.querySelector('vUnCom')?.textContent || '0')
+        })).filter(i => i.xProd && i.qCom > 0);
+        if (!itens.length) { showToast('⚠️ Nenhum item com quantidade válida no XML.'); return; }
+        abrirModalMatchNF(itens, nfNum, xNome, dataNF);
+      } catch(err) {
+        showToast('⚠️ Erro ao processar XML: ' + (err.message || 'formato inesperado'));
+      }
+    };
+    reader.readAsText(file, 'latin1');
+  };
+  inp.click();
+}
+
+function abrirModalMatchNF(itens, nfNum, fornecedor, dataNF) {
+  const allIns = getTodosInsumos();
+  const linhas = itens.map((it, idx) => {
+    const saved = nfMapeamentos[it.xProd];
+    const sugs  = _fuzzyMatchNF(it.xProd);
+    const best  = saved || (sugs.length ? sugs[0].nome : '');
+    const optsSet = [...new Set([best, ...sugs.map(s => s.nome)].filter(Boolean))];
+    // Completar com todos os insumos sem duplicar
+    const opts = [...optsSet, ...allIns.filter(n => !optsSet.includes(n))];
+    return { it, idx, best, opts };
+  });
+
+  const overlay = document.createElement('div');
+  overlay.id = 'modalMatchNF';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:9999;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:16px;box-sizing:border-box';
+  overlay.innerHTML = `
+    <div style="max-width:500px;margin:0 auto;padding-bottom:24px">
+      <div style="font-size:13px;font-weight:800;color:#fff;margin-bottom:3px">📄 Itens da NF-e${nfNum ? ' nº ' + nfNum : ''}</div>
+      <div style="font-size:11px;color:#64748b;margin-bottom:14px">${fornecedor || 'Fornecedor'}${dataNF ? ' · ' + dataNF : ''} — Confirme o insumo de cada item</div>
+      ${linhas.map(({ it, idx, best, opts }) => `
+        <div style="background:rgba(255,255,255,.05);border-radius:12px;padding:11px 13px;margin-bottom:8px">
+          <div style="display:flex;align-items:flex-start;gap:10px">
+            <input type="checkbox" id="nfChk_${idx}" ${best ? 'checked' : ''} style="margin-top:3px;width:18px;height:18px;flex-shrink:0;accent-color:#6366f1"/>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:11px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:2px">${it.xProd}</div>
+              <div style="font-size:10px;color:#64748b;margin-bottom:6px">${it.qCom} ${it.uCom}${it.vUnCom > 0 ? ' · R$ ' + it.vUnCom.toFixed(4) + '/un' : ''}</div>
+              <select id="nfSel_${idx}" style="width:100%;background:#1e293b;border:1px solid rgba(255,255,255,.18);border-radius:8px;padding:6px 8px;color:#e2e8f0;font-size:12px">
+                <option value="">— Não importar este item —</option>
+                ${opts.map(n => `<option value="${n}" ${n === best ? 'selected' : ''}>${n}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+        </div>`).join('')}
+      <button onclick="confirmarMatchNF()" style="width:100%;background:linear-gradient(135deg,#059669,#047857);border:none;border-radius:13px;padding:14px 0;color:#fff;font-weight:800;font-size:13px;margin-top:6px;cursor:pointer">✅ Confirmar e Adicionar Entradas</button>
+      <button onclick="document.getElementById('modalMatchNF').remove()" style="width:100%;background:rgba(255,255,255,.06);border:none;border-radius:13px;padding:12px 0;color:#94a3b8;font-weight:700;font-size:12px;margin-top:8px;cursor:pointer">Cancelar</button>
+    </div>`;
+  overlay._nfData = { linhas, nfNum, fornecedor, dataNF };
+  document.body.appendChild(overlay);
+}
+
+function confirmarMatchNF() {
+  const modal = document.getElementById('modalMatchNF');
+  if (!modal || !modal._nfData) return;
+  const { linhas, nfNum, fornecedor, dataNF } = modal._nfData;
+  const nfNumFinal = (nfNum || (document.getElementById('entNF') || {}).value || 'S/N').toString().trim() || 'S/N';
+  const fornFinal  = ((fornecedor || (document.getElementById('entFornecedor') || {}).value || '').trim().toUpperCase()) || 'NF-e XML';
+  const dataFinal  = dataNF || (document.getElementById('entDataNF') || {}).value || new Date().toISOString().slice(0, 10);
+  const k = lojaKey();
+  if (!entradasAll[k]) entradasAll[k] = [];
+  if (!estIniAll[k])   estIniAll[k]   = {};
+  let adicionados = 0, mapeamentosNovos = false;
+
+  linhas.forEach(({ it, idx }) => {
+    const chk = document.getElementById('nfChk_' + idx);
+    const sel = document.getElementById('nfSel_' + idx);
+    if (!chk || !chk.checked || !sel || !sel.value) return;
+    const insumo = sel.value;
+    if (nfMapeamentos[it.xProd] !== insumo) { nfMapeamentos[it.xProd] = insumo; mapeamentosNovos = true; }
+    estIniAll[k][insumo] = (estIniAll[k][insumo] || 0) + it.qCom;
+    entradasAll[k].push({
+      id: Date.now() + '_' + idx + '_' + Math.random().toString(36).slice(2, 5),
+      insumo, dataNF: dataFinal, nf: nfNumFinal, fornecedor: fornFinal,
+      qtd: it.qCom, custoUnit: it.vUnCom, fotoBase64: '', fotoName: ''
+    });
+    adicionados++;
+  });
+
+  modal.remove();
+  if (mapeamentosNovos) sbPushMasterConfig();
+  if (adicionados > 0) {
+    // Preencher cabeçalho do formulário com os dados da NF
+    const elNF   = document.getElementById('entNF');
+    const elForn = document.getElementById('entFornecedor');
+    const elData = document.getElementById('entDataNF');
+    if (elNF   && !elNF.value)   elNF.value   = nfNumFinal !== 'S/N' ? nfNumFinal : '';
+    if (elForn && !elForn.value) elForn.value  = fornFinal;
+    if (elData && !elData.value) elData.value  = dataFinal;
+    autoSave();
+    render();
+    showToast('✅ ' + adicionados + ' item(s) importado(s) com sucesso!');
+  } else {
+    showToast('⚠️ Nenhum item selecionado para importar.');
+  }
 }
 
 function totalVendas() { return Object.values(getVendas()).reduce((s,v) => s + (v||0), 0); }
@@ -2189,7 +2403,7 @@ function adicionarInsumoCustom(nome) {
    numa linha especial "MASTER_CONFIG" que todas as lojas leem no pull */
 async function sbPushMasterConfig() {
   try {
-    const payload = { fichasCustom, fichasRemoved, insumosCustom, alertasWpp };
+    const payload = { fichasCustom, fichasRemoved, insumosCustom, alertasWpp, nfMapeamentos };
     await sbRequest("gn_lojas?loja=eq.MASTER_CONFIG", {
       method: "PATCH",
       headers: { "Prefer": "return=minimal" },
@@ -3870,6 +4084,18 @@ function render() {
           <div style="font-size:11px;color:#475569">${loja} · ${fmt(semana)} → ${fmt(dom)}</div>
         </div>
         <div class="count-badge">${entradas.length} lançamentos</div>
+      </div>
+
+      <!-- Importação NF-e -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+        <button onclick="abrirScanQRNF()"
+          style="background:rgba(99,102,241,.13);border:1px solid rgba(99,102,241,.35);border-radius:12px;padding:12px 8px;color:#a5b4fc;font-weight:700;font-size:12px;cursor:pointer;line-height:1.3">
+          📷 Ler QR Code<br><span style="font-size:10px;font-weight:500;color:#6366f1">Câmera → Nº NF</span>
+        </button>
+        <button onclick="abrirImportXMLNF()"
+          style="background:rgba(5,150,105,.13);border:1px solid rgba(5,150,105,.35);border-radius:12px;padding:12px 8px;color:#34d399;font-weight:700;font-size:12px;cursor:pointer;line-height:1.3">
+          📄 Importar XML<br><span style="font-size:10px;font-weight:500;color:#059669">XML NF-e → Itens</span>
+        </button>
       </div>
 
       <!-- FORMULÁRIO MULTI-ITEM POR NOTA -->
