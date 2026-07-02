@@ -1,278 +1,387 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 
-const MAIN_HREFS = ['/gn-lojas.html', '/gn-checklist.html', '/gn-avaliacoes.html', '/gn-comissoes.html'];
+const SB_URL = 'https://ncxttwvpafajnilpjbol.supabase.co';
+const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5jeHR0d3ZwYWZham5pbHBqYm9sIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE4NDcyMDEsImV4cCI6MjA5NzQyMzIwMX0.MGDZNGY8GfSzBKAgdR7OhvOeR71i4fj9YseJRhoh5sE';
+const SESSION_KEY = 'gn_session_v1';
+const TTL = 43200000;
 
-const ICON_COLORS = {
-  '/gn-lojas.html': '#E8580A',
-  '/gn-checklist.html': '#22C55E',
-  '/gn-avaliacoes.html': '#EAB308',
-  '/gn-comissoes.html': '#14B8A6',
+const COR_LOJA = {
+  BANGU: '#b81a1a', CAXIAS: '#1a6bbd', 'SÃO GONÇALO': '#8B1A8B',
+  'NORTE SHOPPING': '#1a7a4a', BOULEVARD: '#b85a00', RANCHO: '#0e7490',
+  PEDREIRA: '#7c3aed', 'NOVA AMERICA': '#b45309', 'CAMPO GRANDE': '#065f46',
+  ITAQUERA: '#be123c', GUARULHOS: '#1e40af', GERAL: '#F26419',
 };
 
-const apps = [
-  {
-    href: '/gn-lojas.html',
-    name: 'GN Lojas',
-    description: 'Gestão completa de lojas: pedidos, estoque, vendas, conferência e relatórios.',
-    icon: '🏪',
-    tag: 'Gestão',
-  },
-  {
-    href: '/gn-estoque.html',
-    name: 'GN Estoque',
-    description: 'Controle de estoque com pedidos, fichas técnicas, vendas e conferência semanal.',
-    icon: '📦',
-    tag: 'Estoque',
-  },
-  {
-    href: '/gn-checklist.html',
-    name: 'GN Check-list',
-    description: 'Check-list operacional para abertura, fechamento e processos das lojas.',
-    icon: '✅',
-    tag: 'Operações',
-  },
-  {
-    href: '/gn-comissoes.html',
-    name: 'GN Comissões',
-    description: 'Cálculo e acompanhamento de comissões dos vendedores.',
-    icon: '💰',
-    tag: 'Financeiro',
-  },
-  {
-    href: '/gn-comissoes-mestra.html',
-    name: 'GN Comissões — MESTRA',
-    description: 'Painel mestre de comissões com visão consolidada de todas as lojas.',
-    icon: '👑',
-    tag: 'Financeiro',
-  },
-  {
-    href: '/gn-avaliacoes.html',
-    name: 'GN Avaliações',
-    description: 'Avaliações de desempenho dos colaboradores.',
-    icon: '⭐',
-    tag: 'RH',
-  },
-  {
-    href: '/gn-usuarios.html',
-    name: 'GN Usuários',
-    description: 'Gestão centralizada de usuários: criar, editar, bloquear e controlar acessos.',
-    icon: '👤',
-    tag: 'Admin',
-  },
+const LOJA_DISPLAY = {
+  BANGU: 'Bangu', CAXIAS: 'Caxias', 'SÃO GONÇALO': 'São Gonçalo',
+  'NORTE SHOPPING': 'Norte Shopping', BOULEVARD: 'Boulevard', RANCHO: 'Rancho',
+  PEDREIRA: 'Pedreira', 'NOVA AMERICA': 'Nova América', 'CAMPO GRANDE': 'Campo Grande',
+  ITAQUERA: 'Itaquera', GUARULHOS: 'Guarulhos', GERAL: 'Mestre',
+};
+
+const LOJA_COM_KEY = {
+  BANGU: 'BANGU', CAXIAS: 'CAXIAS', 'SÃO GONÇALO': 'SAO_GONCALO',
+  'NORTE SHOPPING': 'NORTE', BOULEVARD: 'BOULEVARD', RANCHO: 'RANCHO',
+  PEDREIRA: 'PEDREIRA', 'NOVA AMERICA': 'NOVA_AMERICA',
+  'CAMPO GRANDE': 'CAMPO_GRANDE', ITAQUERA: 'ITAQUERA', GUARULHOS: 'GUARULHOS',
+};
+
+const LOJAS_LISTA = [
+  'BANGU', 'CAXIAS', 'SÃO GONÇALO', 'NORTE SHOPPING', 'BOULEVARD',
+  'RANCHO', 'PEDREIRA', 'NOVA AMERICA', 'CAMPO GRANDE', 'ITAQUERA', 'GUARULHOS',
 ];
 
-function fmtR(v) {
-  return 'R$ ' + (parseFloat(v) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
+const MODULES = [
+  { id: 'checklist',  name: 'Check-list',        sub: 'Check-lists diários e pendências',    icon: '✅', bg: '#22c55e', perm: 'checklist',  url: '/gn-checklist.html' },
+  { id: 'estoque',    name: 'Estoque',            sub: 'Controle de produtos e pedidos',      icon: '📦', bg: '#3b82f6', perm: 'estoque',    url: '/gn-estoque.html' },
+  { id: 'avaliacoes', name: 'Avaliações',         sub: 'Desempenho da equipe',                icon: '⭐', bg: '#8b5cf6', perm: 'avaliacoes', url: '/gn-avaliacoes.html' },
+  { id: 'comissoes',  name: 'Comissões',          sub: 'Folha semanal de pagamentos',         icon: '💰', bg: '#f59e0b', perm: 'comissoes',  url: '/gn-comissoes.html' },
+  { id: 'lojas',      name: 'Lojas',              sub: 'Ficha operacional da loja',           icon: '🏪', bg: '#ec4899', perm: 'lojas',      url: '/gn-lojas.html' },
+  { id: 'mestra',     name: 'Comissões Mestra',   sub: 'Visão consolidada — todas as lojas',  icon: '🏆', bg: '#F26419', perm: 'master',     url: '/gn-comissoes-mestra.html', masterOnly: true },
+];
 
-function readChecklistData() {
-  const today = new Date().toISOString().split('T')[0];
-  let dayState = null;
-  let weekState = null;
+function getSession() {
   try {
-    // Descobre qual loja está com sessão ativa no checklist
-    let lojaAtiva = null;
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (!key || !key.startsWith('gn_chk_user_')) continue;
-      try {
-        const u = JSON.parse(localStorage.getItem(key));
-        if (u && u.lojaDisplay) { lojaAtiva = u.lojaDisplay; break; }
-      } catch (e) {}
-    }
-
-    if (lojaAtiva) {
-      // Lê somente os dados da loja do usuário logado
-      const lojaKey = lojaAtiva.replace(/\s+/g, '_');
-      const dayRaw = localStorage.getItem('gn_chk4_day_' + lojaKey);
-      const weekRaw = localStorage.getItem('gn_chk4_week_' + lojaKey);
-      if (dayRaw) {
-        const parsed = JSON.parse(dayRaw);
-        if (parsed && parsed.data === today) dayState = parsed;
-      }
-      if (weekRaw) weekState = JSON.parse(weekRaw);
-    } else {
-      // Fallback: sem sessão ativa, varre todas as chaves (comportamento anterior)
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (!key) continue;
-        if (key.startsWith('gn_chk4_day_') && !dayState) {
-          const parsed = JSON.parse(localStorage.getItem(key));
-          if (parsed && parsed.data === today) dayState = parsed;
-        }
-        if (key.startsWith('gn_chk4_week_') && !weekState) {
-          weekState = JSON.parse(localStorage.getItem(key));
-        }
-      }
-    }
+    const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
+    if (s && Date.now() - s.ts < TTL) return s;
   } catch (e) {}
-  return { dayState, weekState, today };
+  return null;
 }
 
-function calcChecklistProgress(dayState) {
-  if (!dayState) return null;
-  let done = 0, total = 0;
-  ['checklist', 'abertura', 'fechamento'].forEach(key => {
-    const section = dayState[key] || {};
-    Object.values(section).forEach(setor => {
-      Object.values(setor).forEach(item => {
-        total++;
-        if (item.checked) done++;
-      });
-    });
-  });
-  return total > 0 ? Math.round((done / total) * 100) : null;
+/* ─── ESTILOS INLINE ─────────────────────────────────────────── */
+const S = {
+  // página inteira
+  page: { minHeight: '100vh', background: '#08080f', color: '#e8e8f4', fontFamily: "'-apple-system','BlinkMacSystemFont','Segoe UI',sans-serif", display: 'flex', flexDirection: 'column' },
+  // LOGIN
+  loginWrap: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24 },
+  loginLogo: { fontSize: 54, fontWeight: 900, letterSpacing: -3, lineHeight: 1, color: 'var(--cor, #F26419)' },
+  loginTag: { fontSize: 11, color: '#44445a', letterSpacing: 3, textTransform: 'uppercase', margin: '6px 0 36px' },
+  loginCard: { background: '#0e0e1e', border: '1px solid #1a1a2e', borderRadius: 22, padding: '28px 24px', width: '100%', maxWidth: 360, display: 'flex', flexDirection: 'column', gap: 14, boxShadow: '0 24px 60px #00000080' },
+  loginTitle: { fontSize: 15, fontWeight: 700, color: '#e8e8f4', textAlign: 'center', marginBottom: 2 },
+  input: (focused) => ({ background: '#08080f', border: `1.5px solid ${focused ? 'var(--cor, #F26419)' : '#1a1a2e'}`, borderRadius: 12, padding: '14px 16px', fontSize: 15, color: '#e8e8f4', width: '100%', fontFamily: 'inherit', outline: 'none', transition: 'border-color .15s' }),
+  loginBtn: (disabled) => ({ background: disabled ? '#2a2a3a' : 'var(--cor, #F26419)', color: disabled ? '#555' : '#fff', border: 'none', borderRadius: 12, padding: 14, fontSize: 15, fontWeight: 700, fontFamily: 'inherit', cursor: disabled ? 'default' : 'pointer', letterSpacing: 0.3, transition: 'background .15s' }),
+  loginErr: { color: '#f87171', fontSize: 12, minHeight: 16, textAlign: 'center' },
+  // HEADER
+  hdr: { position: 'sticky', top: 0, zIndex: 100, display: 'flex', alignItems: 'center', gap: 8, padding: '13px 16px', background: 'rgba(8,8,15,.94)', backdropFilter: 'blur(14px)', borderBottom: '1px solid rgba(255,255,255,.04)' },
+  hdrGN: { fontSize: 20, fontWeight: 900, color: 'var(--cor, #F26419)', letterSpacing: -1 },
+  hdrGestao: { fontSize: 9, fontWeight: 800, letterSpacing: 3, textTransform: 'uppercase', color: 'rgba(255,255,255,.22)', alignSelf: 'flex-end', marginBottom: 2 },
+  hdrSep: { width: 1, height: 18, background: 'rgba(255,255,255,.06)', flexShrink: 0 },
+  hdrUser: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,.45)' },
+  hdrSair: { background: 'transparent', border: '1px solid rgba(255,255,255,.1)', borderRadius: 8, padding: '6px 13px', fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,.4)', fontFamily: 'inherit', cursor: 'pointer' },
+  // HERO
+  heroWrap: { position: 'relative', padding: '24px 20px 36px', overflow: 'hidden' },
+  heroBg: { position: 'absolute', inset: 0, background: 'linear-gradient(155deg, var(--cor, #F26419) 0%, rgba(0,0,0,.6) 60%, #08080f 100%)', opacity: 0.22, transition: 'background .4s' },
+  heroBlob: { position: 'absolute', top: -40, right: -40, width: 180, height: 180, borderRadius: '50%', background: 'var(--cor, #F26419)', opacity: 0.08, filter: 'blur(40px)', transition: 'background .4s' },
+  heroFade: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 48, background: 'linear-gradient(0deg, #08080f, transparent)' },
+  heroInner: { position: 'relative', zIndex: 1 },
+  heroRow: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 },
+  heroLoja: { fontSize: 22, fontWeight: 900, color: '#fff', lineHeight: 1 },
+  heroSelBtn: { display: 'flex', alignItems: 'center', gap: 4, background: 'rgba(255,255,255,.12)', border: '1px solid rgba(255,255,255,.18)', borderRadius: 8, padding: '4px 10px 4px 11px', fontSize: 11, fontWeight: 700, color: '#fff', cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 },
+  heroDate: { fontSize: 11, color: 'rgba(255,255,255,.42)', marginBottom: 10 },
+  heroGreeting: { fontSize: 20, fontWeight: 800, color: '#fff' },
+  heroSub: { fontSize: 12, color: 'rgba(255,255,255,.45)', marginTop: 3 },
+  // MODULES
+  modList: { padding: '4px 14px 40px', display: 'flex', flexDirection: 'column', gap: 7 },
+  modRow: (enabled) => ({ display: 'flex', alignItems: 'center', gap: 12, background: '#0e0e1e', border: '1px solid #161628', borderRadius: 16, padding: '13px 14px', cursor: enabled ? 'pointer' : 'not-allowed', opacity: enabled ? 1 : 0.27, userSelect: 'none', WebkitUserSelect: 'none', textDecoration: 'none' }),
+  modIcon: (bg) => ({ width: 46, height: 46, borderRadius: 13, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0, background: bg + '1a', border: `1px solid ${bg}33` }),
+  modBody: { flex: 1, minWidth: 0 },
+  modName: { fontSize: 13, fontWeight: 800, color: '#e8e8f4', letterSpacing: 0.2 },
+  modSub: { fontSize: 11, color: '#3a3a5a', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  modRight: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3, flexShrink: 0 },
+  modArrow: { fontSize: 20, color: 'rgba(255,255,255,.12)', lineHeight: 1, marginLeft: 2 },
+  // BADGES
+  badge: (c) => {
+    const map = { g: ['rgba(34,197,94,.1)', '#22c55e'], b: ['rgba(59,130,246,.1)', '#60a5fa'], o: ['rgba(242,100,25,.1)', '#F26419'], x: ['rgba(255,255,255,.04)', '#44445a'] };
+    const [bg, fg] = map[c] || map.x;
+    return { fontSize: 10, fontWeight: 700, padding: '3px 9px', borderRadius: 7, background: bg, color: fg, whiteSpace: 'nowrap', maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' };
+  },
+  // PICKER OVERLAY
+  overlay: { display: 'flex', position: 'fixed', inset: 0, background: 'rgba(0,0,0,.72)', zIndex: 300, alignItems: 'flex-end' },
+  sheet: { background: '#0e0e1e', borderRadius: '24px 24px 0 0', borderTop: '1px solid #1c1c35', padding: '20px 16px 40px', width: '100%', maxHeight: '82vh', overflowY: 'auto' },
+  pickerTitle: { fontSize: 13, fontWeight: 700, color: 'rgba(255,255,255,.4)', textAlign: 'center', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 16 },
+  pickerGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 },
+  pickBtn: (active) => ({ display: 'flex', alignItems: 'center', gap: 9, background: '#08080f', border: `1.5px solid ${active ? 'var(--cor, #F26419)' : '#161628'}`, borderRadius: 13, padding: '11px 13px', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left', width: '100%' }),
+  pickDot: (cor) => ({ width: 10, height: 10, borderRadius: '50%', flexShrink: 0, background: cor }),
+  pickName: { fontSize: 12, fontWeight: 700, color: '#e8e8f4' },
+  pickCancel: { marginTop: 10, width: '100%', background: 'rgba(255,255,255,.04)', border: '1px solid rgba(255,255,255,.06)', borderRadius: 13, padding: 14, fontSize: 14, fontWeight: 600, color: '#555', fontFamily: 'inherit', cursor: 'pointer' },
+};
+
+/* ─── UTILITÁRIOS ────────────────────────────────────────────── */
+function setCor(cor) {
+  document.documentElement.style.setProperty('--cor', cor || '#F26419');
 }
 
-function LiveIndicators() {
-  const [data, setData] = useState(null);
+function fmtDate() {
+  const now = new Date();
+  const dias = ['Domingo','Segunda','Terça','Quarta','Quinta','Sexta','Sábado'];
+  const meses = ['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+  return `${now.getDate()} de ${meses[now.getMonth()]} de ${now.getFullYear()}, ${dias[now.getDay()]}`;
+}
 
-  useEffect(() => {
-    const { dayState, weekState } = readChecklistData();
-    if (!dayState && !weekState) return;
-    const fat = (parseFloat(dayState?.vendaSalao) || 0) + (parseFloat(dayState?.vendaDelivery) || 0);
-    const fatSemanal = weekState?.fat
-      ? ['seg','ter','qua','qui','sex','sab','dom'].reduce((acc, d) => acc + (parseFloat(weekState.fat[d]) || 0), 0)
-      : 0;
-    const meta = parseFloat(weekState?.metaSemanal) || 0;
-    const faltasUrgentes = (dayState?.faltas || []).filter(f => f.urgencia === 'Alta' && f.nome?.trim()).length;
-    const manutPendentes = (dayState?.manutencao || []).filter(m => m.status !== 'Resolvido').length;
-    const checkPct = calcChecklistProgress(dayState);
-    const loja = dayState?.semanaInicio ? null : null;
-    setData({ fat, fatSemanal, meta, faltasUrgentes, manutPendentes, checkPct });
-  }, []);
+function saudacao(nome) {
+  const h = new Date().getHours();
+  const s = h < 12 ? 'Bom dia' : h < 18 ? 'Boa tarde' : 'Boa noite';
+  return `${s}, ${(nome || '').split(' ')[0]}!`;
+}
 
-  if (!data) return null;
+/* ─── LOGIN ──────────────────────────────────────────────────── */
+function LoginScreen({ onLogin }) {
+  const [nome, setNome] = useState('');
+  const [senha, setSenha] = useState('');
+  const [erro, setErro] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [focusNome, setFocusNome] = useState(false);
+  const [focusSenha, setFocusSenha] = useState(false);
 
-  const { fat, fatSemanal, meta, faltasUrgentes, manutPendentes, checkPct } = data;
-  const metaPct = meta > 0 ? Math.min(100, Math.round((fatSemanal / meta) * 100)) : null;
-  const metaColor = metaPct === null ? '#E8580A' : metaPct >= 100 ? '#22C55E' : metaPct >= 70 ? '#E8580A' : '#EF4444';
+  const entrar = useCallback(async () => {
+    if (!nome.trim() || !senha) { setErro('Preencha usuário e senha.'); return; }
+    setErro(''); setLoading(true);
+    try {
+      const res = await fetch(
+        `${SB_URL}/rest/v1/gn_usuarios?nome=eq.${encodeURIComponent(nome.trim())}&senha=eq.${encodeURIComponent(senha)}&ativo=eq.true`,
+        { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
+      );
+      const data = await res.json();
+      if (!data || !data.length) { setErro('❌ Nome ou senha incorretos.'); setLoading(false); return; }
+      const u = data[0];
+      const sess = { id: u.id, nome: u.nome, loja: u.loja, cargo: u.cargo, permissoes: u.permissoes || {}, ts: Date.now() };
+      localStorage.setItem(SESSION_KEY, JSON.stringify(sess));
+      onLogin(sess);
+    } catch (e) {
+      setErro('⚠️ Erro de conexão. Tente novamente.');
+    }
+    setLoading(false);
+  }, [nome, senha, onLogin]);
+
+  const onKey = (e) => { if (e.key === 'Enter') entrar(); };
 
   return (
-    <div className="kpi-strip">
-      <div className="kpi-card-sm">
-        <div className="kpi-label-sm">💰 Faturamento Hoje</div>
-        <div className="kpi-value-sm" style={{ color: '#E8580A' }}>{fmtR(fat)}</div>
+    <div style={{ ...S.loginWrap, background: 'radial-gradient(ellipse at 50% -10%, rgba(242,100,25,.15) 0%, transparent 60%), #08080f' }}>
+      <div style={S.loginLogo}>GN</div>
+      <div style={S.loginTag}>Sistema de Gestão</div>
+      <div style={S.loginCard}>
+        <div style={S.loginTitle}>Entrar no sistema</div>
+        <input
+          style={S.input(focusNome)}
+          type="text" placeholder="Nome de usuário"
+          value={nome} onChange={e => { setNome(e.target.value); setErro(''); }}
+          onFocus={() => setFocusNome(true)} onBlur={() => setFocusNome(false)}
+          onKeyDown={e => e.key === 'Enter' && document.getElementById('inp-senha-r')?.focus()}
+          autoComplete="username" autoCorrect="off" autoCapitalize="none"
+        />
+        <input
+          id="inp-senha-r"
+          style={S.input(focusSenha)}
+          type="password" placeholder="Senha"
+          value={senha} onChange={e => { setSenha(e.target.value); setErro(''); }}
+          onFocus={() => setFocusSenha(true)} onBlur={() => setFocusSenha(false)}
+          onKeyDown={onKey}
+          autoComplete="current-password"
+        />
+        <div style={S.loginErr}>{erro}</div>
+        <button style={S.loginBtn(loading)} disabled={loading} onClick={entrar}>
+          {loading ? 'Verificando...' : 'Entrar →'}
+        </button>
       </div>
-      <div className="kpi-card-sm">
-        <div className="kpi-label-sm">📅 Faturamento Semana</div>
-        <div className="kpi-value-sm" style={{ color: '#14B8A6' }}>{fmtR(fatSemanal)}</div>
-        {metaPct !== null && (
-          <div className="kpi-meta-bar">
-            <div className="kpi-meta-fill" style={{ width: metaPct + '%', background: metaColor }} />
-          </div>
-        )}
-        {metaPct !== null && (
-          <div className="kpi-meta-label" style={{ color: metaColor }}>{metaPct}% da meta</div>
-        )}
-      </div>
-      {faltasUrgentes > 0 && (
-        <a href="/gn-checklist.html" className="kpi-card-sm kpi-alert">
-          <div className="kpi-label-sm">🍎 Insumos Urgentes</div>
-          <div className="kpi-value-sm" style={{ color: '#EF4444' }}>{faltasUrgentes} item{faltasUrgentes > 1 ? 'ns' : ''}</div>
-        </a>
-      )}
-      {manutPendentes > 0 && (
-        <a href="/gn-checklist.html" className="kpi-card-sm kpi-alert">
-          <div className="kpi-label-sm">🔧 Manutenção Pendente</div>
-          <div className="kpi-value-sm" style={{ color: '#EAB308' }}>{manutPendentes} item{manutPendentes > 1 ? 'ns' : ''}</div>
-        </a>
-      )}
-      {checkPct !== null && (
-        <div className="kpi-card-sm">
-          <div className="kpi-label-sm">✅ Check-list</div>
-          <div className="kpi-value-sm" style={{ color: checkPct === 100 ? '#22C55E' : '#E8580A' }}>{checkPct}%</div>
-          <div className="kpi-meta-bar">
-            <div className="kpi-meta-fill" style={{ width: checkPct + '%', background: checkPct === 100 ? '#22C55E' : '#E8580A' }} />
-          </div>
-        </div>
-      )}
     </div>
   );
 }
 
-function Dashboard() {
-  const [tab, setTab] = useState('resumo');
-  const mainApps = apps.filter((app) => MAIN_HREFS.includes(app.href));
+/* ─── BADGE COMPONENT ────────────────────────────────────────── */
+function Badge({ id, badges }) {
+  const b = badges[id] || { text: '⋯', color: 'x' };
+  return <span style={S.badge(b.color)}>{b.text}</span>;
+}
+
+/* ─── LOJA PICKER ────────────────────────────────────────────── */
+function LojaPicker({ masterLoja, onSelect, onClose }) {
+  return (
+    <div style={S.overlay} onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={S.sheet}>
+        <div style={S.pickerTitle}>Selecionar loja</div>
+        <div style={S.pickerGrid}>
+          {LOJAS_LISTA.map(k => (
+            <button key={k} style={S.pickBtn(k === masterLoja)} onClick={() => onSelect(k)}>
+              <span style={S.pickDot(COR_LOJA[k])} />
+              <span style={S.pickName}>{LOJA_DISPLAY[k] || k}</span>
+            </button>
+          ))}
+          <button style={{ ...S.pickBtn(masterLoja === null), gridColumn: '1 / -1' }} onClick={() => onSelect(null)}>
+            <span style={S.pickDot('#F26419')} />
+            <span style={S.pickName}>Todas as lojas (padrão mestre)</span>
+          </button>
+        </div>
+        <button style={S.pickCancel} onClick={onClose}>Cancelar</button>
+      </div>
+    </div>
+  );
+}
+
+/* ─── HOME SCREEN ────────────────────────────────────────────── */
+function HomeScreen({ session, onLogout }) {
+  const [masterLoja, setMasterLoja] = useState(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [badges, setBadges] = useState({});
+
+  const isMaster = session.loja === 'GERAL' || !!(session.permissoes || {}).master;
+  const lojaEfetiva = masterLoja || session.loja;
+  const cor = COR_LOJA[lojaEfetiva] || '#F26419';
+
+  useEffect(() => { setCor(cor); }, [cor]);
+
+  const lojaDisp = masterLoja
+    ? 'Loja ' + (LOJA_DISPLAY[masterLoja] || masterLoja)
+    : isMaster ? 'Todas as lojas' : 'Loja ' + (LOJA_DISPLAY[session.loja] || session.loja);
+
+  // Carregar badges ao vivo
+  useEffect(() => {
+    const perms = session.permissoes || {};
+    const loja = lojaEfetiva;
+    const disp = LOJA_DISPLAY[loja] || loja;
+
+    const set = (id, text, color) => setBadges(b => ({ ...b, [id]: { text, color } }));
+
+    if (perms.checklist) {
+      if (isMaster && !masterLoja) { set('checklist', 'Todas as lojas', 'o'); }
+      else {
+        const hoje = new Date().toISOString().split('T')[0];
+        fetch(`${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hoje}&loja=eq.${encodeURIComponent(loja)}&select=id`, { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } })
+          .then(r => r.json()).then(d => set('checklist', d && d.length ? 'Hoje ✓' : 'Novo hoje', d && d.length ? 'g' : 'b'))
+          .catch(() => set('checklist', '—', 'x'));
+      }
+    }
+
+    if (perms.avaliacoes) {
+      if (isMaster && !masterLoja) { set('avaliacoes', 'Todas as lojas', 'o'); }
+      else {
+        try {
+          const norm = (disp || '').toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+          const avs = JSON.parse(localStorage.getItem('gn_aval_v5_' + norm) || '[]');
+          const fin = avs.filter(a => a.finalizada).length;
+          set('avaliacoes', fin > 0 ? `${fin} finalizada${fin > 1 ? 's' : ''}` : 'Nenhuma ainda', fin > 0 ? 'g' : 'x');
+        } catch (e) { set('avaliacoes', '—', 'x'); }
+      }
+    }
+
+    if (perms.comissoes) {
+      if (isMaster && !masterLoja) { set('comissoes', 'Todas as lojas', 'o'); }
+      else {
+        const ck = LOJA_COM_KEY[loja] || loja;
+        fetch(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${ck}&select=updated_at&order=updated_at.desc&limit=1`, { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } })
+          .then(r => r.json()).then(d => {
+            if (d && d.length && d[0]?.updated_at) {
+              const dt = new Date(d[0].updated_at);
+              set('comissoes', 'Atualizado ' + dt.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }), 'g');
+            } else set('comissoes', 'Sem dados', 'x');
+          }).catch(() => set('comissoes', '—', 'x'));
+      }
+    }
+
+    if (perms.estoque) set('estoque', 'Online', 'g');
+    if (perms.lojas)   set('lojas', 'Online', 'g');
+    if (perms.master)  set('mestra', 'Visão consolidada', 'o');
+  }, [session, masterLoja, lojaEfetiva, isMaster]);
+
+  const navTo = (url) => {
+    if (masterLoja) localStorage.setItem('gn_nav_loja', JSON.stringify({ loja: masterLoja, ts: Date.now() }));
+    else localStorage.removeItem('gn_nav_loja');
+    window.location.href = url;
+  };
+
+  const perms = session.permissoes || {};
 
   return (
-    <div>
-      <div className="mobile-home">
-        <div className="mobile-topbar">
-          <span className="mobile-topbar-title">Visão Geral</span>
-          <span className="mobile-topbar-sub">{apps.length} módulos disponíveis</span>
+    <>
+      {/* HEADER */}
+      <header style={S.hdr}>
+        <span style={S.hdrGN}>GN</span>
+        <span style={S.hdrGestao}>GESTÃO</span>
+        <div style={S.hdrSep} />
+        <div style={S.hdrUser}>{session.nome}{session.cargo ? ' · ' + session.cargo : ''}</div>
+        <button style={S.hdrSair} onClick={onLogout}>Sair</button>
+      </header>
+
+      {/* HERO */}
+      <div style={S.heroWrap}>
+        <div style={S.heroBg} />
+        <div style={S.heroBlob} />
+        <div style={S.heroFade} />
+        <div style={S.heroInner}>
+          <div style={S.heroRow}>
+            <div style={S.heroLoja}>{lojaDisp}</div>
+            {isMaster && (
+              <button style={S.heroSelBtn} onClick={() => setPickerOpen(true)}>
+                Trocar loja <span style={{ fontSize: 14 }}>⌄</span>
+              </button>
+            )}
+          </div>
+          <div style={S.heroDate}>{fmtDate()}</div>
+          <div style={S.heroGreeting}>{saudacao(session.nome)}</div>
+          <div style={S.heroSub}>
+            {isMaster && !masterLoja ? 'Acesso mestre — selecione uma loja ou acesse a Mestra' : session.cargo || ''}
+          </div>
         </div>
-        <div className="mobile-tabs">
-          <button
-            type="button"
-            className={`mobile-tab ${tab === 'resumo' ? 'active' : ''}`}
-            onClick={() => setTab('resumo')}
-          >
-            Resumo
-          </button>
-          <button
-            type="button"
-            className={`mobile-tab ${tab === 'todos' ? 'active' : ''}`}
-            onClick={() => setTab('todos')}
-          >
-            Todos
-          </button>
-        </div>
-        {tab === 'resumo' && (
-          <>
-            <LiveIndicators />
-            <div className="mobile-grid">
-              {mainApps.map((app) => (
-                <a key={app.href} href={app.href} className="mobile-card">
-                  <span
-                    className="mobile-card-icon-wrap"
-                    style={{ background: `${ICON_COLORS[app.href]}26` }}
-                  >
-                    <span className="mobile-card-icon">{app.icon}</span>
-                  </span>
-                  <span className="mobile-card-label">{app.name.replace('GN ', '')}</span>
-                </a>
-              ))}
-            </div>
-          </>
-        )}
       </div>
 
-      <div className="page-header">
-        <h2>Seus Apps</h2>
-        <p>{apps.length} módulos disponíveis</p>
-      </div>
-
-      <div className="desktop-only">
-        <LiveIndicators />
-      </div>
-
-      <div className={`cards-grid ${tab === 'resumo' ? 'mobile-only-hide' : ''}`}>
-        {apps.map((app) => (
-          <a key={app.href} href={app.href} className="card-link">
-            <div className="card">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                <div className="card-icon">{app.icon}</div>
-                <span style={{
-                  fontSize: '0.65rem',
-                  fontWeight: 700,
-                  padding: '4px 10px',
-                  borderRadius: 20,
-                  background: 'rgba(232, 88, 10, 0.1)',
-                  color: '#E8580A',
-                  letterSpacing: '0.3px',
-                  textTransform: 'uppercase',
-                }}>
-                  {app.tag}
-                </span>
+      {/* MODULES */}
+      <div style={S.modList}>
+        {MODULES.filter(m => !m.masterOnly || isMaster).map(m => {
+          const enabled = !!perms[m.perm];
+          return (
+            <div
+              key={m.id}
+              style={S.modRow(enabled)}
+              onClick={enabled ? () => navTo(m.url) : undefined}
+            >
+              <div style={S.modIcon(m.bg)}>{m.icon}</div>
+              <div style={S.modBody}>
+                <div style={S.modName}>{m.name}</div>
+                <div style={S.modSub}>{m.sub}</div>
               </div>
-              <h3>{app.name}</h3>
-              <p>{app.description}</p>
-              <div className="card-arrow">→</div>
+              <div style={S.modRight}>
+                {enabled
+                  ? <Badge id={m.id} badges={badges} />
+                  : <span style={S.badge('x')}>🔒 Sem acesso</span>
+                }
+              </div>
+              {enabled && <div style={S.modArrow}>›</div>}
             </div>
-          </a>
-        ))}
+          );
+        })}
       </div>
+
+      {/* LOJA PICKER */}
+      {pickerOpen && (
+        <LojaPicker
+          masterLoja={masterLoja}
+          onSelect={(loja) => { setMasterLoja(loja); setPickerOpen(false); }}
+          onClose={() => setPickerOpen(false)}
+        />
+      )}
+    </>
+  );
+}
+
+/* ─── DASHBOARD (raiz) ───────────────────────────────────────── */
+function Dashboard() {
+  const [session, setSession] = useState(getSession);
+
+  useEffect(() => {
+    if (!session) setCor('#F26419');
+  }, [session]);
+
+  const handleLogout = () => {
+    localStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem('gn_nav_loja');
+    setSession(null);
+  };
+
+  return (
+    <div style={S.page}>
+      {session
+        ? <HomeScreen session={session} onLogout={handleLogout} />
+        : <LoginScreen onLogin={setSession} />
+      }
     </div>
   );
 }
