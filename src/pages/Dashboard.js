@@ -241,7 +241,7 @@ function HomeScreen({ session, onLogout }) {
 
     const set = (id, text, color) => setBadges(b => ({ ...b, [id]: { text, color } }));
 
-    if (perms.checklist) {
+    if (perms.checklist || isMaster) {
       if (isMaster && !masterLoja) { set('checklist', 'Todas as lojas', 'o'); }
       else {
         const hoje = new Date().toISOString().split('T')[0];
@@ -251,7 +251,7 @@ function HomeScreen({ session, onLogout }) {
       }
     }
 
-    if (perms.avaliacoes) {
+    if (perms.avaliacoes || isMaster) {
       if (isMaster && !masterLoja) { set('avaliacoes', 'Todas as lojas', 'o'); }
       else {
         try {
@@ -263,7 +263,7 @@ function HomeScreen({ session, onLogout }) {
       }
     }
 
-    if (perms.comissoes) {
+    if (perms.comissoes || isMaster) {
       if (isMaster && !masterLoja) { set('comissoes', 'Todas as lojas', 'o'); }
       else {
         const ck = LOJA_COM_KEY[loja] || loja;
@@ -277,8 +277,8 @@ function HomeScreen({ session, onLogout }) {
       }
     }
 
-    if (perms.estoque) set('estoque', 'Online', 'g');
-    if (perms.lojas)   set('lojas', 'Online', 'g');
+    if (perms.estoque || isMaster) set('estoque', 'Online', 'g');
+    if (perms.lojas   || isMaster) set('lojas', 'Online', 'g');
     if (perms.master)  set('mestra', 'Visão consolidada', 'o');
   }, [session, masterLoja, lojaEfetiva, isMaster]);
 
@@ -326,7 +326,7 @@ function HomeScreen({ session, onLogout }) {
       {/* MODULES */}
       <div style={S.modList}>
         {MODULES.filter(m => !m.masterOnly || isMaster).map(m => {
-          const enabled = !!perms[m.perm];
+          const enabled = !!perms[m.perm] || isMaster;
           return (
             <div
               key={m.id}
