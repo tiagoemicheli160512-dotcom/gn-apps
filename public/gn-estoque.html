@@ -590,6 +590,7 @@ let tab     = "home";
 let busca   = "";   // filtro de busca ativo nas abas
 let abasPermitidas = null;
 let lojaForcada = null;
+let semanaTravada = false;
 let notaFotoBase64 = "";  // foto da NF em edição (Entradas)
 let notaFotoName   = "";
 
@@ -1135,8 +1136,17 @@ function submitEntradaForm() {
 }
 
 
-function prevWeek()  { semana = addDays(semana, -7); render(); }
-function nextWeek()  { semana = addDays(semana,  7); render(); }
+function carregarPermissaoSemana() {
+  try {
+    var s = JSON.parse(localStorage.getItem('gn_session_v1') || 'null');
+    if (!s || Date.now() - s.ts > 43200000) { semanaTravada = false; return; }
+    var livre = ['gerente','sub_gerente','supervisor','compras','mestre'].includes(s.cargo) || s.loja === 'GERAL' || !!(s.permissoes && s.permissoes.master);
+    semanaTravada = !livre;
+    if (semanaTravada) semana = getMonday(new Date());
+  } catch(e) { semanaTravada = false; }
+}
+function prevWeek()  { if (semanaTravada) return; semana = addDays(semana, -7); render(); }
+function nextWeek()  { if (semanaTravada) return; semana = addDays(semana,  7); render(); }
 function irParaSemana(isoStr) { semana = new Date(isoStr); tab = "relatorio"; render(); }
 function changeLoja(v) { if (lojaForcada) return; loja = v; tab = "home"; render(); }
 function carregarPermissaoLoja() {
@@ -2122,6 +2132,85 @@ function qtdPreenchidos() {
 }
 
 function confirmarPedido() {
+  var precisaValidar = true;
+  try {
+    var s = JSON.parse(localStorage.getItem('gn_session_v1') || 'null');
+    if (s && Date.now() - s.ts <= 43200000) {
+      var cargosLivres = ['gerente','sub_gerente','supervisor','mestre','compras'];
+      precisaValidar = !cargosLivres.includes(s.cargo) && s.loja !== 'GERAL' && !(s.permissoes && s.permissoes.master);
+    }
+  } catch(e) {}
+  if (precisaValidar) {
+    mostrarDialogValidacaoPedido();
+  } else {
+    _executarConfirmarPedido();
+  }
+}
+
+function mostrarDialogValidacaoPedido() {
+  const over = document.createElement('div');
+  over.id = 'validacaoPedidoOverlay';
+  over.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:200;display:flex;align-items:center;justify-content:center;padding:16px';
+  over.innerHTML = `
+    <div style="background:#0f172a;border:1px solid rgba(232,88,10,.4);border-radius:20px;padding:24px;width:100%;max-width:340px">
+      <div style="font-size:16px;font-weight:900;color:#f1ede8;margin-bottom:4px">🔐 Autorização Necessária</div>
+      <div style="font-size:12px;color:#64748b;margin-bottom:18px">Para confirmar o pedido é necessária a senha do gerente, sub-gerente, supervisor ou mestre.</div>
+      <div style="margin-bottom:12px">
+        <label style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase;display:block;margin-bottom:6px">Nome do Responsável</label>
+        <input id="valNome" type="text" placeholder="Nome completo"
+          style="width:100%;background:#1e293b;border:1px solid rgba(255,255,255,.15);border-radius:12px;padding:11px 13px;color:#fff;font-size:14px;box-sizing:border-box"/>
+      </div>
+      <div style="margin-bottom:16px">
+        <label style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase;display:block;margin-bottom:6px">Senha</label>
+        <input id="valSenha" type="password" placeholder="Senha"
+          style="width:100%;background:#1e293b;border:1px solid rgba(255,255,255,.15);border-radius:12px;padding:11px 13px;color:#fff;font-size:14px;box-sizing:border-box"
+          onkeydown="if(event.key==='Enter')validarEConfirmarPedido()"/>
+      </div>
+      <div id="valErro" style="color:#f87171;font-size:12px;min-height:18px;margin-bottom:10px"></div>
+      <div style="display:flex;gap:10px">
+        <button onclick="document.getElementById('validacaoPedidoOverlay').remove()"
+          style="flex:1;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);border-radius:12px;padding:11px;color:#94a3b8;font-weight:700;font-size:13px;cursor:pointer">
+          Cancelar
+        </button>
+        <button onclick="validarEConfirmarPedido()"
+          style="flex:2;background:linear-gradient(135deg,#e8580a,#c44d09);border:none;border-radius:12px;padding:11px;color:#fff;font-weight:900;font-size:13px;cursor:pointer">
+          ✅ Confirmar Pedido
+        </button>
+      </div>
+    </div>`;
+  document.body.appendChild(over);
+  setTimeout(() => { const el = document.getElementById('valNome'); if (el) el.focus(); }, 80);
+}
+
+async function validarEConfirmarPedido() {
+  const nome = (document.getElementById('valNome').value||'').trim();
+  const senha = (document.getElementById('valSenha').value||'');
+  const erroEl = document.getElementById('valErro');
+  if (!nome || !senha) { erroEl.textContent = '⚠️ Preencha nome e senha.'; return; }
+  const btn = document.querySelector('#validacaoPedidoOverlay button[onclick*="validarEConfirmarPedido"]');
+  if (btn) { btn.textContent = 'Verificando...'; btn.disabled = true; }
+  erroEl.textContent = '';
+  try {
+    const url = SB_URL + "/rest/v1/gn_usuarios?nome=eq." + encodeURIComponent(nome)
+              + "&senha=eq." + encodeURIComponent(senha)
+              + "&ativo=eq.true"
+              + "&cargo=in.(gerente,sub_gerente,supervisor,mestre)";
+    const res = await fetch(url, { headers: { "apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY } });
+    const rows = await res.json();
+    if (!rows || !rows.length) {
+      erroEl.textContent = '❌ Credenciais inválidas ou cargo insuficiente.';
+      if (btn) { btn.textContent = '✅ Confirmar Pedido'; btn.disabled = false; }
+      return;
+    }
+    document.getElementById('validacaoPedidoOverlay').remove();
+    _executarConfirmarPedido();
+  } catch(e) {
+    erroEl.textContent = '⚠️ Erro de conexão. Tente novamente.';
+    if (btn) { btn.textContent = '✅ Confirmar Pedido'; btn.disabled = false; }
+  }
+}
+
+function _executarConfirmarPedido() {
   const p = getPedido();
   const k = lojaKey();  // semana atual → estoque inicial
   const semanaAnterior = addDays(semana, -7);
@@ -2592,6 +2681,7 @@ async function confirmarLogin() {
     document.getElementById('loginOverlay').remove();
     carregarPermissaoLoja();
     carregarPermissaoAbas();
+    carregarPermissaoSemana();
     render();
     showToast('👋 Bem-vindo(a), ' + u.nome + '! (' + u.cargo + ')');
   } catch(e) {
@@ -3044,6 +3134,10 @@ function render() {
   }
   sel.value = loja;
   sel.style.display = lojaForcada ? "none" : "";
+  const bp = document.getElementById('btnPrev');
+  const bn = document.getElementById('btnNext');
+  if (bp) bp.style.display = semanaTravada ? 'none' : '';
+  if (bn) bn.style.display = semanaTravada ? 'none' : '';
 
   /* Nav dots */
   document.getElementById("dot-vendas").classList.toggle("hidden", tv === 0);
@@ -4621,6 +4715,7 @@ if (!verificarSessao()) {
 } else {
   carregarPermissaoLoja();
   carregarPermissaoAbas();
+  carregarPermissaoSemana();
 }
 
 /* Buscar dados da nuvem assim que abrir, e ligar sincronização automática */
