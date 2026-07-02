@@ -31,13 +31,12 @@ const LOJAS_LISTA = [
   'RANCHO', 'PEDREIRA', 'NOVA AMERICA', 'CAMPO GRANDE', 'ITAQUERA', 'GUARULHOS',
 ];
 
+// Módulos na lista principal (estoque e mestra ficam só no bottom nav)
 const MODULES = [
-  { id: 'checklist',  name: 'Check-list',        sub: 'Check-lists diários e pendências',    icon: '✅', bg: '#22c55e', perm: 'checklist',  url: '/gn-checklist.html' },
-  { id: 'estoque',    name: 'Estoque',            sub: 'Controle de produtos e pedidos',      icon: '📦', bg: '#3b82f6', perm: 'estoque',    url: '/gn-estoque.html' },
-  { id: 'avaliacoes', name: 'Avaliações',         sub: 'Desempenho da equipe',                icon: '⭐', bg: '#8b5cf6', perm: 'avaliacoes', url: '/gn-avaliacoes.html' },
-  { id: 'comissoes',  name: 'Comissões',          sub: 'Folha semanal de pagamentos',         icon: '💰', bg: '#f59e0b', perm: 'comissoes',  url: '/gn-comissoes.html' },
-  { id: 'lojas',      name: 'Lojas',              sub: 'Ficha operacional da loja',           icon: '🏪', bg: '#ec4899', perm: 'lojas',      url: '/gn-lojas.html' },
-  { id: 'mestra',     name: 'Comissões Mestra',   sub: 'Visão consolidada — todas as lojas',  icon: '🏆', bg: '#F26419', perm: 'master',     url: '/gn-comissoes-mestra.html', masterOnly: true },
+  { id: 'checklist',  name: 'Check-list',  sub: 'Check-lists diários e pendências', icon: '✅', perm: 'checklist',  url: '/gn-checklist.html' },
+  { id: 'avaliacoes', name: 'Avaliações',  sub: 'Desempenho da equipe',             icon: '⭐', perm: 'avaliacoes', url: '/gn-avaliacoes.html' },
+  { id: 'comissoes',  name: 'Comissões',   sub: 'Folha semanal de pagamentos',      icon: '💰', perm: 'comissoes',  url: '/gn-comissoes.html' },
+  { id: 'lojas',      name: 'Lojas',       sub: 'Ficha operacional da loja',        icon: '🏪', perm: 'lojas',      url: '/gn-lojas.html' },
 ];
 
 function getSession() {
@@ -282,9 +281,7 @@ function HomeScreen({ session, onLogout }) {
       }
     }
 
-    if (perms.estoque || isMaster) set('estoque', 'Online', 'g');
-    if (perms.lojas   || isMaster) set('lojas', 'Online', 'g');
-    if (perms.master)  set('mestra', 'Visão consolidada', 'o');
+    if (perms.lojas || isMaster) set('lojas', 'Online', 'g');
   }, [session, masterLoja, lojaEfetiva, isMaster]);
 
   const navTo = (url) => {
@@ -372,7 +369,11 @@ function HomeScreen({ session, onLogout }) {
             <span style={S.bottomLabel(false)}>Mestra</span>
           </button>
         )}
-        <button style={{ ...S.bottomItem, flex: isMaster ? 1 : 1 }} onClick={() => navTo('/gn-usuarios.html')}>
+        <button style={S.bottomItem} onClick={() => navTo('/gn-estoque.html')}>
+          <span style={S.bottomIcon}>📦</span>
+          <span style={S.bottomLabel(false)}>Estoque</span>
+        </button>
+        <button style={S.bottomItem} onClick={() => navTo('/gn-usuarios.html')}>
           <span style={S.bottomIcon}>🔐</span>
           <span style={S.bottomLabel(false)}>Senhas</span>
         </button>
