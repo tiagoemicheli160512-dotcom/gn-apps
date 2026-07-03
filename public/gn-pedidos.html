@@ -396,6 +396,7 @@ let S = {
   provLoja: '',
   provisoes: [],
   entregasPendentes: [],
+  provisoesAtrasadas: [],
 
   // Totais pedido por loja (calculado)
   totaisPorLoja: {},
@@ -407,6 +408,8 @@ let S = {
 const $ = id => document.getElementById(id);
 const fmt = v => v != null ? Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—';
 const fmtQtd = v => v != null && v !== 0 ? Number(v) : 0;
+let alertasEntregaWpp = [];
+try { alertasEntregaWpp = JSON.parse(localStorage.getItem('gn_alertas_entrega_contatos') || '[]'); } catch(e) {}
 const hoje = () => new Date().toISOString().split('T')[0];
 const hojeDisplay = () => new Date().toLocaleDateString('pt-BR',{weekday:'short',day:'2-digit',month:'short',year:'numeric'});
 
@@ -1568,7 +1571,7 @@ async function salvarNovoFornecedor() {
 // ═══════════════════════════════════════════════
 async function renderProvisoes() {
   $('content').innerHTML = '<div class="empty"><div class="spin"></div></div>';
-  await carregarProvisoes();
+  await Promise.all([carregarProvisoes(), carregarProvisoesPendentes()]);
 
   const lojas = [{ slug_pedido:'', nome_display:'Todas as lojas' }, ...S.lojas];
   const lojaTabs = lojas.map(l =>
@@ -1626,7 +1629,31 @@ async function renderProvisoes() {
         </div>`;
       }).join('');
 
-  $('content').innerHTML = `
+  const bannerAtrasadas = S.provisoesAtrasadas.length ? `
+    <div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.35);border-radius:var(--r);padding:12px 14px;margin-bottom:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+        <div>
+          <div style="font-size:13px;font-weight:800;color:#fca5a5">🚨 ${S.provisoesAtrasadas.length} entrega${S.provisoesAtrasadas.length>1?'s':''} atrasada${S.provisoesAtrasadas.length>1?'s':''}</div>
+          <div style="font-size:10px;color:var(--muted)">Prazo vencido sem confirmação de recebimento</div>
+        </div>
+        <div style="display:flex;gap:6px">
+          <button onclick="abrirModalContatosEntrega()" style="background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:5px 10px;color:var(--muted);font-size:11px;cursor:pointer">⚙️ Contatos</button>
+          <button onclick="dispararAlertaEntregaPedidos()" style="background:rgba(37,211,102,.12);border:1px solid rgba(37,211,102,.3);border-radius:6px;padding:5px 10px;color:#22c55e;font-size:11px;font-weight:700;cursor:pointer">📲 Alertar${alertasEntregaWpp.length?' ('+alertasEntregaWpp.length+')':''}</button>
+        </div>
+      </div>
+      <div style="margin-top:10px;display:flex;flex-direction:column;gap:3px">
+        ${S.provisoesAtrasadas.slice(0,4).map(p => {
+          const lojaNome = S.lojas.find(l=>l.slug_pedido===p.loja_slug)?.nome_display || p.loja_slug;
+          return `<div style="display:flex;justify-content:space-between;font-size:11px;padding:4px 0;border-bottom:1px solid rgba(239,68,68,.12)">
+            <span style="color:#fca5a5;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${lojaNome} — ${p.fornecedor||'—'} — ${p.gn_catalogo?.produto||'—'}</span>
+            <span style="color:#f87171;flex-shrink:0;margin-left:8px;font-weight:700">📅 ${p.data_entrega}</span>
+          </div>`;
+        }).join('')}
+        ${S.provisoesAtrasadas.length>4?`<div style="font-size:10px;color:var(--muted);text-align:center;margin-top:4px">+${S.provisoesAtrasadas.length-4} mais</div>`:''}
+      </div>
+    </div>` : '';
+
+  $('content').innerHTML = bannerAtrasadas + `
     <div class="sec-header">
       <div class="sec-titulo">Provisões <span class="badge badge-r">${S.provisoes.length}</span></div>
       <div style="display:flex;align-items:center;gap:8px">
@@ -1756,6 +1783,133 @@ function modalValidar(provisaoId) {
       <button class="btn-sm btn-success" onclick="confirmarEntrega('${provisaoId}')">✓ Confirmar</button>
     </div>
   `);
+}
+
+// ═══════════════════════════════════════════════
+// ALERTAS DE ENTREGA ATRASADA
+// ═══════════════════════════════════════════════
+async function carregarProvisoesPendentes() {
+  const { data } = await db.from('gn_provisoes')
+    .select('*, gn_catalogo(produto,und)')
+    .eq('status', 'AGUARDANDO')
+    .not('data_entrega', 'is', null)
+    .lt('data_entrega', hoje())
+    .order('data_entrega');
+  S.provisoesAtrasadas = data || [];
+  _atualizarBadgeAtrasadas();
+}
+
+function _atualizarBadgeAtrasadas() {
+  const btn = document.querySelector('[data-tab="provisoes"]');
+  if (!btn) return;
+  const n = S.provisoesAtrasadas.length;
+  let badge = btn.querySelector('.badge-atrasadas');
+  if (n > 0) {
+    if (!badge) {
+      badge = document.createElement('span');
+      badge.className = 'badge-atrasadas';
+      badge.style.cssText = 'position:absolute;top:4px;right:calc(50% - 16px);background:#ef4444;color:#fff;border-radius:20px;font-size:8px;font-weight:800;padding:1px 5px;min-width:14px;text-align:center;pointer-events:none';
+      btn.style.position = 'relative';
+      btn.appendChild(badge);
+    }
+    badge.textContent = n;
+  } else if (badge) {
+    badge.remove();
+  }
+}
+
+function gerarMsgAlertaEntregaPedidos() {
+  const at = S.provisoesAtrasadas;
+  if (!at.length) return '';
+  const dt = new Date().toLocaleDateString('pt-BR')+' '+new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+  const porLoja = {};
+  at.forEach(p => {
+    const nome = S.lojas.find(l => l.slug_pedido === p.loja_slug)?.nome_display || p.loja_slug;
+    (porLoja[nome] = porLoja[nome] || []).push(p);
+  });
+  let msg = `🚨 *ENTREGAS ATRASADAS*\n📅 ${dt}\n\n⏰ *Provisões sem confirmação (prazo vencido):*\n`;
+  Object.entries(porLoja).sort(([a],[b])=>a.localeCompare(b)).forEach(([nome, itens]) => {
+    msg += `\n📍 *${nome}*\n`;
+    itens.forEach(p => {
+      msg += `  ▪️ ${p.fornecedor||'—'} — ${p.gn_catalogo?.produto||'—'}: ${fmtQtd(p.qtd_prevista)} ${p.gn_catalogo?.und||''} (previsto: ${p.data_entrega})\n`;
+    });
+  });
+  msg += `\n⚠️ *${at.length} entrega${at.length>1?'s':''} atrasada${at.length>1?'s':''}. Verificar urgentemente!*`;
+  return msg;
+}
+
+function dispararAlertaEntregaPedidos() {
+  const msg = gerarMsgAlertaEntregaPedidos();
+  if (!msg) { toast('✅ Nenhuma entrega atrasada.', 'ok'); return; }
+  if (!alertasEntregaWpp.length) { abrirModalContatosEntrega(); return; }
+  alertasEntregaWpp.forEach((c, i) => {
+    setTimeout(() => {
+      window.open('https://wa.me/'+(c.numero||'').replace(/\D/g,'')+'?text='+encodeURIComponent(msg), '_blank');
+      toast('📲 '+c.nome+' alertado', 'ok');
+    }, i * 1800);
+  });
+}
+
+function _salvarContatosEntrega() {
+  try { localStorage.setItem('gn_alertas_entrega_contatos', JSON.stringify(alertasEntregaWpp)); } catch(e) {}
+}
+function _renderContatosEntrega() {
+  const lista = document.getElementById('contatoEntregaLista');
+  if (!lista) return;
+  lista.innerHTML = !alertasEntregaWpp.length
+    ? '<div style="font-size:11px;color:var(--muted);text-align:center;padding:8px">Nenhum contato cadastrado</div>'
+    : alertasEntregaWpp.map((c, i) => `
+        <div style="display:flex;align-items:center;gap:8px;background:var(--card2);border-radius:var(--rs);padding:8px 12px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:12px;font-weight:700">${c.nome}</div>
+            <div style="font-size:10px;color:var(--muted)">${c.numero}</div>
+          </div>
+          <button onclick="_removerContatoEntrega(${i})" style="background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.3);border-radius:var(--rs);padding:4px 8px;color:#f87171;font-size:11px;cursor:pointer">✕</button>
+        </div>`).join('');
+}
+function _adicionarContatoEntrega() {
+  const nome = ($('novo-ent-nome')?.value || '').trim();
+  const num  = ($('novo-ent-num')?.value || '').replace(/\D/g,'').trim();
+  if (!nome || num.length < 10) { toast('Preencha nome e número válido.', 'err'); return; }
+  alertasEntregaWpp.push({ nome, numero: num });
+  _salvarContatosEntrega();
+  $('novo-ent-nome').value = ''; $('novo-ent-num').value = '';
+  _renderContatosEntrega();
+}
+function _removerContatoEntrega(idx) {
+  alertasEntregaWpp.splice(idx, 1);
+  _salvarContatosEntrega();
+  _renderContatosEntrega();
+}
+function abrirModalContatosEntrega() {
+  abrirModal(`
+    <div class="modal-titulo">📲 Contatos — Alertas de Entrega
+      <button class="modal-close" onclick="$('modal-bg').classList.remove('ativo')">×</button>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:12px">Recebem alerta WhatsApp quando uma entrega passa da data prevista sem confirmação.</div>
+    <div id="contatoEntregaLista" style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px"></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px">
+      <input id="novo-ent-nome" type="text" placeholder="Nome (ex: Compras)" maxlength="30" class="form-input">
+      <input id="novo-ent-num" type="tel" placeholder="5521..." maxlength="15" class="form-input">
+    </div>
+    <div style="font-size:10px;color:var(--muted);margin-bottom:10px">Formato: 55 + DDD + número (ex: 5521999887766)</div>
+    <div class="modal-acoes">
+      <button class="btn-sm btn-outline" onclick="_adicionarContatoEntrega()">+ Adicionar</button>
+      <button class="btn-sm btn-success" onclick="$('modal-bg').classList.remove('ativo')">✓ Fechar</button>
+    </div>
+  `);
+  _renderContatosEntrega();
+}
+
+async function _verificarAlertasEntregaAuto() {
+  await carregarProvisoesPendentes();
+  if (!S.provisoesAtrasadas.length) return;
+  try {
+    const ts = parseInt(localStorage.getItem('gn_alerta_entrega_ped_ts') || '0');
+    if (Date.now() - ts < 4 * 3600000) return;
+  } catch(e) {}
+  try { localStorage.setItem('gn_alerta_entrega_ped_ts', String(Date.now())); } catch(e) {}
+  if (alertasEntregaWpp.length) dispararAlertaEntregaPedidos();
 }
 
 async function confirmarEntrega(provisaoId) {
@@ -1889,6 +2043,9 @@ async function iniciarApp() {
 
   // Render inicial
   setTab('pedido');
+
+  // Verificar entregas atrasadas em background (auto-alerta após 6s)
+  setTimeout(_verificarAlertasEntregaAuto, 6000);
 }
 
 async function init() {
