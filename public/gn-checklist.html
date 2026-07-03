@@ -749,6 +749,7 @@
     <button class="tab-btn" onclick="switchTab('manutencao',this)">🔧 Manutenção</button>
     <button class="tab-btn" onclick="switchTab('supervisao',this)">🎯 Supervisão</button>
     <button class="tab-btn" onclick="switchTab('historico',this)">📅 Histórico</button>
+    <button class="tab-btn" onclick="switchTab('caixa',this)">💵 Caixa</button>
   </div>
 </div>
 
@@ -804,11 +805,27 @@
         <div style="font-size:9px;color:#444;margin-top:3px;">Alimenta o Bruto do dia no app de Comissões. Não soma ao total abaixo.</div>
         <div id="repique-sync-msg" style="font-size:9px;margin-top:2px;"></div>
       </div>
+      <div><label class="field-label">Dinheiro em Caixa (R$)</label>
+        <input type="number" id="dinheiro-caixa" placeholder="0,00" step="0.01" min="0" oninput="onDinheiroCaixaChange()">
+        <div style="font-size:9px;color:#444;margin-top:3px;">Valor físico em dinheiro no caixa ao final do dia.</div>
+      </div>
       <div style="background:#1c1c1c;border-radius:8px;padding:10px;border-left:3px solid #E8580A;">
         <div style="font-size:9px;color:#444;text-transform:uppercase;margin-bottom:2px;">Total</div>
         <div style="font-size:20px;font-weight:700;color:#E8580A;font-family:'JetBrains Mono',monospace;" id="fat-total">R$ 0,00</div>
       </div>
     </div>
+  </div>
+
+  <!-- Despesas do Dia -->
+  <div class="card p-4 mb-3">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+      <div>
+        <div style="font-size:12px;font-weight:700;">🧾 Despesas do Dia</div>
+        <div style="font-size:10px;color:#444;" id="despesas-total-label">Nenhuma despesa</div>
+      </div>
+      <button class="btn-primary" style="padding:6px 12px;font-size:11px;" onclick="addDespesa()">+ Adicionar</button>
+    </div>
+    <div id="despesas-lista" style="display:flex;flex-direction:column;gap:8px;"></div>
   </div>
 
   <!-- Funcionários (espelha o app de Comissões) -->
@@ -964,6 +981,20 @@
 
 </div><!-- /page-content -->
 </div><!-- /app -->
+
+<!-- ===================== ABA CAIXA ===================== -->
+<div id="tab-caixa" class="tab-content" style="max-width:640px;margin:0 auto;padding:14px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+    <div>
+      <div style="font-size:14px;font-weight:700;">💵 Livro Caixa</div>
+      <div style="font-size:10px;color:#444;" id="caixa-semana-label">—</div>
+    </div>
+    <button class="btn-secondary" onclick="renderLivroCaixa()" style="font-size:10px;padding:5px 10px;">🔄 Atualizar</button>
+  </div>
+  <div id="caixa-content">
+    <div style="text-align:center;padding:40px;color:#444;font-size:12px;">Carregando...</div>
+  </div>
+</div>
 
 <!-- ===================== ABA HISTÓRICO ===================== -->
 <div id="tab-historico" class="tab-content" style="max-width:640px;margin:0 auto;padding:14px;">
@@ -1459,7 +1490,8 @@ async function flushComissoesOps(immediate){
 let state = {
   data: hojeLocal(),
   semanaInicio: '', semanaFim: '', semanaLabel: '',
-  vendaSalao:0, vendaDelivery:0, repique:0,
+  vendaSalao:0, vendaDelivery:0, repique:0, dinheiroCaixa:0,
+  despesas:[],
   checklist:{}, abertura:{}, fechamento:{},
   faltasFuncionarios:[], faltas:[], manutencao:[],
   supervisao: {
@@ -1598,6 +1630,256 @@ function initAllStates(){
 }
 
 // =============================================
+// DINHEIRO EM CAIXA
+// =============================================
+function onDinheiroCaixaChange(){
+  state.dinheiroCaixa = parseFloat(document.getElementById('dinheiro-caixa').value)||0;
+  autoSave();
+}
+
+// =============================================
+// DESPESAS DO DIA
+// =============================================
+function comprimirFoto(file, cb){
+  const reader = new FileReader();
+  reader.onload = e => {
+    const img = new Image();
+    img.onload = () => {
+      const MAX = 800;
+      let w = img.width, h = img.height;
+      if(w > MAX || h > MAX){ if(w>h){h=Math.round(h*MAX/w);w=MAX;}else{w=Math.round(w*MAX/h);h=MAX;} }
+      const c = document.createElement('canvas');
+      c.width=w; c.height=h;
+      c.getContext('2d').drawImage(img,0,0,w,h);
+      cb(c.toDataURL('image/jpeg',0.65));
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+function addDespesa(){
+  const id = Date.now();
+  state.despesas.push({id, descricao:'', valor:0, foto:''});
+  autoSave();
+  renderDespesas();
+}
+
+function removeDespesa(id){
+  state.despesas = state.despesas.filter(d=>d.id!==id);
+  autoSave();
+  renderDespesas();
+}
+
+function updateDespesaField(id, field, value){
+  const d = state.despesas.find(x=>x.id===id);
+  if(!d) return;
+  d[field] = field==='valor' ? (parseFloat(value)||0) : value;
+  autoSave();
+  _atualizarTotalDespesas();
+}
+
+function addDespesaFoto(id, input){
+  const file = input.files && input.files[0];
+  if(!file) return;
+  comprimirFoto(file, b64=>{
+    const d = state.despesas.find(x=>x.id===id);
+    if(!d) return;
+    d.foto = b64;
+    autoSave();
+    renderDespesas();
+  });
+}
+
+function _atualizarTotalDespesas(){
+  const total = state.despesas.reduce((s,d)=>s+(d.valor||0),0);
+  const el = document.getElementById('despesas-total-label');
+  if(el){
+    if(state.despesas.length===0) el.textContent='Nenhuma despesa';
+    else el.textContent = state.despesas.length+' despesa(s) — Total: '+_fmtBRL(total);
+  }
+}
+
+function renderDespesas(){
+  const lista = document.getElementById('despesas-lista');
+  if(!lista) return;
+  if(state.despesas.length===0){
+    lista.innerHTML='<div style="text-align:center;padding:14px;color:#444;font-size:11px;">Nenhuma despesa adicionada</div>';
+    _atualizarTotalDespesas();
+    return;
+  }
+  lista.innerHTML = state.despesas.map(d=>`
+    <div style="background:#1c1c1c;border:1px solid #2a2a2a;border-radius:10px;padding:11px 12px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <input type="text" value="${_esc(d.descricao)}" placeholder="Descrição da despesa"
+          style="flex:1;background:#111;border:1px solid #333;border-radius:7px;padding:7px 10px;color:#f0f0f0;font-size:12px;outline:none;"
+          oninput="updateDespesaField(${d.id},'descricao',this.value)">
+        <button onclick="removeDespesa(${d.id})"
+          style="background:#3a1a1a;border:1px solid #5a2a2a;border-radius:7px;padding:6px 10px;color:#e04040;font-size:13px;cursor:pointer;flex-shrink:0;">✕</button>
+      </div>
+      <div style="display:flex;gap:8px;align-items:flex-end;">
+        <div style="flex:1;">
+          <label style="font-size:9px;color:#555;text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:3px;">Valor (R$)</label>
+          <input type="number" value="${d.valor||''}" placeholder="0,00" step="0.01" min="0"
+            style="width:100%;background:#111;border:1px solid #333;border-radius:7px;padding:7px 10px;color:#f0f0f0;font-size:13px;outline:none;"
+            oninput="updateDespesaField(${d.id},'valor',this.value)">
+        </div>
+        <div style="flex-shrink:0;">
+          <label style="font-size:9px;color:#555;text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:3px;">Comprovante</label>
+          <label style="display:flex;align-items:center;gap:5px;background:${d.foto?'#0d2d1a':'#1a1a2e'};border:1px solid ${d.foto?'#1a6b3a':'#2a2a4e'};border-radius:7px;padding:7px 10px;cursor:pointer;font-size:11px;color:${d.foto?'#4ade80':'#7c83fd'};">
+            ${d.foto?'✅ Ver':'📷 Foto'}
+            <input type="file" accept="image/*" capture="camera" style="display:none;" onchange="addDespesaFoto(${d.id},this)">
+          </label>
+        </div>
+        ${d.foto?`<div style="flex-shrink:0;"><img src="${d.foto}" style="width:44px;height:44px;object-fit:cover;border-radius:7px;border:1px solid #333;" onclick="verFotoDespesa(${d.id})"></div>`:''}
+      </div>
+    </div>
+  `).join('');
+  _atualizarTotalDespesas();
+}
+
+function verFotoDespesa(id){
+  const d = state.despesas.find(x=>x.id===id);
+  if(!d||!d.foto) return;
+  const w = window.open('','_blank');
+  w.document.write('<html><body style="margin:0;background:#000;display:flex;justify-content:center;align-items:center;min-height:100vh;"><img src="'+d.foto+'" style="max-width:100%;max-height:100vh;"></body></html>');
+  w.document.close();
+}
+
+function _esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
+function _fmtBRL(v){ return 'R$ '+Number(v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+
+// =============================================
+// LIVRO CAIXA
+// =============================================
+let _livroCaixaRows = [];
+
+function verFotoLC(rowIdx, despIdx){
+  const r = _livroCaixaRows[rowIdx];
+  if(!r) return;
+  const d = (r.despesas||[])[despIdx];
+  if(!d||!d.foto) return;
+  verFotoDespesaBase64(d.foto);
+}
+
+async function renderLivroCaixa(){
+  const el = document.getElementById('caixa-content');
+  const lbl = document.getElementById('caixa-semana-label');
+  if(!el) return;
+  if(lbl) lbl.textContent = state.semanaLabel ? 'Semana: '+state.semanaLabel : '—';
+
+  el.innerHTML='<div style="text-align:center;padding:30px;color:#444;font-size:12px;">Carregando semana...</div>';
+
+  // Carregar todos os dias da semana atual
+  let rows = [];
+  try{
+    const {data,error} = await sb.from('checklist_diario')
+      .select('data_operacao,venda_salao,venda_delivery,dinheiro_caixa,despesas')
+      .eq('loja', LOJA)
+      .gte('data_operacao', state.semanaInicio)
+      .lte('data_operacao', state.semanaFim)
+      .order('data_operacao', {ascending:true});
+    if(error) throw error;
+    rows = data || [];
+  }catch(e){
+    el.innerHTML='<div style="text-align:center;padding:30px;color:#e04040;font-size:12px;">Falha ao carregar dados</div>';
+    return;
+  }
+
+  // Incluir o dia atual (pode não estar salvo ainda)
+  const hojeISO = state.data;
+  if(!rows.find(r=>r.data_operacao===hojeISO)){
+    rows.push({
+      data_operacao: hojeISO,
+      venda_salao: state.vendaSalao, venda_delivery: state.vendaDelivery,
+      dinheiro_caixa: state.dinheiroCaixa, despesas: state.despesas
+    });
+    rows.sort((a,b)=>a.data_operacao.localeCompare(b.data_operacao));
+  } else {
+    const idx = rows.findIndex(r=>r.data_operacao===hojeISO);
+    rows[idx] = {...rows[idx], dinheiro_caixa: state.dinheiroCaixa, despesas: state.despesas};
+  }
+
+  _livroCaixaRows = rows; // cache para verFotoLC()
+
+  const diasNomes = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+  let totalEntradas=0, totalSaidas=0;
+
+  const cards = rows.map((r, rowIdx)=>{
+    const desp = Array.isArray(r.despesas)?r.despesas:[];
+    const totalDesp = desp.reduce((s,d)=>s+(parseFloat(d.valor)||0),0);
+    const caixa = parseFloat(r.dinheiro_caixa)||0;
+    const saldo = caixa - totalDesp;
+    totalEntradas += caixa;
+    totalSaidas += totalDesp;
+
+    const dt = new Date(r.data_operacao+'T12:00:00');
+    const nomeDia = diasNomes[dt.getDay()];
+    const dtFmt = `${String(dt.getDate()).padStart(2,'0')}/${String(dt.getMonth()+1).padStart(2,'0')}`;
+    const isHoje = r.data_operacao === hojeISO;
+
+    const despHTML = desp.length>0 ? desp.map((d,dIdx)=>`
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid #222;gap:8px;">
+        <div style="flex:1;font-size:11px;color:#ccc;">${_esc(d.descricao)||'Sem descrição'}</div>
+        <div style="font-size:11px;font-weight:700;color:#e04040;white-space:nowrap;">${_fmtBRL(d.valor)}</div>
+        ${d.foto?`<img src="${d.foto}" style="width:28px;height:28px;object-fit:cover;border-radius:5px;cursor:pointer;" onclick="verFotoLC(${rowIdx},${dIdx})">` :''}
+      </div>`).join('')
+    : '<div style="font-size:11px;color:#444;padding:4px 0;">Nenhuma despesa</div>';
+
+    return `
+      <div style="background:#1c1c1c;border:1px solid ${isHoje?'#E8580A':'#2a2a2a'};border-radius:12px;padding:12px;margin-bottom:10px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+          <div>
+            <span style="font-size:13px;font-weight:700;color:${isHoje?'#E8580A':'#f0f0f0'};">${nomeDia}, ${dtFmt}</span>
+            ${isHoje?'<span style="font-size:9px;background:#E8580A22;color:#E8580A;border-radius:99px;padding:1px 7px;margin-left:6px;font-weight:700;">HOJE</span>':''}
+          </div>
+          <div style="font-size:12px;font-weight:700;color:${saldo>=0?'#4ade80':'#e04040'};">${_fmtBRL(saldo)}</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
+          <div style="background:#0d2d1a;border-radius:8px;padding:8px;border-left:3px solid #22c55e;">
+            <div style="font-size:9px;color:#4ade80;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px;">Entrada (Caixa)</div>
+            <div style="font-size:14px;font-weight:700;color:#4ade80;">${_fmtBRL(caixa)}</div>
+          </div>
+          <div style="background:#2d0d0d;border-radius:8px;padding:8px;border-left:3px solid #ef4444;">
+            <div style="font-size:9px;color:#e04040;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px;">Saídas</div>
+            <div style="font-size:14px;font-weight:700;color:#e04040;">${_fmtBRL(totalDesp)}</div>
+          </div>
+        </div>
+        ${desp.length>0?`<div style="margin-top:4px;"><div style="font-size:9px;color:#555;text-transform:uppercase;margin-bottom:4px;">Despesas</div>${despHTML}</div>`:''}
+      </div>`;
+  }).join('');
+
+  const saldoTotal = totalEntradas - totalSaidas;
+
+  el.innerHTML = `
+    <div style="background:linear-gradient(135deg,#1a2a1a,#1a1a2a);border-radius:12px;padding:14px;margin-bottom:14px;border:1px solid #2a2a3a;">
+      <div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Resumo da Semana</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
+        <div style="text-align:center;">
+          <div style="font-size:9px;color:#4ade80;margin-bottom:2px;">Total Entradas</div>
+          <div style="font-size:13px;font-weight:700;color:#4ade80;">${_fmtBRL(totalEntradas)}</div>
+        </div>
+        <div style="text-align:center;">
+          <div style="font-size:9px;color:#e04040;margin-bottom:2px;">Total Saídas</div>
+          <div style="font-size:13px;font-weight:700;color:#e04040;">${_fmtBRL(totalSaidas)}</div>
+        </div>
+        <div style="text-align:center;">
+          <div style="font-size:9px;color:${saldoTotal>=0?'#4ade80':'#e04040'};margin-bottom:2px;">Saldo</div>
+          <div style="font-size:13px;font-weight:700;color:${saldoTotal>=0?'#4ade80':'#e04040'};">${_fmtBRL(saldoTotal)}</div>
+        </div>
+      </div>
+    </div>
+    ${rows.length>0?cards:'<div style="text-align:center;padding:30px;color:#444;font-size:12px;">Nenhum dado nesta semana</div>'}
+  `;
+}
+
+function verFotoDespesaBase64(src){
+  const w = window.open('','_blank');
+  w.document.write('<html><body style="margin:0;background:#000;display:flex;justify-content:center;align-items:center;min-height:100vh;"><img src="'+src+'" style="max-width:100%;max-height:100vh;"></body></html>');
+  w.document.close();
+}
+
+// =============================================
 // SUPABASE
 // =============================================
 async function loadSupabaseDay(data){
@@ -1638,6 +1920,7 @@ async function saveAll(){
       data_operacao: state.data, loja: LOJA,
       semana_inicio: state.semanaInicio, semana_fim: state.semanaFim,
       venda_salao:   state.vendaSalao, venda_delivery: state.vendaDelivery, repique: state.repique,
+      dinheiro_caixa: state.dinheiroCaixa, despesas: state.despesas,
       checklist:     state.checklist, abertura: state.abertura, fechamento: state.fechamento,
       faltas:        state.faltas, manutencao: state.manutencao,
       faltas_funcionarios: state.faltasFuncionarios,
@@ -1666,6 +1949,8 @@ function mergeState(rows){
   if(rows.venda_salao!=null) state.vendaSalao=rows.venda_salao;
   if(rows.venda_delivery!=null) state.vendaDelivery=rows.venda_delivery;
   if(rows.repique!=null) state.repique=rows.repique;
+  if(rows.dinheiro_caixa!=null) state.dinheiroCaixa=rows.dinheiro_caixa;
+  if(Array.isArray(rows.despesas)) state.despesas=rows.despesas;
   ['checklist','abertura','fechamento'].forEach(key=>{
     if(rows[key]&&Object.keys(rows[key]).length){
       Object.keys(rows[key]).forEach(s=>{
@@ -1739,10 +2024,11 @@ async function onDataChange(val){
   state.data=val;
   state.checklist={}; state.abertura={}; state.fechamento={};
   state.faltas=[]; state.manutencao=[]; state.faltasFuncionarios=[];
-  state.vendaSalao=0; state.vendaDelivery=0; state.repique=0;
+  state.vendaSalao=0; state.vendaDelivery=0; state.repique=0; state.dinheiroCaixa=0; state.despesas=[];
   document.getElementById('venda-salao').value='';
   document.getElementById('venda-delivery').value='';
   document.getElementById('repique-valor').value='';
+  document.getElementById('dinheiro-caixa').value='';
   calcTotal();
   initAllStates();
   renderAll();
@@ -2640,6 +2926,7 @@ function renderAll(){
   renderCheckGroup('fechamento',SETORES_FECHAMENTO, 'fechamento-container', 'fechamento-count');
   renderCarnes();
   renderComissoesFuncs();
+  renderDespesas();
   renderFaltas();
   renderManutencao();
   renderSupervisao();
@@ -2655,6 +2942,7 @@ function restoreUI(){
   document.getElementById('venda-salao').value=state.vendaSalao||'';
   document.getElementById('venda-delivery').value=state.vendaDelivery||'';
   document.getElementById('repique-valor').value=state.repique||'';
+  document.getElementById('dinheiro-caixa').value=state.dinheiroCaixa||'';
   calcTotal();
   // NÃO chama initAllStates aqui — preserva dados já carregados pelo merge
   renderAll();
@@ -2677,6 +2965,7 @@ function switchTab(tab,btn){
     renderSupervisao();
   }
   if(tab==='historico') loadHistorico();
+  if(tab==='caixa') renderLivroCaixa();
 }
 
 // =============================================
