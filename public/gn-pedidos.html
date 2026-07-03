@@ -1098,6 +1098,7 @@ function renderPedido() {
       </div>
       <div class="pedido-acoes">
         <button class="btn-sm btn-outline" onclick="novoPedido()">Novo</button>
+        <button class="btn-sm" onclick="gerarWppPedido()" style="background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);color:#22c55e">📲</button>
         ${!pedConfirmado ? `
           <button class="btn-sm btn-success" onclick="confirmarPedido()">✓ Confirmar</button>
         ` : `
@@ -1628,7 +1629,10 @@ async function renderProvisoes() {
   $('content').innerHTML = `
     <div class="sec-header">
       <div class="sec-titulo">Provisões <span class="badge badge-r">${S.provisoes.length}</span></div>
-      <div class="num" style="font-size:13px;font-weight:700">R$ ${fmt(totalValor)}</div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button onclick="gerarWppProvisoes()" style="background:rgba(37,211,102,.12);border:1px solid rgba(37,211,102,.3);border-radius:6px;padding:5px 10px;color:#22c55e;font-size:11px;font-weight:700;cursor:pointer">📲 WhatsApp</button>
+        <div class="num" style="font-size:13px;font-weight:700">R$ ${fmt(totalValor)}</div>
+      </div>
     </div>
     <div class="store-tabs" style="margin-bottom:12px">${lojaTabs}</div>
     ${provHtml}
@@ -1638,6 +1642,86 @@ async function renderProvisoes() {
 async function filtrarProvisao(loja) {
   S.provLoja = loja;
   await renderProvisoes();
+}
+
+function gerarWppProvisoes() {
+  if (!S.provisoes.length) { toast('Nenhuma provisão para enviar.', 'err'); return; }
+  const porForn = {};
+  S.provisoes.forEach(p => {
+    const f = p.fornecedor || 'SEM FORNECEDOR';
+    (porForn[f] = porForn[f] || []).push(p);
+  });
+  const fns = Object.keys(porForn).sort();
+  const lojaLabel = S.provLoja
+    ? (S.lojas.find(l => l.slug_pedido === S.provLoja)?.nome_display || S.provLoja)
+    : 'Todas as lojas';
+  let msg = `📦 *PROVISÕES — ${lojaLabel}*\n`;
+  let total = 0;
+  fns.forEach(forn => {
+    const itens = porForn[forn];
+    const totF = itens.reduce((a, p) => a + (parseFloat(p.valor_previsto) || 0), 0);
+    msg += `\n🏭 *${forn}* — R$ ${fmt(totF)}\n`;
+    itens.forEach(p => {
+      const lojaNome = S.lojas.find(l => l.slug_pedido === p.loja_slug)?.nome_display || p.loja_slug;
+      const icon = p.status === 'RECEBIDO_OK' ? '✅' : p.status === 'DIVERGENCIA' ? '⚠️' : '⏳';
+      const dt = p.data_entrega ? ` (${p.data_entrega})` : '';
+      msg += `  ${icon} ${lojaNome} — ${p.gn_catalogo?.produto || '—'}: ${fmtQtd(p.qtd_prevista)} ${p.gn_catalogo?.und || ''} R$ ${fmt(p.valor_previsto)}${dt}\n`;
+      total += parseFloat(p.valor_previsto) || 0;
+    });
+  });
+  msg += `\n💰 *Total: R$ ${fmt(total)}*`;
+  window.open('https://wa.me/?text=' + encodeURIComponent(msg));
+}
+
+function gerarWppPedido() {
+  if (!S.pedidoAtual) { toast('Nenhum pedido ativo.', 'err'); return; }
+  const sem = formatarSemana(S.semanaAtiva);
+  const porForn = {};
+  S.catalogo.filter(p => p.ativo).forEach(prod => {
+    if (S.todosModo) {
+      S.lojas.forEach(loja => {
+        const qtd = S.pedidoItens[prod.id]?.[loja.slug_pedido]?.qtd || 0;
+        if (qtd <= 0) return;
+        (porForn[prod.fornecedor] = porForn[prod.fornecedor] || [])
+          .push({ produto: prod.produto, und: prod.und, custo: prod.custo || 0, loja: loja.nome_display, qtd });
+      });
+    } else {
+      const qtd = S.pedidoItens[prod.id]?.[S.lojaAtiva]?.qtd || 0;
+      if (qtd <= 0) return;
+      const lojaNome = S.lojas.find(l => l.slug_pedido === S.lojaAtiva)?.nome_display || S.lojaAtiva;
+      (porForn[prod.fornecedor] = porForn[prod.fornecedor] || [])
+        .push({ produto: prod.produto, und: prod.und, custo: prod.custo || 0, loja: lojaNome, qtd });
+    }
+  });
+  const fns = Object.keys(porForn).sort();
+  if (!fns.length) { toast('Nenhum item com pedido para enviar.', 'err'); return; }
+  const titulo = S.todosModo ? 'TODAS AS LOJAS' : (S.lojas.find(l => l.slug_pedido === S.lojaAtiva)?.nome_display || S.lojaAtiva);
+  let msg = `🛒 *PEDIDO — Semana ${sem.num}/${sem.ano}* (${sem.periodo})\n📍 ${titulo}\n`;
+  let totalGeral = 0;
+  fns.forEach(forn => {
+    const itens = porForn[forn];
+    msg += `\n🏭 *${forn}*\n`;
+    if (S.todosModo) {
+      const lojaMap = {};
+      itens.forEach(i => (lojaMap[i.loja] = lojaMap[i.loja] || []).push(i));
+      Object.entries(lojaMap).sort(([a], [b]) => a.localeCompare(b)).forEach(([lojaNome, items]) => {
+        msg += `  📍 ${lojaNome}\n`;
+        items.forEach(i => {
+          const sub = i.custo > 0 ? ` — R$ ${fmt(i.qtd * i.custo)}` : '';
+          msg += `    • ${i.produto}: ${fmtQtd(i.qtd)} ${i.und}${sub}\n`;
+          totalGeral += i.qtd * i.custo;
+        });
+      });
+    } else {
+      itens.forEach(i => {
+        const sub = i.custo > 0 ? ` — R$ ${fmt(i.qtd * i.custo)}` : '';
+        msg += `  • ${i.produto}: ${fmtQtd(i.qtd)} ${i.und}${sub}\n`;
+        totalGeral += i.qtd * i.custo;
+      });
+    }
+  });
+  if (totalGeral > 0) msg += `\n💰 *Total Geral: R$ ${fmt(totalGeral)}*`;
+  window.open('https://wa.me/?text=' + encodeURIComponent(msg));
 }
 
 function modalValidar(provisaoId) {
