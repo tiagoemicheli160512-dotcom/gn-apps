@@ -2697,40 +2697,123 @@ function qtdPreenchidos() {
   return Object.values(p).filter(v => v.atual > 0 || v.pedido > 0).length;
 }
 
-function confirmarPedido() {
+/* ── SINCRONIZAÇÃO COM GN-PEDIDOS ──────────────────────── */
+let _catalogoMap = null;
+
+async function _carregarCatalogo() {
+  if (_catalogoMap) return _catalogoMap;
+  try {
+    const rows = await sbRequest('gn_catalogo?select=id,produto&limit=2000', { method: 'GET' });
+    _catalogoMap = {};
+    (rows || []).forEach(r => { _catalogoMap[r.produto.trim().toUpperCase()] = r.id; });
+  } catch(e) { _catalogoMap = {}; }
+  return _catalogoMap;
+}
+
+async function _buscarOuCriarPedidoAtivo() {
+  const semIso = wkKey(semana);
+  try {
+    const rows = await sbRequest(
+      'gn_pedidos?semana_inicio=eq.' + semIso + '&regiao=eq.RJ&status=in.(RASCUNHO,CONFIRMADO)&order=criado_em.desc&limit=1',
+      { method: 'GET' }
+    );
+    if (rows && rows.length > 0) return rows[0];
+    const hoje = new Date().toISOString().split('T')[0];
+    const novo = await sbRequest('gn_pedidos', {
+      method: 'POST',
+      headers: { 'Prefer': 'return=representation' },
+      body: JSON.stringify({ data_pedido: hoje, semana_inicio: semIso, status: 'RASCUNHO', regiao: 'RJ' })
+    });
+    return Array.isArray(novo) ? novo[0] : novo;
+  } catch(e) { return null; }
+}
+
+async function _sincronizarComPedidos(produtosSync) {
+  // produtosSync: [{prod, cx, und, pedidoCx, pedidoUnd, fator}]
+  const catMap = await _carregarCatalogo();
+  const pedidoDB = await _buscarOuCriarPedidoAtivo();
+  const lojaSlug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+  const hoje = new Date().toISOString().split('T')[0];
+
+  const contagens = [];
+  const itens = [];
+
+  produtosSync.forEach(({ prod, cx, und, pedidoCx, pedidoUnd, fator }) => {
+    const catalogoId = catMap[prod.produto.trim().toUpperCase()];
+    if (!catalogoId) return;
+    const estoqueAtual = (cx * fator) + und;
+    const qtdPedida = (pedidoCx * fator) + pedidoUnd;
+    if (estoqueAtual === 0 && qtdPedida === 0) return;
+
+    contagens.push({
+      catalogo_id: catalogoId, loja_slug: lojaSlug,
+      atual: estoqueAtual, ul_estoque: estoqueAtual, ul_pedido: qtdPedida,
+      data_contagem: hoje,
+      criado_por: usuarioAtual ? usuarioAtual.nome : ''
+    });
+
+    if (pedidoDB && qtdPedida > 0) {
+      itens.push({
+        pedido_id: pedidoDB.id, catalogo_id: catalogoId, loja_slug: lojaSlug,
+        qtd_pedida: qtdPedida, custo_unitario: prod.custo || null
+      });
+    }
+  });
+
+  let erros = 0;
+  if (contagens.length > 0) {
+    try {
+      await sbRequest('gn_contagens_pedido?on_conflict=catalogo_id,loja_slug,data_contagem', {
+        method: 'POST',
+        headers: { 'Prefer': 'return=minimal,resolution=merge-duplicates' },
+        body: JSON.stringify(contagens)
+      });
+    } catch(e) { erros++; }
+  }
+  if (itens.length > 0) {
+    try {
+      await sbRequest('gn_pedido_itens?on_conflict=pedido_id,catalogo_id,loja_slug', {
+        method: 'POST',
+        headers: { 'Prefer': 'return=minimal,resolution=merge-duplicates' },
+        body: JSON.stringify(itens)
+      });
+    } catch(e) { erros++; }
+  }
+  return { contagens: contagens.length, itens: itens.length, erros };
+}
+
+async function confirmarPedido(modo) {
+  // modo: 'urgencia' (sem Excel) | 'final' (com Excel)
   const p = getPedido();
-  const k = lojaKey();  // semana atual → estoque inicial
+  const k = lojaKey();
   const semanaAnterior = addDays(semana, -7);
-  const kAnterior = loja + "|" + wkKey(semanaAnterior);  // semana anterior → contagem fechamento
+  const kAnterior = loja + "|" + wkKey(semanaAnterior);
 
   if (!estIniAll[k]) estIniAll[k] = {};
   if (!contAll[kAnterior]) contAll[kAnterior] = {};
   let atualizados = 0;
 
-  // Calcular o que o pedido ANTERIOR havia gravado (para poder subtrair e substituir)
-  // sem apagar entradas manuais que vieram depois
-  const pedidoAnterior = {}; // insumo → qtd que o pedido anterior gravou
+  const pedidoAnterior = {};
   getProdutosPedidoOrdenados().forEach(prod => {
     const idStr2 = String(prod.item);
-    const entryAnt = p[prod.item]; // valores atuais salvos no pedidoAll
+    const entryAnt = p[prod.item];
     if (!entryAnt) return;
-    const cxAnt  = parseFloat(entryAnt._cxConfirmado)  || 0; // valor que foi confirmado antes
+    const cxAnt  = parseFloat(entryAnt._cxConfirmado)  || 0;
     const undAnt = parseFloat(entryAnt._undConfirmado) || 0;
     if (cxAnt === 0 && undAnt === 0) return;
     const insumoMapeado = mapeamentoPedido[idStr2];
     const nomeUpper = prod.produto.trim().toUpperCase();
     const destino = insumoMapeado || nomeUpper;
-    const insumoParaFator = insumoMapeado || nomeUpper;
-    const fator = getFator(insumoParaFator);
+    const fator = getFator(insumoMapeado || nomeUpper);
     pedidoAnterior[destino] = (pedidoAnterior[destino] || 0) + (cxAnt * fator + undAnt);
   });
 
-  // Subtrair o que o pedido anterior havia colocado (sem tocar entradas manuais)
   Object.entries(pedidoAnterior).forEach(([ins, qtdAnt]) => {
-    if (estIniAll[k][ins] != null) {
+    if (estIniAll[k][ins] != null)
       estIniAll[k][ins] = Math.max(0, (estIniAll[k][ins] || 0) - qtdAnt);
-    }
   });
+
+  const produtosParaSync = [];
 
   getProdutosPedidoOrdenados().forEach(prod => {
     const entry = p[prod.item];
@@ -2738,38 +2821,52 @@ function confirmarPedido() {
     const idStr      = String(prod.item);
     const nomeUpper  = prod.produto.trim().toUpperCase();
     const insumoMapeado  = mapeamentoPedido[idStr];
-    const insumoParaFator = insumoMapeado || nomeUpper;
-    const fator      = getFator(insumoParaFator);
+    const fator      = getFator(insumoMapeado || nomeUpper);
     const cx         = parseFloat(entry.cx)  || 0;
     const und        = parseFloat(entry.und) || 0;
+    const pedidoCx   = parseFloat(entry.pedidoCx) || 0;
+    const pedidoUnd  = parseFloat(entry.pedidoUnd) || 0;
     const qtdBase    = (cx * fator) + und;
     if (qtdBase === 0 && !pedidoAnterior[insumoMapeado || nomeUpper]) return;
 
     const destino = insumoMapeado || nomeUpper;
-
-    // → Somar ao estoque (sem apagar entradas manuais)
     estIniAll[k][destino] = (estIniAll[k][destino] || 0) + qtdBase;
-
-    // → Contagem de fechamento da semana anterior
     contAll[kAnterior][destino] = (contAll[kAnterior][destino] || 0) + qtdBase;
 
-    // Guardar os valores confirmados para poder substituir no próximo confirmar
     if (!pedidoAll[k]) pedidoAll[k] = {};
     if (!pedidoAll[k][prod.item]) pedidoAll[k][prod.item] = {};
     pedidoAll[k][prod.item]._cxConfirmado  = cx;
     pedidoAll[k][prod.item]._undConfirmado = und;
 
-    // Limpar entrada paralela pelo nome do produto se foi mapeado
     if (insumoMapeado) {
       delete estIniAll[k][nomeUpper];
       delete contAll[kAnterior][nomeUpper];
     }
     if (qtdBase > 0) atualizados++;
+
+    // Coletar para sincronização remota
+    produtosParaSync.push({ prod, cx, und, pedidoCx, pedidoUnd, fator });
   });
 
   autoSave();
-  showToast("✅ " + atualizados + " produto(s) confirmados!\nEstoque atualizado (entradas preservadas).");
-  setTimeout(gerarExcelPedido, 400);
+
+  const label = modo === 'urgencia' ? 'Urgência' : 'Pedido';
+  showToast('⏳ ' + label + ': salvando ' + atualizados + ' produto(s)...');
+
+  // Sincronizar com gn-pedidos em background
+  _sincronizarComPedidos(produtosParaSync).then(res => {
+    if (res.erros > 0) {
+      showToast('⚠️ ' + label + ' local ok. Erro ao sincronizar ' + res.erros + ' tabela(s) remota(s).');
+    } else if (res.contagens > 0 || res.itens > 0) {
+      showToast('✅ ' + label + ' enviado! ' + res.contagens + ' contagens · ' + res.itens + ' itens no pedido.');
+    } else {
+      showToast('✅ ' + label + ' salvo localmente. Nenhum item mapeado no catálogo remoto.');
+    }
+    if (modo === 'final') setTimeout(gerarExcelPedido, 300);
+  }).catch(() => {
+    showToast('✅ ' + label + ' salvo localmente (sem conexão remota).');
+    if (modo === 'final') setTimeout(gerarExcelPedido, 300);
+  });
 }
 
 /* Retorna a lista de produtos na ordem original + itens custom inseridos na posição certa */
@@ -4543,20 +4640,20 @@ function render() {
 
       <!-- Botões de ação -->
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-        <button onclick="confirmarPedido()" style="background:linear-gradient(135deg,#1d4ed8,#1e40af);border:none;border-radius:16px;padding:14px 8px;color:#fff;font-weight:900;font-size:12px;display:flex;flex-direction:column;align-items:center;gap:4px">
-          <span style="font-size:20px">✅</span>
-          <span>Confirmar e</span>
-          <span>Gerar Excel</span>
+        <button onclick="confirmarPedido('urgencia')" style="background:linear-gradient(135deg,#b45309,#92400e);border:none;border-radius:16px;padding:14px 8px;color:#fff;font-weight:900;font-size:12px;display:flex;flex-direction:column;align-items:center;gap:4px">
+          <span style="font-size:20px">⚡</span>
+          <span>Gerar</span>
+          <span>Urgência</span>
         </button>
-        <button onclick="gerarExcelPedido()" style="background:linear-gradient(135deg,#059669,#047857);border:none;border-radius:16px;padding:14px 8px;color:#fff;font-weight:900;font-size:12px;display:flex;flex-direction:column;align-items:center;gap:4px">
-          <span style="font-size:20px">📥</span>
-          <span>Só gerar</span>
-          <span>Excel</span>
+        <button onclick="confirmarPedido('final')" style="background:linear-gradient(135deg,#1d4ed8,#1e40af);border:none;border-radius:16px;padding:14px 8px;color:#fff;font-weight:900;font-size:12px;display:flex;flex-direction:column;align-items:center;gap:4px">
+          <span style="font-size:20px">✅</span>
+          <span>Finalizar</span>
+          <span>Pedido</span>
         </button>
       </div>
       <div style="background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.25);border-radius:13px;padding:11px 13px;font-size:11px;color:#93c5fd;line-height:1.5">
-        <strong>✅ Confirmar e Gerar Excel:</strong> atualiza o estoque do app com "Est. Atual" e baixa o .xlsx (aba única, ordem original).<br>
-        <strong>📥 Só gerar Excel:</strong> gera o arquivo sem alterar o estoque.<br>
+        <strong>⚡ Gerar Urgência:</strong> contagem rápida cedo — atualiza estoque, contagem e envia ao app Pedidos.<br>
+        <strong>✅ Finalizar Pedido:</strong> contagem completa — atualiza tudo + gera o Excel de fechamento.<br>
         <strong>+ Novo:</strong> cria produto e adiciona automaticamente como insumo do app.
       </div>
     </div>`;
