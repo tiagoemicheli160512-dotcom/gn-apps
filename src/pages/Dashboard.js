@@ -224,10 +224,17 @@ function LojaPicker({ masterLoja, onSelect, onClose }) {
 }
 
 /* ─── HOME SCREEN ────────────────────────────────────────────── */
-function HomeScreen({ session, onLogout }) {
+function HomeScreen({ session: sessionProp, onLogout }) {
+  const [session, setSession] = useState(sessionProp);
   const [masterLoja, setMasterLoja] = useState(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [badges, setBadges] = useState({});
+  const [senhaOpen, setSenhaOpen] = useState(false);
+  const [tsNome, setTsNome] = useState('');
+  const [tsSenha, setTsSenha] = useState('');
+  const [tsConf, setTsConf] = useState('');
+  const [tsErr, setTsErr] = useState('');
+  const [tsSaving, setTsSaving] = useState(false);
 
   const isMaster = session.loja === 'GERAL' || !!(session.permissoes || {}).master;
   const lojaEfetiva = masterLoja || session.loja;
@@ -295,6 +302,37 @@ function HomeScreen({ session, onLogout }) {
     window.location.href = url;
   };
 
+  const abrirSenha = () => {
+    setTsNome(session.nome);
+    setTsSenha('');
+    setTsConf('');
+    setTsErr('');
+    setTsSaving(false);
+    setSenhaOpen(true);
+  };
+
+  const salvarSenha = async () => {
+    if (!tsNome.trim()) { setTsErr('Nome não pode ser vazio.'); return; }
+    if (tsSenha && tsSenha !== tsConf) { setTsErr('Senhas não conferem.'); return; }
+    setTsErr(''); setTsSaving(true);
+    const payload = { nome: tsNome.trim(), atualizado_em: new Date().toISOString() };
+    if (tsSenha) payload.senha = tsSenha;
+    try {
+      const res = await fetch(
+        `${SB_URL}/rest/v1/gn_usuarios?id=eq.${session.id}`,
+        { method: 'PATCH', headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' }, body: JSON.stringify(payload) }
+      );
+      if (!res.ok) { setTsErr('⚠️ Erro ao salvar. Tente novamente.'); setTsSaving(false); return; }
+      const updated = { ...session, nome: tsNome.trim() };
+      localStorage.setItem(SESSION_KEY, JSON.stringify(updated));
+      setSession(updated);
+      setSenhaOpen(false);
+    } catch (e) {
+      setTsErr('⚠️ Erro de conexão.');
+    }
+    setTsSaving(false);
+  };
+
   const perms = session.permissoes || {};
 
   return (
@@ -305,6 +343,7 @@ function HomeScreen({ session, onLogout }) {
         <span style={S.hdrGestao}>GESTÃO</span>
         <div style={S.hdrSep} />
         <div style={S.hdrUser}>{session.nome}{session.cargo ? ' · ' + session.cargo : ''}</div>
+        <button style={{ background: 'transparent', border: '1px solid rgba(255,255,255,.1)', borderRadius: 8, padding: '5px 9px', fontSize: 14, lineHeight: 1, color: 'rgba(255,255,255,.35)', fontFamily: 'inherit', cursor: 'pointer', flexShrink: 0 }} onClick={abrirSenha} title="Trocar login e senha">🔑</button>
         <button style={S.hdrSair} onClick={onLogout}>Sair</button>
       </header>
 
@@ -364,6 +403,37 @@ function HomeScreen({ session, onLogout }) {
           onSelect={(loja) => { setMasterLoja(loja); setPickerOpen(false); }}
           onClose={() => setPickerOpen(false)}
         />
+      )}
+
+      {/* TROCAR LOGIN/SENHA */}
+      {senhaOpen && (
+        <div style={{ ...S.overlay, alignItems: 'center', justifyContent: 'center' }} onClick={e => e.target === e.currentTarget && setSenhaOpen(false)}>
+          <div style={{ ...S.sheet, borderRadius: 20, maxWidth: 340, maxHeight: 'none' }}>
+            <div style={S.pickerTitle}>Trocar login e senha</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '0 4px 12px' }}>
+              <div>
+                <label style={{ fontSize: 11, color: '#7A7A9A', display: 'block', marginBottom: 4 }}>Nome de usuário</label>
+                <input style={{ width: '100%', padding: '10px 12px', background: '#1a1a2e', border: '1px solid rgba(255,255,255,.12)', borderRadius: 8, color: '#fff', fontSize: 14, fontFamily: 'inherit', boxSizing: 'border-box', outline: 'none' }} type="text" value={tsNome} onChange={e => setTsNome(e.target.value)} autoComplete="off" />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, color: '#7A7A9A', display: 'block', marginBottom: 4 }}>Nova senha</label>
+                <input style={{ width: '100%', padding: '10px 12px', background: '#1a1a2e', border: '1px solid rgba(255,255,255,.12)', borderRadius: 8, color: '#fff', fontSize: 14, fontFamily: 'inherit', boxSizing: 'border-box', outline: 'none' }} type="password" value={tsSenha} onChange={e => setTsSenha(e.target.value)} autoComplete="new-password" />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, color: '#7A7A9A', display: 'block', marginBottom: 4 }}>Confirmar nova senha</label>
+                <input style={{ width: '100%', padding: '10px 12px', background: '#1a1a2e', border: '1px solid rgba(255,255,255,.12)', borderRadius: 8, color: '#fff', fontSize: 14, fontFamily: 'inherit', boxSizing: 'border-box', outline: 'none' }} type="password" value={tsConf} onChange={e => setTsConf(e.target.value)} autoComplete="new-password" />
+              </div>
+              <div style={{ padding: '8px 12px', background: 'rgba(255,255,255,.04)', borderRadius: 8, fontSize: 12, color: '#7A7A9A' }}>
+                🏪 Loja: <span style={{ color: 'rgba(255,255,255,.6)' }}>{LOJA_DISPLAY[session.loja] || session.loja}</span>
+              </div>
+              {tsErr && <div style={{ color: '#f87171', fontSize: 12 }}>{tsErr}</div>}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, padding: '0 4px' }}>
+              <button style={S.pickCancel} onClick={() => setSenhaOpen(false)}>Cancelar</button>
+              <button style={{ padding: 12, background: 'var(--cor, #F26419)', border: 'none', borderRadius: 10, color: '#fff', fontSize: 14, fontWeight: 700, cursor: tsSaving ? 'default' : 'pointer', fontFamily: 'inherit', opacity: tsSaving ? 0.6 : 1 }} onClick={salvarSenha} disabled={tsSaving}>{tsSaving ? 'Salvando...' : 'Salvar'}</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* BOTTOM NAV */}
