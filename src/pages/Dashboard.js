@@ -372,7 +372,7 @@ function HomeScreen({ session: sessionProp, onLogout }) {
       {/* MODULES */}
       <div style={S.modList}>
         {MODULES.filter(m => !m.masterOnly || isMaster).map(m => {
-          const enabled = !!perms[m.perm] || isMaster;
+          const enabled = isMaster ? perms[m.perm] !== false : !!perms[m.perm];
           return (
             <div
               key={m.id}
