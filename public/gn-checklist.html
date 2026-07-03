@@ -6,6 +6,7 @@
 <title>GN Check-list Operacional</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="fichas-seed.js"></script>
 <style>
   /* =============================================
      GN OPERAÇÕES — Design System v2
@@ -750,6 +751,7 @@
     <button class="tab-btn" onclick="switchTab('supervisao',this)">🎯 Supervisão</button>
     <button class="tab-btn" onclick="switchTab('historico',this)">📅 Histórico</button>
     <button class="tab-btn" onclick="switchTab('caixa',this)">💵 Caixa</button>
+    <button class="tab-btn" onclick="switchTab('fichas',this)">📋 Fichas</button>
   </div>
 </div>
 
@@ -981,6 +983,24 @@
 
 </div><!-- /page-content -->
 </div><!-- /app -->
+
+<!-- ===================== ABA FICHAS ===================== -->
+<div id="tab-fichas" class="tab-content" style="max-width:640px;margin:0 auto;padding:14px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+    <div>
+      <div style="font-size:14px;font-weight:700;">📋 Fichas Técnicas</div>
+      <div style="font-size:10px;color:#444;" id="fichas-count-label">Carregando...</div>
+    </div>
+    <button class="btn-secondary" onclick="carregarFichas(true)" style="font-size:10px;padding:5px 10px;">🔄 Atualizar</button>
+  </div>
+  <div style="position:relative;margin-bottom:12px;">
+    <span style="position:absolute;left:11px;top:50%;transform:translateY(-50%);font-size:14px;">🔍</span>
+    <input id="fichas-busca" type="text" placeholder="Buscar prato ou insumo…"
+      style="width:100%;box-sizing:border-box;background:#1c1c1c;border:1px solid #333;border-radius:10px;padding:10px 10px 10px 36px;color:#f0f0f0;font-size:13px;outline:none;"
+      oninput="renderFichasTab(this.value)">
+  </div>
+  <div id="fichas-lista"></div>
+</div>
 
 <!-- ===================== ABA CAIXA ===================== -->
 <div id="tab-caixa" class="tab-content" style="max-width:640px;margin:0 auto;padding:14px;">
@@ -1877,6 +1897,119 @@ function verFotoDespesaBase64(src){
   const w = window.open('','_blank');
   w.document.write('<html><body style="margin:0;background:#000;display:flex;justify-content:center;align-items:center;min-height:100vh;"><img src="'+src+'" style="max-width:100%;max-height:100vh;"></body></html>');
   w.document.close();
+}
+
+// =============================================
+// FICHAS TÉCNICAS (espelho do app estoque)
+// =============================================
+let _fichasCache = null;
+
+async function carregarFichas(forcar){
+  if(_fichasCache && !forcar){
+    renderFichasTab(document.getElementById('fichas-busca').value||'');
+    return;
+  }
+  document.getElementById('fichas-lista').innerHTML =
+    '<div style="text-align:center;padding:30px;color:#444;font-size:12px;">Carregando fichas...</div>';
+
+  // Base: seed (fichas originais + bebidas)
+  const fichas = {};
+  Object.entries(typeof FICHAS_SEED_ORIG!=='undefined'?FICHAS_SEED_ORIG:{}).forEach(([cod,f])=>{
+    fichas[cod] = {...f, codigo:cod, tipo:'prato'};
+  });
+  Object.entries(typeof FICHAS_BEBIDAS_SEED!=='undefined'?FICHAS_BEBIDAS_SEED:{}).forEach(([cod,f])=>{
+    fichas[cod] = {...f, codigo:cod, tipo:'bebida'};
+  });
+
+  // Overlay: MASTER_CONFIG do Supabase (fichasCustom + fichasRemoved)
+  try{
+    const {data,error} = await sb.from('gn_lojas').select('all_data').eq('loja','MASTER_CONFIG').single();
+    if(!error && data && data.all_data){
+      const mc = data.all_data;
+      const removed = new Set(Array.isArray(mc.fichasRemoved)?mc.fichasRemoved:[]);
+      // Aplicar remoções
+      removed.forEach(cod=>{ delete fichas[cod]; });
+      // Aplicar custom (adiciona ou sobrescreve)
+      Object.entries(mc.fichasCustom||{}).forEach(([cod,f])=>{
+        if(!removed.has(cod)) fichas[cod] = {...f, codigo:cod, tipo:'custom', isCustom:true};
+      });
+    }
+  }catch(e){}
+
+  _fichasCache = Object.values(fichas).sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR'));
+  const lbl = document.getElementById('fichas-count-label');
+  if(lbl) lbl.textContent = _fichasCache.length+' fichas técnicas';
+  renderFichasTab(document.getElementById('fichas-busca').value||'');
+}
+
+function renderFichasTab(busca){
+  const lista = document.getElementById('fichas-lista');
+  if(!lista) return;
+  if(!_fichasCache){
+    lista.innerHTML='<div style="text-align:center;padding:30px;color:#444;font-size:12px;">Use 🔄 para carregar</div>';
+    return;
+  }
+  const q = (busca||'').trim().toUpperCase();
+  const filtradas = q
+    ? _fichasCache.filter(f=>
+        f.nome.toUpperCase().includes(q) ||
+        (f.codigo||'').toUpperCase().includes(q) ||
+        (f.insumos||[]).some(it=>it.insumo.toUpperCase().includes(q))
+      )
+    : _fichasCache;
+
+  const lbl = document.getElementById('fichas-count-label');
+  if(lbl) lbl.textContent = q
+    ? filtradas.length+' resultado(s) de '+_fichasCache.length+' fichas'
+    : _fichasCache.length+' fichas técnicas';
+
+  if(filtradas.length===0){
+    lista.innerHTML='<div style="text-align:center;padding:30px;color:#444;font-size:12px;">Nenhuma ficha encontrada</div>';
+    return;
+  }
+
+  lista.innerHTML = filtradas.map(f=>{
+    const insumos = f.insumos||[];
+    const isBebida = f.tipo==='bebida';
+    const isCustom = f.isCustom;
+    const accentColor = isBebida?'#7c3aed':isCustom?'#1d4ed8':'#E8580A';
+    const badge = isBebida
+      ? '<span style="font-size:9px;background:#7c3aed22;color:#a78bfa;border-radius:6px;padding:1px 6px;margin-left:5px;">Bebida</span>'
+      : isCustom
+      ? '<span style="font-size:9px;background:#1d4ed822;color:#93c5fd;border-radius:6px;padding:1px 6px;margin-left:5px;">Custom</span>'
+      : '';
+    const insumoHTML = insumos.map(it=>{
+      const nomeDest = q && it.insumo.toUpperCase().includes(q)
+        ? '<span style="color:#E8580A;font-weight:700;">'+_esc(it.insumo)+'</span>'
+        : _esc(it.insumo);
+      return `<div style="display:flex;justify-content:space-between;align-items:baseline;padding:4px 0;border-bottom:1px solid #1a1a1a;gap:6px;">
+        <span style="font-size:11px;color:#ccc;flex:1;">${nomeDest}</span>
+        <span style="font-size:11px;font-weight:700;color:#f0f0f0;font-family:'JetBrains Mono',monospace;white-space:nowrap;">${it.qtd} ${_esc(it.unidade)}</span>
+      </div>`;
+    }).join('');
+
+    return `
+    <details style="background:#1c1c1c;border:1px solid #2a2a2a;border-radius:12px;margin-bottom:8px;overflow:hidden;">
+      <summary style="display:flex;align-items:center;gap:8px;padding:11px 13px;cursor:pointer;list-style:none;-webkit-appearance:none;">
+        <span style="width:8px;height:8px;border-radius:50%;background:${accentColor};flex-shrink:0;"></span>
+        <span style="font-size:10px;font-family:monospace;color:#555;flex-shrink:0;min-width:44px;">${_esc(f.codigo||'')}</span>
+        <span style="font-size:13px;font-weight:700;color:#f0f0f0;flex:1;">${q?_highlight(f.nome,q):_esc(f.nome)}</span>
+        ${badge}
+        <span style="font-size:10px;color:#444;flex-shrink:0;">${insumos.length} item${insumos.length!==1?'s':''}</span>
+        <span style="font-size:12px;color:#555;flex-shrink:0;">▾</span>
+      </summary>
+      <div style="padding:0 13px 12px 13px;border-top:1px solid #222;">
+        <div style="font-size:9px;color:#555;text-transform:uppercase;letter-spacing:0.5px;margin:8px 0 4px;">Insumos</div>
+        ${insumoHTML||'<div style="font-size:11px;color:#444;">Sem insumos cadastrados</div>'}
+      </div>
+    </details>`;
+  }).join('');
+}
+
+function _highlight(text, q){
+  const idx = text.toUpperCase().indexOf(q);
+  if(idx<0) return _esc(text);
+  return _esc(text.slice(0,idx))+'<span style="color:#E8580A;font-weight:700;">'+_esc(text.slice(idx,idx+q.length))+'</span>'+_esc(text.slice(idx+q.length));
 }
 
 // =============================================
@@ -2966,6 +3099,7 @@ function switchTab(tab,btn){
   }
   if(tab==='historico') loadHistorico();
   if(tab==='caixa') renderLivroCaixa();
+  if(tab==='fichas') carregarFichas(false);
 }
 
 // =============================================
