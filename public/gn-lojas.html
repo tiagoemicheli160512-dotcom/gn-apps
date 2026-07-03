@@ -221,6 +221,11 @@ input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-
     <span class="nav-label">Transfer.</span>
     <span class="nav-dot hidden" id="dot-transf" style="background:#8b5cf6"></span>
   </button>
+  <button class="nav-btn" id="nav-entrega" onclick="goTab('entrega')">
+    <span class="nav-icon">&#9989;</span>
+    <span class="nav-label">Entrega</span>
+    <span class="nav-dot hidden" id="dot-entrega" style="background:#f59e0b"></span>
+  </button>
   <button class="nav-btn" id="nav-relatorio" onclick="goTab('relatorio')">
     <span class="nav-icon">&#128202;</span>
     <span class="nav-label">Relat&#243;rio</span>
@@ -604,6 +609,8 @@ let minAll     = {};   // loja    -> {insumo: val}
 let entradasAll= {};   // lojaKey -> [{id,data,nf,fornecedor,insumo,qtd,custoUnit}]
 let transferAll  = {};  // lojaKey -> [{id,data,origem,destino,insumo,qtd,motivo}]
 let pedidoAll    = {};  // lojaKey -> {item_id: {atual, pedido, obs}}
+let provisoesEntrega = []; // entregas pendentes/histórico desta loja
+let _entregaItensMap = {}; // id -> itens (para recalc sem JSON no onclick)
 let pedidoCustom = [];  // itens novos criados no app [{item, fornecedor, grupo, subgrupo, produto, und, custo, posIndex}]
 let pedidoRemovidos = []; // IDs (string) de itens removidos da lista
 let fatoresConversao  = {}; // insumo -> numero (ex: {"AGUA TONICA CX C/ 12 UND": 12})
@@ -1689,6 +1696,7 @@ function goTab(t) {
   tab = t;
   busca = "";   // limpa busca ao trocar de aba
   render();
+  if (t === 'entrega') carregarEntregas(true);
   // foco automático na busca se a aba tem campo de busca
   if (["estoque","vendas","contagem"].includes(t)) {
     setTimeout(() => {
@@ -4495,6 +4503,68 @@ function render() {
     </div>`;
 
 
+  } else if (tab === "entrega") {
+    const pendentes=provisoesEntrega.filter(p=>p.status==='pendente');
+    const confirmadas=provisoesEntrega.filter(p=>p.status==='confirmado');
+    c.innerHTML=`
+    <div class="section">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div class="sec-label" style="margin-bottom:0">📦 Entregas — ${loja}</div>
+        <button onclick="carregarEntregas(false)" style="background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:8px;padding:5px 10px;color:#94a3b8;font-size:11px">↻ Atualizar</button>
+      </div>
+      ${pendentes.length===0?`<div class="card" style="padding:16px;text-align:center;color:#475569;font-size:12px">✅ Nenhuma entrega pendente de confirmação</div>`:
+        pendentes.map(prov=>`
+        <div class="card" style="padding:14px;border-left:3px solid #f59e0b">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+            <div>
+              <div style="font-weight:700;font-size:13px;color:#fbbf24">📤 Entrega Pendente</div>
+              <div style="font-size:10px;color:#475569">Semana ${prov.semana||''} · Enviado por: ${prov.criado_por||'—'}</div>
+            </div>
+            <div style="font-size:10px;color:#64748b">${new Date(prov.criado_em).toLocaleDateString('pt-BR')}</div>
+          </div>
+          <div style="margin-bottom:10px">
+            ${(prov.itens||[]).map(item=>{
+              const qtdTxt=[item.cx>0?item.cx+' CX':'',item.und_qty>0?item.und_qty+' '+item.und:''].filter(Boolean).join(' + ');
+              return `<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.05)">
+                <div style="flex:1;min-width:0">
+                  <div style="font-size:12px;font-weight:600;color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${item.produto}</div>
+                  <div style="font-size:10px;color:#64748b">${item.fornecedor||''} · ${qtdTxt}${item.custo>0?' · Ref R$ '+Number(item.custo).toFixed(2):''}</div>
+                </div>
+                <div style="flex-shrink:0;display:flex;align-items:center;gap:4px">
+                  <span style="font-size:10px;color:#64748b">R$</span>
+                  <input id="ei_${prov.id}_${item.item}" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0,00"
+                    style="width:80px;background:#1a1a35;border:1px solid #2a2a50;border-radius:8px;color:#e2e8f0;padding:6px 8px;font-size:12px;text-align:right"
+                    oninput="recalcTotalEntrega('${prov.id}')"/>
+                </div>
+              </div>`;
+            }).join('')}
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+            <span style="font-size:12px;color:#94a3b8;font-weight:700">Total da Nota</span>
+            <span id="ei_total_${prov.id}" style="font-size:15px;font-weight:900;color:#34d399">R$ 0,00</span>
+          </div>
+          <button onclick="confirmarEntrega('${prov.id}')" style="width:100%;background:linear-gradient(135deg,#059669,#047857);border:none;border-radius:13px;padding:13px;color:#fff;font-weight:800;font-size:13px">
+            ✅ Confirmar Recebimento
+          </button>
+        </div>`).join('')}
+      ${confirmadas.length>0?`
+        <div class="sec-label" style="margin-top:8px">Histórico</div>
+        ${confirmadas.map(prov=>`
+        <div class="card" style="padding:12px;opacity:.75">
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <div>
+              <div style="font-weight:700;font-size:12px;color:#34d399">✅ Confirmada</div>
+              <div style="font-size:10px;color:#475569">Sem. ${prov.semana||''} · ${prov.criado_por||'—'} → ${prov.confirmado_por||'—'}</div>
+              <div style="font-size:10px;color:#64748b;margin-top:2px">${(prov.itens||[]).length} itens</div>
+            </div>
+            <div style="text-align:right">
+              <div style="font-size:14px;font-weight:800;color:#34d399">${prov.preco_total?'R$ '+Number(prov.preco_total).toFixed(2).replace('.',','):'—'}</div>
+              <div style="font-size:9px;color:#475569">${prov.confirmado_em?new Date(prov.confirmado_em).toLocaleDateString('pt-BR'):''}</div>
+            </div>
+          </div>
+        </div>`).join('')}`:''}
+    </div>`;
+
   } else if (tab === "fichas") {
     const todasFichas = getAllFichas();
     const fichasArr = Object.values(todasFichas).sort((a,b)=>a.nome.localeCompare(b.nome));
@@ -5200,6 +5270,51 @@ aplicarDefaults();
 
 /* GN-HOME: restaura sessão do login unificado */
 (function(){try{var s=JSON.parse(localStorage.getItem('gn_session_v1')||'null');if(!s||Date.now()-s.ts>43200000)return;if(!(s.permissoes&&(s.permissoes.lojas||s.permissoes.master)))return;var nav=JSON.parse(localStorage.getItem('gn_nav_loja')||'null');var lojaEf=(nav&&Date.now()-nav.ts<60000)?nav.loja:s.loja;sessionStorage.setItem('gn_usuario',JSON.stringify({id:s.id||s.nome,nome:s.nome,cargo:s.cargo,loja:lojaEf,validado:true}));sessionStorage.setItem('gn_loja_sessao',lojaEf);}catch(e){}})();
+
+/* ── ENTREGAS ─────────────────────────────────────────── */
+async function carregarEntregas(silent) {
+  try{
+    const rows=await sbRequest('gn_entregas?loja=eq.'+encodeURIComponent(loja)+'&order=criado_em.desc&limit=30',{method:'GET'});
+    provisoesEntrega=rows||[];
+    _entregaItensMap={};
+    provisoesEntrega.forEach(p=>{_entregaItensMap[p.id]=p.itens||[];});
+    const pendentes=provisoesEntrega.filter(p=>p.status==='pendente').length;
+    const dot=document.getElementById('dot-entrega');
+    if(dot) dot.classList.toggle('hidden',pendentes===0);
+    if(!silent||tab==='entrega') render();
+  }catch(e){}
+}
+function recalcTotalEntrega(id){
+  const itens=_entregaItensMap[id]||[];
+  let total=0;
+  itens.forEach(item=>{
+    const el=document.getElementById('ei_'+id+'_'+item.item);
+    total+=parseFloat((el?el.value:'0').replace(',','.'))||0;
+  });
+  const totalEl=document.getElementById('ei_total_'+id);
+  if(totalEl) totalEl.textContent='R$ '+total.toFixed(2).replace('.',',');
+}
+async function confirmarEntrega(id){
+  const prov=provisoesEntrega.find(p=>p.id===id);
+  if(!prov) return;
+  const preco_itens={};
+  let preco_total=0;
+  (prov.itens||[]).forEach(item=>{
+    const el=document.getElementById('ei_'+id+'_'+item.item);
+    const v=parseFloat((el?el.value:'0').replace(',','.'))||0;
+    preco_itens[String(item.item)]=v;
+    preco_total+=v;
+  });
+  const confirmado_por=(usuarioAtual&&usuarioAtual.nome)||loja;
+  try{
+    await sbRequest('gn_entregas?id=eq.'+id,{
+      method:'PATCH',headers:{'Prefer':'return=minimal'},
+      body:JSON.stringify({status:'confirmado',confirmado_por,confirmado_em:new Date().toISOString(),preco_itens,preco_total})
+    });
+    showToast('✅ Recebimento confirmado!');
+    carregarEntregas(true).then(()=>render());
+  }catch(e){showToast('❌ Erro ao confirmar: '+e.message);}
+}
 /* Verificar sessão ou mostrar login */
 if (!verificarSessao()) {
   // Carregar dados primeiro, depois mostrar login
@@ -5249,6 +5364,7 @@ sbStartPolling();
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
+carregarEntregas(true);
 </script>
 </body>
 </html>
