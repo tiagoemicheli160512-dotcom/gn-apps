@@ -368,14 +368,20 @@ function HomeScreen({ session, onLogout }) {
 
       {/* BOTTOM NAV */}
       <nav style={S.bottomNav}>
-        <button style={S.bottomItem} onClick={() => navTo('/gn-home.html')}>
-          <span style={S.bottomIcon}>🏠</span>
-          <span style={S.bottomLabel(false)}>Início</span>
-        </button>
         <button style={S.bottomItem} onClick={() => navTo('/gn-estoque.html')}>
           <span style={S.bottomIcon}>📦</span>
           <span style={S.bottomLabel(false)}>Estoque</span>
         </button>
+        <button style={S.bottomItem} onClick={() => navTo('/gn-pedidos.html')}>
+          <span style={S.bottomIcon}>🛒</span>
+          <span style={S.bottomLabel(false)}>Pedidos</span>
+        </button>
+        {isMaster && (
+          <button style={S.bottomItem} onClick={() => navTo('/gn-comissoes-mestra.html')}>
+            <span style={S.bottomIcon}>🏆</span>
+            <span style={S.bottomLabel(false)}>Mestra</span>
+          </button>
+        )}
         {isMaster && (
           <button style={S.bottomItem} onClick={() => navTo('/gn-usuarios.html')}>
             <span style={S.bottomIcon}>🔐</span>
