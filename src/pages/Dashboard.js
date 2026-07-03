@@ -38,7 +38,7 @@ const MODULES = [
   { id: 'avaliacoes', name: 'Avaliações',       sub: 'Desempenho da equipe',               icon: '⭐', perm: 'avaliacoes', url: '/gn-avaliacoes.html' },
   { id: 'comissoes',  name: 'Comissões',        sub: 'Folha semanal de pagamentos',        icon: '💰', perm: 'comissoes',  url: '/gn-comissoes.html' },
   { id: 'lojas',      name: 'Lojas',            sub: 'Ficha operacional da loja',          icon: '🏪', perm: 'lojas',      url: '/gn-lojas.html' },
-  { id: 'mestra',     name: 'Comissões Mestra', sub: 'Visão consolidada — todas as lojas', icon: '🏆', perm: 'master',     url: '/gn-comissoes-mestra.html', masterOnly: true },
+  { id: 'mestra',     name: 'Comissões Mestra', sub: 'Visão consolidada — todas as lojas', icon: '🏆', perm: 'mestra',     url: '/gn-comissoes-mestra.html', masterOnly: true },
 ];
 
 function getSession() {
@@ -293,7 +293,7 @@ function HomeScreen({ session: sessionProp, onLogout }) {
     if (perms.lojas    || isMaster) set('lojas',   'Online', 'g');
     if (perms.estoque  || isMaster) set('estoque', 'Online', 'g');
     if (perms.pedidos  || isMaster) set('pedidos', 'Online', 'g');
-    if (perms.master   || isMaster) set('mestra',  'Visão consolidada', 'o');
+    if (isMaster && perms.mestra !== false) set('mestra',  'Visão consolidada', 'o');
   }, [session, masterLoja, lojaEfetiva, isMaster]);
 
   const navTo = (url) => {
