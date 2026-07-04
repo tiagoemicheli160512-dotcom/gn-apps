@@ -223,6 +223,130 @@ function LojaPicker({ masterLoja, onSelect, onClose }) {
   );
 }
 
+/* ─── PAINEL GERAL MESTRA ────────────────────────────────────── */
+function fmtR(v) {
+  return 'R$ ' + (v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function getSemanaAtual() {
+  const now = new Date();
+  const diff = now.getDay() === 0 ? -6 : 1 - now.getDay();
+  const mon = new Date(now);
+  mon.setDate(now.getDate() + diff);
+  return mon.toISOString().split('T')[0];
+}
+
+function PainelGeral({ onSelectLoja }) {
+  const [dados, setDados] = useState({});
+  const [checklist, setChecklist] = useState({});
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const semana = getSemanaAtual();
+    const hoje = new Date().toISOString().split('T')[0];
+
+    fetch(
+      `${SB_URL}/rest/v1/gn_comissoes?semana=eq.${semana}&select=loja,bruto,comissao,dias`,
+      { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
+    )
+      .then(r => r.json())
+      .then(rows => {
+        const g = {};
+        (rows || []).forEach(row => {
+          const k = row.loja;
+          if (!g[k]) g[k] = { bruto: 0, comissao: 0, count: 0 };
+          g[k].bruto    += row.bruto    || 0;
+          g[k].comissao += row.comissao || 0;
+          g[k].count    += 1;
+        });
+        setDados(g);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+
+    fetch(
+      `${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hoje}&select=loja`,
+      { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
+    )
+      .then(r => r.json())
+      .then(rows => {
+        const cl = {};
+        (rows || []).forEach(row => { cl[row.loja] = true; });
+        setChecklist(cl);
+      })
+      .catch(() => {});
+  }, []);
+
+  const totalBruto    = Object.values(dados).reduce((s, d) => s + d.bruto, 0);
+  const totalComissao = Object.values(dados).reduce((s, d) => s + d.comissao, 0);
+  const lojasComDados = Object.keys(dados).length;
+
+  const pSec = { fontSize: 10, fontWeight: 800, letterSpacing: 1.4, textTransform: 'uppercase', color: '#d4a800', marginBottom: 10, paddingLeft: 2 };
+  const pCard = (cor, temDados) => ({ display: 'flex', alignItems: 'center', gap: 11, background: '#0e0e1e', border: `1px solid ${temDados ? cor + '35' : '#161628'}`, borderRadius: 14, padding: '11px 13px', cursor: 'pointer', transition: 'border-color .15s' });
+
+  return (
+    <div style={{ padding: '0 14px 90px' }}>
+
+      {/* Totalizador */}
+      <div style={{ background: 'linear-gradient(135deg, #1a1500 0%, #0e0e1e 100%)', border: '1px solid rgba(212,168,0,.22)', borderRadius: 18, padding: '16px', marginBottom: 18 }}>
+        <div style={pSec}>Semana atual · Consolidado</div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 10 }}>
+          <div>
+            <div style={{ fontSize: 10, color: '#44445a', fontWeight: 700, marginBottom: 3 }}>FATURAMENTO</div>
+            <div style={{ fontSize: 20, fontWeight: 900, color: '#e8e8f4', fontVariantNumeric: 'tabular-nums', lineHeight: 1 }}>
+              {loading ? '…' : fmtR(totalBruto)}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: 10, color: '#44445a', fontWeight: 700, marginBottom: 3 }}>COMISSÕES</div>
+            <div style={{ fontSize: 20, fontWeight: 900, color: '#22c55e', fontVariantNumeric: 'tabular-nums', lineHeight: 1 }}>
+              {loading ? '…' : fmtR(totalComissao)}
+            </div>
+          </div>
+        </div>
+        <div style={{ fontSize: 11, color: '#44445a' }}>
+          {loading ? 'Carregando…' : `${lojasComDados} de ${LOJAS_LISTA.length} lojas com dados esta semana`}
+        </div>
+      </div>
+
+      {/* Cards por loja */}
+      <div style={pSec}>Lojas — clique para entrar</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+        {LOJAS_LISTA.map(k => {
+          const comKey = LOJA_COM_KEY[k];
+          const d = dados[comKey] || { bruto: 0, comissao: 0, count: 0 };
+          const temDados = !!dados[comKey];
+          const cor = COR_LOJA[k] || '#444';
+          const temCL = checklist[k];
+
+          return (
+            <div key={k} onClick={() => onSelectLoja(k)} style={pCard(cor, temDados)}>
+              <div style={{ width: 10, height: 10, borderRadius: '50%', background: cor, flexShrink: 0, boxShadow: temDados ? `0 0 7px ${cor}` : 'none' }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: '#e8e8f4', lineHeight: 1 }}>{LOJA_DISPLAY[k]}</div>
+                <div style={{ fontSize: 11, color: temDados ? '#3a3a5a' : '#252538', marginTop: 2 }}>
+                  {temDados ? `${d.count} func. · fat. ${fmtR(d.bruto)}` : 'Sem dados esta semana'}
+                </div>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
+                {temDados && (
+                  <div style={{ fontSize: 13, fontWeight: 800, color: '#22c55e', fontVariantNumeric: 'tabular-nums' }}>
+                    {fmtR(d.comissao)}
+                  </div>
+                )}
+                <div style={{ fontSize: 9, fontWeight: 700, padding: '2px 7px', borderRadius: 5, background: temCL ? 'rgba(34,197,94,.12)' : 'rgba(255,255,255,.04)', color: temCL ? '#22c55e' : '#333348' }}>
+                  {temCL ? '✓ Check-list' : 'Sem check-list'}
+                </div>
+              </div>
+              <div style={{ fontSize: 18, color: 'rgba(255,255,255,.15)', flexShrink: 0 }}>›</div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 /* ─── HOME SCREEN ────────────────────────────────────────────── */
 function HomeScreen({ session: sessionProp, onLogout }) {
   const [session, setSession] = useState(sessionProp);
@@ -368,32 +492,36 @@ function HomeScreen({ session: sessionProp, onLogout }) {
         </div>
       </div>
 
-      {/* MODULES */}
-      <div style={S.modList}>
-        {MODULES.filter(m => !m.masterOnly || isMaster).map(m => {
-          const enabled = isMaster ? perms[m.perm] !== false : !!perms[m.perm];
-          return (
-            <div
-              key={m.id}
-              style={S.modRow(enabled)}
-              onClick={enabled ? () => navTo(m.url) : undefined}
-            >
-              <div style={S.modIcon(cor)}>{m.icon}</div>
-              <div style={S.modBody}>
-                <div style={S.modName}>{m.name}</div>
-                <div style={S.modSub}>{m.sub}</div>
+      {/* MODULES ou PAINEL GERAL */}
+      {isMaster && !masterLoja ? (
+        <PainelGeral onSelectLoja={(loja) => setMasterLoja(loja)} />
+      ) : (
+        <div style={S.modList}>
+          {MODULES.filter(m => !m.masterOnly || isMaster).map(m => {
+            const enabled = isMaster ? perms[m.perm] !== false : !!perms[m.perm];
+            return (
+              <div
+                key={m.id}
+                style={S.modRow(enabled)}
+                onClick={enabled ? () => navTo(m.url) : undefined}
+              >
+                <div style={S.modIcon(cor)}>{m.icon}</div>
+                <div style={S.modBody}>
+                  <div style={S.modName}>{m.name}</div>
+                  <div style={S.modSub}>{m.sub}</div>
+                </div>
+                <div style={S.modRight}>
+                  {enabled
+                    ? <Badge id={m.id} badges={badges} />
+                    : <span style={S.badge('x')}>🔒 Sem acesso</span>
+                  }
+                </div>
+                {enabled && <div style={S.modArrow}>›</div>}
               </div>
-              <div style={S.modRight}>
-                {enabled
-                  ? <Badge id={m.id} badges={badges} />
-                  : <span style={S.badge('x')}>🔒 Sem acesso</span>
-                }
-              </div>
-              {enabled && <div style={S.modArrow}>›</div>}
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* LOJA PICKER */}
       {pickerOpen && (
