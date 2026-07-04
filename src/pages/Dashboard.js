@@ -33,7 +33,6 @@ const LOJAS_LISTA = [
 
 const MODULES = [
   { id: 'checklist',  name: 'Check-list',      sub: 'Check-lists diários e pendências',   icon: '✅', perm: 'checklist',  url: '/gn-checklist.html' },
-  { id: 'estoque',    name: 'Estoque',          sub: 'Controle de produtos e pedidos',     icon: '📦', perm: 'estoque',    url: '/gn-estoque.html' },
   { id: 'pedidos',    name: 'Pedidos',          sub: 'Catálogo, pedidos e provisões',      icon: '🛒', perm: 'pedidos',    url: '/gn-pedidos.html' },
   { id: 'avaliacoes', name: 'Avaliações',       sub: 'Desempenho da equipe',               icon: '⭐', perm: 'avaliacoes', url: '/gn-avaliacoes.html' },
   { id: 'comissoes',  name: 'Comissões',        sub: 'Folha semanal de pagamentos',        icon: '💰', perm: 'comissoes',  url: '/gn-comissoes.html' },
@@ -292,7 +291,6 @@ function HomeScreen({ session: sessionProp, onLogout }) {
     }
 
     if (perms.lojas    || isMaster) set('lojas',   'Online', 'g');
-    if (perms.estoque  || isMaster) set('estoque', 'Online', 'g');
     if (perms.pedidos  || isMaster) set('pedidos', 'Online', 'g');
     if (isMaster && perms.mestra !== false) set('mestra',  'Visão consolidada', 'o');
   }, [session, masterLoja, lojaEfetiva, isMaster]);
@@ -439,10 +437,6 @@ function HomeScreen({ session: sessionProp, onLogout }) {
 
       {/* BOTTOM NAV */}
       <nav style={S.bottomNav}>
-        <button style={S.bottomItem} onClick={() => navTo('/gn-estoque.html')}>
-          <span style={S.bottomIcon}>📦</span>
-          <span style={S.bottomLabel(false)}>Estoque</span>
-        </button>
         <button style={S.bottomItem} onClick={() => navTo('/gn-pedidos.html')}>
           <span style={S.bottomIcon}>🛒</span>
           <span style={S.bottomLabel(false)}>Pedidos</span>
