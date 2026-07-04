@@ -228,36 +228,41 @@ function fmtR(v) {
   return 'R$ ' + (v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-function getSemanaAtual() {
+function getISOWeekNum() {
   const now = new Date();
-  const diff = now.getDay() === 0 ? -6 : 1 - now.getDay();
-  const mon = new Date(now);
-  mon.setDate(now.getDate() + diff);
-  return mon.toISOString().split('T')[0];
+  const d = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+  const day = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - day);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  return String(Math.ceil((((d - yearStart) / 86400000) + 1) / 7));
 }
 
 function PainelGeral({ onSelectLoja }) {
   const [dados, setDados] = useState({});
   const [checklist, setChecklist] = useState({});
   const [loading, setLoading] = useState(true);
+  const [semana, setSemana] = useState('');
 
   useEffect(() => {
-    const semana = getSemanaAtual();
+    const wk = getISOWeekNum();
+    setSemana(wk);
     const hoje = new Date().toISOString().split('T')[0];
 
+    // Uma linha por loja; dados da semana dentro de all_data[wk]
     fetch(
-      `${SB_URL}/rest/v1/gn_comissoes?semana=eq.${semana}&select=loja,bruto,comissao,dias`,
+      `${SB_URL}/rest/v1/gn_comissoes?loja=neq._CONFIG&select=loja,all_data`,
       { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
     )
       .then(r => r.json())
       .then(rows => {
         const g = {};
         (rows || []).forEach(row => {
-          const k = row.loja;
-          if (!g[k]) g[k] = { bruto: 0, comissao: 0, count: 0 };
-          g[k].bruto    += row.bruto    || 0;
-          g[k].comissao += row.comissao || 0;
-          g[k].count    += 1;
+          const semData = row.all_data && row.all_data[wk];
+          if (!semData) return;
+          const brutos = semData.brutos || [];
+          const fat = brutos.reduce((s, v) => s + (v || 0), 0);
+          const funcsAtivos = (semData.funcs || []).filter(f => f.nome && f.nome.trim()).length;
+          g[row.loja] = { bruto: fat, count: funcsAtivos, lastEdit: semData._lastEdit };
         });
         setDados(g);
         setLoading(false);
@@ -278,30 +283,21 @@ function PainelGeral({ onSelectLoja }) {
   }, []);
 
   const totalBruto    = Object.values(dados).reduce((s, d) => s + d.bruto, 0);
-  const totalComissao = Object.values(dados).reduce((s, d) => s + d.comissao, 0);
   const lojasComDados = Object.keys(dados).length;
 
-  const pSec = { fontSize: 10, fontWeight: 800, letterSpacing: 1.4, textTransform: 'uppercase', color: '#d4a800', marginBottom: 10, paddingLeft: 2 };
-  const pCard = (cor, temDados) => ({ display: 'flex', alignItems: 'center', gap: 11, background: '#0e0e1e', border: `1px solid ${temDados ? cor + '35' : '#161628'}`, borderRadius: 14, padding: '11px 13px', cursor: 'pointer', transition: 'border-color .15s' });
+  const pSec  = { fontSize: 10, fontWeight: 800, letterSpacing: 1.4, textTransform: 'uppercase', color: '#d4a800', marginBottom: 10, paddingLeft: 2 };
+  const pCard = (cor, temDados) => ({ display: 'flex', alignItems: 'center', gap: 11, background: '#0e0e1e', border: `1px solid ${temDados ? cor + '35' : '#161628'}`, borderRadius: 14, padding: '11px 13px', cursor: 'pointer' });
 
   return (
     <div style={{ padding: '0 14px 90px' }}>
 
       {/* Totalizador */}
       <div style={{ background: 'linear-gradient(135deg, #1a1500 0%, #0e0e1e 100%)', border: '1px solid rgba(212,168,0,.22)', borderRadius: 18, padding: '16px', marginBottom: 18 }}>
-        <div style={pSec}>Semana atual · Consolidado</div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 10 }}>
-          <div>
-            <div style={{ fontSize: 10, color: '#44445a', fontWeight: 700, marginBottom: 3 }}>FATURAMENTO</div>
-            <div style={{ fontSize: 20, fontWeight: 900, color: '#e8e8f4', fontVariantNumeric: 'tabular-nums', lineHeight: 1 }}>
-              {loading ? '…' : fmtR(totalBruto)}
-            </div>
-          </div>
-          <div>
-            <div style={{ fontSize: 10, color: '#44445a', fontWeight: 700, marginBottom: 3 }}>COMISSÕES</div>
-            <div style={{ fontSize: 20, fontWeight: 900, color: '#22c55e', fontVariantNumeric: 'tabular-nums', lineHeight: 1 }}>
-              {loading ? '…' : fmtR(totalComissao)}
-            </div>
+        <div style={pSec}>Semana {semana} · Consolidado</div>
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ fontSize: 10, color: '#44445a', fontWeight: 700, marginBottom: 3 }}>FATURAMENTO TOTAL</div>
+          <div style={{ fontSize: 26, fontWeight: 900, color: '#e8e8f4', fontVariantNumeric: 'tabular-nums', lineHeight: 1 }}>
+            {loading ? '…' : fmtR(totalBruto)}
           </div>
         </div>
         <div style={{ fontSize: 11, color: '#44445a' }}>
@@ -313,25 +309,25 @@ function PainelGeral({ onSelectLoja }) {
       <div style={pSec}>Lojas — clique para entrar</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
         {LOJAS_LISTA.map(k => {
-          const comKey = LOJA_COM_KEY[k];
-          const d = dados[comKey] || { bruto: 0, comissao: 0, count: 0 };
-          const temDados = !!dados[comKey];
-          const cor = COR_LOJA[k] || '#444';
-          const temCL = checklist[k];
+          const dbKey  = LOJA_COM_KEY[k];
+          const d      = dados[dbKey];
+          const temDados = !!d;
+          const cor    = COR_LOJA[k] || '#444';
+          const temCL  = checklist[k];
 
           return (
             <div key={k} onClick={() => onSelectLoja(k)} style={pCard(cor, temDados)}>
               <div style={{ width: 10, height: 10, borderRadius: '50%', background: cor, flexShrink: 0, boxShadow: temDados ? `0 0 7px ${cor}` : 'none' }} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 13, fontWeight: 800, color: '#e8e8f4', lineHeight: 1 }}>{LOJA_DISPLAY[k]}</div>
-                <div style={{ fontSize: 11, color: temDados ? '#3a3a5a' : '#252538', marginTop: 2 }}>
-                  {temDados ? `${d.count} func. · fat. ${fmtR(d.bruto)}` : 'Sem dados esta semana'}
+                <div style={{ fontSize: 11, color: temDados ? '#5a5a7a' : '#252538', marginTop: 2 }}>
+                  {temDados ? `${d.count} func. cadastrados` : 'Sem dados esta semana'}
                 </div>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
                 {temDados && (
-                  <div style={{ fontSize: 13, fontWeight: 800, color: '#22c55e', fontVariantNumeric: 'tabular-nums' }}>
-                    {fmtR(d.comissao)}
+                  <div style={{ fontSize: 13, fontWeight: 800, color: '#e8e8f4', fontVariantNumeric: 'tabular-nums' }}>
+                    {fmtR(d.bruto)}
                   </div>
                 )}
                 <div style={{ fontSize: 9, fontWeight: 700, padding: '2px 7px', borderRadius: 5, background: temCL ? 'rgba(34,197,94,.12)' : 'rgba(255,255,255,.04)', color: temCL ? '#22c55e' : '#333348' }}>
