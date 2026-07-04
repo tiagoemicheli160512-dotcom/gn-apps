@@ -293,6 +293,8 @@ let syncStatus = 'idle';
 // allDataPorLoja: { BANGU: {...}, CAXIAS: {...}, ... }
 let allDataPorLoja = ld('allDataPorLoja', {});
 let syncStatusPorLoja = {};
+// checklistPctPorLoja: { BANGU: 85, CAXIAS: 100, ... } — média % semanal
+let checklistPctPorLoja = {};
 
 let state = {
   tab: ld('tab','consolidado'),
@@ -1242,6 +1244,40 @@ function limparDados(btnEl){
 }
 
 
+// ── CHECKLIST PCT ─────────────────────────────────────────────────
+function chkIco(pct) {
+  if(pct===null||pct===undefined) return {ico:'○',cor:'var(--gy2)',label:'—'};
+  if(pct===100) return {ico:'●',cor:'#3ecf4a',label:'100%'};
+  if(pct>50)    return {ico:'●',cor:'#f0c050',label:pct+'%'};
+  return          {ico:'●',cor:'#E8580A',label:pct+'%'};
+}
+
+async function carregarChecklistSemana(semIdx) {
+  const sem=CAL[semIdx]; if(!sem) return;
+  const datas=sem.days.map(day=>{
+    const y=2026;
+    const m=String(day.m).padStart(2,'0');
+    const d=String(day.d).padStart(2,'0');
+    return `${y}-${m}-${d}`;
+  });
+  try {
+    const qs=datas.map(d=>`data_operacao=eq.${d}`).join(',');
+    const url=`${SB_URL}/rest/v1/checklist_diario?or=(${qs})&select=loja,checklist_pct`;
+    const res=await fetch(url,{headers:{'apikey':SB_ANON,'Authorization':'Bearer '+SB_ANON}});
+    if(!res.ok) return;
+    const rows=await res.json();
+    checklistPctPorLoja={};
+    const sums={},counts={};
+    rows.forEach(r=>{
+      if(r.checklist_pct==null) return;
+      const k=r.loja;
+      sums[k]=(sums[k]||0)+Number(r.checklist_pct);
+      counts[k]=(counts[k]||0)+1;
+    });
+    Object.keys(sums).forEach(k=>{ checklistPctPorLoja[k]=Math.round(sums[k]/counts[k]); });
+  } catch(e){}
+}
+
 // ── SYNC SUPABASE ────────────────────────────────────────────────
 async function carregarLoja(lojaKey, silent) {
   try {
@@ -1265,9 +1301,9 @@ async function carregarTodasLojas(showFeedback) {
   render();
   setSyncTxt('ing', '⟳ Atualizando...');
 
-  // 2. Busca todas as lojas em paralelo em background
+  // 2. Busca todas as lojas + checklist em paralelo em background
   const promises = LOJAS_LIST.map(([key]) => carregarLoja(key, true));
-  await Promise.all(promises);
+  await Promise.all([...promises, carregarChecklistSemana(state.semIdx)]);
 
   // 3. Salva no localStorage e re-renderiza com dados novos
   sv('allDataPorLoja', allDataPorLoja);
@@ -1417,7 +1453,11 @@ function render() {
 
 function setTab(t){state.tab=t;sv('tab',t);render();}
 function setLoja(k){state.lojaAtiva=k;sv('lojaAtiva',k);render();}
-function setSemIdx(i){state.semIdx=Math.max(0,Math.min(CAL.length-1,i));sv('semIdx',state.semIdx);render();}
+function setSemIdx(i){
+  state.semIdx=Math.max(0,Math.min(CAL.length-1,i));
+  sv('semIdx',state.semIdx);
+  carregarChecklistSemana(state.semIdx).then(()=>render());
+}
 
 // ── TAB CONSOLIDADO ──────────────────────────────────────────────
 function renderConsolidado(ct, sem) {
@@ -1432,11 +1472,19 @@ function renderConsolidado(ct, sem) {
     totalPool+=calc.poolRateio;
     const syncSt=syncStatusPorLoja[key]||'—';
     const syncIco=syncSt==='ok'?'✓':syncSt==='err'?'✗':syncSt==='syncing'?'⟳':'—';
+    const comsLoja=calc.funcCalc.reduce((s,f)=>s+f.liquido,0);
+    const chk=chkIco(checklistPctPorLoja[key]??null);
     return `<div class="cons-card${key===state.lojaAtiva?' sel':''}${bruto===0?' sem-dados':''}" onclick="setLoja('${key}');setTab('loja')">
-      <div class="cc-nome">${nome}${bruto===0?' <span style=\'font-size:8px;color:var(--gy)\'>sem dados</span>':''}</div>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start">
+        <div class="cc-nome">${nome}${bruto===0?' <span style=\'font-size:8px;color:var(--gy)\'>sem dados</span>':''}</div>
+        <span title="Check-list semana" style="font-size:13px;color:${chk.cor};line-height:1;margin-top:1px">${chk.ico}</span>
+      </div>
       <div class="cc-bruto">Bruto: ${fmtBRLShort(bruto)}</div>
       <div class="cc-val">${fmtBRLShort(calc.baseTotal)}</div>
-      <div class="cc-pool">Pool: ${fmtBRLShort(calc.poolRateio)}</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px">
+        <span class="cc-pool">Comissão: ${fmtBRLShort(comsLoja)}</span>
+        <span style="font-size:9px;color:${chk.cor};font-weight:700">${chk.label}</span>
+      </div>
       <div class="cc-sync">${syncIco} ${calc.nAtivos} func.</div>
     </div>`;
   }).join('');
@@ -1591,12 +1639,15 @@ function renderLojaDetalhe(ct, sem) {
       <button onclick="setSemIdx(${state.semIdx+1})">›</button>
     </div>
     <div style="background:var(--bg4);border:1px solid var(--or);border-radius:10px;padding:12px;margin-bottom:12px">
-      <div style="font-size:13px;font-weight:700;color:var(--gd);margin-bottom:8px">${lojaNome} — S${String(CAL[state.semIdx].num).padStart(2,'0')}</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div style="font-size:13px;font-weight:700;color:var(--gd)">${lojaNome} — S${String(CAL[state.semIdx].num).padStart(2,'0')}</div>
+        ${(()=>{const chk=chkIco(checklistPctPorLoja[lojaKey]??null);return `<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:20px;background:rgba(0,0,0,.25);border:1px solid rgba(255,255,255,.08);font-size:10px;font-weight:700;color:${chk.cor}"><span style="font-size:13px">${chk.ico}</span>Check-list ${chk.label}</span>`;})()}
+      </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
         <div><div style="font-size:10px;color:var(--gy)">Bruto Total</div><div class="vv or">${fmtBRLShort(brutoTotal)}</div></div>
         <div><div style="font-size:10px;color:var(--gy)">Base 90%</div><div class="vv bl">${fmtBRLShort(calc.baseTotal)}</div></div>
         <div><div style="font-size:10px;color:var(--gy)">Pool Rateio</div><div class="vv" style="color:var(--cy)">${fmtBRLShort(calc.poolRateio)}</div></div>
-        <div><div style="font-size:10px;color:var(--gy)">Total Líquido</div><div class="vv" style="color:var(--green)">${fmtBRLShort(calc.funcCalc.reduce((s,f)=>s+f.liquido,0))}</div></div>
+        <div><div style="font-size:10px;color:var(--gy)">Comissão Semanal</div><div class="vv" style="color:var(--green)">${fmtBRLShort(calc.funcCalc.reduce((s,f)=>s+f.liquido,0))}</div></div>
       </div>
     </div>
     <div class="sec-title">◄ Funcionários (${calc.nAtivos})</div>
