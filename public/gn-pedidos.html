@@ -1088,6 +1088,13 @@ function renderPedido() {
   const gruposHtml = S.todosModo ? renderGruposTodos() : renderGruposPorLoja();
   const totalLoja  = S.totaisPorLoja[lojaAtiva] || 0;
   const lojaDisplay = S.lojas.find(l=>l.slug_pedido===lojaAtiva)?.nome_display || '';
+  const fornsComItens = [...new Set(
+    S.catalogo.filter(p=>p.ativo).filter(prod=>
+      S.todosModo
+        ? S.lojas.some(l=>(S.pedidoItens[prod.id]?.[l.slug_pedido]?.qtd||0)>0)
+        : (S.pedidoItens[prod.id]?.[lojaAtiva]?.qtd||0)>0
+    ).map(p=>p.fornecedor)
+  )].sort();
 
   $('content').innerHTML = semNavHtml + `
     <div class="pedido-bar">
@@ -1136,6 +1143,15 @@ function renderPedido() {
         </div>
         <div class="loja-total-val num" id="total-loja">R$ ${fmt(totalLoja)}</div>
       </div>`}
+
+    ${fornsComItens.length ? `
+    <div style="margin-top:10px">
+      <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:7px;letter-spacing:.5px">📲 Enviar por WhatsApp</div>
+      <div style="display:flex;flex-wrap:wrap;gap:7px">
+        <button onclick="gerarWppPedido()" style="background:rgba(37,211,102,.2);border:1px solid rgba(37,211,102,.5);border-radius:11px;padding:10px 16px;color:#22c55e;font-weight:800;font-size:13px;display:flex;align-items:center;gap:6px">📲 Geral</button>
+        ${fornsComItens.map(f=>`<button onclick="gerarWppPedidoForn('${f.replace(/'/g,"\\'")}')" style="background:rgba(37,211,102,.08);border:1px solid rgba(37,211,102,.3);border-radius:11px;padding:10px 13px;color:#4ade80;font-weight:700;font-size:11px;display:flex;align-items:center;gap:5px">📦 ${f}</button>`).join('')}
+      </div>
+    </div>` : ''}
   `;
 }
 
@@ -1660,6 +1676,15 @@ async function renderProvisoes() {
     </div>
     <div class="store-tabs" style="margin-bottom:12px">${lojaTabs}</div>
     ${provHtml}
+
+    ${Object.keys(por_forn).length ? `
+    <div style="margin-top:10px">
+      <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:7px;letter-spacing:.5px">📲 Enviar por Fornecedor</div>
+      <div style="display:flex;flex-wrap:wrap;gap:7px">
+        <button onclick="gerarWppProvisoes()" style="background:rgba(37,211,102,.2);border:1px solid rgba(37,211,102,.5);border-radius:11px;padding:10px 16px;color:#22c55e;font-weight:800;font-size:13px;display:flex;align-items:center;gap:6px">📲 Geral</button>
+        ${Object.keys(por_forn).sort().map(f=>`<button onclick="gerarWppProvisoesForn('${f.replace(/'/g,"\\'")}')" style="background:rgba(37,211,102,.08);border:1px solid rgba(37,211,102,.3);border-radius:11px;padding:10px 13px;color:#4ade80;font-weight:700;font-size:11px;display:flex;align-items:center;gap:5px">📦 ${f}</button>`).join('')}
+      </div>
+    </div>` : ''}
   `;
 }
 
@@ -1695,6 +1720,78 @@ function gerarWppProvisoes() {
   });
   msg += `\n💰 *Total: R$ ${fmt(total)}*`;
   window.open('https://wa.me/?text=' + encodeURIComponent(msg));
+}
+
+function gerarWppPedidoForn(fornecedor) {
+  if (!S.pedidoAtual) { toast('Nenhum pedido ativo.', 'err'); return; }
+  const sem = formatarSemana(S.semanaAtiva);
+  const titulo = S.todosModo ? 'TODAS AS LOJAS' : (S.lojas.find(l=>l.slug_pedido===S.lojaAtiva)?.nome_display||S.lojaAtiva);
+  const itens = [];
+  S.catalogo.filter(p=>p.ativo&&p.fornecedor===fornecedor).forEach(prod=>{
+    if (S.todosModo) {
+      S.lojas.forEach(loja=>{
+        const qtd=S.pedidoItens[prod.id]?.[loja.slug_pedido]?.qtd||0;
+        if(qtd>0) itens.push({produto:prod.produto,und:prod.und,custo:prod.custo||0,loja:loja.nome_display,qtd});
+      });
+    } else {
+      const qtd=S.pedidoItens[prod.id]?.[S.lojaAtiva]?.qtd||0;
+      if(qtd>0) itens.push({produto:prod.produto,und:prod.und,custo:prod.custo||0,qtd});
+    }
+  });
+  if(!itens.length){toast('Nenhum item deste fornecedor no pedido.','err');return;}
+  let msg=`🛒 *PEDIDO — ${fornecedor}*\nSemana ${sem.num}/${sem.ano} (${sem.periodo})\n📍 ${titulo}\n━━━━━━━━━━━━━━━━━━\n`;
+  let total=0;
+  if(S.todosModo){
+    const lojaMap={};
+    itens.forEach(i=>(lojaMap[i.loja]=lojaMap[i.loja]||[]).push(i));
+    Object.entries(lojaMap).sort(([a],[b])=>a.localeCompare(b)).forEach(([lojaNome,items])=>{
+      msg+=`📍 ${lojaNome}\n`;
+      items.forEach(i=>{const sub=i.custo>0?` — R$ ${fmt(i.qtd*i.custo)}`:'';msg+=`  • ${i.produto}: ${fmtQtd(i.qtd)} ${i.und}${sub}\n`;total+=i.qtd*i.custo;});
+    });
+  } else {
+    itens.forEach(i=>{const sub=i.custo>0?` — R$ ${fmt(i.qtd*i.custo)}`:'';msg+=`  • ${i.produto}: ${fmtQtd(i.qtd)} ${i.und}${sub}\n`;total+=i.qtd*i.custo;});
+  }
+  if(total>0) msg+=`\n💰 Total: *R$ ${fmt(total)}*`;
+  window.open('https://wa.me/?text='+encodeURIComponent(msg));
+}
+
+function gerarWppProvisoesForn(fornecedor) {
+  const itens=S.provisoes.filter(p=>(p.fornecedor||'SEM FORNECEDOR')===fornecedor);
+  if(!itens.length){toast('Nenhuma provisão deste fornecedor.','err');return;}
+  const lojaLabel=S.provLoja?(S.lojas.find(l=>l.slug_pedido===S.provLoja)?.nome_display||S.provLoja):'Todas as lojas';
+  let msg=`📦 *PROVISÕES — ${fornecedor}*\n📍 ${lojaLabel}\n━━━━━━━━━━━━━━━━━━\n`;
+  let total=0;
+  itens.forEach(p=>{
+    const loja=S.lojas.find(l=>l.slug_pedido===p.loja_slug)?.nome_display||p.loja_slug;
+    const icon=p.status==='RECEBIDO_OK'?'✅':p.status==='DIVERGENCIA'?'⚠️':'⏳';
+    const dt=p.data_entrega?` (${p.data_entrega})`:'';
+    msg+=`${icon} ${loja} — ${p.gn_catalogo?.produto||'—'}: ${fmtQtd(p.qtd_prevista)} ${p.gn_catalogo?.und||''} R$ ${fmt(p.valor_previsto)}${dt}\n`;
+    total+=parseFloat(p.valor_previsto)||0;
+  });
+  msg+=`\n💰 Total: *R$ ${fmt(total)}*`;
+  window.open('https://wa.me/?text='+encodeURIComponent(msg));
+}
+
+function gerarWppEntregas() {
+  if(!S.entregasPendentes||!S.entregasPendentes.length){toast('Nenhuma entrega pendente.','err');return;}
+  const porForn={};
+  S.entregasPendentes.forEach(p=>{
+    const f=p.fornecedor||'SEM FORNECEDOR';
+    (porForn[f]=porForn[f]||[]).push(p);
+  });
+  const total=S.entregasPendentes.reduce((a,p)=>a+(parseFloat(p.valor_previsto)||0),0);
+  let msg=`🚚 *ENTREGAS PENDENTES*\n📅 ${new Date().toLocaleDateString('pt-BR')}\n━━━━━━━━━━━━━━━━━━\n`;
+  Object.entries(porForn).sort(([a],[b])=>a.localeCompare(b)).forEach(([forn,itens])=>{
+    const totF=itens.reduce((a,p)=>a+(parseFloat(p.valor_previsto)||0),0);
+    msg+=`\n🏭 *${forn}* — R$ ${fmt(totF)}\n`;
+    itens.forEach(p=>{
+      const loja=S.lojas.find(l=>l.slug_pedido===p.loja_slug)?.nome_display||p.loja_slug;
+      const dt=p.data_entrega?` | Prev: ${p.data_entrega}`:'';
+      msg+=`  ⏳ ${loja} — ${p.gn_catalogo?.produto||'—'}${dt}\n`;
+    });
+  });
+  msg+=`\n💰 Total pendente: *R$ ${fmt(total)}*`;
+  window.open('https://wa.me/?text='+encodeURIComponent(msg));
 }
 
 function gerarWppPedido() {
@@ -2001,7 +2098,10 @@ async function renderEntrega() {
   $('content').innerHTML = `
     <div class="sec-header">
       <div class="sec-titulo">Entregas Pendentes <span class="badge badge-r">${S.entregasPendentes.length}</span></div>
-      <div class="num" style="font-size:13px;font-weight:700">R$ ${fmt(totalGeral)}</div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button onclick="gerarWppEntregas()" style="background:rgba(37,211,102,.12);border:1px solid rgba(37,211,102,.3);border-radius:6px;padding:5px 10px;color:#22c55e;font-size:11px;font-weight:700;cursor:pointer">📲 WPP</button>
+        <div class="num" style="font-size:13px;font-weight:700">R$ ${fmt(totalGeral)}</div>
+      </div>
     </div>
     <div style="font-size:11px;color:var(--muted);margin-bottom:12px">
       Toque em um item para registrar o que foi recebido.
