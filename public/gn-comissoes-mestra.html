@@ -225,6 +225,7 @@ hr.div{border:none;border-top:1px solid var(--bd);margin:12px 0}
       <div style="display:flex;align-items:center;justify-content:flex-end;gap:4px">
         <span class="h-user" id="hdr-user"></span>
         <button class="btn-pull" onclick="carregarTodasLojas(true)">↓ Todas</button>
+        <button class="btn-pull" onclick="limparCacheRecarregar()" title="Limpar cache e recarregar todos os dados">↺</button>
       </div>
       <div id="sync-txt" class="sync-txt"></div>
     </div>
@@ -1279,21 +1280,39 @@ async function carregarChecklistSemana(semIdx) {
 }
 
 // ── SYNC SUPABASE ────────────────────────────────────────────────
+function limparCacheRecarregar() {
+  try { localStorage.removeItem('gn_mestra_allDataPorLoja'); } catch(_){}
+  allDataPorLoja = {};
+  syncStatusPorLoja = {};
+  showToast('Cache limpo — recarregando...');
+  carregarTodasLojas(true);
+}
+
 async function carregarLoja(lojaKey, silent) {
-  try {
-    const res = await fetch(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${lojaKey}&select=all_data`, {
-      headers: {'apikey':SB_ANON,'Authorization':'Bearer '+SB_ANON}
-    });
-    if (!res.ok) throw new Error('HTTP '+res.status);
-    const rows = await res.json();
-    if (rows.length && rows[0].all_data && Object.keys(rows[0].all_data).length) {
-      allDataPorLoja[lojaKey] = rows[0].all_data;
+  const MAX_TENTATIVAS = 3;
+  let ultimoErro;
+  for (let tentativa = 0; tentativa < MAX_TENTATIVAS; tentativa++) {
+    if (tentativa > 0) await new Promise(r => setTimeout(r, 800 * tentativa));
+    try {
+      const res = await fetch(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${lojaKey}&select=all_data`, {
+        headers: {'apikey':SB_ANON,'Authorization':'Bearer '+SB_ANON}
+      });
+      if (!res.ok) throw new Error('HTTP '+res.status);
+      const rows = await res.json();
+      if (Array.isArray(rows) && rows.length && rows[0].all_data) {
+        const keys = Object.keys(rows[0].all_data);
+        if (keys.length) {
+          allDataPorLoja[lojaKey] = rows[0].all_data;
+        }
+      }
+      syncStatusPorLoja[lojaKey] = 'ok';
+      return;
+    } catch(e) {
+      ultimoErro = e;
     }
-    syncStatusPorLoja[lojaKey] = 'ok';
-  } catch(e) {
-    syncStatusPorLoja[lojaKey] = 'err';
-    if(!silent) showToast(`Erro ao carregar ${lojaKey}: ${e.message}`);
   }
+  syncStatusPorLoja[lojaKey] = 'err';
+  if(!silent) showToast(`Erro ao carregar ${lojaKey}: ${ultimoErro?.message}`);
 }
 
 async function carregarTodasLojas(showFeedback) {
@@ -1306,11 +1325,17 @@ async function carregarTodasLojas(showFeedback) {
   await Promise.all([...promises, carregarChecklistSemana(state.semIdx)]);
 
   // 3. Salva no localStorage e re-renderiza com dados novos
-  sv('allDataPorLoja', allDataPorLoja);
+  try { localStorage.setItem('gn_mestra_allDataPorLoja', JSON.stringify(allDataPorLoja)); } catch(_){}
   sv('lastSync', new Date().toISOString());
-  setSyncTxt('ok', '✓ '+new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}));
+  const erros = LOJAS_LIST.filter(([k]) => syncStatusPorLoja[k] === 'err').map(([,n]) => n);
+  if (erros.length) {
+    setSyncTxt('err', `✗ Falha: ${erros.join(', ')}`);
+    if (showFeedback) showToast(`⚠️ Falha ao carregar: ${erros.join(', ')}`);
+  } else {
+    setSyncTxt('ok', '✓ '+new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}));
+    if(showFeedback) showToast('✓ Todas as lojas atualizadas!');
+  }
   render();
-  if(showFeedback) showToast('✓ Todas as lojas atualizadas!');
 }
 
 // Carregar loja individual em background sem bloquear
