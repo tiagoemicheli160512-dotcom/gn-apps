@@ -252,9 +252,29 @@ function getISOWeekNum() {
 const DISPLAY_TO_KEY = {};
 LOJAS_LISTA.forEach(k => { DISPLAY_TO_KEY[LOJA_DISPLAY[k]] = k; });
 
+// Gera os 7 dias da semana a partir da data de início (ISO)
+function getWeekDates(startIso) {
+  const LABELS = ['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
+  const d = new Date(startIso + 'T12:00:00');
+  return Array.from({ length: 7 }, (_, i) => {
+    const dt = new Date(d); dt.setDate(d.getDate() + i);
+    const iso = dt.getFullYear() + '-' + String(dt.getMonth()+1).padStart(2,'0') + '-' + String(dt.getDate()).padStart(2,'0');
+    return { iso, label: LABELS[i] };
+  });
+}
+
+// Retorna cor e texto para um pct de check-list
+function chkDia(pct) {
+  if (pct === null || pct === undefined) return { bg: 'rgba(255,255,255,.05)', cor: '#2a2a4a', txt: '—' };
+  if (pct === 100)  return { bg: 'rgba(34,197,94,.15)',  cor: '#22c55e', txt: '✓' };
+  if (pct > 50)     return { bg: 'rgba(240,192,80,.15)', cor: '#f0c050', txt: pct+'%' };
+  return              { bg: 'rgba(232,88,10,.15)',  cor: '#E8580A', txt: pct+'%' };
+}
+
 function PainelGeral({ onSelectLoja }) {
   const [dados, setDados] = useState({});
-  const [checklist, setChecklist] = useState({});
+  const [clSemana, setClSemana] = useState({}); // { BANGU: { '2026-07-01': 85, ... } }
+  const [weekDates, setWeekDates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [semana, setSemana] = useState('');
 
@@ -263,47 +283,41 @@ function PainelGeral({ onSelectLoja }) {
     const wk = getISOWeekNum();
     const br = (iso) => iso.slice(5).split('-').reverse().join('/');
     setSemana(`${br(start)} – ${br(end)} (sem. ${wk})`);
+    setWeekDates(getWeekDates(start));
 
-    const hoje = new Date().toISOString().split('T')[0];
-
-    // Faturamento da semana vem do checklist_diario (fonte confiável, atualização diária)
+    // Busca faturamento + checklist_pct da semana toda em uma única query
     fetch(
-      `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${start}&data_operacao=lte.${end}&select=loja,venda_salao,venda_delivery`,
+      `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${start}&data_operacao=lte.${end}&select=loja,data_operacao,venda_salao,venda_delivery,checklist_pct`,
       { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
     )
       .then(r => r.json())
       .then(rows => {
-        const g = {};
+        const fat = {};
+        const cl  = {};
         (rows || []).forEach(row => {
-          const k = DISPLAY_TO_KEY[row.loja]; // 'BANGU', 'CAXIAS' etc.
+          const k = DISPLAY_TO_KEY[row.loja];
           if (!k) return;
-          if (!g[k]) g[k] = { fat: 0 };
-          g[k].fat += (row.venda_salao || 0) + (row.venda_delivery || 0);
+          // Faturamento acumulado da semana
+          if (!fat[k]) fat[k] = { fat: 0 };
+          fat[k].fat += (row.venda_salao || 0) + (row.venda_delivery || 0);
+          // Check-list pct por dia
+          if (!cl[k]) cl[k] = {};
+          if (row.checklist_pct !== null && row.checklist_pct !== undefined) {
+            cl[k][row.data_operacao] = Number(row.checklist_pct);
+          }
         });
-        setDados(g);
+        setDados(fat);
+        setClSemana(cl);
         setLoading(false);
       })
       .catch(() => setLoading(false));
-
-    // Check-list de hoje: checklist_diario armazena loja como nome de exibição ('Bangu')
-    fetch(
-      `${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hoje}&select=loja`,
-      { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
-    )
-      .then(r => r.json())
-      .then(rows => {
-        const cl = {};
-        (rows || []).forEach(row => { cl[row.loja] = true; });
-        setChecklist(cl);
-      })
-      .catch(() => {});
   }, []);
 
   const totalBruto    = Object.values(dados).reduce((s, d) => s + d.fat, 0);
   const lojasComDados = Object.keys(dados).length;
 
   const pSec  = { fontSize: 10, fontWeight: 800, letterSpacing: 1.4, textTransform: 'uppercase', color: '#d4a800', marginBottom: 10, paddingLeft: 2 };
-  const pCard = (cor, temDados) => ({ display: 'flex', alignItems: 'center', gap: 11, background: '#0e0e1e', border: `1px solid ${temDados ? cor + '35' : '#161628'}`, borderRadius: 14, padding: '11px 13px', cursor: 'pointer' });
+  const pCard = (cor, temDados) => ({ display: 'flex', flexDirection: 'column', gap: 0, background: '#0e0e1e', border: `1px solid ${temDados ? cor + '35' : '#161628'}`, borderRadius: 14, padding: '11px 13px', cursor: 'pointer' });
 
   return (
     <div style={{ padding: '0 14px 90px' }}>
@@ -327,32 +341,52 @@ function PainelGeral({ onSelectLoja }) {
       <div style={pSec}>Lojas — clique para entrar</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
         {LOJAS_LISTA.map(k => {
-          const d       = dados[k];
+          const d        = dados[k];
           const temDados = !!d;
-          const cor     = COR_LOJA[k] || '#444';
-          // checklist_diario armazena loja com nome de exibição: 'Bangu', 'São Gonçalo' etc.
-          const temCL   = !!checklist[LOJA_DISPLAY[k]];
+          const cor      = COR_LOJA[k] || '#444';
+          const clDias   = clSemana[k] || {};
+          // Comissão estimada: pool = fat * 0.9 - 50 (ADM)
+          const pool     = temDados ? Math.max(0, d.fat * 0.9 - 50) : null;
 
           return (
             <div key={k} onClick={() => onSelectLoja(k)} style={pCard(cor, temDados)}>
-              <div style={{ width: 10, height: 10, borderRadius: '50%', background: cor, flexShrink: 0, boxShadow: temDados ? `0 0 7px ${cor}` : 'none' }} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 800, color: '#e8e8f4', lineHeight: 1 }}>{LOJA_DISPLAY[k]}</div>
-                <div style={{ fontSize: 11, color: temDados ? '#5a5a7a' : '#252538', marginTop: 2 }}>
-                  {temDados ? 'Faturamento registrado esta semana' : 'Sem dados esta semana'}
-                </div>
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
-                {temDados && (
-                  <div style={{ fontSize: 13, fontWeight: 800, color: '#e8e8f4', fontVariantNumeric: 'tabular-nums' }}>
-                    {fmtR(d.fat)}
+              {/* Linha principal */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
+                <div style={{ width: 10, height: 10, borderRadius: '50%', background: cor, flexShrink: 0, boxShadow: temDados ? `0 0 7px ${cor}` : 'none' }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: '#e8e8f4', lineHeight: 1 }}>{LOJA_DISPLAY[k]}</div>
+                  <div style={{ fontSize: 11, color: temDados ? '#5a5a7a' : '#252538', marginTop: 2 }}>
+                    {temDados ? 'Faturamento registrado esta semana' : 'Sem dados esta semana'}
                   </div>
-                )}
-                <div style={{ fontSize: 9, fontWeight: 700, padding: '2px 7px', borderRadius: 5, background: temCL ? 'rgba(34,197,94,.12)' : 'rgba(255,255,255,.04)', color: temCL ? '#22c55e' : '#333348' }}>
-                  {temCL ? '✓ Check-list' : 'Sem check-list'}
                 </div>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2, flexShrink: 0 }}>
+                  {temDados && (
+                    <div style={{ fontSize: 13, fontWeight: 800, color: '#e8e8f4', fontVariantNumeric: 'tabular-nums' }}>
+                      {fmtR(d.fat)}
+                    </div>
+                  )}
+                  {pool !== null && (
+                    <div style={{ fontSize: 10, fontWeight: 700, color: '#22c55e', fontVariantNumeric: 'tabular-nums' }}>
+                      Comissão: {fmtR(pool)}
+                    </div>
+                  )}
+                </div>
+                <div style={{ fontSize: 18, color: 'rgba(255,255,255,.15)', flexShrink: 0, marginLeft: 4 }}>›</div>
               </div>
-              <div style={{ fontSize: 18, color: 'rgba(255,255,255,.15)', flexShrink: 0 }}>›</div>
+
+              {/* Grade de dias da semana — check-list */}
+              <div style={{ display: 'flex', gap: 3, marginTop: 9 }}>
+                {weekDates.map(({ iso, label }) => {
+                  const pct = clDias[iso] !== undefined ? clDias[iso] : null;
+                  const { bg, cor: c, txt } = chkDia(pct);
+                  return (
+                    <div key={iso} style={{ flex: 1, background: bg, borderRadius: 5, padding: '4px 0', textAlign: 'center' }}>
+                      <div style={{ fontSize: 7, fontWeight: 800, color: c, letterSpacing: 0.3 }}>{label}</div>
+                      <div style={{ fontSize: 8, fontWeight: 700, color: c, marginTop: 2 }}>{txt}</div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           );
         })}
