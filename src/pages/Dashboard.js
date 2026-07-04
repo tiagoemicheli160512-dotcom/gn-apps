@@ -9,7 +9,7 @@ const COR_LOJA = {
   BANGU: '#b81a1a', CAXIAS: '#1a6bbd', 'SÃO GONÇALO': '#8B1A8B',
   'NORTE SHOPPING': '#1a7a4a', BOULEVARD: '#b85a00', RANCHO: '#0e7490',
   PEDREIRA: '#7c3aed', 'NOVA AMERICA': '#b45309', 'CAMPO GRANDE': '#065f46',
-  ITAQUERA: '#be123c', GUARULHOS: '#1e40af', GERAL: '#F26419',
+  ITAQUERA: '#be123c', GUARULHOS: '#1e40af', GERAL: '#d4a800',
 };
 
 const LOJA_DISPLAY = {
