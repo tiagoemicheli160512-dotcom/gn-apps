@@ -366,11 +366,15 @@ function PainelGeral({ onSelectLoja }) {
       .then(r => r.json())
       .then(rows => {
         const coms = {};
+        // Mapa inverso: chave do banco (ex: 'NORTE') → chave de exibição (ex: 'NORTE SHOPPING')
+        const dbParaDisplay = {};
+        Object.entries(LOJA_COM_KEY).forEach(([display, db]) => { dbParaDisplay[db] = display; });
         (rows || []).forEach(row => {
           if (!row.all_data) return;
           const wd = row.all_data[String(semIdx)];
           const total = calcComissaoTotal(wd);
-          if (total !== null) coms[row.loja] = total;
+          const displayKey = dbParaDisplay[row.loja] || row.loja;
+          if (total !== null) coms[displayKey] = total;
         });
         setComissoes(coms);
       });
