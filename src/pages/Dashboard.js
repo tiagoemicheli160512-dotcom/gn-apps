@@ -71,8 +71,8 @@ const S = {
   hdrSair: { background: 'transparent', border: '1px solid rgba(255,255,255,.1)', borderRadius: 8, padding: '6px 13px', fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,.4)', fontFamily: 'inherit', cursor: 'pointer' },
   // HERO
   heroWrap: { position: 'relative', padding: '24px 20px 36px', overflow: 'hidden' },
-  heroBg: { position: 'absolute', inset: 0, background: 'linear-gradient(155deg, var(--cor, #F26419) 0%, rgba(0,0,0,.6) 60%, #08080f 100%)', opacity: 0.22, transition: 'background .4s' },
-  heroBlob: { position: 'absolute', top: -40, right: -40, width: 180, height: 180, borderRadius: '50%', background: 'var(--cor, #F26419)', opacity: 0.08, filter: 'blur(40px)', transition: 'background .4s' },
+  heroBg: { position: 'absolute', inset: 0, background: 'linear-gradient(155deg, var(--cor, #F26419) 0%, rgba(0,0,0,.6) 60%, #08080f 100%)', opacity: 0.55, transition: 'background .4s' },
+  heroBlob: { position: 'absolute', top: -40, right: -40, width: 180, height: 180, borderRadius: '50%', background: 'var(--cor, #F26419)', opacity: 0.22, filter: 'blur(40px)', transition: 'background .4s' },
   heroFade: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 48, background: 'linear-gradient(0deg, #08080f, transparent)' },
   heroInner: { position: 'relative', zIndex: 1 },
   heroRow: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 },
@@ -84,7 +84,7 @@ const S = {
   // MODULES
   modList: { padding: '4px 14px 90px', display: 'flex', flexDirection: 'column', gap: 7 },
   modRow: (enabled) => ({ display: 'flex', alignItems: 'center', gap: 12, background: '#0e0e1e', border: '1px solid #161628', borderRadius: 16, padding: '13px 14px', cursor: enabled ? 'pointer' : 'not-allowed', opacity: enabled ? 1 : 0.27, userSelect: 'none', WebkitUserSelect: 'none', textDecoration: 'none' }),
-  modIcon: (cor) => ({ width: 46, height: 46, borderRadius: 13, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0, background: cor + '40', border: `1.5px solid ${cor}` }),
+  modIcon: (cor) => ({ width: 46, height: 46, borderRadius: 13, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0, background: cor + '75', border: `1.5px solid ${cor}` }),
   modBody: { flex: 1, minWidth: 0 },
   modName: { fontSize: 13, fontWeight: 800, color: '#e8e8f4', letterSpacing: 0.2 },
   modSub: { fontSize: 11, color: '#3a3a5a', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
