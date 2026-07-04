@@ -252,6 +252,54 @@ function getISOWeekNum() {
 const DISPLAY_TO_KEY = {};
 LOJAS_LISTA.forEach(k => { DISPLAY_TO_KEY[LOJA_DISPLAY[k]] = k; });
 
+// Calcula índice de semana igual ao Mestra (âncora: 2026-01-05)
+function getMestraWeekIdx() {
+  const anchor = new Date(2026, 0, 5);
+  const today = new Date();
+  const td = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  return Math.max(0, Math.floor((td - anchor) / (7 * 86400000)));
+}
+
+// Replica calcSemana do Mestra — retorna total líquido da semana para a loja
+function calcComissaoTotal(wd) {
+  if (!wd) return null;
+  const ADM = 50;
+  const ativos = (wd.funcs || []).filter(f => f.nome && f.nome.trim());
+  if (!ativos.length) return null;
+  const dias = Array.from({ length: 7 }, (_, d) => {
+    const e90 = (parseFloat(wd.brutos?.[d]) || 0) * 0.9;
+    const I = ativos.filter(f => f.dias?.[d] !== 'NÃO TRABALHADO').length;
+    return { e90, cotaUnit: I > 0 ? e90 / I : 0 };
+  });
+  const funcCalc = ativos.map(f => {
+    let bruta = 0;
+    dias.forEach((dia, d) => {
+      if (['PRESENTE', 'HORISTA', 'JOVEM APRENDIZ'].includes(f.dias?.[d])) bruta += dia.cotaUnit;
+    });
+    const nFS = (f.dias || []).filter(s => ['FALTA', 'SUSPENSÃO'].includes(s)).length;
+    const mult = nFS >= 2 ? 0 : nFS === 1 ? 0.5 : 1;
+    const AF = bruta * mult;
+    const elegivel = f.tipo !== 'JOVEM APRENDIZ' && nFS === 0 &&
+      !(f.dias || []).some(s => s === 'ATESTADO') &&
+      (f.dias || []).some(s => ['PRESENTE', 'HORISTA'].includes(s));
+    const diasEleg = elegivel ? (f.dias || []).filter(s => ['PRESENTE', 'HORISTA'].includes(s)).length : 0;
+    return { AF, elegivel, diasEleg };
+  });
+  const baseTotal = dias.reduce((s, d) => s + d.e90, 0);
+  const sumAF = funcCalc.reduce((s, f) => s + f.AF, 0);
+  const poolRateio = Math.max(0, baseTotal - sumAF);
+  const vD = parseFloat(wd.vDist) || 0;
+  const efetivo = wd.dist === 'SIM' ? (vD > 0 ? Math.min(vD, poolRateio) : poolRateio) : 0;
+  const totalDE = funcCalc.reduce((s, f) => s + f.diasEleg, 0);
+  const nPagantes = funcCalc.filter(f => f.AF > 0).length;
+  return funcCalc.reduce((s, f) => {
+    const rateio = f.elegivel && totalDE > 0 ? efetivo * f.diasEleg / totalDE : 0;
+    const cota = f.AF + rateio;
+    const adm = nPagantes > 0 && f.AF > 0 ? ADM / nPagantes : 0;
+    return s + (cota - adm);
+  }, 0);
+}
+
 // Gera os 7 dias da semana a partir da data de início (ISO)
 function getWeekDates(startIso) {
   const LABELS = ['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
@@ -274,6 +322,7 @@ function chkDia(pct) {
 function PainelGeral({ onSelectLoja }) {
   const [dados, setDados] = useState({});
   const [clSemana, setClSemana] = useState({}); // { BANGU: { '2026-07-01': 85, ... } }
+  const [comissoes, setComissoes] = useState({}); // { BANGU: 1234.56, ... }
   const [weekDates, setWeekDates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [semana, setSemana] = useState('');
@@ -284,9 +333,10 @@ function PainelGeral({ onSelectLoja }) {
     const br = (iso) => iso.slice(5).split('-').reverse().join('/');
     setSemana(`${br(start)} – ${br(end)} (sem. ${wk})`);
     setWeekDates(getWeekDates(start));
+    const semIdx = getMestraWeekIdx();
 
-    // Busca faturamento + checklist_pct da semana toda em uma única query
-    fetch(
+    // Faturamento + check-list da semana
+    const pFat = fetch(
       `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${start}&data_operacao=lte.${end}&select=loja,data_operacao,venda_salao,venda_delivery,checklist_pct`,
       { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
     )
@@ -297,10 +347,8 @@ function PainelGeral({ onSelectLoja }) {
         (rows || []).forEach(row => {
           const k = DISPLAY_TO_KEY[row.loja];
           if (!k) return;
-          // Faturamento acumulado da semana
           if (!fat[k]) fat[k] = { fat: 0 };
           fat[k].fat += (row.venda_salao || 0) + (row.venda_delivery || 0);
-          // Check-list pct por dia
           if (!cl[k]) cl[k] = {};
           if (row.checklist_pct !== null && row.checklist_pct !== undefined) {
             cl[k][row.data_operacao] = Number(row.checklist_pct);
@@ -308,9 +356,26 @@ function PainelGeral({ onSelectLoja }) {
         });
         setDados(fat);
         setClSemana(cl);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
+      });
+
+    // Comissão real da semana vigente via gn_comissoes (mesmo cálculo do Mestra)
+    const pCom = fetch(
+      `${SB_URL}/rest/v1/gn_comissoes?select=loja,all_data`,
+      { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
+    )
+      .then(r => r.json())
+      .then(rows => {
+        const coms = {};
+        (rows || []).forEach(row => {
+          if (!row.all_data) return;
+          const wd = row.all_data[String(semIdx)];
+          const total = calcComissaoTotal(wd);
+          if (total !== null) coms[row.loja] = total;
+        });
+        setComissoes(coms);
+      });
+
+    Promise.all([pFat, pCom]).catch(() => {}).finally(() => setLoading(false));
   }, []);
 
   const totalBruto    = Object.values(dados).reduce((s, d) => s + d.fat, 0);
@@ -345,8 +410,7 @@ function PainelGeral({ onSelectLoja }) {
           const temDados = !!d;
           const cor      = COR_LOJA[k] || '#444';
           const clDias   = clSemana[k] || {};
-          // Comissão estimada: pool = fat * 0.9 - 50 (ADM)
-          const pool     = temDados ? Math.max(0, d.fat * 0.9 - 50) : null;
+          const comissao = comissoes[k] != null ? comissoes[k] : null;
 
           return (
             <div key={k} onClick={() => onSelectLoja(k)} style={pCard(cor, temDados)}>
@@ -365,9 +429,9 @@ function PainelGeral({ onSelectLoja }) {
                       {fmtR(d.fat)}
                     </div>
                   )}
-                  {pool !== null && (
+                  {comissao !== null && (
                     <div style={{ fontSize: 10, fontWeight: 700, color: '#22c55e', fontVariantNumeric: 'tabular-nums' }}>
-                      Comissão: {fmtR(pool)}
+                      Comissão: {fmtR(comissao)}
                     </div>
                   )}
                 </div>
