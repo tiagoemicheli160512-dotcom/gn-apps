@@ -319,9 +319,16 @@ function chkDia(pct) {
   return              { bg: 'rgba(232,88,10,.15)',  cor: '#E8580A', txt: pct+'%' };
 }
 
+function fmtK(v) {
+  if (!v || v === 0) return null;
+  if (v >= 1000) return 'R$' + (v / 1000).toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 1 }) + 'k';
+  return 'R$' + Math.round(v);
+}
+
 function PainelGeral({ onSelectLoja }) {
   const [dados, setDados] = useState({});
   const [clSemana, setClSemana] = useState({}); // { BANGU: { '2026-07-01': 85, ... } }
+  const [fatDias, setFatDias] = useState({});    // { BANGU: { '2026-07-01': 5000, ... } }
   const [comissoes, setComissoes] = useState({}); // { BANGU: 1234.56, ... }
   const [weekDates, setWeekDates] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -344,11 +351,15 @@ function PainelGeral({ onSelectLoja }) {
       .then(rows => {
         const fat = {};
         const cl  = {};
+        const fd  = {};
         (rows || []).forEach(row => {
           const k = DISPLAY_TO_KEY[row.loja];
           if (!k) return;
           if (!fat[k]) fat[k] = { fat: 0 };
-          fat[k].fat += (row.venda_salao || 0) + (row.venda_delivery || 0);
+          const vendaDia = (row.venda_salao || 0) + (row.venda_delivery || 0);
+          fat[k].fat += vendaDia;
+          if (!fd[k]) fd[k] = {};
+          if (vendaDia > 0) fd[k][row.data_operacao] = vendaDia;
           if (!cl[k]) cl[k] = {};
           if (row.checklist_pct !== null && row.checklist_pct !== undefined) {
             cl[k][row.data_operacao] = Number(row.checklist_pct);
@@ -356,6 +367,7 @@ function PainelGeral({ onSelectLoja }) {
         });
         setDados(fat);
         setClSemana(cl);
+        setFatDias(fd);
       });
 
     // Comissão real da semana vigente via gn_comissoes (mesmo cálculo do Mestra)
@@ -414,6 +426,7 @@ function PainelGeral({ onSelectLoja }) {
           const temDados = !!d;
           const cor      = COR_LOJA[k] || '#444';
           const clDias   = clSemana[k] || {};
+          const fatDiasK = fatDias[k] || {};
           const comissao = comissoes[k] != null ? comissoes[k] : null;
 
           return (
@@ -442,15 +455,17 @@ function PainelGeral({ onSelectLoja }) {
                 <div style={{ fontSize: 18, color: 'rgba(255,255,255,.15)', flexShrink: 0, marginLeft: 4 }}>›</div>
               </div>
 
-              {/* Grade de dias da semana — check-list */}
+              {/* Grade de dias da semana — check-list + faturamento */}
               <div style={{ display: 'flex', gap: 3, marginTop: 9 }}>
                 {weekDates.map(({ iso, label }) => {
                   const pct = clDias[iso] !== undefined ? clDias[iso] : null;
                   const { bg, cor: c, txt } = chkDia(pct);
+                  const fatV = fmtK(fatDiasK[iso]);
                   return (
                     <div key={iso} style={{ flex: 1, background: bg, borderRadius: 5, padding: '4px 0', textAlign: 'center' }}>
                       <div style={{ fontSize: 7, fontWeight: 800, color: c, letterSpacing: 0.3 }}>{label}</div>
                       <div style={{ fontSize: 8, fontWeight: 700, color: c, marginTop: 2 }}>{txt}</div>
+                      {fatV && <div style={{ fontSize: 7, fontWeight: 700, color: c, opacity: 0.8, marginTop: 1 }}>{fatV}</div>}
                     </div>
                   );
                 })}
@@ -459,6 +474,33 @@ function PainelGeral({ onSelectLoja }) {
           );
         })}
       </div>
+
+      {/* Botão WhatsApp — resumo semanal */}
+      {!loading && (
+        <div style={{ marginTop: 16 }}>
+          <button
+            onClick={() => {
+              const hoje = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+              const linhas = LOJAS_LISTA
+                .filter(k => dados[k])
+                .map(k => {
+                  const fat = dados[k]?.fat || 0;
+                  const clDias = clSemana[k] || {};
+                  const dias = weekDates.filter(({ iso }) => clDias[iso] !== undefined);
+                  const media = dias.length ? Math.round(dias.reduce((s, { iso }) => s + clDias[iso], 0) / dias.length) : null;
+                  return `• ${LOJA_DISPLAY[k]}: ${fmtR(fat)}${media !== null ? ' · CL ' + media + '%' : ''}`;
+                });
+              const total = Object.values(dados).reduce((s, d) => s + d.fat, 0);
+              const msg = `*GN Apps — Resumo Semanal*\n${semana}\n\n${linhas.join('\n')}\n\n*Total: ${fmtR(total)}*\n_Gerado em ${hoje}_`;
+              const url = 'https://api.whatsapp.com/send?text=' + encodeURIComponent(msg);
+              window.open(url, '_blank');
+            }}
+            style={{ width: '100%', background: '#25D366', border: 'none', borderRadius: 13, padding: '13px 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, cursor: 'pointer', fontFamily: 'inherit', fontSize: 14, fontWeight: 700, color: '#fff' }}
+          >
+            <span style={{ fontSize: 18 }}>📲</span> Enviar resumo no WhatsApp
+          </button>
+        </div>
+      )}
     </div>
   );
 }
