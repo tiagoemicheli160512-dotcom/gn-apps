@@ -614,6 +614,7 @@ let notaFotoName   = "";
 let estIniAll  = {};   // lojaKey -> {insumo: val}
 let vendasAll  = {};   // lojaKey -> {cod: qtd}
 let checklistFat = null; // null=não carregado, []=vazio, [{data_operacao,venda_salao,venda_delivery}]
+let checklistVendasItens = null; // null=não carregado, {}={cod:qtd} agregado semanal do check-list
 let contAll    = {};   // lojaKey -> {insumo: val|null}
 let minAll     = {};   // loja    -> {insumo: val}
 let entradasAll= {};   // lojaKey -> [{id,data,nf,fornecedor,insumo,qtd,custoUnit}]
@@ -845,22 +846,35 @@ function sbScheduleSync() {
   sbSyncTimer = setTimeout(sbPush, 1500);
 }
 
-/* Carrega faturamento semanal do check-list (checklist_diario) */
+/* Carrega faturamento semanal e vendas individuais do check-list (checklist_diario) */
 async function loadChecklistFat() {
   const checklistLoja = CHECKLIST_LOJA_MAP[loja] || loja;
   const segKey = wkKey(semana);
   const domKey = wkKey(addDays(semana, 6));
   try {
     const rows = await sbRequest(
-      "checklist_diario?select=data_operacao,venda_salao,venda_delivery" +
+      "checklist_diario?select=data_operacao,venda_salao,venda_delivery,vendas" +
       "&loja=eq." + encodeURIComponent(checklistLoja) +
       "&data_operacao=gte." + segKey + "&data_operacao=lte." + domKey +
       "&order=data_operacao",
       { method: "GET" }
     );
     checklistFat = Array.isArray(rows) ? rows.filter(r => (r.venda_salao||0) + (r.venda_delivery||0) > 0) : [];
+    // Agregar vendas individuais de todos os dias da semana
+    const agg = {};
+    if (Array.isArray(rows)) {
+      rows.forEach(r => {
+        if (r.vendas && typeof r.vendas === 'object') {
+          Object.entries(r.vendas).forEach(([cod, qtd]) => {
+            agg[cod] = (agg[cod] || 0) + (parseInt(qtd) || 0);
+          });
+        }
+      });
+    }
+    checklistVendasItens = agg;
   } catch(e) {
     checklistFat = [];
+    checklistVendasItens = {};
   }
   render();
 }
@@ -959,7 +973,11 @@ function getEmprestimosRecebidosPorInsumo() {
   });
   return r;
 }
-function getVendas()   { return vendasAll[lojaKey()] || {}; }
+function getVendas()   {
+  // Prioriza dados do check-list quando carregados; fallback para entradas manuais
+  if (checklistVendasItens && Object.keys(checklistVendasItens).length > 0) return checklistVendasItens;
+  return vendasAll[lojaKey()] || {};
+}
 function getCont()     { return contAll[lojaKey()]   || {}; }
 function getMin()      { return minAll[loja]         || {}; }
 function getEntradas() { return entradasAll[lojaKey()] || []; }
@@ -1740,10 +1758,10 @@ function _iniciarVigiaHorario() {
     _verificarAutoAlerta();
   }, 60000);
 }
-function prevWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana, -7); checklistFat = null; if(tab==="vendas") loadChecklistFat(); render(); }
-function nextWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana,  7); checklistFat = null; if(tab==="vendas") loadChecklistFat(); render(); }
+function prevWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana, -7); checklistFat = null; checklistVendasItens = null; if(tab==="vendas") loadChecklistFat(); render(); }
+function nextWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana,  7); checklistFat = null; checklistVendasItens = null; if(tab==="vendas") loadChecklistFat(); render(); }
 function irParaSemana(isoStr) { semana = new Date(isoStr); tab = "relatorio"; render(); }
-function changeLoja(v) { if (lojaForcada) return; loja = v; tab = "home"; checklistFat = null; render(); }
+function changeLoja(v) { if (lojaForcada) return; loja = v; tab = "home"; checklistFat = null; checklistVendasItens = null; render(); }
 function carregarPermissaoLoja() {
   try {
     var s = JSON.parse(localStorage.getItem('gn_session_v1') || 'null');
@@ -1767,7 +1785,7 @@ function goTab(t) {
   if (abasPermitidas && !abasPermitidas.includes(t)) return;
   tab = t;
   busca = "";   // limpa busca ao trocar de aba
-  if (t === "vendas") { checklistFat = null; loadChecklistFat(); } // carrega faturamento do check-list
+  if (t === "vendas") { checklistFat = null; checklistVendasItens = null; loadChecklistFat(); } // carrega faturamento e itens do check-list
   render();
   if (t === 'entrega') carregarEntregas(true);
   // foco automático na busca se a aba tem campo de busca
@@ -4052,7 +4070,11 @@ function render() {
       <div style="display:flex;align-items:center;justify-content:space-between">
         <div>
           <div class="sec-label" style="margin-bottom:1px">🍽️ Pratos Vendidos</div>
-          <div style="font-size:11px;color:#475569">${loja} · ${fmt(semana)} → ${fmt(dom)}</div>
+          <div style="font-size:11px;color:#475569">
+            ${checklistVendasItens === null ? '⏳ Carregando do check-list…' :
+              Object.keys(checklistVendasItens).length > 0 ? '📋 Via check-list · ' + loja + ' · ' + fmt(semana) + ' → ' + fmt(dom) :
+              loja + ' · ' + fmt(semana) + ' → ' + fmt(dom)}
+          </div>
         </div>
         <span style="font-size:15px;font-weight:900;color:#f59e0b">${tv} itens</span>
       </div>
