@@ -4515,6 +4515,8 @@ async function initAppWithLoja(){
   initAllStates();
 
   // Carregar dados
+  let carryFaltasInit = [];
+  let carryManutInit  = [];
   const savedDay = localStorage.getItem(getLocalKey());
   if(savedDay){
     try{
@@ -4525,6 +4527,9 @@ async function initAppWithLoja(){
         if(parsed.semanaFim)    state.semanaFim    = parsed.semanaFim;
         if(parsed.semanaLabel)  state.semanaLabel  = parsed.semanaLabel;
         applySemanaLabels();
+        // Captura pendentes do dia anterior para carryover (sem rede, mesmo device)
+        if(Array.isArray(parsed.faltas))     carryFaltasInit = parsed.faltas.filter(f => f.nome && f.nome.trim());
+        if(Array.isArray(parsed.manutencao)) carryManutInit  = parsed.manutencao.filter(m => m.status !== 'Resolvido');
       }
     }catch(e){}
   }
@@ -4542,10 +4547,47 @@ async function initAppWithLoja(){
   renderAll();
   restoreUI();
   aplicarPermissaoAbas();
-  await Promise.all([
+  const [todayFound] = await Promise.all([
     loadSupabaseDay(hoje),
     loadSupabaseWeek(state.semanaInicio)
   ]);
+
+  // Carryover ao abrir num novo dia: herda faltas e manutenções pendentes
+  if(!todayFound){
+    // Primeiro tenta do localStorage (mesmo dispositivo)
+    if(!state.faltas.length && carryFaltasInit.length){
+      state.faltas = carryFaltasInit.map((f,i) => ({...f, id: Date.now()+i+1}));
+      renderFaltas();
+    }
+    if(!state.manutencao.length && carryManutInit.length){
+      state.manutencao = carryManutInit.map((m,i) => ({...m, id: Date.now()+i+100}));
+      renderManutencao();
+    }
+    // Fallback Supabase: outro dispositivo ou localStorage limpo
+    if(!state.faltas.length || !state.manutencao.length){
+      try{
+        const {data:ontem,error} = await sb.from('checklist_diario')
+          .select('faltas,manutencao')
+          .eq('loja', LOJA)
+          .lt('data_operacao', hoje)
+          .order('data_operacao', {ascending: false})
+          .limit(1)
+          .single();
+        if(ontem && !error){
+          if(!state.faltas.length && Array.isArray(ontem.faltas)){
+            const carry = ontem.faltas.filter(f => f.nome && f.nome.trim());
+            if(carry.length){ state.faltas = carry.map((f,i)=>({...f,id:Date.now()+i+1})); renderFaltas(); }
+          }
+          if(!state.manutencao.length && Array.isArray(ontem.manutencao)){
+            const carry = ontem.manutencao.filter(m => m.status !== 'Resolvido');
+            if(carry.length){ state.manutencao = carry.map((m,i)=>({...m,id:Date.now()+i+100})); renderManutencao(); }
+          }
+        }
+      }catch(e){}
+    }
+    if(state.faltas.length || state.manutencao.length) autoSave();
+  }
+
   // Garante que todos os dias da semana apareçam no resumo (fonte: checklist_diario)
   await loadFatFromDiario(state.semanaInicio, state.semanaFim);
 }
