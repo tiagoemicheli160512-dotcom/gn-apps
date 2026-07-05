@@ -593,6 +593,14 @@ const LOJAS = ["CAXIAS","NORTE SHOPPING","SÃO GONÇALO","BOULEVARD","BANGU","RA
 const COR   = {"CAXIAS":"#1a6bbd","NORTE SHOPPING":"#1a7a4a","SÃO GONÇALO":"#8B1A8B","BOULEVARD":"#b85a00","BANGU":"#b81a1a","RANCHO":"#0e7490","PEDREIRA":"#7c3aed","NOVA AMERICA":"#b45309","CAMPO GRANDE":"#065f46","ITAQUERA":"#be123c","GUARULHOS":"#1e40af","GERAL":"#d4a800"};
 const LOJA_SLUG = {"CAXIAS":"caxias","NORTE SHOPPING":"norte_shopping","SÃO GONÇALO":"sao_goncalo","BOULEVARD":"boulevard","BANGU":"bangu","RANCHO":"nova_iguacu","PEDREIRA":"pedreira","NOVA AMERICA":"nova_america","CAMPO GRANDE":"campo_grande","ITAQUERA":"itaquera","GUARULHOS":"guarulhos"};
 
+/* Mapa de nomes de loja: gn-lojas (maiúsculo) → gn-checklist (display) */
+const CHECKLIST_LOJA_MAP = {
+  "CAXIAS":"Caxias","NORTE SHOPPING":"Norte Shopping","SÃO GONÇALO":"São Gonçalo",
+  "BOULEVARD":"Boulevard","BANGU":"Bangu","RANCHO":"Rancho","PEDREIRA":"Pedreira",
+  "NOVA AMERICA":"Nova América","CAMPO GRANDE":"Campo Grande",
+  "ITAQUERA":"Itaquera","GUARULHOS":"Guarulhos"
+};
+
 /* ═══════════ STATE ═══════════ */
 let loja    = LOJAS[0];
 let semana  = getMonday(new Date());
@@ -605,6 +613,7 @@ let notaFotoName   = "";
 
 let estIniAll  = {};   // lojaKey -> {insumo: val}
 let vendasAll  = {};   // lojaKey -> {cod: qtd}
+let checklistFat = null; // null=não carregado, []=vazio, [{data_operacao,venda_salao,venda_delivery}]
 let contAll    = {};   // lojaKey -> {insumo: val|null}
 let minAll     = {};   // loja    -> {insumo: val}
 let entradasAll= {};   // lojaKey -> [{id,data,nf,fornecedor,insumo,qtd,custoUnit}]
@@ -834,6 +843,26 @@ async function sbPull(silent) {
 function sbScheduleSync() {
   if (sbSyncTimer) clearTimeout(sbSyncTimer);
   sbSyncTimer = setTimeout(sbPush, 1500);
+}
+
+/* Carrega faturamento semanal do check-list (checklist_diario) */
+async function loadChecklistFat() {
+  const checklistLoja = CHECKLIST_LOJA_MAP[loja] || loja;
+  const segKey = wkKey(semana);
+  const domKey = wkKey(addDays(semana, 6));
+  try {
+    const rows = await sbRequest(
+      "checklist_diario?select=data_operacao,venda_salao,venda_delivery" +
+      "&loja=eq." + encodeURIComponent(checklistLoja) +
+      "&data_operacao=gte." + segKey + "&data_operacao=lte." + domKey +
+      "&order=data_operacao",
+      { method: "GET" }
+    );
+    checklistFat = Array.isArray(rows) ? rows.filter(r => (r.venda_salao||0) + (r.venda_delivery||0) > 0) : [];
+  } catch(e) {
+    checklistFat = [];
+  }
+  render();
 }
 
 /* Liga o polling automático para captar mudanças de outras lojas */
@@ -1711,10 +1740,10 @@ function _iniciarVigiaHorario() {
     _verificarAutoAlerta();
   }, 60000);
 }
-function prevWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana, -7); render(); }
-function nextWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana,  7); render(); }
+function prevWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana, -7); checklistFat = null; if(tab==="vendas") loadChecklistFat(); render(); }
+function nextWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana,  7); checklistFat = null; if(tab==="vendas") loadChecklistFat(); render(); }
 function irParaSemana(isoStr) { semana = new Date(isoStr); tab = "relatorio"; render(); }
-function changeLoja(v) { if (lojaForcada) return; loja = v; tab = "home"; render(); }
+function changeLoja(v) { if (lojaForcada) return; loja = v; tab = "home"; checklistFat = null; render(); }
 function carregarPermissaoLoja() {
   try {
     var s = JSON.parse(localStorage.getItem('gn_session_v1') || 'null');
@@ -1738,6 +1767,7 @@ function goTab(t) {
   if (abasPermitidas && !abasPermitidas.includes(t)) return;
   tab = t;
   busca = "";   // limpa busca ao trocar de aba
+  if (t === "vendas") { checklistFat = null; loadChecklistFat(); } // carrega faturamento do check-list
   render();
   if (t === 'entrega') carregarEntregas(true);
   // foco automático na busca se a aba tem campo de busca
@@ -3996,9 +4026,32 @@ function render() {
           <span style="font-size:11px;color:#94a3b8">Esta aba exibe apenas os dados registrados anteriormente. Para lançar vendas, use o app Check-list.</span>
         </div>
       </div>
+      <!-- Faturamento do Check-list -->
+      ${checklistFat === null ? `
+      <div class="card" style="padding:12px;text-align:center;color:#64748b;font-size:12px">⏳ Buscando faturamento do check-list…</div>` :
+      checklistFat.length === 0 ? `
+      <div class="card" style="padding:12px;display:flex;align-items:center;gap:8px;color:#64748b;font-size:12px">
+        <span>📋</span><span>Sem faturamento registrado no check-list esta semana</span></div>` : `
+      <div class="card" style="padding:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <div class="sec-label" style="margin-bottom:0">📋 Faturamento — Check-list</div>
+          <span style="font-size:13px;font-weight:800;color:#f59e0b">R$ ${checklistFat.reduce((s,r)=>s+(r.venda_salao||0)+(r.venda_delivery||0),0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})}</span>
+        </div>
+        ${checklistFat.map(r=>{
+          const diasPT=['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+          const d=new Date(r.data_operacao+'T12:00:00');
+          const label=diasPT[d.getDay()]+' '+String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0');
+          const tot=(r.venda_salao||0)+(r.venda_delivery||0);
+          const fmtR=v=>'R$ '+v.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+          return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.05)">' +
+            '<span style="font-size:11px;color:#94a3b8">'+label+'</span>' +
+            '<div style="text-align:right"><div style="font-size:12px;font-weight:600;color:#f0f0f0">'+fmtR(tot)+'</div>' +
+            '<div style="font-size:10px;color:#64748b">Salão '+fmtR(r.venda_salao||0)+' · Del. '+fmtR(r.venda_delivery||0)+'</div></div></div>';
+        }).join('')}
+      </div>`}
       <div style="display:flex;align-items:center;justify-content:space-between">
         <div>
-          <div class="sec-label" style="margin-bottom:1px">💰 Vendas do Período</div>
+          <div class="sec-label" style="margin-bottom:1px">🍽️ Pratos Vendidos</div>
           <div style="font-size:11px;color:#475569">${loja} · ${fmt(semana)} → ${fmt(dom)}</div>
         </div>
         <span style="font-size:15px;font-weight:900;color:#f59e0b">${tv} itens</span>
