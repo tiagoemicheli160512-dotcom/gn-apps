@@ -330,6 +330,7 @@ function PainelGeral({ onSelectLoja }) {
   const [clSemana, setClSemana] = useState({}); // { BANGU: { '2026-07-01': 85, ... } }
   const [fatDias, setFatDias] = useState({});    // { BANGU: { '2026-07-01': 5000, ... } }
   const [comissoes, setComissoes] = useState({}); // { BANGU: 1234.56, ... }
+  const [metas, setMetas] = useState({});         // { BANGU: 15000, ... }
   const [weekDates, setWeekDates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [semana, setSemana] = useState('');
@@ -391,11 +392,31 @@ function PainelGeral({ onSelectLoja }) {
         setComissoes(coms);
       });
 
-    Promise.all([pFat, pCom]).catch(() => {}).finally(() => setLoading(false));
+    // Metas semanais por loja (checklist_carnes.fat.meta)
+    const pMeta = fetch(
+      `${SB_URL}/rest/v1/checklist_carnes?semana_inicio=eq.${start}&select=loja,fat`,
+      { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
+    )
+      .then(r => r.json())
+      .then(rows => {
+        const mt = {};
+        (rows || []).forEach(row => {
+          const k = DISPLAY_TO_KEY[row.loja];
+          if (!k) return;
+          const m = parseFloat(row.fat?.meta) || 0;
+          if (m > 0) mt[k] = m;
+        });
+        setMetas(mt);
+      }).catch(() => {});
+
+    Promise.all([pFat, pCom, pMeta]).catch(() => {}).finally(() => setLoading(false));
   }, []);
 
   const totalBruto    = Object.values(dados).reduce((s, d) => s + d.fat, 0);
   const lojasComDados = Object.keys(dados).length;
+  const totalMeta     = Object.values(metas).reduce((s, m) => s + m, 0);
+  const metaPct       = totalMeta > 0 ? Math.min(100, Math.round((totalBruto / totalMeta) * 100)) : null;
+  const metaFalta     = totalMeta > 0 && totalBruto < totalMeta ? totalMeta - totalBruto : 0;
 
   const pSec  = { fontSize: 10, fontWeight: 800, letterSpacing: 1.4, textTransform: 'uppercase', color: '#d4a800', marginBottom: 10, paddingLeft: 2 };
   const pCard = (cor, temDados) => ({ display: 'flex', flexDirection: 'column', gap: 0, background: '#0e0e1e', border: `1px solid ${temDados ? cor + '35' : '#161628'}`, borderRadius: 14, padding: '11px 13px', cursor: 'pointer' });
@@ -416,6 +437,24 @@ function PainelGeral({ onSelectLoja }) {
           {loading ? 'Carregando…' : `${lojasComDados} de ${LOJAS_LISTA.length} lojas com dados esta semana`}
         </div>
         {semana ? <div style={{ fontSize: 10, color: '#2a2a4a', marginTop: 4 }}>{semana}</div> : null}
+
+        {/* Barra de meta consolidada */}
+        {!loading && totalMeta > 0 && (
+          <div style={{ marginTop: 14, borderTop: '1px solid rgba(212,168,0,.15)', paddingTop: 12 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
+              <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1, textTransform: 'uppercase', color: '#d4a800' }}>🎯 Meta semanal consolidada</div>
+              <div style={{ fontSize: 13, fontWeight: 800, color: metaPct >= 100 ? '#22c55e' : metaPct >= 70 ? '#F26419' : '#ef4444', fontVariantNumeric: 'tabular-nums' }}>{metaPct}%</div>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#44445a', marginBottom: 5, fontVariantNumeric: 'tabular-nums' }}>
+              <span>{fmtR(totalBruto)} de {fmtR(totalMeta)}</span>
+              {metaFalta > 0 && <span style={{ color: '#ef4444' }}>falta {fmtR(metaFalta)}</span>}
+              {metaFalta === 0 && metaPct !== null && <span style={{ color: '#22c55e' }}>✓ Atingida</span>}
+            </div>
+            <div style={{ height: 6, borderRadius: 4, background: 'rgba(255,255,255,.07)', overflow: 'hidden' }}>
+              <div style={{ height: '100%', borderRadius: 4, width: metaPct + '%', background: metaPct >= 100 ? '#22c55e' : metaPct >= 70 ? '#F26419' : '#ef4444', transition: 'width .6s ease' }} />
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Cards por loja */}
@@ -428,6 +467,8 @@ function PainelGeral({ onSelectLoja }) {
           const clDias   = clSemana[k] || {};
           const fatDiasK = fatDias[k] || {};
           const comissao = comissoes[k] != null ? comissoes[k] : null;
+          const metaLoja = metas[k] || 0;
+          const metaLojaPct = metaLoja > 0 && d ? Math.min(100, Math.round((d.fat / metaLoja) * 100)) : null;
 
           return (
             <div key={k} onClick={() => onSelectLoja(k)} style={pCard(cor, temDados)}>
@@ -470,6 +511,19 @@ function PainelGeral({ onSelectLoja }) {
                   );
                 })}
               </div>
+
+              {/* Mini barra de meta por loja */}
+              {metaLojaPct !== null && (
+                <div style={{ marginTop: 7 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: '#44445a', marginBottom: 3, fontVariantNumeric: 'tabular-nums' }}>
+                    <span>🎯 Meta {fmtR(metaLoja)}</span>
+                    <span style={{ color: metaLojaPct >= 100 ? '#22c55e' : metaLojaPct >= 70 ? '#F26419' : '#ef4444', fontWeight: 700 }}>{metaLojaPct}%</span>
+                  </div>
+                  <div style={{ height: 3, borderRadius: 2, background: 'rgba(255,255,255,.06)', overflow: 'hidden' }}>
+                    <div style={{ height: '100%', borderRadius: 2, width: metaLojaPct + '%', background: metaLojaPct >= 100 ? '#22c55e' : metaLojaPct >= 70 ? '#F26419' : '#ef4444' }} />
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}
@@ -488,10 +542,14 @@ function PainelGeral({ onSelectLoja }) {
                   const clDias = clSemana[k] || {};
                   const dias = weekDates.filter(({ iso }) => clDias[iso] !== undefined);
                   const media = dias.length ? Math.round(dias.reduce((s, { iso }) => s + clDias[iso], 0) / dias.length) : null;
-                  return `• ${LOJA_DISPLAY[k]}: ${fmtR(fat)}${media !== null ? ' · CL ' + media + '%' : ''}`;
+                  const mt = metas[k] || 0;
+                  const mpct = mt > 0 ? Math.min(100, Math.round((fat / mt) * 100)) : null;
+                  return `• ${LOJA_DISPLAY[k]}: ${fmtR(fat)}${mpct !== null ? ' (' + mpct + '% da meta)' : ''}${media !== null ? ' · CL ' + media + '%' : ''}`;
                 });
               const total = Object.values(dados).reduce((s, d) => s + d.fat, 0);
-              const msg = `*GN Apps — Resumo Semanal*\n${semana}\n\n${linhas.join('\n')}\n\n*Total: ${fmtR(total)}*\n_Gerado em ${hoje}_`;
+              const metaTotal = Object.values(metas).reduce((s, m) => s + m, 0);
+              const metaLinha = metaTotal > 0 ? `\nMeta consolidada: ${fmtR(metaTotal)} (${Math.min(100, Math.round((total/metaTotal)*100))}%)` : '';
+              const msg = `*GN Apps — Resumo Semanal*\n${semana}\n\n${linhas.join('\n')}\n\n*Total: ${fmtR(total)}*${metaLinha}\n_Gerado em ${hoje}_`;
               const url = 'https://api.whatsapp.com/send?text=' + encodeURIComponent(msg);
               window.open(url, '_blank');
             }}
