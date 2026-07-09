@@ -2833,7 +2833,7 @@ async function _sincronizarComPedidos(produtosSync) {
 }
 
 async function confirmarPedido(modo) {
-  // modo: 'urgencia' (sem Excel) | 'final' (com Excel)
+  // modo: 'urgencia' (contagem rápida, envia pedido) | 'final' (fecha semana + Excel)
   const p = getPedido();
   const k = lojaKey();
   const semanaAnterior = addDays(semana, -7);
@@ -2843,6 +2843,7 @@ async function confirmarPedido(modo) {
   if (!contAll[kAnterior]) contAll[kAnterior] = {};
   let atualizados = 0;
   const itensConf = [];
+  const produtosParaSync = [];
 
   // Calcular o que o pedido ANTERIOR havia gravado (para poder subtrair e substituir)
   const pedidoAnterior = {};
@@ -2879,7 +2880,7 @@ async function confirmarPedido(modo) {
     const qtdBase    = (cx * fator) + und;
     const pedCx      = parseFloat(entry.pedidoCx)  || 0;
     const pedUnd     = parseFloat(entry.pedidoUnd) || 0;
-    if (qtdBase === 0 && !pedidoAnterior[insumoMapeado || nomeUpper]) return;
+    if (qtdBase === 0 && pedCx === 0 && pedUnd === 0 && !pedidoAnterior[insumoMapeado || nomeUpper]) return;
 
     const destino = insumoMapeado || nomeUpper;
 
@@ -2900,12 +2901,14 @@ async function confirmarPedido(modo) {
       delete estIniAll[k][nomeUpper];
       delete contAll[kAnterior][nomeUpper];
     }
-    if (qtdBase > 0) {
+    if (qtdBase > 0 || pedCx > 0 || pedUnd > 0) {
       atualizados++;
       itensConf.push({ produto: prod.produto, fornecedor: prod.fornecedor || '', cx, und, pedidoCx: pedCx, pedidoUnd: pedUnd });
+      produtosParaSync.push({ prod, cx, und, pedidoCx: pedCx, pedidoUnd: pedUnd, fator });
     }
   });
 
+  // Registrar confirmação
   if (!pedidoConfs[k]) pedidoConfs[k] = [];
   pedidoConfs[k].push({
     id: Date.now() + Math.random().toString(36).slice(2,7),
@@ -2916,8 +2919,32 @@ async function confirmarPedido(modo) {
   });
 
   autoSave();
-  showToast('✅ ' + atualizados + ' produto(s) confirmados!\nEstoque atualizado (entradas preservadas).');
-  setTimeout(gerarExcelPedido, 400);
+
+  // Enviar ao app Pedidos ANTES de avançar semana (usa semana atual como referência)
+  let syncResult = null;
+  if (produtosParaSync.length > 0) {
+    try {
+      syncResult = await _sincronizarComPedidos(produtosParaSync);
+    } catch(e) {
+      syncResult = { contagens: 0, itens: 0, erros: 1 };
+    }
+  }
+
+  // Avançar semana (estoque da próxima semana parte da contagem atual)
+  avancarSemana();
+
+  // Toast consolidado (substitui o toast de avancarSemana)
+  if (produtosParaSync.length > 0) {
+    const pedOk = syncResult && syncResult.erros === 0;
+    showToast('✅ ' + atualizados + ' produto(s) confirmados!\nEstoque + semana atualizados.' + (pedOk ? '\nApp Pedidos: OK ✓' : '\nApp Pedidos: sem conexão'));
+  } else {
+    showToast('✅ ' + atualizados + ' produto(s) confirmados!\nEstoque e semana atualizados.');
+  }
+
+  // Gerar Excel apenas no modo final
+  if (modo === 'final') {
+    setTimeout(gerarExcelPedido, 400);
+  }
 }
 
 /* Retorna a lista de produtos na ordem original + itens custom inseridos na posição certa */
