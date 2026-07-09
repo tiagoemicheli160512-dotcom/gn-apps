@@ -688,6 +688,7 @@ select option { background: var(--graf2); color: var(--txt); }
       <button class="turno-op" data-t="NOITE" onclick="selTurno('NOITE')">NOITE</button>
     </div>
     <button class="btn-pri" onclick="abrirCaixa()">Abrir caixa</button>
+    <button class="btn-sec" style="margin-top:8px" onclick="consultarCaixa()">🔍 Consultar histórico</button>
     <div class="err-txt" id="turnoErro"></div>
     <button class="btn-sec" onclick="logout()">Trocar usuário</button>
   </div>
@@ -700,6 +701,8 @@ select option { background: var(--graf2); color: var(--txt); }
     <span class="hdr-data" id="tData"></span>
     <span id="tChip"></span>
     <div class="hdr-btns">
+      <span id="consultaChip" class="hidden" style="font-size:9px;color:var(--ouro);background:#2a1a00;border:1px solid var(--ouro);padding:3px 8px;border-radius:20px;font-weight:bold;letter-spacing:1px">CONSULTA</span>
+      <button class="hdr-btn hidden" id="btnAbrirModo" onclick="sairConsulta()">Abrir caixa</button>
       <button class="hdr-btn" onclick="voltarTurno()">↩ Turno</button>
       <button class="hdr-btn" onclick="logout()">Sair</button>
     </div>
@@ -819,6 +822,14 @@ select option { background: var(--graf2); color: var(--txt); }
   </div>
 
   <div class="pane hidden" id="pane-fechar">
+    <div class="secao" id="secRepique">
+      <h3>Repique</h3>
+      <div class="form-group" style="margin-bottom:0">
+        <label>Valor do repique (R$)</label>
+        <input id="repiqueInput" type="text" inputmode="decimal" placeholder="0,00"
+          oninput="atualizarRepiqueLocal(this)" onblur="salvarRepique(this)">
+      </div>
+    </div>
     <div class="secao">
       <h3>Resumo geral</h3>
       <div id="resGeral"></div>
@@ -838,7 +849,7 @@ select option { background: var(--graf2); color: var(--txt); }
         <div class="n">R$ 0,00</div>
       </div>
     </div>
-    <button class="btn-whats" onclick="enviarWhats()">📲 Enviar WhatsApp</button>
+    <button class="btn-whats" id="btnWhats" onclick="enviarWhats()">📲 Enviar WhatsApp</button>
     <button class="btn-fechar" id="btnFechar" onclick="fecharCaixa()">Marcar caixa como FECHADO</button>
     <div class="err-txt" id="fecharErro"></div>
   </div>
@@ -878,9 +889,9 @@ const ENTRADAS = [
   {k:'Vale Refeição',cod:'—'},{k:'Alelo',cod:'9'},
   {k:'Pix',cod:'12'},{k:'Sodexo',cod:'10'},
   {k:'Hipercard',cod:'3'},{k:'IFOOD',cod:'—'},
-  {k:'OUTROS',cod:'—'},{k:'Dinheiro',cod:'—'}
+  {k:'Online',cod:'—'},{k:'OUTROS',cod:'—'},{k:'Dinheiro',cod:'—'}
 ];
-const NAO_CARTAO = ['Dinheiro','IFOOD','Vale Refeição','OUTROS'];
+const NAO_CARTAO = ['Dinheiro','IFOOD','Online','Vale Refeição','OUTROS'];
 
 const SAIDAS = [
   ['taxa_cartao','Taxa Cartão'],['gorjeta_garcom','Gorjeta Garçom'],
@@ -892,7 +903,7 @@ const SAIDAS = [
   ['condominio','Condomínio'],['insumo','Insumo']
 ];
 
-const S = { user: null, loja: null, turnoSel: null, fech: null, comprovantes: [], saidas: [], supr: [], notas10: [], bandAtiva: null };
+const S = { user: null, loja: null, turnoSel: null, fech: null, comprovantes: [], saidas: [], supr: [], notas10: [], bandAtiva: null, modoConsulta: false };
 
 function $(id) { return document.getElementById(id); }
 
@@ -919,9 +930,15 @@ const totSaidas = () => S.saidas.reduce((a, s) => a + Number(s.valor), 0);
 const fundo = () => Number(S.fech?.suprimento_inicial) || 700;
 const suprNotas = () => S.supr.reduce((a, s) => a + Number(s.valor), 0);
 const suprDinheiro = () => Math.max(0, fundo() - suprNotas());
-const totalGeral = () => totEntradas() - totSaidas() + suprDinheiro();
+const totalGeral = () => totEntradas() - totSaidas();
 const totCartoes = () => S.comprovantes.filter(c => !NAO_CARTAO.includes(c.bandeira)).reduce((a, c) => a + Number(c.valor), 0);
 const repique = () => { const base = S.notas10.reduce((a, n) => a + Number(n.valor), 0); return base * 0.10; };
+const repiqueVal = () => Number(S.fech?.repique) || 0;
+const ifoodVal = () => totEntradaK('IFOOD');
+const onlineVal = () => totEntradaK('Online');
+const deliveryVal = () => ifoodVal() + onlineVal();
+const vendaSalao = () => (totEntradas() - repiqueVal()) - deliveryVal();
+const totLiquido = () => totEntradas() - repiqueVal() - totSaidas();
 const cssId = s => s.replace(/[^a-zA-Z]/g, '');
 
 function toast(msg) {
@@ -1000,6 +1017,8 @@ function entrarApp() {
   $('tLoja').textContent = S.loja;
   $('tData').textContent = S.fech.data.split('-').reverse().join('/');
   $('tChip').innerHTML = `<span class="chip ${S.turnoSel.toLowerCase()}">${S.turnoSel}</span>`;
+  $('consultaChip').classList.toggle('hidden', !S.modoConsulta);
+  $('btnAbrirModo').classList.toggle('hidden', !S.modoConsulta);
   $('bandGrid').innerHTML = ENTRADAS.map(b => `
     <button class="band ${b.k === 'Dinheiro' ? 'dinheiro' : ''}" onclick="abrirModal('${b.k.replace(/'/g,"\\'")}')">
       <span class="cod">${b.cod === '—' ? 'manual' : 'cód ' + b.cod}</span>
@@ -1021,7 +1040,7 @@ function irPara(p) {
 }
 
 function voltarTurno() {
-  S.fech = null; S.turnoSel = null; S.comprovantes = []; S.saidas = []; S.supr = []; S.notas10 = [];
+  S.fech = null; S.turnoSel = null; S.comprovantes = []; S.saidas = []; S.supr = []; S.notas10 = []; S.modoConsulta = false;
   document.querySelectorAll('.turno-op').forEach(o => o.classList.remove('sel'));
   $('app').classList.add('hidden');
   $('telaTurno').classList.remove('hidden');
@@ -1068,12 +1087,26 @@ function renderTudo() {
 }
 
 function renderFechar() {
+  const rInp = $('repiqueInput');
+  if (rInp && document.activeElement !== rInp) {
+    rInp.value = repiqueVal() > 0 ? String(repiqueVal()).replace('.', ',') : '';
+  }
+  const isConsulta = S.modoConsulta;
+  $('secRepique').style.display = isConsulta ? 'none' : '';
+  $('btnWhats').style.display = isConsulta ? 'none' : '';
+  $('btnFechar').style.display = isConsulta ? 'none' : '';
+
   const rl = (l, v, cls) => `<div class="rl ${cls || ''}"><span>${l}</span><span class="v">${money(v)}</span></div>`;
   $('resGeral').innerHTML =
     rl('Entradas (B42)', totEntradas()) +
+    rl('iFood', ifoodVal(), 'dim') +
+    rl('Online', onlineVal(), 'dim') +
+    rl('Delivery Total', deliveryVal(), 'dim') +
+    rl('Repique', repiqueVal(), 'dim') +
+    rl('Venda Salão', vendaSalao(), 'dim') +
     rl('Saídas (C42)', totSaidas()) +
-    rl('Suprimento em notas (D33)', suprNotas(), 'dim') +
-    rl('TOTAL GERAL (D42)', totalGeral(), 'forte');
+    rl('TOTAL GERAL (D42)', totalGeral(), 'forte') +
+    rl('VALOR LÍQUIDO', totLiquido(), 'forte');
 
   const cart = ENTRADAS.filter(b => !NAO_CARTAO.includes(b.k) && totEntradaK(b.k) > 0)
     .map(b => `<div class="rl"><span>${b.k} <small style="color:var(--mut)">cód ${b.cod}</small></span><span class="v">${money(totEntradaK(b.k))}</span></div>`).join('');
@@ -1093,7 +1126,9 @@ function renderFechar() {
   }
 
   const aprov = S.fech.aprovado_por;
-  $('btnFechar').textContent = S.fech.status === 'FECHADO' ? 'Reabrir caixa' : 'Marcar caixa como FECHADO';
+  if (!isConsulta) {
+    $('btnFechar').textContent = S.fech.status === 'FECHADO' ? 'Reabrir caixa' : 'Marcar caixa como FECHADO';
+  }
   $('fecharErro').textContent = aprov ? `✓ Aprovado por ${aprov}` : '';
   if (aprov) $('fecharErro').style.color = 'var(--ok)';
 }
@@ -1115,12 +1150,19 @@ function calcDif() {
 async function fecharCaixa() {
   const real = parseMoney($('totalReal').value);
   const novo = S.fech.status === 'FECHADO' ? 'ABERTO' : 'FECHADO';
+  const rq = repiqueVal();
   try {
     const u = await sb(`gn_caixa_fechamento?id=eq.${S.fech.id}`, {
       method: 'PATCH', prefer: 'return=representation',
-      body: { total_real: real || null, status: novo }
+      body: { total_real: real || null, status: novo, repique: rq, venda_ifood: ifoodVal(), venda_online: onlineVal() }
     });
     S.fech = u[0];
+    if (novo === 'FECHADO') {
+      try {
+        const cl = await sb(`checklist_diario?loja=eq.${encodeURIComponent(S.loja)}&data=eq.${S.fech.data}&select=id`);
+        if (cl && cl.length) await sb(`checklist_diario?id=eq.${cl[0].id}`, { method: 'PATCH', prefer: 'return=minimal', body: { repique: rq } });
+      } catch(_) {}
+    }
     $('btnFechar').textContent = novo === 'FECHADO' ? 'Reabrir caixa' : 'Marcar caixa como FECHADO';
     renderFechar();
     toast(novo === 'FECHADO' ? 'Caixa fechado!' : 'Caixa reaberto');
@@ -1166,7 +1208,7 @@ function enviarWhats() {
   const difTxt = Math.abs(dif) < 0.01 ? 'Conferido ✓' : (dif > 0 ? `Sobra R$ ${money(Math.abs(dif))}` : `Falta R$ ${money(Math.abs(dif))}`);
   const cart = ENTRADAS.filter(b => !NAO_CARTAO.includes(b.k) && totEntradaK(b.k) > 0)
     .map(b => `  ${b.k}: ${money(totEntradaK(b.k))}`).join('\n');
-  const t = `*GN CAIXA — ${S.loja}*\n${S.fech.data.split('-').reverse().join('/')} · ${S.turnoSel}\n━━━━━━━━━━━━━\n*RESUMO*\nEntradas: ${money(totEntradas())}\nSaídas: ${money(totSaidas())}\n*TOTAL GERAL: ${money(totalGeral())}*\nTotal real: ${money(real)}\n➡ ${difTxt}\n━━━━━━━━━━━━━\n*CARTÕES*\n${cart || '  —'}\nTotal cartões: ${money(totCartoes())}\n━━━━━━━━━━━━━\nFundo: ${money(fundo())} (notas ${money(suprNotas())} / dinh ${money(suprDinheiro())})\nRepique 10%: ${money(repique())}`;
+  const t = `*GN CAIXA — ${S.loja}*\n${S.fech.data.split('-').reverse().join('/')} · ${S.turnoSel}\n━━━━━━━━━━━━━\n*RESUMO*\nEntradas: ${money(totEntradas())}\niFood: ${money(ifoodVal())}  Online: ${money(onlineVal())}\nDelivery: ${money(deliveryVal())}\nRepique: ${money(repiqueVal())}\nVenda Salão: ${money(vendaSalao())}\nSaídas: ${money(totSaidas())}\n*TOTAL GERAL: ${money(totalGeral())}*\n*VALOR LÍQUIDO: ${money(totLiquido())}*\nTotal real: ${money(real)}\n➡ ${difTxt}\n━━━━━━━━━━━━━\n*CARTÕES*\n${cart || '  —'}\nTotal cartões: ${money(totCartoes())}\n━━━━━━━━━━━━━\nFundo: ${money(fundo())} (notas ${money(suprNotas())} / dinh ${money(suprDinheiro())})\nRepique 10%: ${money(repique())}`;
   window.open('https://wa.me/?text=' + encodeURIComponent(t), '_blank');
 }
 
@@ -1223,6 +1265,51 @@ async function addNota10() {
 }
 
 function logout() { localStorage.removeItem(SESSION_KEY); location.reload(); }
+
+async function consultarCaixa() {
+  $('turnoErro').textContent = '';
+  const data = $('turnoData').value;
+  if (!data || !S.turnoSel) { $('turnoErro').textContent = 'Escolha data e turno.'; return; }
+  try {
+    const f = await sb(`gn_caixa_fechamento?loja=eq.${encodeURIComponent(S.loja)}&data=eq.${data}&turno=eq.${S.turnoSel}&select=*`);
+    if (!f || !f.length) { $('turnoErro').textContent = 'Nenhum caixa encontrado para essa data/turno.'; return; }
+    S.fech = f[0];
+    S.modoConsulta = true;
+    await carregarFilhos();
+    entrarApp();
+  } catch(e) { $('turnoErro').textContent = 'Erro ao consultar. ' + e.message; }
+}
+
+function sairConsulta() {
+  S.modoConsulta = false;
+  voltarTurno();
+}
+
+function atualizarRepiqueLocal(el) {
+  if (!S.fech) return;
+  S.fech = { ...S.fech, repique: parseMoney(el.value) };
+  const rl = (l, v, cls) => `<div class="rl ${cls || ''}"><span>${l}</span><span class="v">${money(v)}</span></div>`;
+  $('resGeral').innerHTML =
+    rl('Entradas (B42)', totEntradas()) +
+    rl('iFood', ifoodVal(), 'dim') +
+    rl('Online', onlineVal(), 'dim') +
+    rl('Delivery Total', deliveryVal(), 'dim') +
+    rl('Repique', repiqueVal(), 'dim') +
+    rl('Venda Salão', vendaSalao(), 'dim') +
+    rl('Saídas (C42)', totSaidas()) +
+    rl('TOTAL GERAL (D42)', totalGeral(), 'forte') +
+    rl('VALOR LÍQUIDO', totLiquido(), 'forte');
+}
+
+async function salvarRepique(el) {
+  if (!S.fech) return;
+  const v = parseMoney(el.value);
+  try {
+    const u = await sb(`gn_caixa_fechamento?id=eq.${S.fech.id}`, { method: 'PATCH', prefer: 'return=representation', body: { repique: v } });
+    S.fech = u[0];
+    toast('Repique salvo');
+  } catch(e) { toast('Erro ao salvar repique'); }
+}
 
 function escolherLojaCaixa(loja) {
   if (!loja) return;
