@@ -344,6 +344,10 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
       <span class="nav-icon">&#128218;</span>
       <span class="nav-label">Fichas</span>
     </button>
+    <button class="nav-btn" data-tab="faltas-dia" onclick="setTab('faltas-dia')">
+      <span class="nav-icon">&#9888;&#65039;</span>
+      <span class="nav-label">Faltas</span>
+    </button>
   </nav>
 </div>
 
@@ -406,7 +410,11 @@ let S = {
   provLoja: '',
   provisoes: [],
   entregasPendentes: [],
+  entregasConfirmadas: [],
   provisoesAtrasadas: [],
+
+  // Faltas do dia
+  faltaDiaLoja: '',
 
   // Totais pedido por loja (calculado)
   totaisPorLoja: {},
@@ -482,11 +490,18 @@ function datePlusWeeks(date, n) {
   return d;
 }
 
+function zerarSaldosSemana() {
+  Object.values(S.contagens).forEach(porLoja => {
+    Object.values(porLoja).forEach(c => { c.atual = null; });
+  });
+}
+
 async function navegarSemana(delta) {
   const nova = datePlusWeeks(S.semanaAtiva, delta);
   const mondayHoje = getMondayOfWeek();
   if (nova > mondayHoje) return; // não avança além da semana atual
   S.semanaAtiva = nova;
+  zerarSaldosSemana(); // limpa saldo vigente ao trocar de semana
   $('content').innerHTML = '<div style="padding:20px;text-align:center"><div class="spin" style="margin:0 auto"></div></div>';
   await carregarPedidoAtual();
   renderPedido();
@@ -689,8 +704,16 @@ async function carregarContagens() {
 }
 
 async function carregarProvisoes() {
+  const monday = getMondayOfWeek().toISOString().split('T')[0];
+  const sunday = getSundayOfWeek(getMondayOfWeek()).toISOString().split('T')[0];
+  const { data: pedidos } = await db.from('gn_pedidos')
+    .select('id').gte('data_pedido', monday).lte('data_pedido', sunday);
+  const pedidoIds = (pedidos || []).map(p => p.id);
+  if (!pedidoIds.length) { S.provisoes = []; return; }
+
   let q = db.from('gn_provisoes')
     .select('*, gn_catalogo(produto,und,grupo), gn_pedidos(data_pedido)')
+    .in('pedido_id', pedidoIds)
     .order('data_entrega', {ascending:true})
     .order('fornecedor');
 
@@ -706,6 +729,21 @@ async function carregarEntregasPendentes() {
     .eq('status', 'AGUARDANDO')
     .order('data_entrega');
   S.entregasPendentes = data || [];
+}
+
+async function carregarEntregasConfirmadas() {
+  const monday = getMondayOfWeek().toISOString().split('T')[0];
+  const sunday = getSundayOfWeek(getMondayOfWeek()).toISOString().split('T')[0];
+  const { data: pedidos } = await db.from('gn_pedidos')
+    .select('id').gte('data_pedido', monday).lte('data_pedido', sunday);
+  const pedidoIds = (pedidos || []).map(p => p.id);
+  if (!pedidoIds.length) { S.entregasConfirmadas = []; return; }
+  const { data } = await db.from('gn_provisoes')
+    .select('*, gn_catalogo(produto,und), gn_pedidos(data_pedido), gn_recebimentos(qtd_recebida,valor_recebido,validado_por,diferenca_qtd,observacao)')
+    .in('status', ['RECEBIDO_OK','DIVERGENCIA'])
+    .in('pedido_id', pedidoIds)
+    .order('data_entrega');
+  S.entregasConfirmadas = data || [];
 }
 
 // ═══════════════════════════════════════════════
@@ -900,6 +938,7 @@ function renderContent() {
     case 'provisoes':   renderProvisoes(); break;
     case 'entrega':     renderEntrega(); break;
     case 'fichas':      renderFichas(); break;
+    case 'faltas-dia':  renderFaltaDia(); break;
   }
 }
 
@@ -1008,8 +1047,9 @@ function renderPedido() {
             </div>
             <div class="qty-ctrl">
               <button class="qty-btn" onclick="ajustarQtd('${prod.id}','${lojaAtiva}',${prod.custo||0},-1)" ${pedConfirmado?'disabled':''}>−</button>
-              <input class="qty-input" type="number" min="0" step="0.5"
+              <input class="qty-input" type="text" inputmode="decimal" min="0"
                 value="${qtdAtual||''}" placeholder="0" ${pedConfirmado?'disabled':''}
+                oninput="qtdChanged('${prod.id}','${lojaAtiva}',${prod.custo||0},this.value)"
                 onchange="qtdChanged('${prod.id}','${lojaAtiva}',${prod.custo||0},this.value)"
                 onblur="qtdChanged('${prod.id}','${lojaAtiva}',${prod.custo||0},this.value)">
               <button class="qty-btn" onclick="ajustarQtd('${prod.id}','${lojaAtiva}',${prod.custo||0},1)" ${pedConfirmado?'disabled':''}>+</button>
@@ -1066,8 +1106,9 @@ function renderPedido() {
               <span class="todos-loja-vig">Est.vig:${vigV}</span>
               <div class="qty-ctrl-sm">
                 <button class="qty-btn-sm" onclick="ajustarQtd('${prod.id}','${loja.slug_pedido}',${prod.custo||0},-1)" ${pedConfirmado?'disabled':''}>−</button>
-                <input class="qty-input-sm" type="number" min="0" step="0.5"
+                <input class="qty-input-sm" type="text" inputmode="decimal" min="0"
                   value="${qtdL||''}" placeholder="0" ${pedConfirmado?'disabled':''}
+                  oninput="qtdChanged('${prod.id}','${loja.slug_pedido}',${prod.custo||0},this.value)"
                   onchange="qtdChanged('${prod.id}','${loja.slug_pedido}',${prod.custo||0},this.value)"
                   onblur="qtdChanged('${prod.id}','${loja.slug_pedido}',${prod.custo||0},this.value)">
                 <button class="qty-btn-sm" onclick="ajustarQtd('${prod.id}','${loja.slug_pedido}',${prod.custo||0},1)" ${pedConfirmado?'disabled':''}>+</button>
@@ -1223,17 +1264,20 @@ async function ajustarQtd(catalogoId, lojaSlug, custo, delta) {
   const atual = S.pedidoItens[catalogoId]?.[lojaSlug]?.qtd ?? 0;
   const nova = Math.max(0, atual + delta);
 
-  // Atualiza input visual
-  const inputs = document.querySelectorAll('.qty-input');
-  inputs.forEach(inp => {
+  // Atualiza inputs visuais (modo loja e modo todos)
+  document.querySelectorAll('.qty-input').forEach(inp => {
     const row = inp.closest('.prod-row');
     if (!row) return;
-    // Match pelo contexto do onclick dos botões irmãos
     const bts = row.querySelectorAll('.qty-btn');
-    const onclickAttr = bts[0]?.getAttribute('onclick') || '';
-    if (onclickAttr.includes(catalogoId) && onclickAttr.includes(lojaSlug)) {
-      inp.value = nova || '';
-    }
+    const onclick = bts[0]?.getAttribute('onclick') || '';
+    if (onclick.includes(catalogoId) && onclick.includes(lojaSlug)) inp.value = nova || '';
+  });
+  document.querySelectorAll('.qty-input-sm').forEach(inp => {
+    const row = inp.closest('.todos-loja-row');
+    if (!row) return;
+    const bts = row.querySelectorAll('.qty-btn-sm');
+    const onclick = bts[0]?.getAttribute('onclick') || '';
+    if (onclick.includes(catalogoId) && onclick.includes(lojaSlug)) inp.value = nova || '';
   });
 
   await salvarItem(catalogoId, lojaSlug, nova, custo || null);
@@ -1870,8 +1914,11 @@ function gerarWppPedido() {
 }
 
 function modalValidar(provisaoId) {
-  const prov = S.provisoes.find(p => p.id === provisaoId);
+  const prov = S.provisoes.find(p => p.id === provisaoId) || S.entregasConfirmadas?.find(p => p.id === provisaoId);
   if (!prov) return;
+
+  let sessNome = '';
+  try { sessNome = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null')?.nome || ''; } catch(e) {}
 
   abrirModal(`
     <div class="modal-titulo">
@@ -1891,6 +1938,10 @@ function modalValidar(provisaoId) {
         <label class="form-label">VALOR RECEBIDO (R$)</label>
         <input class="form-input" id="m-val-rec" type="number" step="0.01" value="${parseFloat(prov.valor_previsto)||''}" placeholder="0.00">
       </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">RECEBIDO POR</label>
+      <input class="form-input" id="m-recebido-por" type="text" value="${sessNome}" placeholder="Nome do funcionário">
     </div>
     <div class="form-group">
       <label class="form-label">OBSERVAÇÃO</label>
@@ -2034,6 +2085,9 @@ async function confirmarEntrega(provisaoId) {
   const qtdRec = parseFloat($('m-qtd-rec').value) || 0;
   const valRec = parseFloat($('m-val-rec').value) || 0;
   const obs    = $('m-obs-rec').value.trim() || null;
+  const recebidoPor = ($('m-recebido-por')?.value || '').trim() || (() => {
+    try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null')?.nome || 'SISTEMA'; } catch(e) { return 'SISTEMA'; }
+  })();
   const prov   = S.provisoes.find(p => p.id === provisaoId);
 
   const qtdPrev = parseFloat(prov?.qtd_prevista) || 0;
@@ -2047,7 +2101,7 @@ async function confirmarEntrega(provisaoId) {
     valor_recebido: valRec,
     diferenca_qtd: diff,
     observacao: obs,
-    validado_por: 'MATHEUS'
+    validado_por: recebidoPor
   }]);
 
   // Atualiza status da provisão
@@ -2059,63 +2113,98 @@ async function confirmarEntrega(provisaoId) {
 }
 
 // ═══════════════════════════════════════════════
-// RENDER: ENTREGA (resumo de pendentes)
+// RENDER: ENTREGA (pendentes + confirmados semana)
 // ═══════════════════════════════════════════════
 async function renderEntrega() {
   $('content').innerHTML = '<div class="empty"><div class="spin"></div></div>';
-  await carregarEntregasPendentes();
+  await Promise.all([carregarEntregasPendentes(), carregarEntregasConfirmadas()]);
 
+  // ── Seção pendentes ──
+  let htmlPendentes = '';
   if (S.entregasPendentes.length === 0) {
-    $('content').innerHTML = `
-      <div class="sec-header"><div class="sec-titulo">Validar Entregas</div></div>
-      <div class="empty">
-        <div class="empty-icon">✅</div>
-        <div class="empty-texto">Nenhuma entrega pendente!</div>
+    htmlPendentes = `<div class="empty" style="padding:20px 0">
+      <div class="empty-icon">✅</div>
+      <div class="empty-texto">Nenhuma entrega pendente!</div>
+    </div>`;
+  } else {
+    const porData = {};
+    S.entregasPendentes.forEach(p => {
+      const d = p.data_entrega || 'Sem data';
+      if (!porData[d]) porData[d] = [];
+      porData[d].push(p);
+    });
+    htmlPendentes = Object.entries(porData).sort(([a],[b])=>a.localeCompare(b)).map(([data, itens]) => {
+      const total = itens.reduce((a,p)=>a+(parseFloat(p.valor_previsto)||0),0);
+      const itensHtml = itens.map(p => {
+        const lojaDisplay = S.lojas.find(l=>l.slug_pedido===p.loja_slug)?.nome_display || p.loja_slug;
+        return `<div class="prov-item" style="cursor:pointer" onclick="modalValidar('${p.id}')">
+          <div class="prov-item-header">
+            <div>
+              <div class="prov-forn">${p.fornecedor}</div>
+              <div class="prov-produto">${p.gn_catalogo?.produto||'—'}</div>
+              <div style="font-size:11px;color:var(--muted)">${lojaDisplay}</div>
+            </div>
+            <div style="text-align:right">
+              <div class="num" style="font-size:13px;font-weight:700">R$ ${fmt(p.valor_previsto)}</div>
+              <div style="font-size:11px;color:var(--muted)">${fmtQtd(p.qtd_prevista)} ${p.gn_catalogo?.und||''}</div>
+              <div style="font-size:10px;color:var(--primary);margin-top:4px">Toque para validar →</div>
+            </div>
+          </div>
+        </div>`;
+      }).join('');
+      const dtDisplay = data !== 'Sem data' ? new Date(data+'T12:00:00').toLocaleDateString('pt-BR',{weekday:'short',day:'2-digit',month:'short'}) : 'Sem data';
+      return `<div class="grupo-bloco aberto" style="margin-bottom:8px">
+        <div class="grupo-header" style="cursor:default">
+          <span class="grupo-nome">${dtDisplay}</span>
+          <div style="display:flex;gap:12px;align-items:center">
+            <span style="font-size:11px;color:var(--muted)">${itens.length} item${itens.length>1?'s':''}</span>
+            <span class="num" style="font-size:12px">R$ ${fmt(total)}</span>
+          </div>
+        </div>
+        <div class="grupo-body" style="display:block">${itensHtml}</div>
       </div>`;
-    return;
+    }).join('');
   }
 
-  // Agrupar por data de entrega
-  const porData = {};
-  S.entregasPendentes.forEach(p => {
-    const d = p.data_entrega || 'Sem data';
-    if (!porData[d]) porData[d] = [];
-    porData[d].push(p);
-  });
-
-  const html = Object.entries(porData).sort(([a],[b])=>a.localeCompare(b)).map(([data, itens]) => {
-    const total = itens.reduce((a,p)=>a+(parseFloat(p.valor_previsto)||0),0);
-    const itensHtml = itens.map(p => {
+  // ── Seção confirmados semana vigente ──
+  let htmlConfirmados = '';
+  if (S.entregasConfirmadas.length > 0) {
+    const itensHtml = S.entregasConfirmadas.map(p => {
       const lojaDisplay = S.lojas.find(l=>l.slug_pedido===p.loja_slug)?.nome_display || p.loja_slug;
-      return `<div class="prov-item" style="cursor:pointer" onclick="modalValidar('${p.id}')">
+      const rec = Array.isArray(p.gn_recebimentos) ? p.gn_recebimentos[0] : p.gn_recebimentos;
+      const recebidoPor = rec?.validado_por || '—';
+      const isDiv = p.status === 'DIVERGENCIA';
+      const statusBadge = isDiv
+        ? '<span class="status-badge s-div" style="font-size:9px">DIVERGÊNCIA</span>'
+        : '<span class="status-badge s-ok" style="font-size:9px">RECEBIDO ✓</span>';
+      return `<div class="prov-item">
         <div class="prov-item-header">
           <div>
             <div class="prov-forn">${p.fornecedor}</div>
             <div class="prov-produto">${p.gn_catalogo?.produto||'—'}</div>
             <div style="font-size:11px;color:var(--muted)">${lojaDisplay}</div>
           </div>
-          <div style="text-align:right">
-            <div class="num" style="font-size:13px;font-weight:700">R$ ${fmt(p.valor_previsto)}</div>
-            <div style="font-size:11px;color:var(--muted)">${fmtQtd(p.qtd_prevista)} ${p.gn_catalogo?.und||''}</div>
-            <div style="font-size:10px;color:var(--primary);margin-top:4px">Toque para validar →</div>
+          <div style="text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:3px">
+            ${statusBadge}
+            <div class="num" style="font-size:12px;font-weight:700">R$ ${fmt(rec?.valor_recebido ?? p.valor_previsto)}</div>
+            <div style="font-size:10px;color:var(--muted)">${fmtQtd(rec?.qtd_recebida ?? p.qtd_prevista)} ${p.gn_catalogo?.und||''}</div>
           </div>
         </div>
+        <div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border);display:flex;align-items:center;gap:6px">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--muted);flex-shrink:0"><circle cx="12" cy="8" r="4"/><path d="M6 20v-2a6 6 0 0112 0v2"/></svg>
+          <span style="font-size:11px;color:var(--muted)">Recebido por: </span>
+          <span style="font-size:11px;font-weight:700;color:var(--text)">${recebidoPor}</span>
+          ${rec?.diferenca_qtd && Math.abs(rec.diferenca_qtd) >= 0.01 ? `<span style="font-size:10px;color:#fbbf24;margin-left:auto">Dif: ${rec.diferenca_qtd > 0 ? '+' : ''}${fmtQtd(rec.diferenca_qtd)}</span>` : ''}
+        </div>
+        ${rec?.observacao ? `<div style="font-size:10px;color:var(--muted);margin-top:4px;font-style:italic">"${rec.observacao}"</div>` : ''}
       </div>`;
     }).join('');
-
-    const dtDisplay = data !== 'Sem data' ? new Date(data+'T12:00:00').toLocaleDateString('pt-BR',{weekday:'short',day:'2-digit',month:'short'}) : 'Sem data';
-
-    return `<div class="grupo-bloco aberto" style="margin-bottom:8px">
-      <div class="grupo-header" style="cursor:default">
-        <span class="grupo-nome">${dtDisplay}</span>
-        <div style="display:flex;gap:12px;align-items:center">
-          <span style="font-size:11px;color:var(--muted)">${itens.length} item${itens.length>1?'s':''}</span>
-          <span class="num" style="font-size:12px">R$ ${fmt(total)}</span>
-        </div>
-      </div>
-      <div class="grupo-body" style="display:block">${itensHtml}</div>
-    </div>`;
-  }).join('');
+    htmlConfirmados = `
+      <div style="margin-top:20px">
+        <div class="sec-titulo" style="font-size:13px;margin-bottom:8px">Confirmados esta semana <span class="badge" style="background:rgba(34,197,94,.15);color:#4ade80;font-size:10px">${S.entregasConfirmadas.length}</span></div>
+        ${itensHtml}
+      </div>`;
+  }
 
   const totalGeral = S.entregasPendentes.reduce((a,p)=>a+(parseFloat(p.valor_previsto)||0),0);
 
@@ -2124,13 +2213,85 @@ async function renderEntrega() {
       <div class="sec-titulo">Entregas Pendentes <span class="badge badge-r">${S.entregasPendentes.length}</span></div>
       <div style="display:flex;align-items:center;gap:8px">
         <button onclick="gerarWppEntregas()" style="background:rgba(37,211,102,.12);border:1px solid rgba(37,211,102,.3);border-radius:6px;padding:5px 10px;color:#22c55e;font-size:11px;font-weight:700;cursor:pointer">📲 WPP</button>
-        <div class="num" style="font-size:13px;font-weight:700">R$ ${fmt(totalGeral)}</div>
+        ${S.entregasPendentes.length > 0 ? `<div class="num" style="font-size:13px;font-weight:700">R$ ${fmt(totalGeral)}</div>` : ''}
       </div>
     </div>
-    <div style="font-size:11px;color:var(--muted);margin-bottom:12px">
-      Toque em um item para registrar o que foi recebido.
+    ${S.entregasPendentes.length > 0 ? `<div style="font-size:11px;color:var(--muted);margin-bottom:12px">Toque em um item para registrar o que foi recebido.</div>` : ''}
+    ${htmlPendentes}
+    ${htmlConfirmados}
+  `;
+}
+
+// ═══════════════════════════════════════════════
+// RENDER: FALTAS DO DIA
+// ═══════════════════════════════════════════════
+async function renderFaltaDia() {
+  $('content').innerHTML = '<div class="empty"><div class="spin"></div></div>';
+  const hojeIso = hoje();
+
+  const { data: rows } = await db.from('checklist_diario')
+    .select('loja, faltas')
+    .eq('data_operacao', hojeIso);
+
+  const registros = (rows || []).filter(r => Array.isArray(r.faltas) && r.faltas.length > 0);
+
+  const lojasFiltro = [{ slug_pedido: '', nome_display: 'Todas as lojas' }, ...S.lojas];
+  const tabsHtml = lojasFiltro.map(l =>
+    `<button class="store-tab${S.faltaDiaLoja === l.slug_pedido ? ' ativo' : ''}"
+      onclick="S.faltaDiaLoja='${l.slug_pedido}';renderFaltaDia()">${l.nome_display}</button>`
+  ).join('');
+
+  const registrosFiltrados = S.faltaDiaLoja
+    ? registros.filter(r => {
+        const loja = S.lojas.find(l => l.slug_pedido === S.faltaDiaLoja || l.slug_checklist === S.faltaDiaLoja || l.nome_display === S.faltaDiaLoja);
+        return r.loja === S.faltaDiaLoja || (loja && r.loja === loja.loja);
+      })
+    : registros;
+
+  const urgenciaIcon = u => u === 'Alta' ? '🔴' : u === 'Media' ? '🟡' : '🟢';
+
+  const itensHtml = registrosFiltrados.length === 0
+    ? `<div class="empty" style="padding:30px 0">
+        <div class="empty-icon">✅</div>
+        <div class="empty-texto">${S.faltaDiaLoja ? 'Nenhuma falta registrada nessa loja hoje.' : 'Nenhuma falta registrada hoje.'}</div>
+      </div>`
+    : registrosFiltrados.map(r => {
+        const lojaDisplay = S.lojas.find(l =>
+          l.slug_pedido === r.loja || l.loja === r.loja || l.nome_display === r.loja
+        )?.nome_display || r.loja;
+        const itensLoja = r.faltas.map(f => {
+          const icon = urgenciaIcon(f.urgencia);
+          return `<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)">
+            <span style="font-size:16px;flex-shrink:0">${icon}</span>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px;font-weight:600;color:var(--text)">${f.nome || '—'}</div>
+              ${f.quantidade ? `<div style="font-size:11px;color:var(--muted)">Qtd: ${f.quantidade}</div>` : ''}
+            </div>
+            <span style="font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;flex-shrink:0;${
+              f.urgencia==='Alta' ? 'background:rgba(239,68,68,.15);color:#fca5a5' :
+              f.urgencia==='Media' ? 'background:rgba(251,191,36,.15);color:#fbbf24' :
+              'background:rgba(34,197,94,.15);color:#4ade80'
+            }">${f.urgencia || 'Média'}</span>
+          </div>`;
+        }).join('');
+        return `<div class="grupo-bloco aberto" style="margin-bottom:10px">
+          <div class="grupo-header" style="cursor:default">
+            <span class="grupo-nome">${lojaDisplay}</span>
+            <span class="badge badge-r" style="font-size:10px">${r.faltas.length} falta${r.faltas.length>1?'s':''}</span>
+          </div>
+          <div class="grupo-body" style="display:block;padding:0 12px">${itensLoja}</div>
+        </div>`;
+      }).join('');
+
+  const totalFaltas = registrosFiltrados.reduce((n, r) => n + (r.faltas?.length || 0), 0);
+
+  $('content').innerHTML = `
+    <div class="sec-header">
+      <div class="sec-titulo">Faltas do Dia <span class="badge badge-r">${totalFaltas}</span></div>
+      <div style="font-size:11px;color:var(--muted)">${new Date(hojeIso+'T12:00:00').toLocaleDateString('pt-BR',{weekday:'short',day:'2-digit',month:'short'})}</div>
     </div>
-    ${html}
+    <div class="store-tabs" style="margin-bottom:12px">${tabsHtml}</div>
+    ${itensHtml}
   `;
 }
 
