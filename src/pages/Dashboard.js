@@ -39,6 +39,7 @@ const MODULES = [
   { id: 'lojas',      name: 'Lojas',            sub: 'Ficha operacional da loja',          icon: '🏪', perm: 'lojas',      url: '/gn-lojas.html' },
   { id: 'caixa',      name: 'Caixa',            sub: 'Fechamento de caixa e aprovação',    icon: '💵', perm: 'caixa',      url: '/gn-caixa.html' },
   { id: 'mestra',     name: 'Comissões Mestra', sub: 'Visão consolidada — todas as lojas', icon: '🏆', perm: 'mestra',     url: '/gn-comissoes-mestra.html', masterOnly: true },
+  { id: 'rh',         name: 'RH / Financeiro',  sub: 'Consolidador de RH e dados financeiros', icon: '👥', perm: 'rh',         url: '/gn-rh.html' },
 ];
 
 function getSession() {
@@ -633,6 +634,7 @@ function HomeScreen({ session: sessionProp, onLogout }) {
     if (perms.lojas    || isMaster) set('lojas',   'Online', 'g');
     if (perms.pedidos  || isMaster) set('pedidos', 'Online', 'g');
     if (isMaster && perms.mestra !== false) set('mestra',  'Visão consolidada', 'o');
+    if (perms.rh  || isMaster) set('rh', 'Online', 'b');
   }, [session, masterLoja, lojaEfetiva, isMaster]);
 
   const navTo = (url) => {
@@ -795,6 +797,12 @@ function HomeScreen({ session: sessionProp, onLogout }) {
           <button style={S.bottomItem} onClick={() => navTo('/gn-usuarios.html')}>
             <span style={S.bottomIcon}>🔐</span>
             <span style={S.bottomLabel(false)}>Senhas</span>
+          </button>
+        )}
+        {(perms.rh || isMaster) && (
+          <button style={S.bottomItem} onClick={() => navTo('/gn-rh.html')}>
+            <span style={S.bottomIcon}>👥</span>
+            <span style={S.bottomLabel(false)}>RH</span>
           </button>
         )}
       </nav>
