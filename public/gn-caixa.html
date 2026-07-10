@@ -905,6 +905,37 @@ const SAIDAS = [
 
 const S = { user: null, loja: null, turnoSel: null, fech: null, comprovantes: [], saidas: [], supr: [], notas10: [], bandAtiva: null, modoConsulta: false };
 
+// Mapeamento userKey (gn_caixa_fechamento.loja) → nome display (checklist_diario.loja)
+const LOJA_CHK_MAP = {
+  'BANGU':'Bangu','CAXIAS':'Caxias','SÃO GONÇALO':'São Gonçalo',
+  'NORTE SHOPPING':'Norte Shopping','BOULEVARD':'Boulevard','RANCHO':'Rancho',
+  'PEDREIRA':'Pedreira','NOVA AMERICA':'Nova América','CAMPO GRANDE':'Campo Grande',
+  'ITAQUERA':'Itaquera','GUARULHOS':'Guarulhos',
+};
+
+// Sincroniza venda_salao, venda_delivery e repique do caixa para o checklist do dia.
+// Soma todos os caixas da loja na data informada.
+async function sincronizarChecklist(data) {
+  if (!S.loja || !data) return;
+  try {
+    const lojaChk = LOJA_CHK_MAP[S.loja] || S.loja;
+    const caixas = await sb(`gn_caixa_fechamento?loja=eq.${encodeURIComponent(S.loja)}&data=eq.${data}&select=total_real,repique,venda_ifood,venda_online`);
+    if (!caixas || !caixas.length) return;
+    // delivery e repique: somados de todos os caixas do dia
+    const vDelivery  = caixas.reduce((a,c)=>a+(parseFloat(c.venda_ifood)||0)+(parseFloat(c.venda_online)||0),0);
+    const sumRepique = caixas.reduce((a,c)=>a+(parseFloat(c.repique)||0),0);
+    // venda_salao: apenas caixas já fechados (total_real preenchido)
+    const vSalao = caixas
+      .filter(c=>c.total_real!=null)
+      .reduce((a,c)=>a+Math.max(0,parseFloat(c.total_real)-(parseFloat(c.repique)||0)-(parseFloat(c.venda_ifood)||0)-(parseFloat(c.venda_online)||0)),0);
+    await sb(`checklist_diario?on_conflict=data_operacao,loja`, {
+      method: 'POST',
+      prefer: 'return=minimal,resolution=merge-duplicates',
+      body: { loja: lojaChk, data_operacao: data, venda_salao: vSalao, venda_delivery: vDelivery, repique: sumRepique }
+    });
+  } catch(_) {}
+}
+
 function $(id) { return document.getElementById(id); }
 
 async function sb(path, opts = {}) {
@@ -1157,12 +1188,7 @@ async function fecharCaixa() {
       body: { total_real: real || null, status: novo, repique: rq, venda_ifood: ifoodVal(), venda_online: onlineVal() }
     });
     S.fech = u[0];
-    if (novo === 'FECHADO') {
-      try {
-        const cl = await sb(`checklist_diario?loja=eq.${encodeURIComponent(S.loja)}&data=eq.${S.fech.data}&select=id`);
-        if (cl && cl.length) await sb(`checklist_diario?id=eq.${cl[0].id}`, { method: 'PATCH', prefer: 'return=minimal', body: { repique: rq } });
-      } catch(_) {}
-    }
+    sincronizarChecklist(S.fech.data);
     $('btnFechar').textContent = novo === 'FECHADO' ? 'Reabrir caixa' : 'Marcar caixa como FECHADO';
     renderFechar();
     toast(novo === 'FECHADO' ? 'Caixa fechado!' : 'Caixa reaberto');
@@ -1308,6 +1334,7 @@ async function salvarRepique(el) {
     const u = await sb(`gn_caixa_fechamento?id=eq.${S.fech.id}`, { method: 'PATCH', prefer: 'return=representation', body: { repique: v } });
     S.fech = u[0];
     toast('Repique salvo');
+    sincronizarChecklist(S.fech.data);
   } catch(e) { toast('Erro ao salvar repique'); }
 }
 
