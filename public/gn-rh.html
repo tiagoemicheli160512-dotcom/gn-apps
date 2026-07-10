@@ -367,15 +367,12 @@ function formatSemana(monday) {
   return { num:weekNum, periodo:`${fmt(monday)} – ${fmt(sun)}` };
 }
 
-// Índice de semana para o sistema de Comissões (igual ao gn-checklist.html)
-function comissoesSemIdx(dateISO) {
-  if (!dateISO) return null;
-  const dt = new Date(dateISO+'T12:00:00');
-  const d2 = new Date(Date.UTC(dt.getFullYear(),dt.getMonth(),dt.getDate()));
-  const dow = d2.getUTCDay()||7; d2.setUTCDate(d2.getUTCDate()+4-dow);
-  const jan1 = new Date(Date.UTC(d2.getUTCFullYear(),0,1));
-  const weekNum = Math.ceil(((d2-jan1)/86400000+1)/7);
-  return weekNum - 2; // COMISSOES_CAL começa na semana 2 → idx 0
+// Índice de semana pelo sistema Mestra (âncora fixa 2026-01-05 = seg.)
+function mestraWeekIdx(monday) {
+  const anchor = new Date(2026, 0, 5);
+  const d = monday instanceof Date ? monday : getMondayOfWeek();
+  const td = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  return Math.max(0, Math.floor((td - anchor) / (7 * 86400000)));
 }
 
 // Índice do dia dentro da semana comissões (0=Seg..6=Dom)
@@ -420,20 +417,18 @@ function fecharModal()    { $('modal-bg').classList.remove('ativo'); }
 // DATA — OPERAÇÕES
 // ══════════════════════════════════════════════
 async function carregarOperacoes() {
-  const [resUsers, resCaixa, resComissoes] = await Promise.all([
-    db.from('gn_usuarios').select('nome,cargo,loja,ativo').eq('ativo', true),
+  const [resCaixa, resComissoes] = await Promise.all([
     db.from('gn_caixa_fechamento').select('loja,data,turno,status,total_real,repique,venda_ifood,venda_online')
       .eq('data', hoje()).order('turno', {ascending:false}),
-    db.from('gn_lojas').select('loja,all_data').in('loja', LOJAS.map(l=>l.comKey)),
+    db.from('gn_comissoes').select('loja,all_data').in('loja', LOJAS.map(l=>l.comKey)),
   ]);
-  S.usuarios = resUsers.data || [];
 
-  // Última fechamento do dia por loja
+  // Último fechamento do dia por loja
   const caixaMap = {};
   (resCaixa.data || []).forEach(r => { if (!caixaMap[r.loja]) caixaMap[r.loja] = r; });
   S.caixaHoje = Object.values(caixaMap);
 
-  // Comissões: all_data por loja
+  // all_data por loja (chave = comKey)
   S.comissoesData = {};
   (resComissoes.data || []).forEach(r => { S.comissoesData[r.loja] = r.all_data; });
 }
@@ -470,17 +465,17 @@ async function carregarFinanceiro() {
 async function carregarRH() {
   if (!S.rhSemana) S.rhSemana = getMondayOfWeek();
   const loja = S.rhLoja;
-  const weekIdx = comissoesSemIdx(isoWeekStr(S.rhSemana));
+  const weekIdx = mestraWeekIdx(S.rhSemana);
 
   const [resBH, resCom] = await Promise.all([
     db.from('gn_banco_horas').select('mes,registros').eq('loja', loja.chkKey),
-    db.from('gn_lojas').select('all_data').eq('loja', loja.comKey).single(),
+    db.from('gn_comissoes').select('all_data').eq('loja', loja.comKey).single(),
   ]);
   S.bancoHoras = (resBH.data || []).filter(r => r.mes !== 'CONFIG');
 
-  // Extrai funcs da semana atual
+  // Extrai funcs da semana selecionada via all_data[semIdx]
   const allData = resCom.data?.all_data;
-  const semWD = (allData?.semanas && weekIdx >= 0) ? (allData.semanas[weekIdx] || null) : null;
+  const semWD = allData ? (allData[String(weekIdx)] || null) : null;
   S.presencaSemana = semWD ? { idx: weekIdx, funcs: semWD.funcs || [] } : null;
 }
 
@@ -489,31 +484,26 @@ async function carregarRH() {
 // ══════════════════════════════════════════════
 function renderOperacoes() {
   const hojeISO = hoje();
-  const semIdx  = comissoesSemIdx(hojeISO);
+  const semIdx  = mestraWeekIdx(getMondayOfWeek());
   const diaIdx  = comissoesDiaIdx(hojeISO);
 
   // Totais globais
   let totalFuncs = 0, totalFaltas = 0, totalAtestados = 0, totalCaixa = 0;
 
   const cardsHtml = LOJAS.map(loja => {
-    // Funcionários ativos
-    const funcsAtivos = S.usuarios.filter(u => u.loja === loja.userKey).length;
+    // Funcionários e presença do checklist/comissões
+    const allData = S.comissoesData[loja.comKey];
+    const wd = allData ? allData[String(semIdx)] : null;
+    const funcs = wd?.funcs ? wd.funcs.filter(f => f.nome?.trim()) : [];
+    const funcsAtivos = funcs.length;
     totalFuncs += funcsAtivos;
 
-    // Presença de hoje (do sistema de comissões)
-    const allData = S.comissoesData[loja.comKey];
     let faltas = 0, atestados = 0;
-    if (allData?.semanas && semIdx >= 0) {
-      const wd = allData.semanas[semIdx];
-      if (wd?.funcs) {
-        wd.funcs.forEach(f => {
-          if (!f.nome?.trim()) return;
-          const st = f.dias?.[diaIdx] || 'PRESENTE';
-          if (st === 'FALTA') faltas++;
-          else if (st === 'ATESTADO') atestados++;
-        });
-      }
-    }
+    funcs.forEach(f => {
+      const st = f.dias?.[diaIdx] || '';
+      if (st === 'FALTA') faltas++;
+      else if (st === 'ATESTADO') atestados++;
+    });
     totalFaltas += faltas; totalAtestados += atestados;
 
     // Status caixa hoje
