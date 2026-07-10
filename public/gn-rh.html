@@ -311,7 +311,9 @@ let S = {
   // Operações
   usuarios: [],          // [{nome, loja(userKey), cargo, ativo}]
   comissoesData: {},     // { comKey: allData }
-  caixaHoje: [],         // [{loja(chkKey), status, total_real, ...}]
+  opCaixa: [],           // caixa records for selected period
+  opMode: 'dia',         // 'dia' | 'sem' | 'mes'
+  opData: null,          // Date representing selected day / week Monday / month
   // Financeiro
   finLoja: '',           // '' = todas
   finSemana: null,       // Date (segunda-feira)
@@ -345,6 +347,9 @@ function fmtBRShort(iso) {
   return dt.toLocaleDateString('pt-BR', { weekday:'short', day:'2-digit', month:'short' });
 }
 
+function isoDate(d) {
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
 function getMondayOfWeek(d = new Date()) {
   const dd = new Date(d); dd.setHours(0,0,0,0);
   const dow = dd.getDay(); const diff = (dow===0)?-6:1-dow;
@@ -431,18 +436,27 @@ function fecharModal()    { $('modal-bg').classList.remove('ativo'); }
 // DATA — OPERAÇÕES
 // ══════════════════════════════════════════════
 async function carregarOperacoes() {
+  if (!S.opData) { S.opData = new Date(); S.opData.setHours(12,0,0,0); }
+  const mode = S.opMode || 'dia';
+  let ini, fim;
+  if (mode === 'dia') {
+    ini = fim = isoDate(S.opData);
+  } else if (mode === 'sem') {
+    const mon = getMondayOfWeek(S.opData);
+    ini = isoDate(mon); fim = isoDate(getSundayOfWeek(mon));
+  } else {
+    const y = S.opData.getFullYear(), m = S.opData.getMonth();
+    ini = y+'-'+String(m+1).padStart(2,'0')+'-01';
+    fim = isoDate(new Date(y, m+1, 0));
+  }
+
   const [resCaixa, resComissoes] = await Promise.all([
     db.from('gn_caixa_fechamento').select('loja,data,turno,status,total_real,repique,venda_ifood,venda_online')
-      .eq('data', hoje()).order('turno', {ascending:false}),
+      .gte('data', ini).lte('data', fim).order('turno', {ascending:false}),
     db.from('gn_comissoes').select('loja,all_data').in('loja', LOJAS.map(l=>l.comKey)),
   ]);
 
-  // Último fechamento do dia por loja
-  const caixaMap = {};
-  (resCaixa.data || []).forEach(r => { if (!caixaMap[r.loja]) caixaMap[r.loja] = r; });
-  S.caixaHoje = Object.values(caixaMap);
-
-  // all_data por loja (chave = comKey)
+  S.opCaixa = resCaixa.data || [];
   S.comissoesData = {};
   (resComissoes.data || []).forEach(r => { S.comissoesData[r.loja] = r.all_data; });
 }
@@ -497,50 +511,101 @@ async function carregarRH() {
 // RENDER — OPERAÇÕES (Tab 1)
 // ══════════════════════════════════════════════
 function renderOperacoes() {
-  const hojeISO = hoje();
-  const semIdx  = mestraWeekIdx(getMondayOfWeek());
-  const diaIdx  = comissoesDiaIdx(hojeISO);
+  if (!S.opData) { S.opData = new Date(); S.opData.setHours(12,0,0,0); }
+  const mode  = S.opMode || 'dia';
+  const today = new Date(); today.setHours(12,0,0,0);
+  const isToday = mode === 'dia' && isoDate(S.opData) === isoDate(today);
+
+  // Nav label
+  let navLabel = '';
+  if (mode === 'dia') {
+    navLabel = S.opData.toLocaleDateString('pt-BR',{weekday:'short',day:'2-digit',month:'short',year:'numeric'});
+    if (isToday) navLabel += ' · hoje';
+  } else if (mode === 'sem') {
+    const mon = getMondayOfWeek(S.opData);
+    const sem = formatSemana(mon);
+    navLabel = `Sem. ${sem.num} · ${sem.periodo}`;
+  } else {
+    navLabel = S.opData.toLocaleDateString('pt-BR',{month:'long',year:'numeric'});
+    navLabel = navLabel.charAt(0).toUpperCase() + navLabel.slice(1);
+  }
+
+  // Semana idx para busca de comissões
+  const refMon  = getMondayOfWeek(S.opData);
+  const semIdx  = mestraWeekIdx(refMon);
+
+  // Compute faltas helper por loja baseado no modo
+  function contarFaltas(allData) {
+    let faltas = 0, atestados = 0;
+    if (mode === 'dia') {
+      const di = comissoesDiaIdx(isoDate(S.opData));
+      const wd = allData?.[String(semIdx)];
+      (wd?.funcs||[]).filter(f=>f.nome?.trim()).forEach(f=>{
+        const st = f.dias?.[di]||'';
+        if (st==='FALTA'||st==='SUSPENSÃO') faltas++;
+        else if (st==='ATESTADO') atestados++;
+      });
+    } else if (mode === 'sem') {
+      const wd = allData?.[String(semIdx)];
+      (wd?.funcs||[]).filter(f=>f.nome?.trim()).forEach(f=>{
+        (f.dias||[]).forEach(st=>{
+          if (st==='FALTA'||st==='SUSPENSÃO') faltas++;
+          else if (st==='ATESTADO') atestados++;
+        });
+      });
+    } else {
+      // mês: iterar cada dia do mês
+      const y = S.opData.getFullYear(), mo = S.opData.getMonth();
+      const dias = new Date(y, mo+1, 0).getDate();
+      for (let d = 1; d <= dias; d++) {
+        const dt = new Date(y, mo, d, 12);
+        const si = mestraWeekIdx(getMondayOfWeek(dt));
+        const di = comissoesDiaIdx(isoDate(dt));
+        const wd = allData?.[String(si)];
+        (wd?.funcs||[]).filter(f=>f.nome?.trim()).forEach(f=>{
+          const st = f.dias?.[di]||'';
+          if (st==='FALTA'||st==='SUSPENSÃO') faltas++;
+          else if (st==='ATESTADO') atestados++;
+        });
+      }
+    }
+    return { faltas, atestados };
+  }
 
   // Totais globais
   let totalFuncs = 0, totalFaltas = 0, totalAtestados = 0, totalCaixa = 0;
 
   const cardsHtml = LOJAS.map(loja => {
-    // Funcionários: usa a semana mais recente com dados (fallback)
     const allData = S.comissoesData[loja.comKey];
     const wdFuncs = getWDComFallback(allData, semIdx);
-    const funcs = wdFuncs?.funcs ? wdFuncs.funcs.filter(f => f.nome?.trim()) : [];
-    const funcsAtivos = funcs.length;
+    const funcsAtivos = (wdFuncs?.funcs||[]).filter(f=>f.nome?.trim()).length;
     totalFuncs += funcsAtivos;
 
-    // Faltas/atestados: apenas da semana corrente (dados de hoje)
-    let faltas = 0, atestados = 0;
-    const wdHoje = allData ? allData[String(semIdx)] : null;
-    (wdHoje?.funcs || []).filter(f => f.nome?.trim()).forEach(f => {
-      const st = f.dias?.[diaIdx] || '';
-      if (st === 'FALTA') faltas++;
-      else if (st === 'ATESTADO') atestados++;
-    });
+    const { faltas, atestados } = contarFaltas(allData);
     totalFaltas += faltas; totalAtestados += atestados;
 
-    // Status caixa hoje
-    const cx = S.caixaHoje.find(c => c.loja === loja.userKey);
-    const cxStatus = cx?.status || null;
-    const cxTotal  = cx?.total_real || 0;
+    // Caixa: soma do período por loja
+    const cxRecs = (S.opCaixa||[]).filter(r=>r.loja===loja.userKey);
+    const cxTotal = cxRecs.reduce((a,r)=>a+(parseFloat(r.total_real)||0),0);
     totalCaixa += cxTotal;
-
-    const cxBadge = cxStatus
-      ? `<span class="badge ${STATUS_CLASS[cxStatus]||'badge-muted'}">${STATUS_LABEL[cxStatus]||cxStatus}</span>`
-      : `<span class="badge badge-muted">Sem caixa</span>`;
+    // Em modo dia: pega status do primeiro registro
+    const cxStatus = mode==='dia' ? (cxRecs[0]?.status||null) : null;
+    const cxBadge = mode==='dia'
+      ? (cxStatus
+          ? `<span class="badge ${STATUS_CLASS[cxStatus]||'badge-muted'}">${STATUS_LABEL[cxStatus]||cxStatus}</span>`
+          : `<span class="badge badge-muted">Sem caixa</span>`)
+      : '';
 
     const faltaColor = faltas > 0 ? 'color:var(--red)' : 'color:var(--green)';
     const atesColor  = atestados > 0 ? 'color:var(--amber)' : '';
+    const faltaLbl   = mode==='dia' ? 'Faltas Hoje' : 'Faltas';
 
     return `<div class="loja-card">
       <div class="loja-card-header">
         <span class="loja-name">${loja.display}</span>
         <div style="display:flex;align-items:center;gap:8px">
           ${cxBadge}
-          ${cx ? `<span class="num" style="font-size:11px;font-weight:700;color:var(--accent)">${money(cxTotal)}</span>` : ''}
+          ${cxTotal>0 ? `<span class="num" style="font-size:11px;font-weight:700;color:var(--accent)">${money(cxTotal)}</span>` : ''}
         </div>
       </div>
       <div class="loja-metrics">
@@ -550,7 +615,7 @@ function renderOperacoes() {
         </div>
         <div class="loja-metric">
           <span class="loja-metric-val" style="${faltaColor}">${faltas}</span>
-          <span class="loja-metric-lbl">Faltas Hoje</span>
+          <span class="loja-metric-lbl">${faltaLbl}</span>
         </div>
         <div class="loja-metric">
           <span class="loja-metric-val" style="${atesColor}">${atestados}</span>
@@ -560,12 +625,21 @@ function renderOperacoes() {
     </div>`;
   }).join('');
 
+  const caixaLbl = mode==='dia' ? 'Total de Caixa Hoje' : mode==='sem' ? 'Total de Caixa — Semana' : 'Total de Caixa — Mês';
+
   $('content').innerHTML = `
     <div class="sec-header">
-      <div>
-        <div class="sec-title">Operações</div>
-        <div class="sec-sub">${fmtBRShort(hojeISO)}</div>
-      </div>
+      <div class="sec-title">Operações</div>
+    </div>
+    <div class="filter-row" style="gap:4px;margin-bottom:8px">
+      <button class="ftab${mode==='dia'?' ativo':''}" onclick="setOpMode('dia')">Dia</button>
+      <button class="ftab${mode==='sem'?' ativo':''}" onclick="setOpMode('sem')">Semana</button>
+      <button class="ftab${mode==='mes'?' ativo':''}" onclick="setOpMode('mes')">Mês</button>
+    </div>
+    <div class="week-nav" style="margin-bottom:10px">
+      <button onclick="navegarOp(-1)">&#8592;</button>
+      <div class="week-label" style="font-size:13px;font-weight:600">${navLabel}</div>
+      <button ${isoDate(S.opData)>=isoDate(today)?'disabled style="opacity:.35"':''} onclick="navegarOp(1)">&#8594;</button>
     </div>
     <div class="stat-row">
       <div class="stat b"><div class="stat-val">${totalFuncs}</div><div class="stat-lbl">Funcionários</div></div>
@@ -574,7 +648,7 @@ function renderOperacoes() {
     </div>
     <div class="card" style="margin-bottom:14px">
       <div class="card-body" style="display:flex;justify-content:space-between;align-items:center">
-        <span style="font-size:11px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.4px">Total de Caixa Hoje</span>
+        <span style="font-size:11px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.4px">${caixaLbl}</span>
         <span class="num fin-total">${money(totalCaixa)}</span>
       </div>
     </div>
@@ -874,6 +948,30 @@ function renderContent() {
 function recarregar() { renderContent(); }
 
 // ══════════════════════════════════════════════
+// ACTIONS — OPERAÇÕES
+// ══════════════════════════════════════════════
+function setOpMode(mode) {
+  S.opMode = mode;
+  if (!S.opData) { S.opData = new Date(); S.opData.setHours(12,0,0,0); }
+  renderContent();
+}
+
+function navegarOp(delta) {
+  if (!S.opData) { S.opData = new Date(); S.opData.setHours(12,0,0,0); }
+  const mode = S.opMode || 'dia';
+  if (mode === 'dia') {
+    S.opData = new Date(S.opData); S.opData.setDate(S.opData.getDate()+delta);
+  } else if (mode === 'sem') {
+    S.opData = datePlusWeeks(S.opData, delta);
+  } else {
+    S.opData = new Date(S.opData.getFullYear(), S.opData.getMonth()+delta, 1, 12);
+  }
+  const today = new Date(); today.setHours(12,0,0,0);
+  if (S.opData > today) S.opData = today;
+  renderContent();
+}
+
+// ══════════════════════════════════════════════
 // ACTIONS — FINANCEIRO
 // ══════════════════════════════════════════════
 async function filtrarFinLoja(chkKey) {
@@ -1059,6 +1157,7 @@ async function iniciarApp() {
   $('hdr-date').textContent = dt.toLocaleDateString('pt-BR',{weekday:'short',day:'2-digit',month:'short'});
   $('hdr-user').textContent = S.usuario.nome;
 
+  S.opData    = new Date(); S.opData.setHours(12,0,0,0);
   S.finSemana = getMondayOfWeek();
   S.rhSemana  = getMondayOfWeek();
 
