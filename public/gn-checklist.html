@@ -2776,7 +2776,7 @@ function autoSave(){
 async function onDataChange(val){
   // Captura pendências antes de zerar — faltas não recebidas e manutenções não resolvidas
   const carryFaltas = state.faltas.filter(f => f.nome && f.nome.trim());
-  const carryManut  = state.manutencao.filter(m => m.status !== 'Resolvido');
+  const carryManut  = state.manutencao.filter(m => !(m.status === 'Resolvido' && m.confirmado_loja));
 
   // Zera só dados do DIA — carnes (stateWeek) não são afetadas
   state.data=val;
@@ -3784,13 +3784,26 @@ function renderFaltas(){
 // =============================================
 // MANUTENÇÃO
 // =============================================
-function addManutencao(){state.manutencao.push({id:Date.now(),setor:'Salão',tipo:'Estrutura',descricao:'',contato:'',fotoBase64:'',fotoName:'',status:'Pendente'});renderManutencao();autoSave();}
+function addManutencao(){state.manutencao.push({id:Date.now(),setor:'Salão',tipo:'Estrutura',descricao:'',contato:'',fotoBase64:'',fotoName:'',status:'Pendente',confirmado_loja:false});renderManutencao();autoSave();}
 function removeManutencao(id){state.manutencao=state.manutencao.filter(m=>m.id!==id);renderManutencao();autoSave();}
 function updateManut(id,field,val){const m=state.manutencao.find(m=>m.id===id);if(m){m[field]=val;if(field==='status')renderManutencao();autoSave();}}
+
+async function confirmarResolucao(id){
+  const m=state.manutencao.find(m=>m.id===id);
+  if(!m) return;
+  m.confirmado_loja=true;
+  renderManutencao();
+  autoSave();
+  await saveAll();
+  showToast('✅ Resolução confirmada!','success');
+}
+
 function renderManutencao(){
   const lista=document.getElementById('manut-lista');
   const empty=document.getElementById('manut-empty');
-  const pendCount=state.manutencao.filter(m=>m.status!=='Resolvido').length;
+  // Itens que precisam de ação: não concluídos (não resolvido+confirmado)
+  const pendCount=state.manutencao.filter(m=>!(m.status==='Resolvido'&&m.confirmado_loja)).length;
+  const aguardConf=state.manutencao.filter(m=>m.status==='Resolvido'&&!m.confirmado_loja).length;
   const tabBtnManut=document.getElementById('tab-btn-manutencao');
   if(tabBtnManut){
     if(pendCount>0){
@@ -3799,13 +3812,45 @@ function renderManutencao(){
       tabBtnManut.textContent='🔧 Manutenção';
     }
   }
-  document.getElementById('manut-count').textContent=state.manutencao.length+' problemas'+(pendCount?' · '+pendCount+' pendente'+(pendCount>1?'s':''):'');
+  const resumo=[state.manutencao.length+' problema'+(state.manutencao.length!==1?'s':''),
+    pendCount&&!aguardConf?pendCount+' pendente'+(pendCount>1?'s':''):'',
+    aguardConf?aguardConf+' aguardando confirmação':''
+  ].filter(Boolean).join(' · ');
+  document.getElementById('manut-count').textContent=resumo;
   empty.style.display=state.manutencao.length?'none':'block';
   lista.innerHTML=state.manutencao.map(m=>{
-    const sc=m.status==='Pendente'?'background:#1e0f0f;color:#d05050':m.status==='Em andamento'?'background:#1e1e0f;color:#f0c050':'background:#0f1e0f;color:#5cb85c';
+    // ── RESOLVIDO: card compacto de confirmação ──
+    if(m.status==='Resolvido'){
+      if(m.confirmado_loja){
+        return `<div class="card p-3" style="opacity:.55;border:1px solid #1a3a1a;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+            <span style="font-size:10px;padding:2px 9px;border-radius:99px;font-weight:700;background:#0a2818;color:#5cb85c;">✅ Concluído · confirmado pela loja</span>
+            <button class="btn-danger" onclick="removeManutencao(${m.id})">✕</button>
+          </div>
+          <div style="font-size:12px;color:#666;">${m.tipo||'Estrutura'} · ${m.setor}</div>
+          ${m.descricao?`<div style="font-size:11px;color:#555;margin-top:2px;">${escHtml(m.descricao)}</div>`:''}
+        </div>`;
+      }
+      return `<div class="card p-3" style="border:1.5px solid #2a5a2a;background:#0b1e0b;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <span style="font-size:10px;padding:2px 9px;border-radius:99px;font-weight:700;background:#0f2a0f;color:#5cb85c;">✅ Resolvido pelo setor de manutenção</span>
+          <button class="btn-danger" onclick="removeManutencao(${m.id})">✕</button>
+        </div>
+        <div style="font-size:12px;color:#bbb;margin-bottom:4px;">${m.tipo||'Estrutura'} · ${m.setor}</div>
+        ${m.descricao?`<div style="font-size:12px;margin-bottom:6px;">${escHtml(m.descricao)}</div>`:''}
+        ${m.fotoBase64?`<img src="${m.fotoBase64}" class="foto-thumb" style="margin-bottom:8px;">`:'' }
+        <div style="font-size:11px;color:#888;margin-bottom:8px;">Verifique se o problema foi de fato corrigido antes de confirmar.</div>
+        <button onclick="confirmarResolucao(${m.id})"
+          style="width:100%;padding:11px;background:#1a5a1a;color:#5ade5a;border:1.5px solid #2a7a2a;border-radius:8px;font-weight:800;font-size:13px;cursor:pointer;letter-spacing:.3px;">
+          ✅ Confirmar que foi resolvido
+        </button>
+      </div>`;
+    }
+    // ── PENDENTE / EM ANDAMENTO: card editável ──
+    const sc=m.status==='Pendente'?'background:#1e0f0f;color:#d05050':'background:#1e1e0f;color:#f0c050';
     return `<div class="card p-3">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        <span style="font-size:10px;padding:2px 9px;border-radius:99px;font-weight:700;${sc}">${m.status}</span>
+        <span style="font-size:10px;padding:2px 9px;border-radius:99px;font-weight:700;${sc}">${m.status==='Pendente'?'⏳ Pendente':'🔄 Em andamento'}</span>
         <button class="btn-danger" onclick="removeManutencao(${m.id})">✕</button>
       </div>
       <div style="display:flex;flex-direction:column;gap:6px;">
@@ -3818,7 +3863,6 @@ function renderManutencao(){
             <select onchange="updateManut(${m.id},'status',this.value)">
               <option value="Pendente" ${m.status==='Pendente'?'selected':''}>⏳ Pendente</option>
               <option value="Em andamento" ${m.status==='Em andamento'?'selected':''}>🔄 Em andamento</option>
-              <option value="Resolvido" ${m.status==='Resolvido'?'selected':''}>✅ Resolvido</option>
             </select></div>
         </div>
         <div><label class="field-label">Tipo de Manutenção</label>
