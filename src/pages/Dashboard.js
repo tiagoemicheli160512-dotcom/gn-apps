@@ -336,6 +336,8 @@ function PainelGeral({ onSelectLoja }) {
   const [loading, setLoading] = useState(true);
   const [semana, setSemana] = useState('');
   const [freqData, setFreqData] = useState({});
+  const [funcData, setFuncData] = useState({});
+  const [caixaData, setCaixaData] = useState({});
   const [cmv, setCmv] = useState(null);
   const [semIdx, setSemIdx] = useState(() => getMestraWeekIdx());
   const [viewMode, setViewMode] = useState('sem');
@@ -344,6 +346,8 @@ function PainelGeral({ onSelectLoja }) {
     setLoading(true);
     setCmv(null);
     setFreqData({});
+    setFuncData({});
+    setCaixaData({});
     setComissoes({});
     setMetas({});
     setDados({});
@@ -407,14 +411,18 @@ function PainelGeral({ onSelectLoja }) {
       .then(rows => {
         const coms = {};
         const freq = {};
+        const fData = {};
         const dbParaDisplay = {};
         Object.entries(LOJA_COM_KEY).forEach(([display, db]) => { dbParaDisplay[db] = display; });
         (rows || []).forEach(row => {
           if (!row.all_data) return;
-          const wd = row.all_data[String(semIdx)];
+          const allData = row.all_data;
+          const wd = allData[String(semIdx)];
           const total = calcComissaoTotal(wd);
           const displayKey = dbParaDisplay[row.loja] || row.loja;
           if (total !== null) coms[displayKey] = total;
+
+          // Frequência consolidada por tipo
           if (wd?.funcs) {
             const sm = {};
             ['CLT / MENSALISTA','HORISTA','JOVEM APRENDIZ'].forEach(s => { sm[s] = {P:0,F:0,AT:0,total:0}; });
@@ -430,10 +438,45 @@ function PainelGeral({ onSelectLoja }) {
             });
             freq[displayKey] = sm;
           }
+
+          // Func ativos (com fallback para semana mais recente com dados)
+          let wdFuncs = wd;
+          if (!wdFuncs?.funcs?.filter(f => f.nome?.trim()).length) {
+            const keys = Object.keys(allData).map(Number).sort((a, b) => b - a);
+            for (const k of keys) {
+              const w = allData[String(k)];
+              if (w?.funcs?.filter(f => f.nome?.trim()).length) { wdFuncs = w; break; }
+            }
+          }
+          const count = wdFuncs?.funcs?.filter(f => f.nome?.trim()).length || 0;
+
+          // Faltas/atestados da semana selecionada
+          let faltas = 0, atestados = 0;
+          (wd?.funcs || []).filter(f => f.nome?.trim()).forEach(f => {
+            (f.dias || []).forEach(st => {
+              if (st === 'FALTA' || st === 'SUSPENSÃO') faltas++;
+              else if (st === 'ATESTADO') atestados++;
+            });
+          });
+          fData[displayKey] = { count, faltas, atestados };
         });
         setComissoes(coms);
         setFreqData(freq);
+        setFuncData(fData);
       }) : Promise.resolve();
+
+    // Caixa fechamentos por loja — ambos os modos
+    const pCaixa = fetch(
+      `${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${start}&data=lte.${end}&select=loja,total_real`,
+      { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
+    ).then(r => r.json()).then(rows => {
+      const cx = {};
+      (rows || []).forEach(r => {
+        if (!cx[r.loja]) cx[r.loja] = 0;
+        cx[r.loja] += parseFloat(r.total_real) || 0;
+      });
+      setCaixaData(cx);
+    }).catch(() => {});
 
     // Metas — apenas modo semanal
     const pMeta = viewMode === 'sem' ? fetch(
@@ -468,7 +511,7 @@ function PainelGeral({ onSelectLoja }) {
       });
     }).catch(() => {});
 
-    Promise.all([pFat, pCom, pMeta]).catch(() => {}).finally(() => setLoading(false));
+    Promise.all([pFat, pCom, pMeta, pCaixa]).catch(() => {}).finally(() => setLoading(false));
   }, [semIdx, viewMode]);
 
   const totalBruto    = Object.values(dados).reduce((s, d) => s + d.fat, 0);
@@ -610,6 +653,8 @@ function PainelGeral({ onSelectLoja }) {
           const comissao = comissoes[k] != null ? comissoes[k] : null;
           const metaLoja = metas[k] || 0;
           const metaLojaPct = metaLoja > 0 && d ? Math.min(100, Math.round((d.fat / metaLoja) * 100)) : null;
+          const fd = funcData[k];
+          const cx = caixaData[k];
 
           return (
             <div key={k} onClick={() => onSelectLoja(k)} style={pCard(cor, temDados)}>
@@ -636,6 +681,34 @@ function PainelGeral({ onSelectLoja }) {
                 </div>
                 <div style={{ fontSize: 18, color: 'rgba(255,255,255,.15)', flexShrink: 0, marginLeft: 4 }}>›</div>
               </div>
+
+              {/* Métricas operacionais: func / faltas / atestados / caixa */}
+              {(fd || cx != null) && (
+                <div style={{ display:'flex', alignItems:'center', gap:4, marginTop:9, paddingTop:8, borderTop:'1px solid rgba(255,255,255,.04)' }}>
+                  {fd && (
+                    <>
+                      <div style={{ flex:1, textAlign:'center' }}>
+                        <div style={{ fontSize:14, fontWeight:900, color:'#3b82f6', fontVariantNumeric:'tabular-nums', lineHeight:1 }}>{fd.count}</div>
+                        <div style={{ fontSize:8, color:'#3a3a5a', fontWeight:700, textTransform:'uppercase', letterSpacing:.5, marginTop:2 }}>Func.</div>
+                      </div>
+                      <div style={{ flex:1, textAlign:'center' }}>
+                        <div style={{ fontSize:14, fontWeight:900, color: fd.faltas>0?'#ef4444':'#22c55e', fontVariantNumeric:'tabular-nums', lineHeight:1 }}>{fd.faltas}</div>
+                        <div style={{ fontSize:8, color:'#3a3a5a', fontWeight:700, textTransform:'uppercase', letterSpacing:.5, marginTop:2 }}>Faltas</div>
+                      </div>
+                      <div style={{ flex:1, textAlign:'center' }}>
+                        <div style={{ fontSize:14, fontWeight:900, color: fd.atestados>0?'#f0c050':'#22c55e', fontVariantNumeric:'tabular-nums', lineHeight:1 }}>{fd.atestados}</div>
+                        <div style={{ fontSize:8, color:'#3a3a5a', fontWeight:700, textTransform:'uppercase', letterSpacing:.5, marginTop:2 }}>Ates.</div>
+                      </div>
+                    </>
+                  )}
+                  {cx != null && (
+                    <div style={{ flex:fd?2:1, textAlign: fd?'right':'center' }}>
+                      <div style={{ fontSize:11, fontWeight:800, color: cx>0?'#22c55e':'#3a3a5a', fontVariantNumeric:'tabular-nums', lineHeight:1 }}>{fmtR(cx)}</div>
+                      <div style={{ fontSize:8, color:'#3a3a5a', fontWeight:700, textTransform:'uppercase', letterSpacing:.5, marginTop:2 }}>Caixa</div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Grade de dias da semana — check-list + faturamento */}
               <div style={{ display: 'flex', gap: 3, marginTop: 9 }}>
