@@ -551,6 +551,23 @@ body {
 
 .btn-fechar:active { opacity: 0.85; }
 
+.btn-checklist {
+  width: 100%;
+  background: #1a3a1a;
+  color: #4ade80;
+  border: 1px solid #2d6a2d;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: bold;
+  padding: 13px 20px;
+  border-radius: 8px;
+  cursor: pointer;
+  margin-bottom: 10px;
+  letter-spacing: 0.5px;
+}
+.btn-checklist:active { opacity: 0.85; }
+.btn-checklist:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .hist-item {
   background: var(--graf2);
   border: 1px solid var(--linha);
@@ -883,6 +900,7 @@ select option { background: var(--graf2); color: var(--txt); }
         <div class="n">R$ 0,00</div>
       </div>
     </div>
+    <button class="btn-checklist" id="btnLancaChecklist" onclick="lancaChecklistManual()">📋 Lançar no Check-list</button>
     <button class="btn-whats" id="btnWhats" onclick="enviarWhats()">📲 Enviar WhatsApp</button>
     <button class="btn-fechar" id="btnFechar" onclick="fecharCaixa()">Marcar caixa como FECHADO</button>
     <div class="err-txt" id="fecharErro"></div>
@@ -948,26 +966,35 @@ const LOJA_CHK_MAP = {
 };
 
 // Sincroniza venda_salao, venda_delivery e repique do caixa para o checklist do dia.
-// Soma todos os caixas da loja na data informada.
-async function sincronizarChecklist(data) {
+// Soma todos os caixas + comprovantes da loja na data informada.
+async function sincronizarChecklist(data, mostrarToast) {
   if (!S.loja || !data) return;
   try {
     const lojaChk = LOJA_CHK_MAP[S.loja] || S.loja;
-    const caixas = await sb(`gn_caixa_fechamento?loja=eq.${encodeURIComponent(S.loja)}&data=eq.${data}&select=total_real,repique,venda_ifood,venda_online`);
+    const caixas = await sb(`gn_caixa_fechamento?loja=eq.${encodeURIComponent(S.loja)}&data=eq.${data}&select=id,repique`);
     if (!caixas || !caixas.length) return;
-    // delivery e repique: somados de todos os caixas do dia
-    const vDelivery  = caixas.reduce((a,c)=>a+(parseFloat(c.venda_ifood)||0)+(parseFloat(c.venda_online)||0),0);
+    const ids = caixas.map(c => c.id).join(',');
+    // Buscar todos os comprovantes do dia para calcular correto
+    const comps = await sb(`gn_caixa_comprovante?fechamento_id=in.(${ids})&select=bandeira,valor`);
+    const totalEntradas = (comps||[]).reduce((a,c)=>a+Number(c.valor),0);
+    const vDelivery = (comps||[]).filter(c=>c.bandeira==='IFOOD'||c.bandeira==='Online').reduce((a,c)=>a+Number(c.valor),0);
     const sumRepique = caixas.reduce((a,c)=>a+(parseFloat(c.repique)||0),0);
-    // venda_salao: apenas caixas já fechados (total_real preenchido)
-    const vSalao = caixas
-      .filter(c=>c.total_real!=null)
-      .reduce((a,c)=>a+Math.max(0,parseFloat(c.total_real)-(parseFloat(c.repique)||0)-(parseFloat(c.venda_ifood)||0)-(parseFloat(c.venda_online)||0)),0);
+    const vSalao = Math.max(0, totalEntradas - sumRepique - vDelivery);
     await sb(`checklist_diario?on_conflict=data_operacao,loja`, {
       method: 'POST',
       prefer: 'return=minimal,resolution=merge-duplicates',
       body: { loja: lojaChk, data_operacao: data, venda_salao: vSalao, venda_delivery: vDelivery, repique: sumRepique }
     });
+    if (mostrarToast) toast('✅ Lançado no Check-list!');
   } catch(_) {}
+}
+
+async function lancaChecklistManual() {
+  if (!S.fech || !S.loja) return;
+  const btn = $('btnLancaChecklist');
+  if (btn) { btn.disabled = true; btn.textContent = 'Enviando...'; }
+  await sincronizarChecklist(S.fech.data, true);
+  if (btn) { btn.disabled = false; btn.textContent = '📋 Lançar no Check-list'; }
 }
 
 function $(id) { return document.getElementById(id); }
@@ -1158,6 +1185,7 @@ function renderFechar() {
   }
   const isConsulta = S.modoConsulta;
   $('secRepique').style.display = isConsulta ? 'none' : '';
+  $('btnLancaChecklist').style.display = isConsulta ? 'none' : '';
   $('btnWhats').style.display = isConsulta ? 'none' : '';
   $('btnFechar').style.display = isConsulta ? 'none' : '';
 
