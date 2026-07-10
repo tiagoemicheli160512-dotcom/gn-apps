@@ -1063,29 +1063,122 @@ async function salvarFotoComissao(loja, semanaIni) {
       { onConflict: 'loja,semana_ini' }
     );
     if (error) throw error;
-    toast('Foto salva!', 'ok');
+    toast('Foto salva! Analisando com IA...', 'ok');
     fecharModal();
     await carregarFinanceiro(); renderFinanceiro();
+    // Dispara análise OCR em background
+    analisarFotoComissao(loja, semanaIni)
+      .then(() => carregarFinanceiro().then(renderFinanceiro))
+      .catch(e => toast('OCR: ' + e.message, 'err'));
   } catch(e) { toast('Erro: ' + e.message, 'err'); }
+}
+
+async function analisarFotoComissao(loja, semanaIni) {
+  const res = await fetch(`${SUPA_URL}/functions/v1/analisar-foto-comissao`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SUPA_KEY}`,
+      'apikey': SUPA_KEY,
+    },
+    body: JSON.stringify({ loja, semana_ini: semanaIni }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Erro na análise');
+  return data;
 }
 
 function verFoto(loja, semanaIni) {
   const foto = S.comissaoFotos.find(f=>f.loja===loja && f.semana_ini===semanaIni);
   if (!foto?.foto_base64) { toast('Foto não encontrada', 'err'); return; }
   const lojaDisplay = LOJAS.find(l=>l.chkKey===loja)?.display || loja;
+
+  const dias = ['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
+  let ocrHtml = '';
+
+  if (Array.isArray(foto.ocr_brutos) && foto.ocr_brutos.length === 7) {
+    const mestre = foto.ocr_mestre_brutos;
+    const analisadoEm = foto.ocr_analisado_em
+      ? new Date(foto.ocr_analisado_em).toLocaleString('pt-BR', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})
+      : '';
+
+    const cabTh = mestre
+      ? `<th style="text-align:right">Foto (OCR)</th><th style="text-align:right">Sistema</th><th style="text-align:right">Dif.</th>`
+      : `<th style="text-align:right">Foto (OCR)</th>`;
+
+    const linhas = dias.map((d, i) => {
+      const ocr = foto.ocr_brutos[i] || 0;
+      const fmtOcr = 'R$ ' + num(ocr / 100);
+      if (!mestre) return `<tr><td>${d}</td><td style="text-align:right">${fmtOcr}</td></tr>`;
+      const mes = mestre[i] || 0;
+      const dif = ocr - mes;
+      const difStr = dif === 0 ? '—'
+        : `<span style="color:${dif>0?'var(--green)':'var(--red)'}">${dif>0?'+':''}R$ ${num(dif/100)}</span>`;
+      return `<tr>
+        <td>${d}</td>
+        <td style="text-align:right">${fmtOcr}</td>
+        <td style="text-align:right">R$ ${num(mes/100)}</td>
+        <td style="text-align:right">${difStr}</td>
+      </tr>`;
+    }).join('');
+
+    ocrHtml = `
+      <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-size:12px;font-weight:700;color:var(--muted)">🤖 Leitura da Foto</span>
+          ${analisadoEm ? `<span style="font-size:10px;color:var(--muted)">${analisadoEm}</span>` : ''}
+        </div>
+        <div style="overflow-x:auto">
+          <table style="width:100%;font-size:12px;border-collapse:collapse">
+            <thead><tr style="font-size:10px;color:var(--muted);border-bottom:1px solid var(--border)">
+              <th style="text-align:left;padding-bottom:4px">Dia</th>${cabTh}
+            </tr></thead>
+            <tbody>${linhas}</tbody>
+          </table>
+        </div>
+        <button class="btn btn-sec" style="margin-top:10px;width:100%;font-size:12px"
+          onclick="triggerAnalisarFoto('${loja}','${semanaIni}')">🔄 Re-analisar</button>
+      </div>`;
+  } else {
+    ocrHtml = `
+      <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+        <button id="btn-analisar" class="btn btn-pri" style="width:100%;font-size:13px"
+          onclick="triggerAnalisarFoto('${loja}','${semanaIni}')">🤖 Analisar com IA</button>
+        <p style="font-size:10px;color:var(--muted);text-align:center;margin-top:6px">
+          Extrai valores diários e compara com o sistema
+        </p>
+      </div>`;
+  }
+
   abrirModal(`
     <div class="modal-handle"></div>
     <div class="modal-title">
       📸 ${lojaDisplay} — ${fmtBR(semanaIni)}
       <button class="modal-close" onclick="fecharModal()">×</button>
     </div>
-    <img src="${foto.foto_base64}" style="width:100%;border-radius:var(--rs);max-height:60dvh;object-fit:contain;background:var(--surf2)">
+    <img src="${foto.foto_base64}" style="width:100%;border-radius:var(--rs);max-height:50dvh;object-fit:contain;background:var(--surf2)">
     <p style="font-size:11px;color:var(--muted);margin-top:8px">Enviado por: ${foto.enviado_por||'—'}</p>
+    ${ocrHtml}
     <div class="modal-actions">
       <button class="btn btn-sec" onclick="fecharModal()">Fechar</button>
       <button class="btn btn-danger" onclick="excluirFoto('${loja}','${semanaIni}')">Excluir</button>
     </div>
   `);
+}
+
+async function triggerAnalisarFoto(loja, semanaIni) {
+  const btn = document.getElementById('btn-analisar') || document.querySelector('[onclick*="triggerAnalisarFoto"]');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Analisando...'; }
+  try {
+    await analisarFotoComissao(loja, semanaIni);
+    await carregarFinanceiro();
+    toast('Análise concluída!', 'ok');
+    fecharModal();
+    verFoto(loja, semanaIni);
+  } catch(e) {
+    toast('Erro na análise: ' + e.message, 'err');
+    if (btn) { btn.disabled = false; btn.textContent = '🤖 Analisar com IA'; }
+  }
 }
 
 async function excluirFoto(loja, semanaIni) {
