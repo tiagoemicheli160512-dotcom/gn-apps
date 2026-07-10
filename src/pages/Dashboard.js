@@ -337,16 +337,40 @@ function PainelGeral({ onSelectLoja }) {
   const [semana, setSemana] = useState('');
   const [freqData, setFreqData] = useState({});
   const [cmv, setCmv] = useState(null);
+  const [semIdx, setSemIdx] = useState(() => getMestraWeekIdx());
+  const [viewMode, setViewMode] = useState('sem');
 
   useEffect(() => {
-    const { start, end } = getWeekRange();
-    const wk = getISOWeekNum();
-    const br = (iso) => iso.slice(5).split('-').reverse().join('/');
-    setSemana(`${br(start)} – ${br(end)} (sem. ${wk})`);
-    setWeekDates(getWeekDates(start));
-    const semIdx = getMestraWeekIdx();
+    setLoading(true);
+    setCmv(null);
+    setFreqData({});
+    setComissoes({});
+    setMetas({});
+    setDados({});
 
-    // Faturamento + check-list da semana
+    // Calcula datas de início e fim conforme modo
+    const anchor = new Date(2026, 0, 5);
+    const iso = dt => dt.getFullYear() + '-' + String(dt.getMonth()+1).padStart(2,'0') + '-' + String(dt.getDate()).padStart(2,'0');
+    let start, end;
+    if (viewMode === 'mes') {
+      const d = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + semIdx * 7);
+      const first = new Date(d.getFullYear(), d.getMonth(), 1);
+      const last  = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+      start = iso(first); end = iso(last);
+      const label = first.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+      setSemana(label.charAt(0).toUpperCase() + label.slice(1));
+      setWeekDates([]);
+    } else {
+      const d = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + semIdx * 7);
+      const e = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 6);
+      start = iso(d); end = iso(e);
+      const br = s => s.slice(5).split('-').reverse().join('/');
+      const isCurrent = semIdx === getMestraWeekIdx();
+      setSemana(`${br(start)} – ${br(end)}${isCurrent ? ' · atual' : ''}`);
+      setWeekDates(getWeekDates(start));
+    }
+
+    // Faturamento + check-list
     const pFat = fetch(
       `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${start}&data_operacao=lte.${end}&select=loja,data_operacao,venda_salao,venda_delivery,checklist_pct`,
       { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
@@ -374,8 +398,8 @@ function PainelGeral({ onSelectLoja }) {
         setFatDias(fd);
       });
 
-    // Comissão real da semana vigente via gn_comissoes (mesmo cálculo do Mestra)
-    const pCom = fetch(
+    // Comissão + Frequência — apenas modo semanal
+    const pCom = viewMode === 'sem' ? fetch(
       `${SB_URL}/rest/v1/gn_comissoes?select=loja,all_data`,
       { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
     )
@@ -383,7 +407,6 @@ function PainelGeral({ onSelectLoja }) {
       .then(rows => {
         const coms = {};
         const freq = {};
-        // Mapa inverso: chave do banco (ex: 'NORTE') → chave de exibição (ex: 'NORTE SHOPPING')
         const dbParaDisplay = {};
         Object.entries(LOJA_COM_KEY).forEach(([display, db]) => { dbParaDisplay[db] = display; });
         (rows || []).forEach(row => {
@@ -410,10 +433,10 @@ function PainelGeral({ onSelectLoja }) {
         });
         setComissoes(coms);
         setFreqData(freq);
-      });
+      }) : Promise.resolve();
 
-    // Metas semanais por loja (checklist_carnes.fat.meta)
-    const pMeta = fetch(
+    // Metas — apenas modo semanal
+    const pMeta = viewMode === 'sem' ? fetch(
       `${SB_URL}/rest/v1/checklist_carnes?semana_inicio=eq.${start}&select=loja,fat`,
       { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
     )
@@ -427,9 +450,9 @@ function PainelGeral({ onSelectLoja }) {
           if (m > 0) mt[k] = m;
         });
         setMetas(mt);
-      }).catch(() => {});
+      }).catch(() => {}) : Promise.resolve();
 
-    // CMV semanal consolidado
+    // CMV — funciona em ambos os modos
     fetch(
       `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${start}&data_operacao=lte.${end}&select=venda_salao,venda_delivery`,
       { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
@@ -446,7 +469,7 @@ function PainelGeral({ onSelectLoja }) {
     }).catch(() => {});
 
     Promise.all([pFat, pCom, pMeta]).catch(() => {}).finally(() => setLoading(false));
-  }, []);
+  }, [semIdx, viewMode]);
 
   const totalBruto    = Object.values(dados).reduce((s, d) => s + d.fat, 0);
   const lojasComDados = Object.keys(dados).length;
@@ -467,9 +490,41 @@ function PainelGeral({ onSelectLoja }) {
   return (
     <div style={{ padding: '0 14px 90px' }}>
 
+      {/* Toggle Semanal/Mensal + navegação */}
+      <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:14 }}>
+        <div style={{ display:'flex', background:'#0e0e1e', border:'1px solid #161628', borderRadius:10, overflow:'hidden', flexShrink:0 }}>
+          <button onClick={() => setViewMode('sem')} style={{ padding:'7px 12px', fontSize:11, fontWeight:700, border:'none', cursor:'pointer', background: viewMode==='sem' ? '#F26419' : 'transparent', color: viewMode==='sem' ? '#fff' : '#5a5a7a', fontFamily:'inherit' }}>Semanal</button>
+          <button onClick={() => setViewMode('mes')} style={{ padding:'7px 12px', fontSize:11, fontWeight:700, border:'none', cursor:'pointer', background: viewMode==='mes' ? '#F26419' : 'transparent', color: viewMode==='mes' ? '#fff' : '#5a5a7a', fontFamily:'inherit' }}>Mensal</button>
+        </div>
+        <button
+          onClick={() => {
+            if (viewMode === 'mes') {
+              const anchor = new Date(2026, 0, 5);
+              const d = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + semIdx * 7);
+              const prev = new Date(d.getFullYear(), d.getMonth() - 1, 1);
+              setSemIdx(Math.max(0, Math.round((prev - anchor) / (7 * 86400000))));
+            } else { setSemIdx(i => Math.max(0, i - 1)); }
+          }}
+          style={{ background:'#0e0e1e', border:'1px solid #161628', borderRadius:8, width:32, height:32, fontSize:18, cursor:'pointer', color:'#8888aa', fontFamily:'inherit', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}
+        >‹</button>
+        <div style={{ flex:1, textAlign:'center', fontSize:10, color:'#5a5a7a', fontWeight:600, lineHeight:1.3 }}>{semana}</div>
+        <button
+          onClick={() => {
+            const max = getMestraWeekIdx();
+            if (viewMode === 'mes') {
+              const anchor = new Date(2026, 0, 5);
+              const d = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + semIdx * 7);
+              const next = new Date(d.getFullYear(), d.getMonth() + 1, 1);
+              setSemIdx(Math.min(max, Math.round((next - anchor) / (7 * 86400000))));
+            } else { setSemIdx(i => Math.min(max, i + 1)); }
+          }}
+          style={{ background:'#0e0e1e', border:'1px solid #161628', borderRadius:8, width:32, height:32, fontSize:18, cursor:'pointer', color: semIdx >= getMestraWeekIdx() ? '#2a2a4a' : '#8888aa', fontFamily:'inherit', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}
+        >›</button>
+      </div>
+
       {/* Totalizador */}
       <div style={{ background: 'linear-gradient(135deg, #1a1500 0%, #0e0e1e 100%)', border: '1px solid rgba(212,168,0,.22)', borderRadius: 18, padding: '16px', marginBottom: 18 }}>
-        <div style={pSec}>Semana atual · Consolidado</div>
+        <div style={pSec}>{viewMode === 'sem' ? 'Semana' : 'Mês'} · Consolidado</div>
         <div style={{ marginBottom: 8 }}>
           <div style={{ fontSize: 10, color: '#44445a', fontWeight: 700, marginBottom: 3 }}>FATURAMENTO TOTAL</div>
           <div style={{ fontSize: 26, fontWeight: 900, color: '#e8e8f4', fontVariantNumeric: 'tabular-nums', lineHeight: 1 }}>
@@ -477,7 +532,7 @@ function PainelGeral({ onSelectLoja }) {
           </div>
         </div>
         <div style={{ fontSize: 11, color: '#44445a' }}>
-          {loading ? 'Carregando…' : `${lojasComDados} de ${LOJAS_LISTA.length} lojas com dados esta semana`}
+          {loading ? 'Carregando…' : `${lojasComDados} de ${LOJAS_LISTA.length} lojas com dados ${viewMode === 'sem' ? 'esta semana' : 'este mês'}`}
         </div>
         {semana ? <div style={{ fontSize: 10, color: '#2a2a4a', marginTop: 4 }}>{semana}</div> : null}
 
