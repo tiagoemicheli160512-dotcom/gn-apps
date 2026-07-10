@@ -338,6 +338,7 @@ function PainelGeral({ onSelectLoja }) {
   const [freqData, setFreqData] = useState({});
   const [funcData, setFuncData] = useState({});
   const [caixaData, setCaixaData] = useState({});
+  const [cmvPorLoja, setCmvPorLoja] = useState({});
   const [cmv, setCmv] = useState(null);
   const [semIdx, setSemIdx] = useState(() => getMestraWeekIdx());
   const [viewMode, setViewMode] = useState('sem');
@@ -348,6 +349,7 @@ function PainelGeral({ onSelectLoja }) {
     setFreqData({});
     setFuncData({});
     setCaixaData({});
+    setCmvPorLoja({});
     setComissoes({});
     setMetas({});
     setDados({});
@@ -495,20 +497,34 @@ function PainelGeral({ onSelectLoja }) {
         setMetas(mt);
       }).catch(() => {}) : Promise.resolve();
 
-    // CMV — funciona em ambos os modos
-    fetch(
-      `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${start}&data_operacao=lte.${end}&select=venda_salao,venda_delivery`,
-      { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
-    ).then(r => r.json()).then(dias => {
-      const totalVendas = (dias || []).reduce((s, r) => s + (r.venda_salao || 0) + (r.venda_delivery || 0), 0);
-      if (totalVendas <= 0) return;
-      return fetch(
-        `${SB_URL}/rest/v1/gn_recebimentos?data=gte.${start}&data=lte.${end}&select=valor_recebido`,
-        { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
-      ).then(r => r.json()).then(recbs => {
-        const totalReceb = (recbs || []).reduce((s, r) => s + (r.valor_recebido || 0), 0);
-        setCmv(Math.round((totalReceb / totalVendas) * 1000) / 10);
+    // CMV — consolidado + por loja, ambos os modos
+    Promise.all([
+      fetch(`${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${start}&data_operacao=lte.${end}&select=loja,venda_salao,venda_delivery`,
+        { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }).then(r => r.json()),
+      fetch(`${SB_URL}/rest/v1/gn_recebimentos?data=gte.${start}&data=lte.${end}&select=loja,valor_recebido`,
+        { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }).then(r => r.json()),
+    ]).then(([dias, recbs]) => {
+      const vendasPorLoja = {}, custosPorLoja = {};
+      let totalVendas = 0, totalReceb = 0;
+      (dias || []).forEach(r => {
+        const v = (r.venda_salao || 0) + (r.venda_delivery || 0);
+        totalVendas += v;
+        const k = DISPLAY_TO_KEY[r.loja];
+        if (k) { vendasPorLoja[k] = (vendasPorLoja[k] || 0) + v; }
       });
+      (recbs || []).forEach(r => {
+        const c = parseFloat(r.valor_recebido) || 0;
+        totalReceb += c;
+        const k = DISPLAY_TO_KEY[r.loja] || r.loja;
+        if (k) { custosPorLoja[k] = (custosPorLoja[k] || 0) + c; }
+      });
+      if (totalVendas > 0) setCmv(Math.round((totalReceb / totalVendas) * 1000) / 10);
+      const cl = {};
+      Object.keys(vendasPorLoja).forEach(k => {
+        const v = vendasPorLoja[k];
+        if (v > 0) cl[k] = Math.round(((custosPorLoja[k] || 0) / v) * 1000) / 10;
+      });
+      setCmvPorLoja(cl);
     }).catch(() => {});
 
     Promise.all([pFat, pCom, pMeta, pCaixa]).catch(() => {}).finally(() => setLoading(false));
@@ -707,6 +723,18 @@ function PainelGeral({ onSelectLoja }) {
                       <div style={{ fontSize:8, color:'#3a3a5a', fontWeight:700, textTransform:'uppercase', letterSpacing:.5, marginTop:2 }}>Caixa</div>
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* CMV por loja */}
+              {cmvPorLoja[k] != null && (
+                <div style={{ display:'flex', alignItems:'center', gap:8, marginTop: (fd || cx != null) ? 7 : 9, paddingTop: (fd || cx != null) ? 7 : 8, borderTop:'1px solid rgba(255,255,255,.04)' }}>
+                  <div style={{ fontSize:9, color:'#3a3a5a', fontWeight:700, textTransform:'uppercase', letterSpacing:.5, flexShrink:0 }}>CMV</div>
+                  <div style={{ flex:1, height:4, borderRadius:2, background:'rgba(255,255,255,.05)', overflow:'hidden' }}>
+                    <div style={{ height:'100%', width:Math.min(100,cmvPorLoja[k]/50*100)+'%', background:cmvPorLoja[k]<=30?'#22c55e':cmvPorLoja[k]<=38?'#f0c050':'#ef4444', borderRadius:2 }} />
+                  </div>
+                  <div style={{ fontSize:12, fontWeight:900, color:cmvPorLoja[k]<=30?'#22c55e':cmvPorLoja[k]<=38?'#f0c050':'#ef4444', fontVariantNumeric:'tabular-nums', flexShrink:0 }}>{cmvPorLoja[k].toFixed(1)}%</div>
+                  <div style={{ fontSize:9, color:cmvPorLoja[k]<=30?'#22c55e':cmvPorLoja[k]<=38?'#f0c050':'#ef4444', fontWeight:700, flexShrink:0 }}>{cmvPorLoja[k]<=30?'✓ Ótimo':cmvPorLoja[k]<=38?'⚠ Aten.':'✗ Alto'}</div>
                 </div>
               )}
 
