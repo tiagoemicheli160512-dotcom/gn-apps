@@ -925,6 +925,30 @@ select option { background: var(--graf2); color: var(--txt); }
   </div>
 </div>
 
+<div class="modal-overlay hidden" id="modalReabrirAuth">
+  <div class="modal-sheet">
+    <div class="modal-nm" style="color:#f87171;">🔒 Autorizar Reabertura</div>
+    <div class="modal-cod" style="margin-bottom:16px;line-height:1.5;">Necessário: gerente, sub-gerente, supervisor ou mestre</div>
+    <div class="form-group" style="margin-bottom:10px;">
+      <label style="font-size:11px;color:var(--mut);display:block;margin-bottom:5px;">Usuário</label>
+      <input id="reabrirNome" type="text" autocomplete="off" placeholder="Nome do usuário"
+        style="width:100%;background:var(--graf3);border:1px solid var(--linha);color:var(--txt);font-family:inherit;font-size:15px;padding:11px 13px;border-radius:8px;outline:none;box-sizing:border-box;"
+        onkeydown="if(event.key==='Enter')document.getElementById('reabrirSenha').focus()">
+    </div>
+    <div class="form-group" style="margin-bottom:14px;">
+      <label style="font-size:11px;color:var(--mut);display:block;margin-bottom:5px;">Senha</label>
+      <input id="reabrirSenha" type="password" autocomplete="off" placeholder="••••••"
+        style="width:100%;background:var(--graf3);border:1px solid var(--linha);color:var(--txt);font-family:inherit;font-size:15px;padding:11px 13px;border-radius:8px;outline:none;box-sizing:border-box;"
+        onkeydown="if(event.key==='Enter')confirmarReabrir()">
+    </div>
+    <div class="err-txt" id="reabrirErro" style="margin-bottom:10px;"></div>
+    <div class="modal-btns">
+      <button class="btn-cancel" onclick="fecharModalReabrir()">Cancelar</button>
+      <button class="btn-ok" id="btnConfirmarReabrir" onclick="confirmarReabrir()">Reabrir</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -1310,20 +1334,67 @@ function calcDifSistema() {
 }
 
 async function fecharCaixa() {
+  // Reabertura exige autorização de cargo superior
+  if (S.fech.status === 'FECHADO') { abrirModalReabrir(); return; }
   const real = parseMoney($('valorEncontrado').value);
-  const novo = S.fech.status === 'FECHADO' ? 'ABERTO' : 'FECHADO';
   const rq = repiqueVal();
   try {
     const u = await sb(`gn_caixa_fechamento?id=eq.${S.fech.id}`, {
       method: 'PATCH', prefer: 'return=representation',
-      body: { total_real: real || null, status: novo, repique: rq, venda_ifood: ifoodVal(), venda_online: onlineVal() }
+      body: { total_real: real || null, status: 'FECHADO', repique: rq, venda_ifood: ifoodVal(), venda_online: onlineVal() }
     });
     S.fech = u[0];
     sincronizarChecklist(S.fech.data);
-    $('btnFechar').textContent = novo === 'FECHADO' ? 'Reabrir caixa' : 'Marcar caixa como FECHADO';
+    $('btnFechar').textContent = 'Reabrir caixa';
     renderFechar();
-    toast(novo === 'FECHADO' ? 'Caixa fechado!' : 'Caixa reaberto');
+    toast('Caixa fechado!');
   } catch(e) { $('fecharErro').textContent = 'Erro ao fechar. ' + e.message; }
+}
+
+function abrirModalReabrir() {
+  $('reabrirNome').value = '';
+  $('reabrirSenha').value = '';
+  $('reabrirErro').textContent = '';
+  $('modalReabrirAuth').classList.remove('hidden');
+  setTimeout(() => $('reabrirNome').focus(), 80);
+}
+
+function fecharModalReabrir() {
+  $('modalReabrirAuth').classList.add('hidden');
+}
+
+const CARGOS_REABRIR = ['admin','gerente','sub-gerente','subgerente','sub gerente','supervisor','mestre'];
+
+async function confirmarReabrir() {
+  const nome = $('reabrirNome').value.trim();
+  const senha = $('reabrirSenha').value.trim();
+  $('reabrirErro').textContent = '';
+  if (!nome || !senha) { $('reabrirErro').textContent = 'Preencha usuário e senha.'; return; }
+  const btn = $('btnConfirmarReabrir');
+  btn.disabled = true; btn.textContent = 'Verificando...';
+  try {
+    const rows = await sb(`gn_usuarios?nome=ilike.${encodeURIComponent(nome)}&senha=eq.${encodeURIComponent(senha)}&ativo=eq.true&select=nome,cargo`);
+    if (!rows.length) { $('reabrirErro').textContent = 'Usuário ou senha incorretos.'; return; }
+    const u = rows[0];
+    if (!CARGOS_REABRIR.includes((u.cargo||'').toLowerCase())) {
+      $('reabrirErro').textContent = 'Cargo sem permissão para reabrir. (' + u.cargo + ')';
+      return;
+    }
+    // Autorizado — reabrir e registrar quem autorizou
+    const upd = await sb(`gn_caixa_fechamento?id=eq.${S.fech.id}`, {
+      method: 'PATCH', prefer: 'return=representation',
+      body: { status: 'ABERTO', gerente: u.nome }
+    });
+    S.fech = upd[0];
+    fecharModalReabrir();
+    $('btnFechar').textContent = 'Marcar caixa como FECHADO';
+    renderFechar();
+    toast('Caixa reaberto por ' + u.nome);
+  } catch(e) {
+    $('reabrirErro').textContent = 'Erro: ' + e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Reabrir';
+  }
 }
 
 async function salvarFundo() {
