@@ -54,18 +54,18 @@ function getSession() {
 /* ─── ESTILOS INLINE ─────────────────────────────────────────── */
 const S = {
   // página inteira
-  page: { minHeight: '100vh', background: '#08080f', color: '#e8e8f4', fontFamily: "'-apple-system','BlinkMacSystemFont','Segoe UI',sans-serif", display: 'flex', flexDirection: 'column' },
+  page: { minHeight: '100vh', background: 'color-mix(in srgb, var(--cor, #F26419) 9%, #111118)', color: '#e8e8f4', fontFamily: "'-apple-system','BlinkMacSystemFont','Segoe UI',sans-serif", display: 'flex', flexDirection: 'column' },
   // LOGIN
   loginWrap: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24 },
   loginLogo: { fontSize: 54, fontWeight: 900, letterSpacing: -3, lineHeight: 1, color: 'var(--cor, #F26419)' },
   loginTag: { fontSize: 11, color: '#44445a', letterSpacing: 3, textTransform: 'uppercase', margin: '6px 0 36px' },
-  loginCard: { background: '#0e0e1e', border: '1px solid #1a1a2e', borderRadius: 22, padding: '28px 24px', width: '100%', maxWidth: 360, display: 'flex', flexDirection: 'column', gap: 14, boxShadow: '0 24px 60px #00000080' },
+  loginCard: { background: 'color-mix(in srgb, var(--cor, #F26419) 7%, #141428)', border: '1px solid rgba(255,255,255,.09)', borderRadius: 22, padding: '28px 24px', width: '100%', maxWidth: 360, display: 'flex', flexDirection: 'column', gap: 14, boxShadow: '0 24px 60px #00000080' },
   loginTitle: { fontSize: 15, fontWeight: 700, color: '#e8e8f4', textAlign: 'center', marginBottom: 2 },
-  input: (focused) => ({ background: '#08080f', border: `1.5px solid ${focused ? 'var(--cor, #F26419)' : '#1a1a2e'}`, borderRadius: 12, padding: '14px 16px', fontSize: 15, color: '#e8e8f4', width: '100%', fontFamily: 'inherit', outline: 'none', transition: 'border-color .15s' }),
+  input: (focused) => ({ background: '#181830', border: `1.5px solid ${focused ? 'var(--cor, #F26419)' : '#2e2e50'}`, borderRadius: 12, padding: '14px 16px', fontSize: 15, color: '#e8e8f4', width: '100%', fontFamily: 'inherit', outline: 'none', transition: 'border-color .15s' }),
   loginBtn: (disabled) => ({ background: disabled ? '#2a2a3a' : 'var(--cor, #F26419)', color: disabled ? '#555' : '#fff', border: 'none', borderRadius: 12, padding: 14, fontSize: 15, fontWeight: 700, fontFamily: 'inherit', cursor: disabled ? 'default' : 'pointer', letterSpacing: 0.3, transition: 'background .15s' }),
   loginErr: { color: '#f87171', fontSize: 12, minHeight: 16, textAlign: 'center' },
   // HEADER
-  hdr: { position: 'sticky', top: 0, zIndex: 100, display: 'flex', alignItems: 'center', gap: 8, padding: '13px 16px', background: 'rgba(8,8,15,.94)', backdropFilter: 'blur(14px)', borderBottom: '1px solid rgba(255,255,255,.04)' },
+  hdr: { position: 'sticky', top: 0, zIndex: 100, display: 'flex', alignItems: 'center', gap: 8, padding: '13px 16px', background: 'linear-gradient(90deg, color-mix(in srgb, var(--cor, #F26419) 16%, #0c0c1a) 0%, rgba(12,12,24,.97) 65%)', backdropFilter: 'blur(14px)', borderBottom: '1px solid rgba(255,255,255,.06)' },
   hdrGN: { fontSize: 20, fontWeight: 900, color: 'var(--cor, #F26419)', letterSpacing: -1 },
   hdrGestao: { fontSize: 9, fontWeight: 800, letterSpacing: 3, textTransform: 'uppercase', color: 'rgba(255,255,255,.22)', alignSelf: 'flex-end', marginBottom: 2 },
   hdrSep: { width: 1, height: 18, background: 'rgba(255,255,255,.06)', flexShrink: 0 },
@@ -75,7 +75,7 @@ const S = {
   heroWrap: { position: 'relative', padding: '24px 20px 36px', overflow: 'hidden' },
   heroBg: { position: 'absolute', inset: 0, background: 'linear-gradient(155deg, var(--cor, #F26419) 0%, rgba(0,0,0,.6) 60%, #08080f 100%)', opacity: 0.55, transition: 'background .4s' },
   heroBlob: { position: 'absolute', top: -40, right: -40, width: 180, height: 180, borderRadius: '50%', background: 'var(--cor, #F26419)', opacity: 0.22, filter: 'blur(40px)', transition: 'background .4s' },
-  heroFade: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 48, background: 'linear-gradient(0deg, #08080f, transparent)' },
+  heroFade: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 48, background: 'linear-gradient(0deg, color-mix(in srgb, var(--cor, #F26419) 9%, #111118), transparent)' },
   heroInner: { position: 'relative', zIndex: 1 },
   heroRow: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 },
   heroLoja: { fontSize: 22, fontWeight: 900, color: '#fff', lineHeight: 1 },
@@ -85,11 +85,11 @@ const S = {
   heroSub: { fontSize: 12, color: 'rgba(255,255,255,.45)', marginTop: 3 },
   // MODULES
   modList: { padding: '4px 14px 90px', display: 'flex', flexDirection: 'column', gap: 7 },
-  modRow: (enabled) => ({ display: 'flex', alignItems: 'center', gap: 12, background: '#0e0e1e', border: '1px solid #161628', borderRadius: 16, padding: '13px 14px', cursor: enabled ? 'pointer' : 'not-allowed', opacity: enabled ? 1 : 0.27, userSelect: 'none', WebkitUserSelect: 'none', textDecoration: 'none' }),
+  modRow: (enabled) => ({ display: 'flex', alignItems: 'center', gap: 12, background: 'color-mix(in srgb, var(--cor, #F26419) 7%, #141428)', border: '1px solid color-mix(in srgb, var(--cor, #F26419) 18%, #20203a)', borderRadius: 16, padding: '13px 14px', cursor: enabled ? 'pointer' : 'not-allowed', opacity: enabled ? 1 : 0.27, userSelect: 'none', WebkitUserSelect: 'none', textDecoration: 'none' }),
   modIcon: (cor) => ({ width: 46, height: 46, borderRadius: 13, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0, background: cor + '75', border: `1.5px solid ${cor}` }),
   modBody: { flex: 1, minWidth: 0 },
   modName: { fontSize: 13, fontWeight: 800, color: '#e8e8f4', letterSpacing: 0.2 },
-  modSub: { fontSize: 11, color: '#3a3a5a', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  modSub: { fontSize: 11, color: '#6a6a8e', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   modRight: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3, flexShrink: 0 },
   modArrow: { fontSize: 20, color: 'rgba(255,255,255,.18)', lineHeight: 1, marginLeft: 2 },
   // BADGES
@@ -100,15 +100,15 @@ const S = {
   },
   // PICKER OVERLAY
   overlay: { display: 'flex', position: 'fixed', inset: 0, background: 'rgba(0,0,0,.72)', zIndex: 300, alignItems: 'flex-end' },
-  sheet: { background: '#0e0e1e', borderRadius: '24px 24px 0 0', borderTop: '1px solid #1c1c35', padding: '20px 16px 40px', width: '100%', maxHeight: '82vh', overflowY: 'auto' },
+  sheet: { background: 'color-mix(in srgb, var(--cor, #F26419) 7%, #141428)', borderRadius: '24px 24px 0 0', borderTop: '1px solid rgba(255,255,255,.09)', padding: '20px 16px 40px', width: '100%', maxHeight: '82vh', overflowY: 'auto' },
   pickerTitle: { fontSize: 13, fontWeight: 700, color: 'rgba(255,255,255,.4)', textAlign: 'center', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 16 },
   pickerGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 },
-  pickBtn: (active, cor) => ({ display: 'flex', alignItems: 'center', gap: 9, background: active ? cor + '22' : '#08080f', border: `1.5px solid ${active ? cor : '#2a2a40'}`, borderRadius: 13, padding: '11px 13px', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left', width: '100%' }),
+  pickBtn: (active, cor) => ({ display: 'flex', alignItems: 'center', gap: 9, background: active ? cor + '28' : '#1a1a30', border: `1.5px solid ${active ? cor : '#30305a'}`, borderRadius: 13, padding: '11px 13px', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left', width: '100%' }),
   pickDot: (cor) => ({ width: 14, height: 14, borderRadius: '50%', flexShrink: 0, background: cor, boxShadow: `0 0 6px ${cor}` }),
   pickName: { fontSize: 12, fontWeight: 700, color: '#e8e8f4' },
   pickCancel: { marginTop: 10, width: '100%', background: 'rgba(255,255,255,.04)', border: '1px solid rgba(255,255,255,.06)', borderRadius: 13, padding: 14, fontSize: 14, fontWeight: 600, color: '#555', fontFamily: 'inherit', cursor: 'pointer' },
   // BOTTOM NAV
-  bottomNav: { position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 200, background: 'rgba(8,8,15,.97)', borderTop: '1px solid rgba(255,255,255,.07)', display: 'flex', backdropFilter: 'blur(16px)' },
+  bottomNav: { position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 200, background: 'linear-gradient(0deg, color-mix(in srgb, var(--cor, #F26419) 12%, rgba(12,12,24,.99)), rgba(12,12,24,.97))', borderTop: '1px solid rgba(255,255,255,.07)', display: 'flex', backdropFilter: 'blur(16px)' },
   bottomItem: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '10px 0 14px', gap: 3, cursor: 'pointer', textDecoration: 'none', background: 'none', border: 'none', fontFamily: 'inherit' },
   bottomIcon: { fontSize: 22, lineHeight: 1 },
   bottomLabel: (active) => ({ fontSize: 10, fontWeight: 700, color: active ? 'var(--cor, #F26419)' : 'rgba(255,255,255,.3)', letterSpacing: 0.5, textTransform: 'uppercase' }),
@@ -164,7 +164,7 @@ function LoginScreen({ onLogin }) {
   const onKey = (e) => { if (e.key === 'Enter') entrar(); };
 
   return (
-    <div style={{ ...S.loginWrap, background: 'radial-gradient(ellipse at 50% -10%, rgba(242,100,25,.15) 0%, transparent 60%), #08080f' }}>
+    <div style={{ ...S.loginWrap, background: 'radial-gradient(ellipse at 50% -10%, color-mix(in srgb, var(--cor, #F26419) 18%, transparent) 0%, transparent 60%), color-mix(in srgb, var(--cor, #F26419) 9%, #111118)' }}>
       <div style={S.loginLogo}>GN</div>
       <div style={S.loginTag}>Sistema de Gestão</div>
       <div style={S.loginCard}>
@@ -539,7 +539,7 @@ function PainelGeral({ onSelectLoja }) {
   const metaFalta     = totalMeta > 0 && totalBruto < totalMeta ? totalMeta - totalBruto : 0;
 
   const pSec  = { fontSize: 10, fontWeight: 800, letterSpacing: 1.4, textTransform: 'uppercase', color: '#d4a800', marginBottom: 10, paddingLeft: 2 };
-  const pCard = (cor, temDados) => ({ display: 'flex', flexDirection: 'column', gap: 0, background: '#0e0e1e', border: `1px solid ${temDados ? cor + '35' : '#161628'}`, borderRadius: 14, padding: '11px 13px', cursor: 'pointer' });
+  const pCard = (cor, temDados) => ({ display: 'flex', flexDirection: 'column', gap: 0, background: `color-mix(in srgb, ${cor} ${temDados ? 10 : 5}%, #141428)`, border: `1px solid ${temDados ? cor + '45' : '#20203a'}`, borderRadius: 14, padding: '11px 13px', cursor: 'pointer' });
 
   const freqCons = {};
   ['CLT / MENSALISTA','HORISTA','JOVEM APRENDIZ'].forEach(s => { freqCons[s] = {P:0,F:0,AT:0,total:0}; });
@@ -584,7 +584,7 @@ function PainelGeral({ onSelectLoja }) {
       </div>
 
       {/* Totalizador */}
-      <div style={{ background: 'linear-gradient(135deg, #1a1500 0%, #0e0e1e 100%)', border: '1px solid rgba(212,168,0,.22)', borderRadius: 18, padding: '16px', marginBottom: 18 }}>
+      <div style={{ background: 'linear-gradient(135deg, color-mix(in srgb, var(--cor, #d4a800) 16%, #111118) 0%, color-mix(in srgb, var(--cor, #d4a800) 6%, #111118) 100%)', border: '1px solid rgba(212,168,0,.3)', borderRadius: 18, padding: '16px', marginBottom: 18 }}>
         <div style={pSec}>{viewMode === 'sem' ? 'Semana' : 'Mês'} · Consolidado</div>
         <div style={{ marginBottom: 8 }}>
           <div style={{ fontSize: 10, color: '#44445a', fontWeight: 700, marginBottom: 3 }}>FATURAMENTO TOTAL</div>
