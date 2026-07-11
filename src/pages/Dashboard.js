@@ -120,6 +120,44 @@ function setCor(cor) {
   document.documentElement.style.setProperty('--cor', cor || '#F26419');
 }
 
+/* ─── OFFLINE INDICATOR ──────────────────────────────────────── */
+function OfflineBar() {
+  const [online, setOnline] = useState(navigator.onLine);
+  useEffect(() => {
+    const up = () => setOnline(true);
+    const dn = () => setOnline(false);
+    window.addEventListener('online', up);
+    window.addEventListener('offline', dn);
+    return () => { window.removeEventListener('online', up); window.removeEventListener('offline', dn); };
+  }, []);
+  if (online) return null;
+  return (
+    <div style={{ position:'fixed', top:0, left:0, right:0, zIndex:9999, background:'#1a0a0a', borderBottom:'1px solid #7f1d1d', padding:'8px 16px', display:'flex', alignItems:'center', gap:8, fontSize:12, color:'#f87171', fontWeight:700 }}>
+      📵 Sem conexão — alguns dados podem estar desatualizados
+    </div>
+  );
+}
+
+/* ─── PULL-TO-REFRESH ────────────────────────────────────────── */
+function usePullToRefresh(onRefresh) {
+  const startY = React.useRef(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const onTouchStart = useCallback(e => {
+    if (window.scrollY === 0) startY.current = e.touches[0].clientY;
+  }, []);
+  const onTouchEnd = useCallback(async e => {
+    if (startY.current === null) return;
+    const dy = e.changedTouches[0].clientY - startY.current;
+    startY.current = null;
+    if (dy > 80 && !refreshing) {
+      setRefreshing(true);
+      try { await onRefresh(); } catch(e) {}
+      setRefreshing(false);
+    }
+  }, [onRefresh, refreshing]);
+  return { onTouchStart, onTouchEnd, refreshing };
+}
+
 function fmtDate() {
   const now = new Date();
   const dias = ['Domingo','Segunda','Terça','Quarta','Quinta','Sexta','Sábado'];
@@ -344,6 +382,10 @@ function PainelGeral({ onSelectLoja }) {
   const [cmv, setCmv] = useState(null);
   const [semIdx, setSemIdx] = useState(() => getMestraWeekIdx());
   const [viewMode, setViewMode] = useState('sem');
+  const [semAntDados, setSemAntDados] = useState({});
+  const [manutPorLoja, setManutPorLoja] = useState({});
+  const [sortBy, setSortBy] = useState('fat');
+  const [filtroAtencao, setFiltroAtencao] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -355,6 +397,8 @@ function PainelGeral({ onSelectLoja }) {
     setComissoes({});
     setMetas({});
     setDados({});
+    setSemAntDados({});
+    setManutPorLoja({});
 
     // Calcula datas de início e fim conforme modo
     const anchor = new Date(2026, 0, 5);
@@ -530,6 +574,45 @@ function PainelGeral({ onSelectLoja }) {
       setCmvPorLoja(cl);
     }).catch(() => {});
 
+    // Semana anterior — comparativo de faturamento (apenas semanal)
+    if (viewMode === 'sem') {
+      const anchorSA = new Date(2026, 0, 5);
+      const isoSA = dt => dt.getFullYear() + '-' + String(dt.getMonth()+1).padStart(2,'0') + '-' + String(dt.getDate()).padStart(2,'0');
+      const dSA = new Date(anchorSA.getFullYear(), anchorSA.getMonth(), anchorSA.getDate() + (semIdx - 1) * 7);
+      const eSA = new Date(dSA.getFullYear(), dSA.getMonth(), dSA.getDate() + 6);
+      fetch(
+        `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${isoSA(dSA)}&data_operacao=lte.${isoSA(eSA)}&select=loja,venda_salao,venda_delivery`,
+        { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
+      ).then(r => r.json()).then(rows => {
+        const ant = {};
+        (rows || []).forEach(row => {
+          const k = DISPLAY_TO_KEY[row.loja];
+          if (!k) return;
+          ant[k] = (ant[k] || 0) + (parseFloat(row.venda_salao)||0) + (parseFloat(row.venda_delivery)||0);
+        });
+        setSemAntDados(ant);
+      }).catch(() => {});
+    }
+
+    // Manutenções pendentes por loja (últimos 30 dias)
+    (() => {
+      const hoje30 = new Date(); hoje30.setDate(hoje30.getDate() - 30);
+      const iso30 = hoje30.getFullYear() + '-' + String(hoje30.getMonth()+1).padStart(2,'0') + '-' + String(hoje30.getDate()).padStart(2,'0');
+      fetch(
+        `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${iso30}&select=loja,manutencao`,
+        { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
+      ).then(r => r.json()).then(rows => {
+        const counts = {};
+        (rows || []).forEach(row => {
+          const k = DISPLAY_TO_KEY[row.loja];
+          if (!k || !Array.isArray(row.manutencao)) return;
+          const pend = row.manutencao.filter(m => m && m.status && m.status !== 'Resolvido').length;
+          if (pend > 0) counts[k] = (counts[k] || 0) + pend;
+        });
+        setManutPorLoja(counts);
+      }).catch(() => {});
+    })();
+
     Promise.all([pFat, pCom, pMeta, pCaixa]).catch(() => {}).finally(() => setLoading(false));
   }, [semIdx, viewMode]);
 
@@ -538,6 +621,24 @@ function PainelGeral({ onSelectLoja }) {
   const totalMeta     = Object.values(metas).reduce((s, m) => s + m, 0);
   const metaPct       = totalMeta > 0 ? Math.min(100, Math.round((totalBruto / totalMeta) * 100)) : null;
   const metaFalta     = totalMeta > 0 && totalBruto < totalMeta ? totalMeta - totalBruto : 0;
+
+  // Ordenação e filtro de lojas
+  let lojasOrdenadas = [...LOJAS_LISTA];
+  if (sortBy === 'fat') {
+    lojasOrdenadas.sort((a, b) => (dados[b]?.fat || 0) - (dados[a]?.fat || 0));
+  } else if (sortBy === 'meta') {
+    const pctK = k => metas[k] && dados[k] ? Math.round((dados[k].fat / metas[k]) * 100) : 999;
+    lojasOrdenadas.sort((a, b) => pctK(a) - pctK(b));
+  }
+  if (filtroAtencao) {
+    lojasOrdenadas = lojasOrdenadas.filter(k => {
+      const abaixoMeta = metas[k] && dados[k] && (dados[k].fat / metas[k] * 100) < 70;
+      const semCL = dados[k] && weekDates.some(({iso}) => fatDias[k]?.[iso] && clSemana[k]?.[iso] === undefined);
+      return abaixoMeta || semCL || (manutPorLoja[k] || 0) > 0;
+    });
+  }
+
+  const btnCtrl = (active) => ({ background: active ? 'rgba(232,88,10,.25)' : 'rgba(255,255,255,.05)', border: `1px solid ${active ? '#E8580A' : 'rgba(255,255,255,.1)'}`, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 700, color: active ? '#E8580A' : '#5a5a7a', cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 });
 
   const pSec  = { fontSize: 10, fontWeight: 800, letterSpacing: 1.4, textTransform: 'uppercase', color: '#d4a800', marginBottom: 10, paddingLeft: 2 };
   const pCard = (cor, temDados) => ({ display: 'flex', flexDirection: 'column', gap: 0, background: `color-mix(in srgb, ${cor} ${temDados ? 10 : 5}%, #141428)`, border: `1px solid ${temDados ? cor + '45' : '#20203a'}`, borderRadius: 14, padding: '11px 13px', cursor: 'pointer' });
@@ -551,6 +652,19 @@ function PainelGeral({ onSelectLoja }) {
 
   return (
     <div style={{ padding: '0 14px 90px' }}>
+
+      {/* Controles de ordenação e filtro */}
+      <div style={{ display:'flex', gap:6, marginBottom:10, flexWrap:'wrap' }}>
+        <button onClick={() => setSortBy(s => s === 'fat' ? 'default' : 'fat')} style={btnCtrl(sortBy === 'fat')}>
+          ↓ {sortBy === 'fat' ? 'Faturamento' : 'Faturamento'}
+        </button>
+        <button onClick={() => setSortBy(s => s === 'meta' ? 'default' : 'meta')} style={btnCtrl(sortBy === 'meta')}>
+          🎯 {sortBy === 'meta' ? 'Por meta' : 'Por meta'}
+        </button>
+        <button onClick={() => setFiltroAtencao(v => !v)} style={btnCtrl(filtroAtencao)}>
+          ⚠️ Atenção{filtroAtencao && lojasOrdenadas.length > 0 ? ` (${lojasOrdenadas.length})` : ''}
+        </button>
+      </div>
 
       {/* Toggle Semanal/Mensal + navegação */}
       <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:14 }}>
@@ -661,9 +775,9 @@ function PainelGeral({ onSelectLoja }) {
       )}
 
       {/* Cards por loja */}
-      <div style={pSec}>Lojas — clique para entrar</div>
+      <div style={pSec}>Lojas — clique para entrar{filtroAtencao && lojasOrdenadas.length === 0 ? ' · nenhuma loja em alerta' : ''}</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-        {LOJAS_LISTA.map(k => {
+        {lojasOrdenadas.map(k => {
           const d        = dados[k];
           const temDados = !!d;
           const cor      = COR_LOJA[k] || '#444';
@@ -696,6 +810,22 @@ function PainelGeral({ onSelectLoja }) {
                     <div style={{ fontSize: 10, fontWeight: 700, color: '#22c55e', fontVariantNumeric: 'tabular-nums' }}>
                       Comissão: {fmtR(comissao)}
                     </div>
+                  )}
+                  {/* ▲/▼ vs semana anterior */}
+                  {viewMode === 'sem' && semAntDados[k] != null && semAntDados[k] > 0 && d && (
+                    <div style={{ fontSize: 10, fontWeight: 700, color: d.fat >= semAntDados[k] ? '#22c55e' : '#ef4444', fontVariantNumeric: 'tabular-nums' }}>
+                      {d.fat >= semAntDados[k] ? '▲' : '▼'} {Math.abs(Math.round(((d.fat - semAntDados[k]) / semAntDados[k]) * 100))}% vs ant.
+                    </div>
+                  )}
+                  {/* Manutenções pendentes */}
+                  {(manutPorLoja[k] || 0) > 0 && (
+                    <div style={{ fontSize: 10, fontWeight: 700, color: '#f97316' }}>
+                      🔧 {manutPorLoja[k]} pend.
+                    </div>
+                  )}
+                  {/* Sem check-list no dia com faturamento */}
+                  {weekDates.some(({iso}) => fatDias[k]?.[iso] && clSemana[k]?.[iso] === undefined) && (
+                    <div style={{ fontSize: 10, fontWeight: 700, color: '#ef4444' }}>⚠️ CL faltando</div>
                   )}
                 </div>
                 <div style={{ fontSize: 18, color: 'rgba(255,255,255,.15)', flexShrink: 0, marginLeft: 4 }}>›</div>
@@ -824,6 +954,8 @@ function HomeScreen({ session: sessionProp, onLogout }) {
   const [tsConf, setTsConf] = useState('');
   const [tsErr, setTsErr] = useState('');
   const [tsSaving, setTsSaving] = useState(false);
+  const [miniPainel, setMiniPainel] = useState(null);
+  const [manutBadgeCount, setManutBadgeCount] = useState(0);
 
   const isMaster = session.loja === 'GERAL' || !!(session.permissoes || {}).master;
   const lojaEfetiva = masterLoja || session.loja;
@@ -883,6 +1015,38 @@ function HomeScreen({ session: sessionProp, onLogout }) {
     if (perms.pedidos  || isMaster) set('pedidos', 'Online', 'g');
     if (isMaster && perms.mestra !== false) set('mestra',  'Visão consolidada', 'o');
     if (perms.rh  || isMaster) set('rh', 'Online', 'b');
+
+    // Badge de manutenção com count real de pendências (últimos 30 dias)
+    const lojaDispQ = LOJA_DISPLAY[loja] || loja;
+    const d30 = new Date(); d30.setDate(d30.getDate() - 30);
+    const d30s = d30.getFullYear()+'-'+String(d30.getMonth()+1).padStart(2,'0')+'-'+String(d30.getDate()).padStart(2,'0');
+    fetch(
+      `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${d30s}&loja=eq.${encodeURIComponent(lojaDispQ)}&select=manutencao`,
+      { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
+    ).then(r => r.json()).then(rows => {
+      let pend = 0;
+      (rows || []).forEach(row => {
+        if (Array.isArray(row.manutencao)) pend += row.manutencao.filter(m => m && m.status && m.status !== 'Resolvido').length;
+      });
+      setManutBadgeCount(pend);
+      set('manutencao', pend > 0 ? `⚠️ ${pend} pendente${pend > 1 ? 's' : ''}` : '✓ Em dia', pend > 0 ? 'o' : 'g');
+    }).catch(() => set('manutencao', 'Online', 'g'));
+
+    // Mini painel do dia (apenas para view de loja específica)
+    if (!isMaster || masterLoja) {
+      setMiniPainel(null);
+      const hojeD = new Date();
+      const hojeISO = hojeD.getFullYear()+'-'+String(hojeD.getMonth()+1).padStart(2,'0')+'-'+String(hojeD.getDate()).padStart(2,'0');
+      fetch(
+        `${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hojeISO}&loja=eq.${encodeURIComponent(lojaDispQ)}&select=checklist_pct,venda_salao,venda_delivery,manutencao`,
+        { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
+      ).then(r => r.json()).then(data => {
+        const row = data?.[0];
+        const fat = row ? (parseFloat(row.venda_salao)||0) + (parseFloat(row.venda_delivery)||0) : 0;
+        const pend = row && Array.isArray(row.manutencao) ? row.manutencao.filter(m => m && m.status && m.status !== 'Resolvido').length : 0;
+        setMiniPainel({ pct: row?.checklist_pct ?? null, fat, manut: pend });
+      }).catch(() => setMiniPainel({ pct: null, fat: 0, manut: 0 }));
+    }
   }, [session, masterLoja, lojaEfetiva, isMaster]);
 
   const navTo = (url) => {
@@ -924,8 +1088,22 @@ function HomeScreen({ session: sessionProp, onLogout }) {
 
   const perms = session.permissoes || {};
 
+  // Pull-to-refresh hook
+  const { onTouchStart, onTouchEnd, refreshing } = usePullToRefresh(async () => {
+    // Re-fetch badges by remounting — reload window as simplest approach
+    window.location.reload();
+  });
+
   return (
-    <>
+    <div onTouchStart={onTouchStart} onTouchEnd={onTouchEnd} style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+      {/* OFFLINE */}
+      <OfflineBar />
+      {/* Pull-to-refresh indicator */}
+      {refreshing && (
+        <div style={{ textAlign: 'center', padding: '8px', fontSize: 11, color: '#5a5a7a', background: 'rgba(255,255,255,.03)' }}>
+          🔄 Atualizando…
+        </div>
+      )}
       {/* HEADER */}
       <header style={S.hdr}>
         <span style={S.hdrGN}>GN</span>
@@ -957,6 +1135,35 @@ function HomeScreen({ session: sessionProp, onLogout }) {
           </div>
         </div>
       </div>
+
+      {/* MINI PAINEL DO DIA (apenas para view de loja) */}
+      {(!isMaster || masterLoja) && miniPainel && (
+        <div style={{ padding: '0 14px 4px' }}>
+          <div style={{ background: 'rgba(255,255,255,.04)', border: '1px solid rgba(255,255,255,.08)', borderRadius: 14, padding: '12px 14px', display: 'flex', gap: 0 }}>
+            {/* Check-list % */}
+            <div style={{ flex: 1, textAlign: 'center', borderRight: '1px solid rgba(255,255,255,.06)' }}>
+              <div style={{ fontSize: 18, fontWeight: 900, color: miniPainel.pct === 100 ? '#22c55e' : miniPainel.pct > 50 ? '#f0c050' : miniPainel.pct != null ? '#ef4444' : '#2a2a4a', lineHeight: 1 }}>
+                {miniPainel.pct != null ? miniPainel.pct + '%' : '—'}
+              </div>
+              <div style={{ fontSize: 9, color: '#44445a', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 3 }}>Check-list hoje</div>
+            </div>
+            {/* Faturamento hoje */}
+            <div style={{ flex: 1, textAlign: 'center', borderRight: '1px solid rgba(255,255,255,.06)' }}>
+              <div style={{ fontSize: 13, fontWeight: 900, color: miniPainel.fat > 0 ? '#e8e8f4' : '#2a2a4a', lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>
+                {miniPainel.fat > 0 ? fmtR(miniPainel.fat) : '—'}
+              </div>
+              <div style={{ fontSize: 9, color: '#44445a', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 3 }}>Faturamento hoje</div>
+            </div>
+            {/* Manutenções pendentes */}
+            <div style={{ flex: 1, textAlign: 'center' }}>
+              <div style={{ fontSize: 18, fontWeight: 900, color: miniPainel.manut > 0 ? '#f97316' : '#22c55e', lineHeight: 1 }}>
+                {miniPainel.manut > 0 ? miniPainel.manut : '✓'}
+              </div>
+              <div style={{ fontSize: 9, color: '#44445a', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 3 }}>Manut. pend.</div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* MODULES ou PAINEL GERAL */}
       {isMaster && !masterLoja ? (
@@ -1062,7 +1269,7 @@ function HomeScreen({ session: sessionProp, onLogout }) {
           <span style={S.bottomLabel(false)}>Inventário</span>
         </button>
       </nav>
-    </>
+    </div>
   );
 }
 
@@ -1082,6 +1289,7 @@ function Dashboard() {
 
   return (
     <div style={S.page}>
+      <OfflineBar />
       {session
         ? <HomeScreen session={session} onLogout={handleLogout} />
         : <LoginScreen onLogin={setSession} />
