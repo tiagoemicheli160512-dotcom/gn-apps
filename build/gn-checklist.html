@@ -1463,11 +1463,20 @@
 
 <!-- ===================== ABA ESCALA ===================== -->
 <div id="tab-escala" class="tab-content" style="max-width:640px;margin:0 auto;padding:14px;">
-  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
-    <div>
-      <div style="font-size:14px;font-weight:700;">📅 Escala da Semana</div>
-      <div style="font-size:10px;color:#444;" id="escala-semana-label">—</div>
-    </div>
+  <!-- Seletor de modo -->
+  <div style="display:flex;gap:6px;margin-bottom:12px;">
+    <button id="escala-modo-diaria"  onclick="setEscalaModo('diaria')"  style="flex:1;padding:7px 0;border-radius:8px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:#94a3b8;font-size:12px;font-weight:700;font-family:inherit;cursor:pointer;transition:all .15s">Diária</button>
+    <button id="escala-modo-semanal" onclick="setEscalaModo('semanal')" style="flex:1;padding:7px 0;border-radius:8px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:#94a3b8;font-size:12px;font-weight:700;font-family:inherit;cursor:pointer;transition:all .15s">Semanal</button>
+    <button id="escala-modo-mensal"  onclick="setEscalaModo('mensal')"  style="flex:1;padding:7px 0;border-radius:8px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:#94a3b8;font-size:12px;font-weight:700;font-family:inherit;cursor:pointer;transition:all .15s">Mensal</button>
+  </div>
+  <!-- Seletor de dia (modo diário) -->
+  <div id="escala-dia-sel" style="display:none;overflow-x:auto;-webkit-overflow-scrolling:touch;margin-bottom:10px;">
+    <div id="escala-dia-pills" style="display:flex;gap:5px;min-width:max-content;padding-bottom:2px;"></div>
+  </div>
+  <!-- Cabeçalho dinâmico -->
+  <div style="margin-bottom:10px;">
+    <div style="font-size:13px;font-weight:700;color:#e2e8f0;" id="escala-titulo">📅 Escala</div>
+    <div style="font-size:10px;color:#64748b;margin-top:1px;" id="escala-semana-label">—</div>
   </div>
   <div id="escala-container"></div>
 </div>
@@ -1813,6 +1822,7 @@ let comissoesExpanded = {};
 
 async function loadComissoesData(){
   comissoesLoadErr = false;
+  escalaAllData = null; // invalida cache mensal ao recarregar
   const idx = comissoesSemIdx(state.semanaInicio || state.data);
   comissoesWeekIdx = idx;
   if(idx==null || !LOJA){ comissoesWD=null; renderComissoesFuncs(); return; }
@@ -3192,57 +3202,293 @@ function updComissoesHorario(i,v){
   scheduleComissoesOp(mutator);
 }
 
+// ── ESCALA ─────────────────────────────────────────────────────
+let escalaModo    = 'semanal'; // 'diaria' | 'semanal' | 'mensal'
+let escalaDiaIdx  = null;      // 0‒6, dia selecionado no modo diário
+let escalaAllData = null;      // cache do all_data para visão mensal
+
+const ESCALA_TURNO_COLOR  = {MANHÃ:'#f59e0b',TARDE:'#3b82f6',NOITE:'#8b5cf6',MISTO:'#10b981',FOLGA:'#94a3b8','':'#475569'};
+const ESCALA_STATUS_COLOR = {PRESENTE:'#10b981',FALTA:'#ef4444',ATESTADO:'#f59e0b','SUSPENSÃO':'#f97316','NÃO TRABALHADO':'#94a3b8',HORISTA:'#38bdf8','JOVEM APRENDIZ':'#a78bfa',FOLGA:'#06b6d4','BANCO DE HORAS':'#8b5cf6'};
+const ESCALA_PRESENTE_SET = new Set(['PRESENTE','HORISTA','JOVEM APRENDIZ']);
+
+function _escalaAtualizaBotoes(){
+  ['diaria','semanal','mensal'].forEach(m=>{
+    const btn = document.getElementById('escala-modo-'+m);
+    if(!btn) return;
+    const on = m === escalaModo;
+    btn.style.background = on ? 'var(--gn-color,#E8580A)' : 'rgba(255,255,255,.04)';
+    btn.style.color      = on ? '#fff'                    : '#94a3b8';
+    btn.style.borderColor= on ? 'var(--gn-color,#E8580A)' : 'rgba(255,255,255,.1)';
+  });
+  const dSel = document.getElementById('escala-dia-sel');
+  if(dSel) dSel.style.display = escalaModo==='diaria' ? 'block' : 'none';
+}
+
+function setEscalaModo(modo){
+  escalaModo = modo;
+  _escalaAtualizaBotoes();
+  if(modo==='diaria')  _renderEscalaDiaria();
+  else if(modo==='mensal') _renderEscalaMensal();
+  else                     _renderEscalaSemanal();
+}
+
+function setEscalaDia(idx){
+  escalaDiaIdx = idx;
+  _escalaRenderDiaPills();
+  renderEscala();
+}
+
+function _escalaRenderDiaPills(){
+  const box = document.getElementById('escala-dia-pills');
+  if(!box || !comissoesWD || comissoesWeekIdx==null) return;
+  const sem = COMISSOES_CAL[comissoesWeekIdx];
+  box.innerHTML = sem.days.map((d,i)=>{
+    const on = i===escalaDiaIdx;
+    return `<button onclick="setEscalaDia(${i})" style="padding:5px 10px;border-radius:7px;border:1px solid ${on?'var(--gn-color,#E8580A)':'rgba(255,255,255,.1)'};background:${on?'var(--gn-color,#E8580A)':'rgba(255,255,255,.04)'};color:${on?'#fff':'#94a3b8'};font-size:11px;font-weight:700;font-family:inherit;cursor:pointer;white-space:nowrap">${d.nome} ${String(d.d).padStart(2,'0')}</button>`;
+  }).join('');
+}
+
 function renderEscala(){
+  _escalaAtualizaBotoes();
+  if(escalaModo==='diaria')  _renderEscalaDiaria();
+  else if(escalaModo==='mensal') _renderEscalaMensal();
+  else                           _renderEscalaSemanal();
+}
+
+function _renderEscalaSemanal(){
   const container = document.getElementById('escala-container');
   const labelEl   = document.getElementById('escala-semana-label');
+  const tituloEl  = document.getElementById('escala-titulo');
   if(!container) return;
-
-  if(!comissoesWD || comissoesWeekIdx == null){
+  if(!comissoesWD || comissoesWeekIdx==null){
     container.innerHTML='<div style="text-align:center;padding:30px;color:#888;font-size:12px;">Selecione uma semana para ver a escala.</div>';
     return;
   }
-
   const sem = COMISSOES_CAL[comissoesWeekIdx];
-  if(labelEl) labelEl.textContent = sem.header;
+  if(labelEl)  labelEl.textContent  = sem.header;
+  if(tituloEl) tituloEl.textContent = '📅 Escala Semanal';
 
-  const funcs = comissoesWD.funcs.filter(f => f.nome && f.nome.trim());
-  if(!funcs.length){
-    container.innerHTML='<div style="text-align:center;padding:30px;color:#888;font-size:12px;">Nenhum funcionário cadastrado.</div>';
-    return;
-  }
+  const funcs = comissoesWD.funcs.filter(f=>f.nome&&f.nome.trim());
+  if(!funcs.length){ container.innerHTML='<div style="text-align:center;padding:30px;color:#888;font-size:12px;">Nenhum funcionário cadastrado.</div>'; return; }
 
-  const TURNO_COLOR = {MANHÃ:'#f59e0b',TARDE:'#3b82f6',NOITE:'#8b5cf6',MISTO:'#10b981',FOLGA:'#94a3b8','':'#334155'};
-  const STATUS_COLOR = {PRESENTE:'#10b981',FALTA:'#ef4444',ATESTADO:'#f59e0b','SUSPENSÃO':'#f97316','NÃO TRABALHADO':'#94a3b8',HORISTA:'#38bdf8','JOVEM APRENDIZ':'#a78bfa',FOLGA:'#06b6d4','BANCO DE HORAS':'#8b5cf6'};
-
-  const dias = sem.days;
-  const thDias = dias.map(d=>`<th style="font-size:9px;text-align:center;padding:4px 2px;color:#94a3b8;min-width:38px">${d.nome}<br><span style="font-size:8px">${String(d.d).padStart(2,'0')}/${String(d.m).padStart(2,'0')}</span></th>`).join('');
-
+  const thDias = sem.days.map(d=>`<th style="font-size:9px;text-align:center;padding:4px 2px;color:#94a3b8;min-width:36px">${d.nome}<br><span style="font-size:8px">${String(d.d).padStart(2,'0')}/${String(d.m).padStart(2,'0')}</span></th>`).join('');
   const rows = funcs.map(f=>{
-    const tc = TURNO_COLOR[f.turno||''] || '#334155';
+    const tc = ESCALA_TURNO_COLOR[f.turno||'']||'#475569';
     const turnoTag = f.turno ? `<span style="font-size:9px;background:${tc}22;color:${tc};border-radius:4px;padding:1px 5px;font-weight:700">${f.turno}</span>` : '';
     const horTag   = f.horario ? `<span style="font-size:9px;color:#64748b">${f.horario}</span>` : '';
-    const cellsDias = dias.map((_,d)=>{
-      const st = (f.dias||[])[d] || 'PRESENTE';
-      const abrev = COMISSOES_STATUS_ABREV[st] || st.slice(0,2);
-      const sc = STATUS_COLOR[st] || '#94a3b8';
-      return `<td style="text-align:center;padding:4px 2px"><span style="font-size:10px;font-weight:700;color:${sc}">${abrev}</span></td>`;
+    const cells = sem.days.map((_,d)=>{
+      const st=(f.dias||[])[d]||'PRESENTE';
+      const ab=COMISSOES_STATUS_ABREV[st]||st.slice(0,2);
+      const sc=ESCALA_STATUS_COLOR[st]||'#94a3b8';
+      return `<td style="text-align:center;padding:4px 2px"><span style="font-size:10px;font-weight:700;color:${sc}">${ab}</span></td>`;
     }).join('');
     return `<tr style="border-bottom:1px solid rgba(255,255,255,.04)">
-      <td style="padding:6px 8px;min-width:120px">
-        <div style="font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px">${escHtml(f.nome)}</div>
+      <td style="padding:6px 8px;min-width:110px">
+        <div style="font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:110px">${escHtml(f.nome)}</div>
         <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:2px">${turnoTag}${horTag}</div>
-      </td>
-      ${cellsDias}
-    </tr>`;
+      </td>${cells}</tr>`;
+  }).join('');
+  container.innerHTML=`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11px">
+    <thead><tr style="border-bottom:2px solid rgba(255,255,255,.1)">
+      <th style="text-align:left;padding:6px 8px;font-size:10px;color:#94a3b8">Funcionário</th>${thDias}
+    </tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function _renderEscalaDiaria(){
+  const container = document.getElementById('escala-container');
+  const labelEl   = document.getElementById('escala-semana-label');
+  const tituloEl  = document.getElementById('escala-titulo');
+  if(!container) return;
+  if(!comissoesWD || comissoesWeekIdx==null){
+    container.innerHTML='<div style="text-align:center;padding:30px;color:#888;font-size:12px;">Selecione uma semana para ver a escala.</div>';
+    return;
+  }
+  const sem = COMISSOES_CAL[comissoesWeekIdx];
+
+  // Auto-detectar dia de hoje se não selecionado
+  if(escalaDiaIdx===null){
+    const hoje = hojeLocal();
+    const dObj = hoje ? new Date(hoje+'T12:00:00') : new Date();
+    const d=dObj.getDate(), m=dObj.getMonth()+1;
+    const found = sem.days.findIndex(x=>x.d===d&&x.m===m);
+    escalaDiaIdx = found>=0 ? found : 0;
+  }
+  _escalaRenderDiaPills();
+
+  const dia = sem.days[escalaDiaIdx];
+  if(labelEl)  labelEl.textContent  = `${dia.nome}, ${String(dia.d).padStart(2,'0')}/${String(dia.m).padStart(2,'0')}`;
+  if(tituloEl) tituloEl.textContent = '📅 Escala Diária';
+
+  const funcs = comissoesWD.funcs.filter(f=>f.nome&&f.nome.trim());
+  if(!funcs.length){ container.innerHTML='<div style="text-align:center;padding:30px;color:#888;font-size:12px;">Nenhum funcionário cadastrado.</div>'; return; }
+
+  // Separar presentes (por turno) e ausentes
+  const turnos = ['MANHÃ','TARDE','NOITE','MISTO',''];
+  const grupos = {}; turnos.forEach(t=>{ grupos[t]=[]; });
+  const ausentes = [];
+
+  funcs.forEach(f=>{
+    const st=(f.dias||[])[escalaDiaIdx]||'PRESENTE';
+    const turno = f.turno||'';
+    if(ESCALA_PRESENTE_SET.has(st)||st==='FOLGA'||st==='BANCO DE HORAS'){
+      const g = turnos.includes(turno) ? turno : '';
+      grupos[g].push({...f, st});
+    } else {
+      ausentes.push({...f, st});
+    }
+  });
+
+  const TURNO_LABEL = {MANHÃ:'☀️ Manhã',TARDE:'🌤 Tarde',NOITE:'🌙 Noite',MISTO:'🔄 Misto','':`👤 Sem turno`};
+  let html = '';
+
+  turnos.forEach(t=>{
+    const lista = grupos[t];
+    if(!lista.length) return;
+    const tc = ESCALA_TURNO_COLOR[t]||'#475569';
+    html += `<div style="margin-bottom:12px;">
+      <div style="font-size:10px;font-weight:800;color:${tc};letter-spacing:1px;text-transform:uppercase;padding:6px 10px;background:${tc}18;border-radius:7px 7px 0 0;border:1px solid ${tc}30;">${TURNO_LABEL[t]||t} — ${lista.length} func.</div>
+      <div style="border:1px solid ${tc}20;border-top:none;border-radius:0 0 7px 7px;overflow:hidden;">`;
+    lista.forEach((f,i)=>{
+      const sc = ESCALA_STATUS_COLOR[f.st]||'#10b981';
+      const stLabel = f.st==='PRESENTE'?'Presente':f.st==='HORISTA'?'Horista':f.st==='JOVEM APRENDIZ'?'Jv.Aprendiz':f.st==='FOLGA'?'Folga':'Bco.H.';
+      html += `<div style="display:flex;align-items:center;gap:10px;padding:9px 12px;${i>0?'border-top:1px solid rgba(255,255,255,.04)':''}">
+        <div style="width:7px;height:7px;border-radius:50%;background:${sc};flex-shrink:0;"></div>
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:12px;font-weight:600;color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(f.nome)}</div>
+          ${f.horario?`<div style="font-size:10px;color:#64748b;margin-top:1px">${escHtml(f.horario)}</div>`:''}
+        </div>
+        <span style="font-size:10px;font-weight:700;color:${sc};background:${sc}18;border-radius:5px;padding:2px 7px;white-space:nowrap">${stLabel}</span>
+      </div>`;
+    });
+    html += '</div></div>';
+  });
+
+  if(ausentes.length){
+    html += `<div style="margin-bottom:12px;">
+      <div style="font-size:10px;font-weight:800;color:#ef4444;letter-spacing:1px;text-transform:uppercase;padding:6px 10px;background:#ef444418;border-radius:7px 7px 0 0;border:1px solid #ef444430;">⚠️ Ausentes — ${ausentes.length}</div>
+      <div style="border:1px solid #ef444420;border-top:none;border-radius:0 0 7px 7px;overflow:hidden;">`;
+    ausentes.forEach((f,i)=>{
+      const sc=ESCALA_STATUS_COLOR[f.st]||'#94a3b8';
+      html += `<div style="display:flex;align-items:center;gap:10px;padding:9px 12px;${i>0?'border-top:1px solid rgba(255,255,255,.04)':''}">
+        <div style="width:7px;height:7px;border-radius:50%;background:${sc};flex-shrink:0;"></div>
+        <div style="flex:1;min-width:0;font-size:12px;font-weight:600;color:#cbd5e1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(f.nome)}</div>
+        <span style="font-size:10px;font-weight:700;color:${sc};background:${sc}18;border-radius:5px;padding:2px 7px;white-space:nowrap">${COMISSOES_STATUS_ABREV[f.st]||f.st}</span>
+      </div>`;
+    });
+    html += '</div></div>';
+  }
+
+  if(!html) html='<div style="text-align:center;padding:30px;color:#888;font-size:12px;">Nenhum dado para este dia.</div>';
+  container.innerHTML = html;
+}
+
+async function _renderEscalaMensal(){
+  const container = document.getElementById('escala-container');
+  const labelEl   = document.getElementById('escala-semana-label');
+  const tituloEl  = document.getElementById('escala-titulo');
+  if(!container) return;
+  if(comissoesWeekIdx==null){
+    container.innerHTML='<div style="text-align:center;padding:30px;color:#888;font-size:12px;">Selecione uma semana para ver a escala mensal.</div>';
+    return;
+  }
+  container.innerHTML='<div style="text-align:center;padding:24px;color:#64748b;font-size:12px;">⏳ Carregando dados do mês…</div>';
+
+  // Determinar mês do índice de semana atual
+  const semAtual = COMISSOES_CAL[comissoesWeekIdx];
+  const mesAlvo  = semAtual.month;
+  const mesNome  = semAtual.mesNome;
+  if(tituloEl) tituloEl.textContent = `📅 Escala Mensal — ${mesNome}`;
+  if(labelEl)  labelEl.textContent  = `Todas as semanas de ${mesNome}`;
+
+  // Buscar all_data uma só vez (cache)
+  if(!escalaAllData){
+    try{
+      escalaAllData = await fetchComissoesAllData(comissoesLojaKey());
+    } catch(e){
+      container.innerHTML='<div style="text-align:center;padding:30px;color:#ef4444;font-size:12px;">Erro ao carregar dados do mês.</div>';
+      return;
+    }
+  }
+
+  // Semanas que contêm dias do mês alvo
+  const semsDoMes = COMISSOES_CAL.map((w,idx)=>({w,idx})).filter(({w})=>w.days.some(d=>d.m===mesAlvo));
+
+  // Coletar todos os dias do mês em ordem
+  const diasDoMes = [];
+  const diasSet   = new Set();
+  semsDoMes.forEach(({w})=>{
+    w.days.forEach(d=>{
+      if(d.m!==mesAlvo) return;
+      const key=`${d.m}-${d.d}`;
+      if(!diasSet.has(key)){ diasSet.add(key); diasDoMes.push(d); }
+    });
+  });
+  diasDoMes.sort((a,b)=>a.d-b.d);
+
+  // Montar mapa: nome → {turno, horario, dias:{`m-d`→status}}
+  const empMap = {};
+  semsDoMes.forEach(({w,idx})=>{
+    const wd = getComissoesWD(escalaAllData, idx);
+    (wd.funcs||[]).filter(f=>f.nome&&f.nome.trim()).forEach(f=>{
+      const nome = f.nome.trim();
+      if(!empMap[nome]) empMap[nome]={turno:f.turno||'',horario:f.horario||'',dias:{}};
+      // Atualizar turno/horario se ainda não definido
+      if(!empMap[nome].turno && f.turno) empMap[nome].turno=f.turno;
+      if(!empMap[nome].horario && f.horario) empMap[nome].horario=f.horario;
+      w.days.forEach((d,di)=>{
+        if(d.m!==mesAlvo) return;
+        const key=`${d.m}-${d.d}`;
+        empMap[nome].dias[key]=(f.dias||[])[di]||'PRESENTE';
+      });
+    });
+  });
+
+  const nomes = Object.keys(empMap).sort();
+  if(!nomes.length){ container.innerHTML='<div style="text-align:center;padding:30px;color:#888;font-size:12px;">Sem funcionários no mês.</div>'; return; }
+
+  const thDias = diasDoMes.map(d=>`<th style="font-size:8px;text-align:center;padding:3px 1px;color:#94a3b8;min-width:26px;font-weight:600">${String(d.d).padStart(2,'0')}<br><span style="font-size:7px;color:#475569">${d.nome.slice(0,1)}</span></th>`).join('');
+
+  const rows = nomes.map(nome=>{
+    const emp = empMap[nome];
+    const tc  = ESCALA_TURNO_COLOR[emp.turno]||'#475569';
+    const turnoAbrev = {MANHÃ:'Mnh',TARDE:'Trd',NOITE:'Not',MISTO:'Mix','':'—'}[emp.turno]||(emp.turno||'—').slice(0,3);
+    const cells = diasDoMes.map(d=>{
+      const st=emp.dias[`${d.m}-${d.d}`]||'';
+      if(!st) return `<td style="text-align:center;padding:2px 1px"><span style="font-size:8px;color:#2d3748">—</span></td>`;
+      const ab=COMISSOES_STATUS_ABREV[st]||st.slice(0,2);
+      const sc=ESCALA_STATUS_COLOR[st]||'#94a3b8';
+      return `<td style="text-align:center;padding:2px 1px"><span style="font-size:8px;font-weight:700;color:${sc}">${ab}</span></td>`;
+    }).join('');
+    return `<tr style="border-bottom:1px solid rgba(255,255,255,.04)">
+      <td style="padding:5px 8px;white-space:nowrap">
+        <div style="font-size:10px;font-weight:600;color:#e2e8f0;max-width:110px;overflow:hidden;text-overflow:ellipsis">${escHtml(nome)}</div>
+        <span style="font-size:8px;font-weight:700;color:${tc};background:${tc}20;border-radius:3px;padding:1px 4px">${turnoAbrev}</span>
+      </td>${cells}</tr>`;
   }).join('');
 
-  container.innerHTML=`<div style="overflow-x:auto">
-    <table style="width:100%;border-collapse:collapse;font-size:11px">
-      <thead><tr style="border-bottom:2px solid rgba(255,255,255,.1)">
-        <th style="text-align:left;padding:6px 8px;font-size:10px;color:#94a3b8">Funcionário</th>
-        ${thDias}
-      </tr></thead>
-      <tbody>${rows}</tbody>
+  // Resumo por dia (presença %)
+  const resumoRow = diasDoMes.map(d=>{
+    const key=`${d.m}-${d.d}`;
+    const total=nomes.filter(n=>empMap[n].dias[key]).length;
+    const pres=nomes.filter(n=>ESCALA_PRESENTE_SET.has(empMap[n].dias[key])).length;
+    const pct=total?Math.round(pres/total*100):0;
+    const cor=pct>=80?'#10b981':pct>=60?'#f59e0b':'#ef4444';
+    return `<td style="text-align:center;padding:3px 1px"><span style="font-size:8px;font-weight:700;color:${cor}">${pct}%</span></td>`;
+  }).join('');
+
+  container.innerHTML=`<div style="overflow-x:auto;-webkit-overflow-scrolling:touch;">
+    <table style="width:100%;border-collapse:collapse;font-size:10px">
+      <thead>
+        <tr style="border-bottom:2px solid rgba(255,255,255,.1)">
+          <th style="text-align:left;padding:5px 8px;font-size:9px;color:#94a3b8;white-space:nowrap;min-width:120px">Funcionário</th>${thDias}
+        </tr>
+      </thead>
+      <tbody>
+        <tr style="border-bottom:1px solid rgba(255,255,255,.08)">
+          <td style="padding:4px 8px;font-size:9px;color:#64748b;font-weight:600">% Presença</td>${resumoRow}
+        </tr>
+        ${rows}
+      </tbody>
     </table>
   </div>`;
 }
