@@ -245,9 +245,9 @@ const S = {
   usuario:  null,
   tab:      'inventario',
   setor:    'Computadores',
-  view:     'list',       // 'list' | 'add' | 'saida' | 'hist'
-  saidaCtx: null,         // { type:'inv'|'mkt', idx:number }
-  histCtx:  null,         // { type:'inv'|'mkt', idx:number }
+  view:     'list',       // 'list' | 'add' | 'addMkt' | 'saida' | 'hist'
+  saidaCtx: null,         // { type:'inv'|'mkt', ref:number|string }
+  histCtx:  null,         // { type:'inv'|'mkt', ref:number|string }
   data:     null,
 };
 
@@ -279,9 +279,11 @@ function loadData(){
     const raw=localStorage.getItem(storageKey());
     S.data=raw?JSON.parse(raw):null;
   }catch(e){ S.data=null; }
-  if(!S.data) S.data={items:[],saidas:[],mkt:{},mktSaidas:[]};
+  if(!S.data) S.data={items:[],saidas:[],mkt:{},mktSaidas:[],mktCustomItems:[]};
   if(!S.data.mktSaidas) S.data.mktSaidas=[];
+  if(!S.data.mktCustomItems) S.data.mktCustomItems=[];
   MKT_ITEMS.forEach(m=>{ if(S.data.mkt[m.key]==null) S.data.mkt[m.key]=0; });
+  S.data.mktCustomItems.forEach(m=>{ if(S.data.mkt[m.id]==null) S.data.mkt[m.id]=0; });
 }
 
 function saveData(){
@@ -342,7 +344,10 @@ function setTab(tab){
 
 function setSetor(idx){ S.setor=SETORES[idx].key; render(); }
 
-function onFabClick(){ S.view='add'; render(); }
+function onFabClick(){
+  if(S.tab==='marketing'){ S.view='addMkt'; render(); }
+  else{ S.view='add'; render(); }
+}
 
 function render(){
   // Bottom nav highlight
@@ -354,9 +359,10 @@ function render(){
   ['inventario','marketing','relatorio'].forEach(t=>{
     document.getElementById('sl-'+t)?.classList.toggle('active',S.tab===t);
   });
-  // FAB only on inventory list
+  // FAB on inventory or marketing list
   const fab=$('fab');
-  if(S.tab==='inventario'&&S.view==='list'&&!S.saidaCtx&&!S.histCtx) fab.classList.remove('hidden');
+  const showFab=(S.tab==='inventario'||S.tab==='marketing')&&S.view==='list'&&!S.saidaCtx&&!S.histCtx;
+  if(showFab) fab.classList.remove('hidden');
   else fab.classList.add('hidden');
 
   const c=$('app-content');
@@ -366,7 +372,8 @@ function render(){
     if(S.view==='add') renderAddItem(c);
     else renderInventario(c);
   } else if(S.tab==='marketing'){
-    renderMarketing(c);
+    if(S.view==='addMkt') renderAddMktItem(c);
+    else renderMarketing(c);
   } else {
     renderRelatorio(c);
   }
@@ -470,68 +477,128 @@ function delItem(id){
 }
 
 // ─── MARKETING ───────────────────────────────────────────
+function allMktList(){
+  return [
+    ...MKT_ITEMS.map(m=>({id:m.key,nome:m.key,icon:m.icon,isDefault:true})),
+    ...(S.data.mktCustomItems||[]).map(m=>({...m,isDefault:false})),
+  ];
+}
+
 function renderMarketing(c){
-  const cards=MKT_ITEMS.map((m,idx)=>{
-    const qty=S.data.mkt[m.key]||0;
-    const saidas=S.data.mktSaidas.filter(s=>s.item===m.key);
+  const items=allMktList();
+  const cards=items.map((m,idx)=>{
+    const qty=S.data.mkt[m.id]||0;
+    const saidas=S.data.mktSaidas.filter(s=>s.item===m.id);
     return `<div class="mkt-card">
       <div class="mkt-head">
         <div class="mkt-icon">${m.icon}</div>
         <div class="mkt-info">
-          <div class="mkt-nome">${esc(m.key)}</div>
+          <div class="mkt-nome">${esc(m.nome)}</div>
           <div class="mkt-sub">${saidas.length} saída${saidas.length!==1?'s':''} registrada${saidas.length!==1?'s':''}</div>
         </div>
-        <div class="mkt-qty">${qty}</div>
+        <div class="mkt-qty" id="mkt-dq-${idx}">${qty}</div>
       </div>
       <div class="mkt-controls">
         <div class="qty-wrap">
-          <button class="qty-btn" onclick="mktAdj(${idx},-1)">−</button>
+          <button class="qty-btn" onclick="mktAdj('${esc(m.id)}',-1,${idx})">−</button>
           <input class="qty-input" type="number" min="0" id="mkt-q-${idx}" value="${qty}"
-            onchange="mktSet(${idx},this.value)" onblur="mktSet(${idx},this.value)">
-          <button class="qty-btn" onclick="mktAdj(${idx},1)">+</button>
+            onchange="mktSetKey('${esc(m.id)}',this.value,${idx})" onblur="mktSetKey('${esc(m.id)}',this.value,${idx})">
+          <button class="qty-btn" onclick="mktAdj('${esc(m.id)}',1,${idx})">+</button>
         </div>
-        <button class="btn-sm pri" onclick="openSaida('mkt',${idx})">↩ Saída</button>
-        <button class="btn-sm sec" onclick="openHist('mkt',${idx})">📋</button>
+        <button class="btn-sm pri" onclick="openSaida('mkt','${esc(m.id)}')">↩ Saída</button>
+        <button class="btn-sm sec" onclick="openHist('mkt','${esc(m.id)}')">📋</button>
+        ${!m.isDefault?`<button class="btn-sm dan" onclick="delMktItem('${esc(m.id)}')">🗑️</button>`:''}
       </div>
     </div>`;
   }).join('');
   c.innerHTML=`<div class="content">${cards}</div>`;
 }
 
-function mktAdj(idx,delta){
-  const key=MKT_ITEMS[idx].key;
-  S.data.mkt[key]=Math.max(0,(S.data.mkt[key]||0)+delta);
-  saveData(); render();
+function renderAddMktItem(c){
+  c.innerHTML=`
+    <div class="back-hdr">
+      <button class="back-btn" onclick="cancelView()">← Voltar</button>
+      <div class="back-title">➕ Novo Item de Marketing</div>
+    </div>
+    <div class="content">
+      <div class="form-card">
+        <div class="form-title">Adicionar item de marketing</div>
+        <div class="form-field">
+          <label class="form-label">Nome do item *</label>
+          <input class="form-input" id="fm-nome" placeholder="Ex: Banner de Vitrine" autofocus>
+        </div>
+        <div class="form-row">
+          <div class="form-field">
+            <label class="form-label">Ícone (emoji)</label>
+            <input class="form-input" id="fm-icon" placeholder="📣" maxlength="4" style="font-size:20px;text-align:center">
+          </div>
+          <div class="form-field">
+            <label class="form-label">Quantidade inicial</label>
+            <input class="form-input" id="fm-qty" type="number" min="0" value="0">
+          </div>
+        </div>
+        <div class="form-btns">
+          <button class="form-btn sec" onclick="cancelView()">Cancelar</button>
+          <button class="form-btn pri" onclick="addMktItem()">✅ Salvar</button>
+        </div>
+      </div>
+    </div>`;
+  setTimeout(()=>$('fm-nome')?.focus(),60);
 }
 
-function mktSet(idx,val){
-  const key=MKT_ITEMS[idx].key;
+function addMktItem(){
+  const nome=($('fm-nome')?.value||'').trim();
+  const icon=($('fm-icon')?.value||'').trim()||'📣';
+  const qty=Math.max(0,parseInt($('fm-qty')?.value||0,10)||0);
+  if(!nome){ toast('Nome obrigatório'); return; }
+  if(!S.data.mktCustomItems) S.data.mktCustomItems=[];
+  const id=uid();
+  S.data.mktCustomItems.push({id,nome,icon,criado_em:nowISO(),criado_por:S.usuario.nome});
+  S.data.mkt[id]=qty;
+  saveData(); S.view='list';
+  toast('✅ Item adicionado!'); render();
+}
+
+function delMktItem(id){
+  if(!confirm('Excluir este item e todo seu histórico de saídas?')) return;
+  S.data.mktCustomItems=(S.data.mktCustomItems||[]).filter(m=>m.id!==id);
+  S.data.mktSaidas=S.data.mktSaidas.filter(s=>s.item!==id);
+  delete S.data.mkt[id];
+  saveData(); toast('Excluído'); render();
+}
+
+function mktAdj(key,delta,idx){
+  S.data.mkt[key]=Math.max(0,(S.data.mkt[key]||0)+delta);
+  saveData();
+  const v=S.data.mkt[key];
+  const qi=$(`mkt-q-${idx}`); if(qi) qi.value=v;
+  const dq=$(`mkt-dq-${idx}`); if(dq) dq.textContent=v;
+}
+
+function mktSetKey(key,val,idx){
   S.data.mkt[key]=Math.max(0,parseInt(val,10)||0);
   saveData();
-  // update display without full re-render
-  const el=$(`mkt-q-${idx}`);
-  if(el) el.value=S.data.mkt[key];
-  // update qty display
-  const card=document.querySelectorAll('.mkt-card')[idx];
-  if(card){
-    const qtyEl=card.querySelector('.mkt-qty');
-    if(qtyEl) qtyEl.textContent=S.data.mkt[key];
-  }
+  const v=S.data.mkt[key];
+  const qi=$(`mkt-q-${idx}`); if(qi) qi.value=v;
+  const dq=$(`mkt-dq-${idx}`); if(dq) dq.textContent=v;
 }
 
 // ─── SAÍDA PANEL ─────────────────────────────────────────
-function openSaida(type,idx){ S.saidaCtx={type,idx}; render(); }
+function openSaida(type,ref){ S.saidaCtx={type,ref}; render(); }
 
 function renderSaidaPanel(c){
   const ctx=S.saidaCtx;
   let nome,maxQty;
   if(ctx.type==='inv'){
-    const item=S.data.items[ctx.idx];
+    const item=S.data.items[ctx.ref];
     if(!item){ cancelView(); return; }
     nome=item.nome; maxQty=item.quantidade;
   } else {
-    const m=MKT_ITEMS[ctx.idx];
-    nome=m.key; maxQty=S.data.mkt[m.key]||0;
+    const key=ctx.ref;
+    const defItem=MKT_ITEMS.find(m=>m.key===key);
+    const custItem=(S.data.mktCustomItems||[]).find(m=>m.id===key);
+    nome=defItem?defItem.key:(custItem?custItem.nome:key);
+    maxQty=S.data.mkt[key]||0;
   }
   c.innerHTML=`
     <div class="back-hdr">
@@ -566,13 +633,13 @@ function confirmarSaida(){
   if(!qty||qty<1){ toast('Quantidade inválida'); return; }
 
   if(ctx.type==='inv'){
-    const item=S.data.items[ctx.idx];
+    const item=S.data.items[ctx.ref];
     if(!item){ toast('Item não encontrado'); return; }
     if(qty>item.quantidade){ toast(`Máximo: ${item.quantidade}`); return; }
     item.quantidade-=qty;
     S.data.saidas.push({id:uid(),item_id:item.id,item_nome:item.nome,setor:item.setor,quantidade:qty,obs,data:nowISO(),usuario:S.usuario.nome});
   } else {
-    const key=MKT_ITEMS[ctx.idx].key;
+    const key=ctx.ref;
     const avail=S.data.mkt[key]||0;
     if(qty>avail){ toast(`Máximo: ${avail}`); return; }
     S.data.mkt[key]=avail-qty;
@@ -582,19 +649,21 @@ function confirmarSaida(){
 }
 
 // ─── HISTÓRICO ───────────────────────────────────────────
-function openHist(type,idx){ S.histCtx={type,idx}; render(); }
+function openHist(type,ref){ S.histCtx={type,ref}; render(); }
 
 function renderHistPanel(c){
   const ctx=S.histCtx;
   let nome,saidas;
   if(ctx.type==='inv'){
-    const item=S.data.items[ctx.idx];
+    const item=S.data.items[ctx.ref];
     if(!item){ cancelView(); return; }
     nome=item.nome;
     saidas=[...S.data.saidas.filter(s=>s.item_id===item.id)].sort((a,b)=>b.data.localeCompare(a.data));
   } else {
-    const key=MKT_ITEMS[ctx.idx].key;
-    nome=key;
+    const key=ctx.ref;
+    const defItem=MKT_ITEMS.find(m=>m.key===key);
+    const custItem=(S.data.mktCustomItems||[]).find(m=>m.id===key);
+    nome=defItem?defItem.key:(custItem?custItem.nome:key);
     saidas=[...S.data.mktSaidas.filter(s=>s.item===key)].sort((a,b)=>b.data.localeCompare(a.data));
   }
 
@@ -665,11 +734,13 @@ function renderRelatorio(c){
       <div class="relat-val">${s.totalQty}</div>
     </div>`).join('');
 
-  const mktRows=MKT_ITEMS.map(m=>
+  const allMkt=allMktList();
+  const mktRows=allMkt.map(m=>
     `<div class="relat-row">
-      <div class="relat-name">${m.icon} ${esc(m.key)}</div>
-      <div class="relat-val">${S.data.mkt[m.key]||0}</div>
+      <div class="relat-name">${m.icon} ${esc(m.nome)}</div>
+      <div class="relat-val">${S.data.mkt[m.id]||0}</div>
     </div>`).join('');
+  const totalMkt=allMkt.reduce((a,m)=>a+(S.data.mkt[m.id]||0),0);
 
   c.innerHTML=`
     <div class="content">
@@ -684,7 +755,7 @@ function renderRelatorio(c){
         ${mktRows}
         <div class="relat-total">
           <span>Total</span>
-          <span style="color:var(--ouro)">${MKT_ITEMS.reduce((a,m)=>a+(S.data.mkt[m.key]||0),0)} un</span>
+          <span style="color:var(--ouro)">${totalMkt} un</span>
         </div>
       </div>
       <button class="wpp-btn" onclick="compartilharWpp()">
@@ -712,7 +783,7 @@ function compartilharWpp(){
 
   // Marketing
   txt+=`\n*─ MARKETING ─*\n`;
-  MKT_ITEMS.forEach(m=>{ txt+=`${m.icon} ${m.key}: *${S.data.mkt[m.key]||0}*\n`; });
+  allMktList().forEach(m=>{ txt+=`${m.icon} ${m.nome}: *${S.data.mkt[m.id]||0}*\n`; });
 
   txt+=`\n_Gerado em ${new Date().toLocaleString('pt-BR')}_`;
 
