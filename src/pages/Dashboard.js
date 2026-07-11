@@ -40,7 +40,8 @@ const MODULES = [
   { id: 'caixa',      name: 'Caixa',            sub: 'Fechamento de caixa e aprovação',    icon: '💵', perm: 'caixa',      url: '/gn-caixa.html' },
   { id: 'mestra',     name: 'Comissões Mestra', sub: 'Visão consolidada — todas as lojas', icon: '🏆', perm: 'mestra',     url: '/gn-comissoes-mestra.html', masterOnly: true },
   { id: 'rh',         name: 'RH / Financeiro',  sub: 'Consolidador de RH e dados financeiros', icon: '👥', perm: 'rh',         url: '/gn-rh.html' },
-  { id: 'manutencao', name: 'Manutenção',       sub: 'Acompanhamento de manutenções das lojas', icon: '🔧', perm: 'manutencao',  url: '/gn-manutencao.html', free: true },
+  { id: 'manutencao',  name: 'Manutenção',       sub: 'Acompanhamento de manutenções das lojas', icon: '🔧', perm: 'manutencao',  url: '/gn-manutencao.html', free: true },
+  { id: 'inventario',  name: 'Inventário',       sub: 'Inventário de itens e marketing da loja', icon: '📦', perm: 'inventario',  url: '/gn-inventario.html', free: true },
 ];
 
 function getSession() {
