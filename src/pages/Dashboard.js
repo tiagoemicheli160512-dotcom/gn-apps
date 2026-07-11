@@ -845,7 +845,7 @@ function HomeScreen({ session: sessionProp, onLogout }) {
     if (perms.checklist || isMaster) {
       if (isMaster && !masterLoja) { set('checklist', 'Todas as lojas', 'o'); }
       else {
-        const hoje = new Date().toISOString().split('T')[0];
+        const hoje = (d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'))(new Date());
         fetch(`${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hoje}&loja=eq.${encodeURIComponent(loja)}&select=id`, { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } })
           .then(r => r.json()).then(d => set('checklist', d && d.length ? 'Hoje ✓' : 'Novo hoje', d && d.length ? 'g' : 'b'))
           .catch(() => set('checklist', '—', 'x'));
