@@ -1057,6 +1057,10 @@ function HomeScreen({ session: sessionProp, onLogout }) {
           <span style={S.bottomIcon}>🔧</span>
           <span style={S.bottomLabel(false)}>Manutenção</span>
         </button>
+        <button style={S.bottomItem} onClick={() => navTo('/gn-inventario.html')}>
+          <span style={S.bottomIcon}>📦</span>
+          <span style={S.bottomLabel(false)}>Inventário</span>
+        </button>
       </nav>
     </>
   );
