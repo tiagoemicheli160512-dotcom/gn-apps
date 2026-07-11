@@ -453,15 +453,16 @@ function PainelGeral({ onSelectLoja }) {
           }
           const count = wdFuncs?.funcs?.filter(f => f.nome?.trim()).length || 0;
 
-          // Faltas/atestados da semana selecionada
-          let faltas = 0, atestados = 0;
+          // Faltas/suspensões/atestados da semana selecionada
+          let faltas = 0, suspensoes = 0, atestados = 0;
           (wd?.funcs || []).filter(f => f.nome?.trim()).forEach(f => {
             (f.dias || []).forEach(st => {
-              if (st === 'FALTA' || st === 'SUSPENSÃO') faltas++;
+              if (st === 'FALTA') faltas++;
+              else if (st === 'SUSPENSÃO') suspensoes++;
               else if (st === 'ATESTADO') atestados++;
             });
           });
-          fData[displayKey] = { count, faltas, atestados };
+          fData[displayKey] = { count, faltas, suspensoes, atestados };
         });
         setComissoes(coms);
         setFreqData(freq);
@@ -711,6 +712,10 @@ function PainelGeral({ onSelectLoja }) {
                       <div style={{ flex:1, textAlign:'center' }}>
                         <div style={{ fontSize:14, fontWeight:900, color: fd.faltas>0?'#ef4444':'#22c55e', fontVariantNumeric:'tabular-nums', lineHeight:1 }}>{fd.faltas}</div>
                         <div style={{ fontSize:8, color:'#3a3a5a', fontWeight:700, textTransform:'uppercase', letterSpacing:.5, marginTop:2 }}>Faltas</div>
+                      </div>
+                      <div style={{ flex:1, textAlign:'center' }}>
+                        <div style={{ fontSize:14, fontWeight:900, color: fd.suspensoes>0?'#f97316':'#22c55e', fontVariantNumeric:'tabular-nums', lineHeight:1 }}>{fd.suspensoes}</div>
+                        <div style={{ fontSize:8, color:'#3a3a5a', fontWeight:700, textTransform:'uppercase', letterSpacing:.5, marginTop:2 }}>Susp.</div>
                       </div>
                       <div style={{ flex:1, textAlign:'center' }}>
                         <div style={{ fontSize:14, fontWeight:900, color: fd.atestados>0?'#f0c050':'#22c55e', fontVariantNumeric:'tabular-nums', lineHeight:1 }}>{fd.atestados}</div>
