@@ -336,6 +336,7 @@ let S = {
   bancoHoras: [],        // [{loja(chkKey), mes, registros:[{nome,horas,obs}]}]
   presencaSemana: null,  // { idx, funcs:[] }
   rhSemana: null,        // Date (segunda-feira)
+  rhBusca: '',           // busca por funcionário
 };
 
 // ══════════════════════════════════════════════
@@ -619,12 +620,14 @@ function renderOperacoes() {
     const atesColor  = atestados > 0 ? 'color:var(--amber)' : '';
     const bhColor    = bancoHoras > 0 ? 'color:var(--teal)' : '';
     const faltaLbl   = mode==='dia' ? 'Faltas Hoje' : 'Faltas';
+    const LIMITE_FALTA = { dia: 3, sem: 5, mes: 15 };
+    const alertaBadge = faltas >= LIMITE_FALTA[mode] ? `<span class="badge badge-err" style="font-size:9px">⚠️ ${faltas}F</span>` : '';
 
     return `<div class="loja-card">
       <div class="loja-card-header">
         <span class="loja-name">${loja.display}</span>
-        <div style="display:flex;align-items:center;gap:8px">
-          ${cxBadge}
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          ${alertaBadge}${cxBadge}
           ${cxTotal>0 ? `<span class="num" style="font-size:11px;font-weight:700;color:var(--accent)">${money(cxTotal)}</span>` : ''}
         </div>
       </div>
@@ -681,6 +684,11 @@ function renderOperacoes() {
         <span style="font-size:11px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.4px">${caixaLbl}</span>
         <span class="num fin-total">${money(totalCaixa)}</span>
       </div>
+    </div>
+    <div style="margin-bottom:10px">
+      <button onclick="enviarResumoWhatsApp()" style="width:100%;background:#25d366;color:#fff;border-radius:var(--rs);padding:10px;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center;gap:6px">
+        <span>📲</span> Enviar resumo no WhatsApp
+      </button>
     </div>
     <div class="loja-grid">${cardsHtml}</div>`;
 }
@@ -841,6 +849,11 @@ function renderRH() {
 
   const meses = [...new Set(S.bancoHoras.map(r=>r.mes))].sort();
 
+  const buscaQ = (S.rhBusca||'').toLowerCase().trim();
+  const bhFuncsFilt = buscaQ
+    ? Object.fromEntries(Object.entries(bhFuncs).filter(([n])=>n.toLowerCase().includes(buscaQ)))
+    : bhFuncs;
+
   let bhHtml = '';
   if (Object.keys(bhFuncs).length === 0) {
     bhHtml = `<div class="empty" style="padding:24px"><div class="empty-icon">⏱</div><div class="empty-text">Sem dados de banco de horas para ${S.rhLoja.display}</div></div>`;
@@ -850,7 +863,12 @@ function renderRH() {
       return `<th style="text-align:center">${MES_ABREV[parseInt(mo)]} ${y.slice(2)}</th>`;
     }).join('');
 
-    const rowsHtml = Object.entries(bhFuncs).sort(([a],[b])=>a.localeCompare(b)).map(([nome, mesSaldo]) => {
+    const rowsHtml = Object.entries(bhFuncsFilt).sort(([a],[b])=>a.localeCompare(b)).map(([nome, mesSaldo]) => {
+      const ultimoMes = meses[meses.length-1];
+      const ultimoSaldo = ultimoMes != null ? parseFloat(mesSaldo[ultimoMes]) : null;
+      const isNeg = ultimoSaldo != null && !isNaN(ultimoSaldo) && ultimoSaldo < 0;
+      const negBadge = isNeg ? ' <span class="badge badge-err" style="font-size:8px;vertical-align:middle">⚠️</span>' : '';
+      const rowBg = isNeg ? 'background:var(--red-bg)' : '';
       const celulas = meses.map(m => {
         const h = mesSaldo[m];
         if (h == null) return `<td style="text-align:center;color:var(--muted)">—</td>`;
@@ -858,11 +876,11 @@ function renderRH() {
         const color = hNum > 0 ? 'color:var(--green);font-weight:700' : hNum < 0 ? 'color:var(--red);font-weight:700' : 'color:var(--muted)';
         return `<td class="num" style="text-align:center;${color}">${hNum>0?'+':''}${hNum}h</td>`;
       }).join('');
-      return `<tr><td class="nome-col">${nome}</td>${celulas}</tr>`;
+      return `<tr style="${rowBg}"><td class="nome-col">${nome}${negBadge}</td>${celulas}</tr>`;
     }).join('');
 
     const totHtml = meses.map(m => {
-      const tot = Object.values(bhFuncs).reduce((a,mb)=>a+(parseFloat(mb[m])||0),0);
+      const tot = Object.values(bhFuncsFilt).reduce((a,mb)=>a+(parseFloat(mb[m])||0),0);
       const color = tot > 0 ? 'color:var(--green)' : tot < 0 ? 'color:var(--red)' : 'color:var(--muted)';
       return `<td class="num" style="text-align:center;font-weight:800;${color}">${tot>0?'+':''}${tot.toFixed(1)}h</td>`;
     }).join('');
@@ -883,6 +901,7 @@ function renderRH() {
   // ── ESPELHO DE FREQUÊNCIA (semana atual da comissões) ──
   const DIAS_NAMES = ['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
   let presFuncs = S.presencaSemana?.funcs?.filter(f=>f.nome?.trim()) || [];
+  if (buscaQ) presFuncs = presFuncs.filter(f => f.nome.toLowerCase().includes(buscaQ));
 
   let presHtml = '';
   if (presFuncs.length === 0) {
@@ -931,11 +950,20 @@ function renderRH() {
   $('content').innerHTML = `
     <div class="sec-header"><div class="sec-title">RH / Banco de Horas</div></div>
     <div class="filter-row">${lojaTabsHtml}</div>
+    <div style="margin-bottom:10px">
+      <input type="search" id="rh-busca" value="${(S.rhBusca||'').replace(/"/g,'&quot;')}"
+        placeholder="🔍 Pesquisar funcionário…"
+        oninput="S.rhBusca=this.value;renderRH();setTimeout(()=>{const el=$('rh-busca');if(el){el.focus();el.setSelectionRange(el.value.length,el.value.length);}},0)"
+        style="width:100%;background:var(--surf2);border:1px solid var(--border);color:var(--text);border-radius:var(--rs);padding:8px 12px;font-size:12px;font-family:inherit;outline:none;box-sizing:border-box">
+    </div>
 
     <div class="card" style="margin-bottom:14px">
       <div class="card-header">
         <span class="card-title">⏱ Saldo Banco de Horas</span>
-        <span style="font-size:11px;color:var(--muted)">${S.rhLoja.display}</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:11px;color:var(--muted)">${S.rhLoja.display}</span>
+          ${Object.keys(bhFuncs).length > 0 ? `<button onclick="exportarBHCSV()" class="btn-sm btn-sec" style="font-size:11px;padding:3px 8px">⬇️ CSV</button>` : ''}
+        </div>
       </div>
       <div class="card-body" style="padding:0">${bhHtml}</div>
     </div>
@@ -1003,6 +1031,66 @@ function navegarOp(delta) {
   const today = new Date(); today.setHours(12,0,0,0);
   if (S.opData > today) S.opData = today;
   renderContent();
+}
+
+function enviarResumoWhatsApp() {
+  if (!S.opData) return;
+  const mode = S.opMode || 'dia';
+  let periodo;
+  if (mode === 'dia') {
+    periodo = S.opData.toLocaleDateString('pt-BR',{weekday:'long',day:'2-digit',month:'short'});
+  } else if (mode === 'sem') {
+    const mon = getMondayOfWeek(S.opData);
+    const sem = formatSemana(mon);
+    periodo = `Semana ${sem.num} (${sem.periodo})`;
+  } else {
+    const p = S.opData.toLocaleDateString('pt-BR',{month:'long',year:'numeric'});
+    periodo = p.charAt(0).toUpperCase()+p.slice(1);
+  }
+  const refMon = getMondayOfWeek(S.opData);
+  const semIdx = mestraWeekIdx(refMon);
+  let totalFaltas = 0, totalCaixa = 0;
+  const linhas = LOJAS.map(loja => {
+    const allData = S.comissoesData[loja.comKey];
+    let faltas = 0, suspensoes = 0;
+    if (mode === 'dia') {
+      const di = comissoesDiaIdx(isoDate(S.opData));
+      const wd = allData?.[String(semIdx)];
+      (wd?.funcs||[]).filter(f=>f.nome?.trim()).forEach(f=>{
+        const st=f.dias?.[di]||'';
+        if(st==='FALTA')faltas++;
+        else if(st==='SUSPENSÃO')suspensoes++;
+      });
+    } else if (mode === 'sem') {
+      const wd = allData?.[String(semIdx)];
+      (wd?.funcs||[]).filter(f=>f.nome?.trim()).forEach(f=>{
+        (f.dias||[]).forEach(st=>{ if(st==='FALTA')faltas++; else if(st==='SUSPENSÃO')suspensoes++; });
+      });
+    } else {
+      const y=S.opData.getFullYear(), mo=S.opData.getMonth();
+      const qtd=new Date(y,mo+1,0).getDate();
+      for(let d=1;d<=qtd;d++){
+        const dt=new Date(y,mo,d,12);
+        const si=mestraWeekIdx(getMondayOfWeek(dt));
+        const di=comissoesDiaIdx(isoDate(dt));
+        const wd=allData?.[String(si)];
+        (wd?.funcs||[]).filter(f=>f.nome?.trim()).forEach(f=>{
+          const st=f.dias?.[di]||'';
+          if(st==='FALTA')faltas++; else if(st==='SUSPENSÃO')suspensoes++;
+        });
+      }
+    }
+    totalFaltas += faltas;
+    const cxTotal=(S.opCaixa||[]).filter(r=>r.loja===loja.userKey).reduce((a,r)=>a+(parseFloat(r.total_real)||0),0);
+    totalCaixa += cxTotal;
+    const partes=[];
+    if(faltas>0) partes.push(`${faltas} falta${faltas>1?'s':''}`);
+    if(suspensoes>0) partes.push(`${suspensoes} susp.`);
+    if(cxTotal>0) partes.push(`R$ ${cxTotal.toLocaleString('pt-BR',{minimumFractionDigits:2})}`);
+    return `• ${loja.display}${partes.length?': '+partes.join(', '):' ✅'}`;
+  }).join('\n');
+  const text=`📊 *GN Operações — ${periodo}*\n\n${linhas}\n\n📉 Total faltas: *${totalFaltas}*\n💰 Caixa total: *R$ ${totalCaixa.toLocaleString('pt-BR',{minimumFractionDigits:2})}*`;
+  window.open('https://wa.me/?text='+encodeURIComponent(text),'_blank');
 }
 
 // ══════════════════════════════════════════════
@@ -1230,6 +1318,7 @@ function modalMigracaoFoto() {
 // ══════════════════════════════════════════════
 async function filtrarRHLoja(comKey) {
   S.rhLoja = LOJAS.find(l=>l.comKey===comKey) || LOJAS[0];
+  S.rhBusca = '';
   $('content').innerHTML = `<div class="empty"><div class="spin"></div></div>`;
   await carregarRH(); renderRH();
 }
@@ -1239,6 +1328,36 @@ async function navegarRHSemana(delta) {
   if (S.rhSemana > getMondayOfWeek()) S.rhSemana = getMondayOfWeek();
   $('content').innerHTML = `<div class="empty"><div class="spin"></div></div>`;
   await carregarRH(); renderRH();
+}
+
+function exportarBHCSV() {
+  if (!S.bancoHoras.length) { toast('Sem dados para exportar', 'err'); return; }
+  const MES_ABREV = ['','Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+  const bhFuncs = {};
+  S.bancoHoras.forEach(row => {
+    (row.registros||[]).forEach(r => {
+      if (!r.nome) return;
+      if (!bhFuncs[r.nome]) bhFuncs[r.nome] = {};
+      bhFuncs[r.nome][row.mes] = r.horas;
+    });
+  });
+  const meses = [...new Set(S.bancoHoras.map(r=>r.mes))].sort();
+  const header = ['Funcionário', ...meses.map(m => {
+    const [y,mo] = m.split('-');
+    return MES_ABREV[parseInt(mo)]+'/'+y.slice(2);
+  })];
+  const rows = Object.entries(bhFuncs).sort(([a],[b])=>a.localeCompare(b)).map(([nome, mesSaldo]) =>
+    [nome, ...meses.map(m => mesSaldo[m] != null ? parseFloat(mesSaldo[m]).toFixed(1) : '')]
+  );
+  const csv = [header, ...rows].map(r => r.join(';')).join('\n');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const dataLabel = new Date().toISOString().slice(0,7);
+  a.href = url; a.download = `banco-horas-${S.rhLoja.display.replace(/\s+/g,'-').toLowerCase()}-${dataLabel}.csv`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast('CSV exportado!', 'ok');
 }
 
 // ══════════════════════════════════════════════
