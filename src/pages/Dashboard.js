@@ -749,6 +749,30 @@ function PainelGeral({ onSelectLoja }) {
   });
   const hasFreqData = Object.values(freqCons).some(c => c.total > 0);
 
+  const exportarCSV = () => {
+    const cols = ['Loja', 'Faturamento', 'Meta', '% Meta', 'CL Médio%', 'Comissão', 'CMV%'];
+    const rows = lojasOrdenadas.map(k => {
+      const fat = dados[k]?.fat || 0;
+      const meta = metas[k] || 0;
+      const metaPct = meta > 0 ? Math.min(100, Math.round((fat / meta) * 100)) : '';
+      const clVals = Object.values(clSemana[k] || {});
+      const clMedia = clVals.length ? Math.round(clVals.reduce((s, v) => s + v, 0) / clVals.length) : '';
+      const com = comissoes[k] != null ? comissoes[k].toFixed(2) : '';
+      const cmvV = cmvPorLoja[k] != null ? cmvPorLoja[k].toFixed(1) : '';
+      return [LOJA_DISPLAY[k], fat.toFixed(2), meta.toFixed(2), metaPct, clMedia, com, cmvV];
+    });
+    const csv = [cols, ...rows].map(r => r.join(';')).join('\n');
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `gn-${semana.replace(/[\s/–]/g, '-')}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div style={{ padding: '0 14px 90px' }}>
 
@@ -1079,9 +1103,15 @@ function PainelGeral({ onSelectLoja }) {
         })}
       </div>
 
-      {/* Botão WhatsApp — resumo semanal */}
+      {/* Botões de ação — WhatsApp + Exportar CSV */}
       {!loading && (
-        <div style={{ marginTop: 16 }}>
+        <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <button
+            onClick={exportarCSV}
+            style={{ width: '100%', background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 13, padding: '12px 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 700, color: '#7a7aaa' }}
+          >
+            <span style={{ fontSize: 16 }}>⬇️</span> Exportar CSV
+          </button>
           <button
             onClick={() => {
               const hoje = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
@@ -1127,6 +1157,7 @@ function HomeScreen({ session: sessionProp, onLogout }) {
   const [tsSaving, setTsSaving] = useState(false);
   const [miniPainel, setMiniPainel] = useState(null);
   const [manutBadgeCount, setManutBadgeCount] = useState(0);
+  const [streak, setStreak] = useState(null);
   const [notifPerm, setNotifPerm] = useState(() => {
     if (typeof Notification !== 'undefined') return Notification.permission;
     return 'unsupported';
@@ -1221,6 +1252,24 @@ function HomeScreen({ session: sessionProp, onLogout }) {
         const pend = row && Array.isArray(row.manutencao) ? row.manutencao.filter(m => m && m.status && m.status !== 'Resolvido').length : 0;
         setMiniPainel({ pct: row?.checklist_pct ?? null, fat, manut: pend });
       }).catch(() => setMiniPainel({ pct: null, fat: 0, manut: 0 }));
+
+      // Streak — dias consecutivos com CL 100%
+      fetch(
+        `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${d30s}&loja=eq.${encodeURIComponent(lojaDispQ)}&select=data_operacao,checklist_pct&order=data_operacao.desc`,
+        { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
+      ).then(r => r.json()).then(rows => {
+        const byDate = {};
+        (rows || []).forEach(r => { if (r.checklist_pct !== null) byDate[r.data_operacao] = r.checklist_pct; });
+        let s = 0;
+        const today = new Date();
+        for (let i = 0; i < 30; i++) {
+          const dt = new Date(today.getFullYear(), today.getMonth(), today.getDate() - i);
+          const iso = dt.getFullYear() + '-' + String(dt.getMonth()+1).padStart(2,'0') + '-' + String(dt.getDate()).padStart(2,'0');
+          if (byDate[iso] === 100) s++;
+          else break;
+        }
+        setStreak(s);
+      }).catch(() => {});
     }
   }, [session, masterLoja, lojaEfetiva, isMaster]);
 
@@ -1383,6 +1432,19 @@ function HomeScreen({ session: sessionProp, onLogout }) {
           <button onClick={() => navTo('/gn-checklist.html')} style={{ background: '#ef4444', border: 'none', borderRadius: 8, padding: '7px 11px', fontSize: 11, fontWeight: 700, color: '#fff', cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}>
             Preencher →
           </button>
+        </div>
+      )}
+
+      {/* Streak de check-list */}
+      {(!isMaster || masterLoja) && streak !== null && streak > 0 && (
+        <div style={{ margin: '0 14px 6px', background: 'rgba(34,197,94,.06)', border: '1px solid rgba(34,197,94,.18)', borderRadius: 12, padding: '8px 14px', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 22 }}>🔥</span>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#22c55e', lineHeight: 1 }}>
+              {streak} dia{streak > 1 ? 's' : ''} consecutivo{streak > 1 ? 's' : ''} com CL 100%!
+            </div>
+            <div style={{ fontSize: 10, color: '#1a4a2a', marginTop: 2 }}>Continue mantendo o check-list em dia</div>
+          </div>
         </div>
       )}
 
