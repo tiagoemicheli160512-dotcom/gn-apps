@@ -270,6 +270,9 @@ body{background:var(--bg);color:#e8e8f0;font-family:-apple-system,BlinkMacSystem
     </div>
     <span class="filtro-label">Período</span>
     <div class="filtro-row" id="periodo-row"></div>
+    <div id="busca-row" style="display:none;padding:0 14px 8px">
+      <input type="search" id="busca-input" placeholder="🔍 Pesquisar descrição, setor ou loja…" style="width:100%;background:#1a1a30;border:1px solid #2a2a4a;color:#e8e8f0;border-radius:8px;padding:8px 12px;font-size:12px;font-family:inherit;outline:none;box-sizing:border-box" oninput="S.busca=this.value;renderLista()">
+    </div>
   </div>
 
   <!-- ALERTA DE NOVIDADES -->
@@ -288,6 +291,12 @@ body{background:var(--bg);color:#e8e8f0;font-family:-apple-system,BlinkMacSystem
 </div>
 
 <div id="toast"></div>
+
+<!-- Modal foto em tela cheia -->
+<div id="fotoModal" onclick="fecharFoto()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.93);z-index:9999;align-items:center;justify-content:center">
+  <img id="fotoModalImg" style="max-width:95vw;max-height:90vh;object-fit:contain;border-radius:10px;box-shadow:0 0 60px rgba(0,0,0,.9)">
+  <button onclick="event.stopPropagation();fecharFoto()" style="position:absolute;top:16px;right:16px;background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:50%;width:42px;height:42px;font-size:20px;cursor:pointer;line-height:1;font-family:inherit">✕</button>
+</div>
 
 <script>
 const SB_URL = 'https://ncxttwvpafajnilpjbol.supabase.co';
@@ -314,6 +323,7 @@ const PERIODOS = [
   { key:'semana_ant', label:'Sem. passada' },
   { key:'mes',        label:'Este mês' },
   { key:'30d',        label:'30 dias' },
+  { key:'90d',        label:'3 meses' },
 ];
 
 const S = {
@@ -322,6 +332,7 @@ const S = {
   filtro:      'Estrutura',
   lojaFiltro:  'Todas',
   periodo:     '30d',
+  busca:       '',
   // utensílios
   utensTab:       'contagem',
   utensCatalogo:  [],
@@ -429,8 +440,8 @@ let _lastIds = new Set();
 
 async function carregarDados(){
   $('btnRef').textContent='⏳';
-  // Sempre busca 30 dias completos para alertas globais funcionarem
-  const d=new Date(); d.setDate(d.getDate()-30);
+  const daysToFetch = S.periodo === '90d' ? 90 : 30;
+  const d=new Date(); d.setDate(d.getDate()-daysToFetch);
   const from=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
   try{
     // Não-master só busca dados da sua própria loja no servidor
@@ -545,6 +556,10 @@ function renderFiltros(){
   $('periodo-row').innerHTML = PERIODOS.map(p =>
     `<button class="chip${S.periodo===p.key?' sel':''}" onclick="setPeriodo('${p.key}')">${p.label}</button>`
   ).join('');
+
+  // Busca — visível apenas para tabs de manutenção
+  const br=$('busca-row');
+  if(br) br.style.display=['Utensílios','Relatórios'].includes(S.filtro)?'none':'';
 }
 
 async function setLojaFiltro(l){
@@ -591,6 +606,9 @@ function renderBotNav(){
 
 async function setFiltro(f){
   S.filtro=f;
+  // Limpa busca ao mudar de aba
+  if(['Utensílios','Relatórios'].includes(f)){ S.busca=''; const bi=$('busca-input'); if(bi) bi.value=''; }
+  const br=$('busca-row'); if(br) br.style.display=['Utensílios','Relatórios'].includes(f)?'none':'';
   document.querySelectorAll('.sidebar-link').forEach(l=>l.classList.remove('active'));
   const sl=document.querySelector(`.sidebar-link[data-sidebar-tab="${f}"]`);
   if(sl) sl.classList.add('active');
@@ -608,6 +626,11 @@ function renderLista(){
   if(S.filtro==='Utensílios'){ renderUtensPanel(); return; }
   let items=getItensFiltradosPorLojaEPeriodo();
   items=items.filter(m=>(m.tipo||'Estrutura')===S.filtro);
+  // Busca rápida
+  if(S.busca&&S.busca.trim()){
+    const q=S.busca.toLowerCase();
+    items=items.filter(m=>(m.descricao||'').toLowerCase().includes(q)||(m.setor||'').toLowerCase().includes(q)||(m._loja||'').toLowerCase().includes(q));
+  }
   const ord={pendente_urgente:0,pendente:1,andamento:2,resolvido:3};
   const getPrioKey=m=>{ const sc=scCls(m.status); return (sc==='pendente'&&m.prioridade==='Urgente')?'pendente_urgente':sc; };
   items=[...items].sort((a,b)=>{
@@ -655,7 +678,7 @@ function renderLista(){
         <div class="isetor">Setor: ${esc(m.setor||'—')}</div>
         ${m.descricao?`<div class="idesc">${esc(m.descricao)}</div>`:''}
         ${m.contato?`<div class="icontato">📞 ${esc(m.contato)}</div>`:''}
-        ${m.fotoBase64?`<img class="foto-thumb" src="${m.fotoBase64}" onclick="this.requestFullscreen&&this.requestFullscreen()" title="Ver foto">`:''}
+        ${m.fotoBase64?`<img class="foto-thumb" src="${m.fotoBase64}" onclick="abrirFoto(this)" title="Ver foto">`:''}
       </div>
       <div class="iactions">
         <select class="status-sel" id="sel-${m.id}">
@@ -796,7 +819,7 @@ function renderContagemHTML(){
     return `<div class="ucard${alertMin?' ucard-alert':''}">
       <div class="ucard-head">
         ${item.foto_base64
-          ?`<img class="ucard-foto" src="${item.foto_base64}" onclick="this.requestFullscreen&&this.requestFullscreen()" style="cursor:pointer">`
+          ?`<img class="ucard-foto" src="${item.foto_base64}" onclick="abrirFoto(this)" style="cursor:pointer">`
           :`<div class="ucard-foto">${catIcon(item.categoria)}</div>`}
         <div class="ucard-info">
           <div class="ucard-nome">${esc(item.nome)}</div>
@@ -1076,6 +1099,38 @@ function renderRelatoriosPanel(){
       ${tipoRows||`<div style="color:var(--mut);font-size:12px;text-align:center;padding:12px 0">Nenhum registro neste período</div>`}
     </div>
     ${lojaSection}
+    ${(()=>{
+      // ── Estatísticas ──
+      const res=base.filter(m=>m.status==='Resolvido'&&m.resolved_at&&m._data);
+      let avgDias=null;
+      if(res.length){
+        const th=res.reduce((s,m)=>{
+          try{ return s+Math.max(0,(new Date(m.resolved_at)-new Date(m._data+'T12:00:00'))/3600000); }catch(_){return s;}
+        },0);
+        avgDias=(th/res.length/24).toFixed(1);
+      }
+      const porSetor={};
+      base.forEach(m=>{ const s=m.setor||'Geral'; if(!porSetor[s])porSetor[s]={t:0,p:0}; porSetor[s].t++; if(m.status!=='Resolvido')porSetor[s].p++; });
+      const urgentes=base.filter(m=>m.prioridade==='Urgente').length;
+      const pctUrg=base.length?Math.round(urgentes/base.length*100):0;
+      const setorRows=Object.entries(porSetor).sort((a,b)=>b[1].p-a[1].p)
+        .map(([s,d])=>`<div class="relat-tipo-row"><span class="relat-tipo-icon">📍</span><span class="relat-tipo-label">${esc(s)}</span><div class="relat-tipo-badges">${d.p>0?`<span class="rbadge pend">⏳ ${d.p}</span>`:''}<span class="rbadge res">✅ ${d.t-d.p}</span></div></div>`).join('');
+      if(!base.length)return '';
+      return `<div class="relat-card">
+        <div class="relat-card-title">📈 Estatísticas</div>
+        <div class="relat-summary-grid" style="grid-template-columns:1fr 1fr;margin-bottom:${setorRows?'12px':'0'}">
+          <div class="relat-summary-cell">
+            <div class="relat-summary-val" style="color:var(--azul);font-size:18px">${avgDias!==null?avgDias+'d':'—'}</div>
+            <div class="relat-summary-lab">Tempo médio resolução</div>
+          </div>
+          <div class="relat-summary-cell">
+            <div class="relat-summary-val" style="color:${pctUrg>30?'var(--erro)':'var(--warn)'};font-size:18px">${pctUrg}%</div>
+            <div class="relat-summary-lab">Urgentes (${urgentes}/${base.length})</div>
+          </div>
+        </div>
+        ${setorRows?`<div style="font-size:10px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Por Setor</div>${setorRows}`:''}
+      </div>`;
+    })()}
     <button class="wpp-btn" onclick="gerarRelatorioWpp()">
       <span style="font-size:18px">📤</span> Compartilhar via WhatsApp
     </button>
@@ -1134,6 +1189,16 @@ function gerarRelatorioWpp(){
   } else {
     window.open('https://wa.me/?text='+encodeURIComponent(txt),'_blank');
   }
+}
+
+// ─── FOTO MODAL ──────────────────────────────────────────
+function abrirFoto(el){
+  $('fotoModalImg').src=el.src;
+  $('fotoModal').style.display='flex';
+}
+function fecharFoto(){
+  $('fotoModal').style.display='none';
+  $('fotoModalImg').src='';
 }
 
 function doLogout(){
