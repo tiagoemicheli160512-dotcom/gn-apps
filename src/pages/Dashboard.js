@@ -264,6 +264,58 @@ function LojaPicker({ masterLoja, onSelect, onClose }) {
   );
 }
 
+/* ─── META EDITOR ────────────────────────────────────────────── */
+function MetaEditor({ metasLocal, onSave, onClose }) {
+  const [vals, setVals] = useState(() => {
+    const v = {};
+    LOJAS_LISTA.forEach(k => { v[k] = metasLocal[k] ? String(metasLocal[k]) : ''; });
+    return v;
+  });
+
+  const handleSave = () => {
+    const mt = {};
+    LOJAS_LISTA.forEach(k => {
+      const n = parseFloat(String(vals[k]).replace(/\./g,'').replace(',','.'));
+      if (n > 0) mt[k] = n;
+    });
+    try { localStorage.setItem('gn_metas_v1', JSON.stringify(mt)); } catch(_) {}
+    onSave(mt);
+    onClose();
+  };
+
+  return (
+    <div style={S.overlay} onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{ ...S.sheet, maxHeight: '90vh', overflowY: 'auto' }}>
+        <div style={S.pickerTitle}>⚙️ Metas Semanais por Loja</div>
+        <div style={{ fontSize: 11, color: '#5a5a7a', textAlign: 'center', marginBottom: 14 }}>
+          Usado como padrão quando o check-list não tem meta cadastrada
+        </div>
+        {LOJAS_LISTA.map(k => (
+          <div key={k} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 9 }}>
+            <div style={{ width: 9, height: 9, borderRadius: '50%', background: COR_LOJA[k], flexShrink: 0 }} />
+            <div style={{ flex: 1, fontSize: 12, fontWeight: 700, color: '#e8e8f4' }}>{LOJA_DISPLAY[k]}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: '#5a5a7a' }}>
+              <span>R$</span>
+              <input
+                type="number" min="0" step="1000" placeholder="0"
+                value={vals[k]}
+                onChange={e => setVals(v => ({ ...v, [k]: e.target.value }))}
+                style={{ width: 90, padding: '6px 8px', background: '#1a1a30', border: '1px solid #2e2e50', borderRadius: 8, color: '#e8e8f4', fontSize: 12, fontFamily: 'inherit', outline: 'none', textAlign: 'right' }}
+              />
+            </div>
+          </div>
+        ))}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 16 }}>
+          <button style={S.pickCancel} onClick={onClose}>Cancelar</button>
+          <button style={{ padding: 12, background: 'var(--cor, #F26419)', border: 'none', borderRadius: 13, color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }} onClick={handleSave}>
+            Salvar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ─── PAINEL GERAL MESTRA ────────────────────────────────────── */
 function fmtR(v) {
   return 'R$ ' + (v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -388,6 +440,10 @@ function PainelGeral({ onSelectLoja }) {
   const [filtroAtencao, setFiltroAtencao] = useState(false);
   const [tendDados, setTendDados] = useState({});
   const [mesAntDados, setMesAntDados] = useState({});
+  const [metasLocal, setMetasLocal] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('gn_metas_v1') || '{}'); } catch(_) { return {}; }
+  });
+  const [metaEditorOpen, setMetaEditorOpen] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -545,7 +601,8 @@ function PainelGeral({ onSelectLoja }) {
           const m = parseFloat(row.fat?.meta) || 0;
           if (m > 0) mt[k] = m;
         });
-        setMetas(mt);
+        // metasLocal como padrão, Supabase sobrescreve por semana
+        setMetas({ ...metasLocal, ...mt });
       }).catch(() => {}) : Promise.resolve();
 
     // CMV — consolidado + por loja, ambos os modos
@@ -695,6 +752,43 @@ function PainelGeral({ onSelectLoja }) {
   return (
     <div style={{ padding: '0 14px 90px' }}>
 
+      {/* Lembrete segunda-feira — enviar relatório semanal */}
+      {(() => {
+        const hoje = new Date();
+        if (hoje.getDay() !== 1 || viewMode !== 'sem') return null;
+        const weekKey = 'gn_rel_sem_' + start;
+        let jaEnviou = false;
+        try { jaEnviou = !!localStorage.getItem(weekKey); } catch(_) {}
+        if (jaEnviou || loading || !totalBruto) return null;
+        return (
+          <div style={{ background:'rgba(212,168,0,.1)', border:'1px solid rgba(212,168,0,.25)', borderRadius:12, padding:'10px 14px', display:'flex', alignItems:'center', gap:10, marginBottom:10 }}>
+            <span style={{ fontSize:18, flexShrink:0 }}>📊</span>
+            <div style={{ flex:1, minWidth:0 }}>
+              <div style={{ fontSize:12, fontWeight:700, color:'#d4a800', lineHeight:1 }}>Relatório da semana passada pronto</div>
+              <div style={{ fontSize:10, color:'#7a6a00', marginTop:3 }}>Segunda-feira — hora de enviar o resumo para a equipe</div>
+            </div>
+            <button
+              onClick={() => {
+                try { localStorage.setItem('gn_rel_sem_' + start, '1'); } catch(_) {}
+                const hoje2 = new Date().toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric' });
+                const linhas = LOJAS_LISTA.filter(k => dados[k]).map(k => {
+                  const fat = dados[k]?.fat || 0;
+                  const mt = metas[k] || 0;
+                  const mpct = mt > 0 ? Math.min(100, Math.round((fat/mt)*100)) : null;
+                  return `• ${LOJA_DISPLAY[k]}: ${fmtR(fat)}${mpct!==null?' ('+mpct+'% meta)':''}`;
+                });
+                const total = Object.values(dados).reduce((s,d)=>s+d.fat,0);
+                const msg = `*GN Apps — Resumo Semanal*\n${semana}\n\n${linhas.join('\n')}\n\n*Total: ${fmtR(total)}*\n_Gerado em ${hoje2}_`;
+                window.open('https://api.whatsapp.com/send?text='+encodeURIComponent(msg),'_blank');
+              }}
+              style={{ background:'#d4a800', border:'none', borderRadius:8, padding:'7px 11px', fontSize:11, fontWeight:700, color:'#000', cursor:'pointer', fontFamily:'inherit', flexShrink:0 }}
+            >
+              Enviar →
+            </button>
+          </div>
+        );
+      })()}
+
       {/* Controles de ordenação e filtro */}
       <div style={{ display:'flex', gap:6, marginBottom:10, flexWrap:'wrap' }}>
         <button onClick={() => setSortBy(s => s === 'fat' ? 'default' : 'fat')} style={btnCtrl(sortBy === 'fat')}>
@@ -706,7 +800,19 @@ function PainelGeral({ onSelectLoja }) {
         <button onClick={() => setFiltroAtencao(v => !v)} style={btnCtrl(filtroAtencao)}>
           ⚠️ Atenção{filtroAtencao && lojasOrdenadas.length > 0 ? ` (${lojasOrdenadas.length})` : ''}
         </button>
+        <button onClick={() => setMetaEditorOpen(true)} style={btnCtrl(false)} title="Configurar metas por loja">
+          ⚙️ Metas
+        </button>
       </div>
+
+      {/* Modal editor de metas */}
+      {metaEditorOpen && (
+        <MetaEditor
+          metasLocal={metasLocal}
+          onSave={mt => { setMetasLocal(mt); setMetas(prev => ({ ...mt, ...prev })); }}
+          onClose={() => setMetaEditorOpen(false)}
+        />
+      )}
 
       {/* Toggle Semanal/Mensal + navegação */}
       <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:14 }}>
@@ -1021,6 +1127,10 @@ function HomeScreen({ session: sessionProp, onLogout }) {
   const [tsSaving, setTsSaving] = useState(false);
   const [miniPainel, setMiniPainel] = useState(null);
   const [manutBadgeCount, setManutBadgeCount] = useState(0);
+  const [notifPerm, setNotifPerm] = useState(() => {
+    if (typeof Notification !== 'undefined') return Notification.permission;
+    return 'unsupported';
+  });
 
   const isMaster = session.loja === 'GERAL' || !!(session.permissoes || {}).master;
   const lojaEfetiva = masterLoja || session.loja;
@@ -1114,6 +1224,31 @@ function HomeScreen({ session: sessionProp, onLogout }) {
     }
   }, [session, masterLoja, lojaEfetiva, isMaster]);
 
+  // Notificação local quando CL não preenchido após 20h
+  useEffect(() => {
+    if (!miniPainel || miniPainel.pct !== null) return;
+    if (notifPerm !== 'granted') return;
+    const h = new Date().getHours();
+    if (h < 20) return;
+    const hoje = new Date().toISOString().slice(0, 10);
+    const key = 'gn_cl_notif_' + (lojaEfetiva || 'GERAL');
+    try {
+      if (localStorage.getItem(key) === hoje) return;
+      localStorage.setItem(key, hoje);
+      new Notification('⚠️ GN Apps — Check-list não preenchido', {
+        body: (LOJA_DISPLAY[lojaEfetiva] || lojaEfetiva) + ': o check-list de hoje ainda não foi preenchido!',
+        tag: 'gn-cl-alert',
+        icon: '/favicon.ico',
+      });
+    } catch(_) {}
+  }, [miniPainel, notifPerm, lojaEfetiva]);
+
+  const habilitarNotif = useCallback(async () => {
+    if (typeof Notification === 'undefined') return;
+    const p = await Notification.requestPermission();
+    setNotifPerm(p);
+  }, []);
+
   const navTo = (url) => {
     if (masterLoja) localStorage.setItem('gn_nav_loja', JSON.stringify({ loja: masterLoja, ts: Date.now() }));
     else localStorage.removeItem('gn_nav_loja');
@@ -1175,6 +1310,13 @@ function HomeScreen({ session: sessionProp, onLogout }) {
         <span style={S.hdrGestao}>GESTÃO</span>
         <div style={S.hdrSep} />
         <div style={S.hdrUser}>{session.nome}{session.cargo ? ' · ' + session.cargo : ''}</div>
+        {notifPerm !== 'unsupported' && (
+          <button
+            onClick={notifPerm === 'granted' ? undefined : habilitarNotif}
+            title={notifPerm === 'granted' ? 'Notificações ativas' : 'Habilitar notificações'}
+            style={{ background: 'transparent', border: '1px solid rgba(255,255,255,.1)', borderRadius: 8, padding: '5px 9px', fontSize: 14, lineHeight: 1, color: notifPerm === 'granted' ? '#22c55e' : 'rgba(255,255,255,.25)', fontFamily: 'inherit', cursor: notifPerm === 'granted' ? 'default' : 'pointer', flexShrink: 0 }}
+          >{notifPerm === 'granted' ? '🔔' : '🔕'}</button>
+        )}
         <button style={{ background: 'transparent', border: '1px solid rgba(255,255,255,.1)', borderRadius: 8, padding: '5px 9px', fontSize: 14, lineHeight: 1, color: 'rgba(255,255,255,.35)', fontFamily: 'inherit', cursor: 'pointer', flexShrink: 0 }} onClick={abrirSenha} title="Trocar login e senha">🔑</button>
         <button style={S.hdrSair} onClick={onLogout}>Sair</button>
       </header>
@@ -1355,6 +1497,12 @@ function HomeScreen({ session: sessionProp, onLogout }) {
 /* ─── DASHBOARD (raiz) ───────────────────────────────────────── */
 function Dashboard() {
   const [session, setSession] = useState(getSession);
+
+  useEffect(() => {
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
+  }, []);
 
   useEffect(() => {
     if (!session) setCor('#F26419');
