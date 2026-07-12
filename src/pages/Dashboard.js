@@ -386,6 +386,8 @@ function PainelGeral({ onSelectLoja }) {
   const [manutPorLoja, setManutPorLoja] = useState({});
   const [sortBy, setSortBy] = useState('fat');
   const [filtroAtencao, setFiltroAtencao] = useState(false);
+  const [tendDados, setTendDados] = useState({});
+  const [mesAntDados, setMesAntDados] = useState({});
 
   useEffect(() => {
     setLoading(true);
@@ -399,6 +401,8 @@ function PainelGeral({ onSelectLoja }) {
     setDados({});
     setSemAntDados({});
     setManutPorLoja({});
+    setTendDados({});
+    setMesAntDados({});
 
     // Calcula datas de início e fim conforme modo
     const anchor = new Date(2026, 0, 5);
@@ -591,6 +595,44 @@ function PainelGeral({ onSelectLoja }) {
           ant[k] = (ant[k] || 0) + (parseFloat(row.venda_salao)||0) + (parseFloat(row.venda_delivery)||0);
         });
         setSemAntDados(ant);
+      }).catch(() => {});
+    }
+
+    // Tendência — últimas 4 semanas por loja (modo semanal)
+    if (viewMode === 'sem') {
+      const d4w = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + (semIdx - 3) * 7);
+      const e4w = new Date(d4w.getFullYear(), d4w.getMonth(), d4w.getDate() + 27);
+      fetch(
+        `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${iso(d4w)}&data_operacao=lte.${iso(e4w)}&select=loja,data_operacao,venda_salao,venda_delivery`,
+        { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
+      ).then(r => r.json()).then(rows => {
+        const tend = {};
+        (rows||[]).forEach(row => {
+          const k = DISPLAY_TO_KEY[row.loja]; if (!k) return;
+          const rowDate = new Date(row.data_operacao + 'T12:00:00');
+          const wIdx = Math.floor((rowDate - anchor) / (7 * 86400000));
+          if (!tend[k]) tend[k] = {};
+          tend[k][wIdx] = (tend[k][wIdx] || 0) + (parseFloat(row.venda_salao)||0) + (parseFloat(row.venda_delivery)||0);
+        });
+        setTendDados(tend);
+      }).catch(() => {});
+    }
+
+    // Mês anterior — comparativo (modo mensal)
+    if (viewMode === 'mes') {
+      const dMes = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + semIdx * 7);
+      const prevFirst = new Date(dMes.getFullYear(), dMes.getMonth() - 1, 1);
+      const prevLast  = new Date(dMes.getFullYear(), dMes.getMonth(), 0);
+      fetch(
+        `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${iso(prevFirst)}&data_operacao=lte.${iso(prevLast)}&select=loja,venda_salao,venda_delivery`,
+        { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
+      ).then(r => r.json()).then(rows => {
+        const ant = {};
+        (rows||[]).forEach(row => {
+          const k = DISPLAY_TO_KEY[row.loja]; if (!k) return;
+          ant[k] = (ant[k] || 0) + (parseFloat(row.venda_salao)||0) + (parseFloat(row.venda_delivery)||0);
+        });
+        setMesAntDados(ant);
       }).catch(() => {});
     }
 
@@ -817,6 +859,12 @@ function PainelGeral({ onSelectLoja }) {
                       {d.fat >= semAntDados[k] ? '▲' : '▼'} {Math.abs(Math.round(((d.fat - semAntDados[k]) / semAntDados[k]) * 100))}% vs ant.
                     </div>
                   )}
+                  {/* ▲/▼ vs mês anterior */}
+                  {viewMode === 'mes' && mesAntDados[k] != null && mesAntDados[k] > 0 && d && (
+                    <div style={{ fontSize: 10, fontWeight: 700, color: d.fat >= mesAntDados[k] ? '#22c55e' : '#ef4444', fontVariantNumeric: 'tabular-nums' }}>
+                      {d.fat >= mesAntDados[k] ? '▲' : '▼'} {Math.abs(Math.round(((d.fat - mesAntDados[k]) / mesAntDados[k]) * 100))}% vs mês ant.
+                    </div>
+                  )}
                   {/* Manutenções pendentes */}
                   {(manutPorLoja[k] || 0) > 0 && (
                     <div style={{ fontSize: 10, fontWeight: 700, color: '#f97316' }}>
@@ -890,6 +938,23 @@ function PainelGeral({ onSelectLoja }) {
                   );
                 })}
               </div>
+
+              {/* Sparkline — tendência últimas 4 semanas */}
+              {viewMode === 'sem' && (() => {
+                const td = tendDados[k];
+                if (!td) return null;
+                const wks = [semIdx - 3, semIdx - 2, semIdx - 1, semIdx];
+                const vals = wks.map(w => td[w] || 0);
+                if (!vals.some(v => v > 0)) return null;
+                const max = Math.max(...vals, 1);
+                return (
+                  <div style={{ marginTop: 5, display: 'flex', gap: 2, alignItems: 'flex-end', height: 16 }}>
+                    {vals.map((v, i) => (
+                      <div key={i} style={{ flex: 1, background: i === 3 ? cor : cor + '50', borderRadius: '2px 2px 0 0', minHeight: 2, height: Math.max(2, Math.round((v / max) * 16)) }} title={`${['S-3','S-2','S-1','Esta'][i]}: ${fmtR(v)}`} />
+                    ))}
+                  </div>
+                );
+              })()}
 
               {/* Mini barra de meta por loja */}
               {metaLojaPct !== null && (
@@ -1162,6 +1227,20 @@ function HomeScreen({ session: sessionProp, onLogout }) {
               <div style={{ fontSize: 9, color: '#44445a', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 3 }}>Manut. pend.</div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Alerta: check-list do dia ainda não preenchido */}
+      {(!isMaster || masterLoja) && miniPainel && miniPainel.pct === null && (
+        <div style={{ margin: '0 14px 6px', background: 'rgba(239,68,68,.1)', border: '1px solid rgba(239,68,68,.22)', borderRadius: 12, padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 18, flexShrink: 0 }}>⚠️</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#f87171', lineHeight: 1 }}>Check-list de hoje não preenchido</div>
+            <div style={{ fontSize: 10, color: '#7a3a3a', marginTop: 3 }}>Registre as operações para manter os dados atualizados</div>
+          </div>
+          <button onClick={() => navTo('/gn-checklist.html')} style={{ background: '#ef4444', border: 'none', borderRadius: 8, padding: '7px 11px', fontSize: 11, fontWeight: 700, color: '#fff', cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}>
+            Preencher →
+          </button>
         </div>
       )}
 
