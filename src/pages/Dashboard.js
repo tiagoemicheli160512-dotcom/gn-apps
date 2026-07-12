@@ -1367,6 +1367,10 @@ function HomeScreen({ session: sessionProp, onLogout }) {
           >{notifPerm === 'granted' ? '🔔' : '🔕'}</button>
         )}
         <button style={{ background: 'transparent', border: '1px solid rgba(255,255,255,.1)', borderRadius: 8, padding: '5px 9px', fontSize: 14, lineHeight: 1, color: 'rgba(255,255,255,.35)', fontFamily: 'inherit', cursor: 'pointer', flexShrink: 0 }} onClick={abrirSenha} title="Trocar login e senha">🔑</button>
+        <button style={{ ...S.hdrSair, fontSize: 11 }} onClick={async () => {
+          try { if ('caches' in window) { const ks = await caches.keys(); await Promise.all(ks.map(k => caches.delete(k))); } } catch(e) {}
+          window.location.href = window.location.pathname.split('?')[0] + '?v=' + Date.now();
+        }} title="Forçar atualização do app">↻ Atualizar</button>
         <button style={S.hdrSair} onClick={onLogout}>Sair</button>
       </header>
 
