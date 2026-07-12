@@ -1,3 +1,42 @@
+// ─── OFFLINE CACHE — network-first para requests Supabase ────
+const API_CACHE = 'gn-api-v2';
+
+self.addEventListener('install', event => {
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', event => {
+  event.waitUntil(
+    caches.keys().then(keys =>
+      Promise.all(keys.filter(k => k !== API_CACHE).map(k => caches.delete(k)))
+    ).then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener('fetch', event => {
+  const url = event.request.url;
+  if (event.request.method !== 'GET') return;
+  if (!url.includes('supabase.co/rest/')) return;
+
+  event.respondWith(
+    fetch(event.request.clone())
+      .then(response => {
+        if (response.ok) {
+          caches.open(API_CACHE).then(cache => cache.put(event.request, response.clone()));
+        }
+        return response;
+      })
+      .catch(() =>
+        caches.match(event.request).then(cached =>
+          cached || new Response(JSON.stringify([]), {
+            headers: { 'Content-Type': 'application/json' }
+          })
+        )
+      )
+  );
+});
+
+// ─── PUSH NOTIFICATIONS ───────────────────────────────────
 self.addEventListener('push', event => {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch(e) {}
