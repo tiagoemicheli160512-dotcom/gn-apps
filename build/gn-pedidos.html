@@ -465,6 +465,7 @@ let S = {
 
   // Filtros provisão
   provLoja: '',
+  provStatus: '',
   provisoes: [],
   entregasPendentes: [],
   entregasConfirmadas: [],
@@ -559,6 +560,24 @@ async function navegarSemana(delta) {
   if (nova > mondayHoje) return; // não avança além da semana atual
   S.semanaAtiva = nova;
   zerarSaldosSemana(); // limpa saldo vigente ao trocar de semana
+  $('content').innerHTML = '<div style="padding:20px;text-align:center"><div class="spin" style="margin:0 auto"></div></div>';
+  await carregarPedidoAtual();
+  renderPedido();
+}
+
+function expandirTodos() {
+  [...new Set(S.catalogo.filter(p=>p.ativo).map(p=>p.grupo))].forEach(g=>S.gruposAbertos.add(g));
+  renderPedido();
+}
+
+function fecharTodos() {
+  S.gruposAbertos.clear();
+  renderPedido();
+}
+
+async function irParaSemanaAtual() {
+  S.semanaAtiva = getMondayOfWeek();
+  zerarSaldosSemana();
   $('content').innerHTML = '<div style="padding:20px;text-align:center"><div class="spin" style="margin:0 auto"></div></div>';
   await carregarPedidoAtual();
   renderPedido();
@@ -1023,7 +1042,8 @@ function renderPedido() {
         ${sem.ehAtual ? '<div class="semana-atual-badge">▶ SEMANA ATUAL</div>' : '<div class="semana-atual-badge" style="color:var(--muted)">semana passada</div>'}
       </div>
       <button class="semana-nav-arrow" onclick="navegarSemana(1)" ${podeAvancar?'':'disabled'} title="Próxima semana">›</button>
-    </div>`;
+    </div>
+    ${!sem.ehAtual?`<div style="text-align:center;margin-bottom:6px"><button onclick="irParaSemanaAtual()" style="padding:5px 16px;border-radius:20px;border:1px solid var(--primary);background:rgba(232,88,10,.1);color:var(--primary);font-size:11px;font-weight:700;cursor:pointer">▶ Ir para semana atual</button></div>`:''}`;
 
   if (!S.pedidoAtual) {
     $('content').innerHTML = semNavHtml + `
@@ -1042,6 +1062,9 @@ function renderPedido() {
 
   const totalGeral = totalPedidoGeral();
   const pedConfirmado = S.pedidoAtual.status === 'CONFIRMADO';
+  const totalItensGeral = S.todosModo
+    ? S.lojas.reduce((sum,l)=>sum+contarItensLoja(l.slug_pedido),0)
+    : contarItensLoja(S.lojaAtiva);
 
   // Grupos únicos do catálogo ativo
   const grupos = [...new Set(S.catalogo.filter(p=>p.ativo).map(p=>p.grupo))].sort();
@@ -1237,7 +1260,7 @@ function renderPedido() {
       <div class="pedido-info">
         <div class="pedido-label">PEDIDO</div>
         <div class="pedido-valor">${statusChip} &nbsp;<span style="font-size:11px;color:var(--muted)">${S.pedidoAtual.data_pedido}</span></div>
-        <div style="font-size:11px;color:var(--muted);margin-top:2px">Total geral: <span class="num">R$ ${fmt(totalGeral)}</span></div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">Total geral: <span class="num">R$ ${fmt(totalGeral)}</span> · <span style="color:var(--text)">${totalItensGeral} item${totalItensGeral!==1?'s':''}</span></div>
       </div>
       <div class="pedido-acoes">
         <button class="btn-sm btn-outline" onclick="novoPedido()">Novo</button>
@@ -1254,12 +1277,21 @@ function renderPedido() {
     ${!S.todosModo ? `<div class="store-tabs">${storeTabs}</div>` : ''}
 
     <div class="filtros">
-      <input class="filtro-input" type="search" placeholder="🔍 Buscar produto..." 
+      <input class="filtro-input" type="search" placeholder="🔍 Buscar produto..."
         value="${S.busca}" oninput="S.busca=this.value;renderPedido()">
       <select class="filtro-select" onchange="S.grupoFiltro=this.value;renderPedido()">
         <option value="">Todos grupos</option>
         ${grupos.map(g=>`<option value="${g}"${S.grupoFiltro===g?' selected':''}>${g}</option>`).join('')}
       </select>
+      <select class="filtro-select" onchange="S.fornFiltro=this.value;renderPedido()">
+        <option value="">Todos fornec.</option>
+        ${[...new Set(S.catalogo.filter(p=>p.ativo).map(p=>p.fornecedor))].sort().map(f=>`<option value="${esc(f)}"${S.fornFiltro===f?' selected':''}>${esc(f)}</option>`).join('')}
+      </select>
+    </div>
+
+    <div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:6px">
+      <button class="btn-sm btn-outline" onclick="expandirTodos()" style="padding:5px 10px;font-size:11px">↕ Expandir todos</button>
+      <button class="btn-sm btn-outline" onclick="fecharTodos()" style="padding:5px 10px;font-size:11px">↕ Fechar todos</button>
     </div>
 
     <div id="grupos-lista">${gruposHtml}</div>
@@ -1780,18 +1812,31 @@ async function renderProvisoes() {
       onclick="filtrarProvisao('${l.slug_pedido}')">${l.nome_display}</button>`
   ).join('');
 
-  // Agrupar por fornecedor
+  // Filtro de status
+  const STATUS_OPTS = [
+    {v:'',l:'Todas'},
+    {v:'AGUARDANDO',l:'Aguardando'},
+    {v:'RECEBIDO_OK',l:'Recebido ✓'},
+    {v:'DIVERGENCIA',l:'Divergência'},
+    {v:'CANCELADO',l:'Cancelado'},
+  ];
+  const statusChips = STATUS_OPTS.map(o=>
+    `<button class="store-tab${S.provStatus===o.v?' ativo':''}" onclick="S.provStatus='${o.v}';renderProvisoes()">${o.l}</button>`
+  ).join('');
+
+  // Filtrar e agrupar por fornecedor
+  const provisoesFilt = S.provStatus ? S.provisoes.filter(p=>p.status===S.provStatus) : S.provisoes;
   const por_forn = {};
-  S.provisoes.forEach(p => {
+  provisoesFilt.forEach(p => {
     const forn = p.fornecedor || 'SEM FORNECEDOR';
     if (!por_forn[forn]) por_forn[forn] = [];
     por_forn[forn].push(p);
   });
 
-  const totalValor = S.provisoes.reduce((a,p) => a + (parseFloat(p.valor_previsto)||0), 0);
+  const totalValor = provisoesFilt.reduce((a,p) => a + (parseFloat(p.valor_previsto)||0), 0);
 
   const provHtml = Object.keys(por_forn).length === 0
-    ? '<div class="empty"><div class="empty-icon">📬</div><div class="empty-texto">Nenhuma provisão encontrada</div></div>'
+    ? `<div class="empty"><div class="empty-icon">📬</div><div class="empty-texto">${S.provStatus?'Nenhuma provisão com esse status':'Nenhuma provisão encontrada'}</div></div>`
     : Object.entries(por_forn).sort(([a],[b])=>a.localeCompare(b)).map(([forn, itens]) => {
         const totalForn = itens.reduce((a,p)=>a+(parseFloat(p.valor_previsto)||0),0);
         const itensHtml = itens.map(p => {
@@ -1856,13 +1901,14 @@ async function renderProvisoes() {
 
   $('content').innerHTML = bannerAtrasadas + `
     <div class="sec-header">
-      <div class="sec-titulo">Provisões <span class="badge badge-r">${S.provisoes.length}</span></div>
+      <div class="sec-titulo">Provisões <span class="badge badge-r">${provisoesFilt.length}</span></div>
       <div style="display:flex;align-items:center;gap:8px">
         <button onclick="gerarWppProvisoes()" style="background:rgba(37,211,102,.12);border:1px solid rgba(37,211,102,.3);border-radius:6px;padding:5px 10px;color:#22c55e;font-size:11px;font-weight:700;cursor:pointer">📲 WhatsApp</button>
         <div class="num" style="font-size:13px;font-weight:700">R$ ${fmt(totalValor)}</div>
       </div>
     </div>
-    <div class="store-tabs" style="margin-bottom:12px">${lojaTabs}</div>
+    <div class="store-tabs" style="margin-bottom:8px">${lojaTabs}</div>
+    <div class="store-tabs" style="margin-bottom:12px">${statusChips}</div>
     ${provHtml}
 
     ${Object.keys(por_forn).length ? `
@@ -2404,14 +2450,45 @@ async function renderFaltaDia() {
       }).join('');
 
   const totalFaltas = registrosFiltrados.reduce((n, r) => n + (r.faltas?.length || 0), 0);
+  const dataStr = new Date(hojeIso+'T12:00:00').toLocaleDateString('pt-BR',{weekday:'short',day:'2-digit',month:'short'});
+
+  window._gerarWppFaltas = function(){
+    const dataFull = new Date(hojeIso+'T12:00:00').toLocaleDateString('pt-BR',{weekday:'long',day:'2-digit',month:'long'});
+    let txt = `⚠️ *GN — Faltas do Dia*\n📅 ${dataFull}\n`;
+    if(registrosFiltrados.length===0){
+      txt += '\n✅ Nenhuma falta registrada hoje.';
+    } else {
+      registrosFiltrados.forEach(r => {
+        const lojaD = S.lojas.find(l=>l.slug_pedido===r.loja||l.loja===r.loja||l.nome_display===r.loja)?.nome_display||r.loja;
+        txt += `\n🏪 *${lojaD}*\n`;
+        r.faltas.forEach(f => {
+          const ic = f.urgencia==='Alta'?'🔴':f.urgencia==='Media'?'🟡':'🟢';
+          txt += `${ic} ${f.nome||'—'}${f.quantidade?' ('+f.quantidade+')':''}${f.urgencia?' — '+f.urgencia:''}\n`;
+        });
+      });
+    }
+    txt += `\n_Gerado em ${new Date().toLocaleString('pt-BR')}_`;
+    if(navigator.share&&navigator.canShare({text:txt})){
+      navigator.share({text:txt}).catch(()=>window.open('https://wa.me/?text='+encodeURIComponent(txt),'_blank'));
+    } else {
+      window.open('https://wa.me/?text='+encodeURIComponent(txt),'_blank');
+    }
+  };
 
   $('content').innerHTML = `
     <div class="sec-header">
       <div class="sec-titulo">Faltas do Dia <span class="badge badge-r">${totalFaltas}</span></div>
-      <div style="font-size:11px;color:var(--muted)">${new Date(hojeIso+'T12:00:00').toLocaleDateString('pt-BR',{weekday:'short',day:'2-digit',month:'short'})}</div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <div style="font-size:11px;color:var(--muted)">${dataStr}</div>
+        <button onclick="renderFaltaDia()" style="padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:none;color:var(--muted);font-size:11px;cursor:pointer">↻ Atualizar</button>
+      </div>
     </div>
     <div class="store-tabs" style="margin-bottom:12px">${tabsHtml}</div>
     ${itensHtml}
+    ${totalFaltas>0?`
+    <button onclick="window._gerarWppFaltas()" style="margin-top:12px;width:100%;background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);border-radius:11px;padding:12px;color:#22c55e;font-weight:800;font-size:13px;display:flex;align-items:center;justify-content:center;gap:6px;cursor:pointer">
+      📲 Enviar Faltas por WhatsApp
+    </button>`:''}
   `;
 }
 

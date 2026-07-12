@@ -110,6 +110,11 @@ body{background:var(--bg);color:#e8e8f0;font-family:-apple-system,BlinkMacSystem
 .relat-total{padding:8px 0 0;display:flex;justify-content:space-between;font-size:13px;font-weight:800;border-top:2px solid var(--card2);margin-top:4px}
 .wpp-btn{width:100%;background:#25D366;color:#fff;border:none;border-radius:10px;padding:13px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;margin-top:10px;display:flex;align-items:center;justify-content:center;gap:8px}
 .wpp-btn:active{opacity:.8}
+.btn-sm.ok{background:rgba(62,207,142,.12);color:var(--ok);border:1px solid rgba(62,207,142,.25)}
+.btn-sm.edit{background:rgba(245,217,138,.07);color:var(--ouro);border:1px solid rgba(245,217,138,.18)}
+.inv-busca{width:100%;background:var(--card2);border:1px solid #2a2a4a;color:#e8e8f0;border-radius:8px;padding:8px 12px;font-size:13px;font-family:inherit;margin-bottom:10px}
+.inv-busca:focus{outline:none;border-color:var(--laranja)}
+.tab-badge{display:inline-block;background:var(--erro);color:#fff;border-radius:99px;font-size:8px;font-weight:800;padding:1px 5px;margin-left:3px;vertical-align:middle;line-height:1.5}
 
 /* EMPTY */
 .empty-state{text-align:center;padding:48px 20px;color:var(--mut)}
@@ -242,13 +247,16 @@ const MKT_ITEMS = [
 ];
 
 const S = {
-  usuario:  null,
-  tab:      'inventario',
-  setor:    'Computadores',
-  view:     'list',       // 'list' | 'add' | 'addMkt' | 'saida' | 'hist'
-  saidaCtx: null,         // { type:'inv'|'mkt', ref:number|string }
-  histCtx:  null,         // { type:'inv'|'mkt', ref:number|string }
-  data:     null,
+  usuario:    null,
+  tab:        'inventario',
+  setor:      'Computadores',
+  view:       'list',       // 'list' | 'add' | 'addMkt' | 'edit'
+  saidaCtx:   null,         // { type:'inv'|'mkt', ref:number|string }
+  histCtx:    null,         // { type:'inv'|'mkt', ref:number|string }
+  entradaCtx: null,         // { type:'inv', ref:number }
+  editCtx:    null,         // index into S.data.items
+  invBusca:   '',
+  data:       null,
 };
 
 // ─── UTILS ───────────────────────────────────────────────
@@ -282,6 +290,7 @@ function loadData(){
   if(!S.data) S.data={items:[],saidas:[],mkt:{},mktSaidas:[],mktCustomItems:[]};
   if(!S.data.mktSaidas) S.data.mktSaidas=[];
   if(!S.data.mktCustomItems) S.data.mktCustomItems=[];
+  if(!S.data.entradas) S.data.entradas=[];
   MKT_ITEMS.forEach(m=>{ if(S.data.mkt[m.key]==null) S.data.mkt[m.key]=0; });
   S.data.mktCustomItems.forEach(m=>{ if(S.data.mkt[m.id]==null) S.data.mkt[m.id]=0; });
 }
@@ -338,7 +347,7 @@ function doLogout(){
 
 // ─── NAVIGATION ──────────────────────────────────────────
 function setTab(tab){
-  S.tab=tab; S.view='list'; S.saidaCtx=null; S.histCtx=null;
+  S.tab=tab; S.view='list'; S.saidaCtx=null; S.histCtx=null; S.entradaCtx=null; S.editCtx=null; S.invBusca='';
   render();
 }
 
@@ -355,21 +364,32 @@ function render(){
     const t={inv:'inventario',mkt:'marketing',rel:'relatorio'}[k];
     $('tab-'+k)?.classList.toggle('sel',S.tab===t);
   });
-  // Sidebar highlight
-  ['inventario','marketing','relatorio'].forEach(t=>{
+  // Badge de alertas na aba Inventário
+  if(S.data?.items){
+    const alertCount=S.data.items.filter(i=>i.minimo>0&&i.quantidade<i.minimo).length;
+    const badge=alertCount>0?` <span class="tab-badge">${alertCount}</span>`:'';
+    const tabInv=$('tab-inv');
+    if(tabInv) tabInv.innerHTML=`<span class="ti">📦</span><span>Inventário${badge}</span>`;
+    const slInv=$('sl-inventario');
+    if(slInv){ slInv.innerHTML=`<span class="sl-icon">📦</span>Inventário${badge}`; slInv.classList.toggle('active',S.tab==='inventario'); }
+  }
+  // Sidebar highlight (others)
+  ['marketing','relatorio'].forEach(t=>{
     document.getElementById('sl-'+t)?.classList.toggle('active',S.tab===t);
   });
   // FAB on inventory or marketing list
   const fab=$('fab');
-  const showFab=(S.tab==='inventario'||S.tab==='marketing')&&S.view==='list'&&!S.saidaCtx&&!S.histCtx;
+  const showFab=(S.tab==='inventario'||S.tab==='marketing')&&S.view==='list'&&!S.saidaCtx&&!S.histCtx&&!S.entradaCtx;
   if(showFab) fab.classList.remove('hidden');
   else fab.classList.add('hidden');
 
   const c=$('app-content');
   if(S.histCtx){ renderHistPanel(c); return; }
   if(S.saidaCtx){ renderSaidaPanel(c); return; }
+  if(S.entradaCtx){ renderEntradaPanel(c); return; }
   if(S.tab==='inventario'){
     if(S.view==='add') renderAddItem(c);
+    else if(S.view==='edit') renderEditItem(c);
     else renderInventario(c);
   } else if(S.tab==='marketing'){
     if(S.view==='addMkt') renderAddMktItem(c);
@@ -387,9 +407,12 @@ function renderInventario(c){
     `<button class="chip${S.setor===s.key?' sel':''}" onclick="setSetor(${i})">${s.icon} ${esc(s.key)}</button>`
   ).join('');
 
-  const items=S.data.items.filter(i=>i.setor===S.setor);
+  const buscaQ=S.invBusca.trim().toLowerCase();
+  let items=S.data.items.filter(i=>i.setor===S.setor);
+  if(buscaQ) items=items.filter(i=>i.nome.toLowerCase().includes(buscaQ));
+
   const list=items.length
-    ?items.map((item,idx)=>{
+    ?items.map((item)=>{
       const globalIdx=S.data.items.indexOf(item);
       const saidas=S.data.saidas.filter(s=>s.item_id===item.id);
       const alertLow=item.minimo>0&&item.quantidade<item.minimo;
@@ -404,6 +427,8 @@ function renderInventario(c){
         </div>
         <div class="icard-actions">
           <button class="btn-sm pri" onclick="openSaida('inv',${globalIdx})">↩ Saída</button>
+          <button class="btn-sm ok" onclick="openEntrada('inv',${globalIdx})">➕ Entrada</button>
+          <button class="btn-sm edit" onclick="openEdit(${globalIdx})">✏️ Editar</button>
           <button class="btn-sm sec" onclick="openHist('inv',${globalIdx})">📋 Histórico</button>
           <button class="btn-sm dan" onclick="delItem('${esc(item.id)}')">🗑️</button>
         </div>
@@ -411,11 +436,17 @@ function renderInventario(c){
     }).join('')
     :`<div class="empty-state">
       <div class="empty-icon">${setorIcon(S.setor)}</div>
-      <div>Nenhum item em ${esc(S.setor)}</div>
-      <div class="empty-hint">Toque + para adicionar</div>
+      <div>${buscaQ?`Nenhum resultado para "${esc(S.invBusca)}"`:('Nenhum item em '+esc(S.setor))}</div>
+      ${!buscaQ?'<div class="empty-hint">Toque + para adicionar</div>':''}
     </div>`;
 
-  c.innerHTML=`<div class="chips-wrap">${chips}</div><div class="content">${list}</div>`;
+  c.innerHTML=`<div class="chips-wrap">${chips}</div>
+    <div class="content">
+      <input class="inv-busca" id="inv-busca-inp" type="search" placeholder="🔍 Buscar item no setor..."
+        value="${esc(S.invBusca)}"
+        oninput="S.invBusca=this.value;renderInventario(document.getElementById('app-content'));setTimeout(()=>{const e=document.getElementById('inv-busca-inp');if(e){e.focus();e.setSelectionRange(e.value.length,e.value.length);}},0)">
+      ${list}
+    </div>`;
 }
 
 function renderAddItem(c){
@@ -456,7 +487,7 @@ function renderAddItem(c){
   setTimeout(()=>$('f-nome')?.focus(),60);
 }
 
-function cancelView(){ S.view='list'; S.saidaCtx=null; S.histCtx=null; render(); }
+function cancelView(){ S.view='list'; S.saidaCtx=null; S.histCtx=null; S.entradaCtx=null; S.editCtx=null; render(); }
 
 function addItem(){
   const nome=($('f-nome')?.value||'').trim();
@@ -611,11 +642,13 @@ function renderSaidaPanel(c){
         <div style="font-size:12px;color:var(--mut);margin-bottom:14px">Disponível: <strong style="color:#e8e8f0">${maxQty}</strong></div>
         <div class="form-field">
           <label class="form-label">Quantidade de saída *</label>
-          <input class="form-input" id="s-qty" type="number" min="1" max="${maxQty}" value="1" autofocus>
+          <input class="form-input" id="s-qty" type="number" min="1" max="${maxQty}" value="1" autofocus
+            onkeydown="if(event.key==='Enter')document.getElementById('s-obs')?.focus()">
         </div>
         <div class="form-field">
           <label class="form-label">Observação (opcional)</label>
-          <input class="form-input" id="s-obs" placeholder="Ex: devolvido ao fornecedor">
+          <input class="form-input" id="s-obs" placeholder="Ex: devolvido ao fornecedor"
+            onkeydown="if(event.key==='Enter')confirmarSaida()">
         </div>
         <div class="form-btns">
           <button class="form-btn sec" onclick="cancelView()">Cancelar</button>
@@ -714,10 +747,125 @@ function delSaida(type,id){
   saveData(); toast('Excluído'); render();
 }
 
+// ─── ENTRADA ─────────────────────────────────────────────
+function openEntrada(type,ref){ S.entradaCtx={type,ref}; render(); }
+
+function renderEntradaPanel(c){
+  const ctx=S.entradaCtx;
+  const item=S.data.items[ctx.ref];
+  if(!item){ cancelView(); return; }
+  c.innerHTML=`
+    <div class="back-hdr">
+      <button class="back-btn" onclick="cancelView()">← Voltar</button>
+      <div class="back-title">➕ Registrar Entrada</div>
+    </div>
+    <div class="content">
+      <div class="form-card">
+        <div class="form-title" style="color:var(--ok)">${esc(item.nome)}</div>
+        <div style="font-size:12px;color:var(--mut);margin-bottom:14px">Atual: <strong style="color:#e8e8f0">${item.quantidade}</strong></div>
+        <div class="form-field">
+          <label class="form-label">Quantidade recebida *</label>
+          <input class="form-input" id="e-qty" type="number" min="1" value="1" autofocus
+            onkeydown="if(event.key==='Enter')document.getElementById('e-obs')?.focus()">
+        </div>
+        <div class="form-field">
+          <label class="form-label">Observação (opcional)</label>
+          <input class="form-input" id="e-obs" placeholder="Ex: entrega fornecedor"
+            onkeydown="if(event.key==='Enter')confirmarEntrada()">
+        </div>
+        <div class="form-btns">
+          <button class="form-btn sec" onclick="cancelView()">Cancelar</button>
+          <button class="form-btn pri" style="background:var(--ok)" onclick="confirmarEntrada()">✅ Confirmar Entrada</button>
+        </div>
+      </div>
+    </div>`;
+  setTimeout(()=>$('e-qty')?.select(),60);
+}
+
+function confirmarEntrada(){
+  const ctx=S.entradaCtx;
+  const qty=parseInt($('e-qty')?.value||0,10);
+  const obs=($('e-obs')?.value||'').trim();
+  if(!qty||qty<1){ toast('Quantidade inválida'); return; }
+  const item=S.data.items[ctx.ref];
+  if(!item){ toast('Item não encontrado'); return; }
+  item.quantidade+=qty;
+  S.data.entradas.push({id:uid(),item_id:item.id,item_nome:item.nome,setor:item.setor,quantidade:qty,obs,data:nowISO(),usuario:S.usuario.nome});
+  saveData(); S.entradaCtx=null; toast('✅ Entrada registrada!'); render();
+}
+
+// ─── EDITAR ITEM ─────────────────────────────────────────
+function openEdit(idx){ S.view='edit'; S.editCtx=idx; render(); }
+
+function renderEditItem(c){
+  const item=S.data.items[S.editCtx];
+  if(!item){ cancelView(); return; }
+  c.innerHTML=`
+    <div class="back-hdr">
+      <button class="back-btn" onclick="cancelView()">← Voltar</button>
+      <div class="back-title">✏️ Editar Item</div>
+    </div>
+    <div class="content">
+      <div class="form-card">
+        <div class="form-title">Editar item</div>
+        <div class="form-field">
+          <label class="form-label">Nome do item *</label>
+          <input class="form-input" id="ed-nome" value="${esc(item.nome)}" autofocus>
+        </div>
+        <div class="form-row">
+          <div class="form-field">
+            <label class="form-label">Setor</label>
+            <select class="form-input" id="ed-setor">
+              ${SETORES.map(s=>`<option value="${esc(s.key)}"${s.key===item.setor?' selected':''}>${s.icon} ${esc(s.key)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-field">
+            <label class="form-label">Quantidade atual</label>
+            <input class="form-input" id="ed-qty" type="number" min="0" value="${item.quantidade}">
+          </div>
+        </div>
+        <div class="form-field">
+          <label class="form-label">Quantidade mínima (alerta)</label>
+          <input class="form-input" id="ed-min" type="number" min="0" value="${item.minimo||0}" placeholder="0 = sem alerta">
+        </div>
+        <div class="form-btns">
+          <button class="form-btn sec" onclick="cancelView()">Cancelar</button>
+          <button class="form-btn pri" onclick="saveEditItem()">💾 Salvar</button>
+        </div>
+      </div>
+    </div>`;
+  setTimeout(()=>$('ed-nome')?.focus(),60);
+}
+
+function saveEditItem(){
+  const item=S.data.items[S.editCtx];
+  if(!item){ cancelView(); return; }
+  const nome=($('ed-nome')?.value||'').trim();
+  const setor=$('ed-setor')?.value||item.setor;
+  const qty=Math.max(0,parseInt($('ed-qty')?.value,10)||0);
+  const minimo=Math.max(0,parseInt($('ed-min')?.value,10)||0);
+  if(!nome){ toast('Nome obrigatório'); return; }
+  item.nome=nome; item.setor=setor; item.quantidade=qty; item.minimo=minimo;
+  S.setor=setor;
+  saveData(); S.view='list'; S.editCtx=null;
+  toast('✅ Item atualizado!'); render();
+}
+
 // ─── RELATÓRIO ───────────────────────────────────────────
 function renderRelatorio(c){
   const loja=S.usuario?.loja||'Loja';
   const hoje=new Date().toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',year:'numeric'});
+  const itemsAbaixo=S.data.items.filter(i=>i.minimo>0&&i.quantidade<i.minimo);
+  const bannerAlerta=itemsAbaixo.length?`
+    <div style="background:rgba(255,90,110,.08);border:1px solid rgba(255,90,110,.3);border-radius:10px;padding:12px 14px;margin-bottom:10px">
+      <div style="font-size:12px;font-weight:800;color:var(--erro);margin-bottom:8px">⚠️ ${itemsAbaixo.length} item${itemsAbaixo.length!==1?'s':''} abaixo do mínimo</div>
+      ${itemsAbaixo.slice(0,8).map(i=>`
+        <div style="display:flex;justify-content:space-between;font-size:11px;padding:4px 0;border-bottom:1px solid rgba(255,90,110,.1)">
+          <span style="color:#d0d0e8">${setorIcon(i.setor)} ${esc(i.nome)}</span>
+          <span style="color:var(--erro);font-weight:700">${i.quantidade}/${i.minimo}</span>
+        </div>`).join('')}
+      ${itemsAbaixo.length>8?`<div style="font-size:10px;color:var(--mut);margin-top:6px">+${itemsAbaixo.length-8} outros...</div>`:''}
+    </div>`:'';
 
   // Inventory by sector
   const porSetor=[];
@@ -745,6 +893,7 @@ function renderRelatorio(c){
   c.innerHTML=`
     <div class="content">
       <div style="font-size:11px;color:var(--mut);font-weight:700;text-align:center;padding:2px 0 12px;letter-spacing:.3px">${esc(loja)} · ${hoje}</div>
+      ${bannerAlerta}
       <div class="relat-card">
         <div class="relat-title">📦 Inventário</div>
         ${invRows||`<div style="color:var(--mut);font-size:12px;text-align:center;padding:12px 0">Sem itens cadastrados</div>`}
