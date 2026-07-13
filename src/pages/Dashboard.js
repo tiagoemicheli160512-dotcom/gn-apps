@@ -780,7 +780,10 @@ function PainelGeral({ onSelectLoja }) {
       {(() => {
         const hoje = new Date();
         if (hoje.getDay() !== 1 || viewMode !== 'sem') return null;
-        const weekKey = 'gn_rel_sem_' + start;
+        const anchor = new Date(2026, 0, 5);
+        const isoFn = dt => dt.getFullYear() + '-' + String(dt.getMonth()+1).padStart(2,'0') + '-' + String(dt.getDate()).padStart(2,'0');
+        const semStart = isoFn(new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + semIdx * 7));
+        const weekKey = 'gn_rel_sem_' + semStart;
         let jaEnviou = false;
         try { jaEnviou = !!localStorage.getItem(weekKey); } catch(_) {}
         if (jaEnviou || loading || !totalBruto) return null;
@@ -793,7 +796,7 @@ function PainelGeral({ onSelectLoja }) {
             </div>
             <button
               onClick={() => {
-                try { localStorage.setItem('gn_rel_sem_' + start, '1'); } catch(_) {}
+                try { localStorage.setItem('gn_rel_sem_' + semStart, '1'); } catch(_) {}
                 const hoje2 = new Date().toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric' });
                 const linhas = LOJAS_LISTA.filter(k => dados[k]).map(k => {
                   const fat = dados[k]?.fat || 0;
