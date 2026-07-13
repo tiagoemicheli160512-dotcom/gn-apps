@@ -84,7 +84,7 @@ header{height:var(--hdr-h);border-bottom:1px solid var(--border);background:var(
 
 /* ── BOTTOM NAV ─────────────────────────────────── */
 nav{height:var(--nav-h);border-top:1px solid var(--border);background:var(--surf);
-  display:grid;grid-template-columns:repeat(4,1fr);flex-shrink:0;position:sticky;bottom:0;z-index:10}
+  display:grid;grid-template-columns:repeat(5,1fr);flex-shrink:0;position:sticky;bottom:0;z-index:10}
 .nav-btn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
   font-size:10px;color:var(--muted);padding:6px 0;position:relative;transition:color .15s}
 .nav-btn.ativo{color:var(--accent)}
@@ -219,6 +219,15 @@ nav{height:var(--nav-h);border-top:1px solid var(--border);background:var(--surf
   padding:12px;font-family:ui-monospace,'Cascadia Code',monospace;font-size:10px;
   line-height:1.6;overflow-x:auto;white-space:pre;color:var(--text);margin-bottom:12px}
 
+/* ── COMPARATIVO (Tab 4) ─────────────────────── */
+.comp-card{background:var(--surf);border:1px solid var(--border);border-radius:var(--r);overflow:hidden;margin-bottom:8px}
+.comp-card-hdr{padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.comp-loja{font-size:13px;font-weight:700}
+.comp-div-body{padding:0 14px 10px}
+.comp-div-table{width:100%;border-collapse:collapse;font-size:11px}
+.comp-div-table td{padding:4px 0;border-top:1px solid var(--border)}
+.comp-div-table td:not(:first-child){text-align:right;font-variant-numeric:tabular-nums;font-family:ui-monospace,'Cascadia Code',monospace}
+
 /* ── DESKTOP (≥768px) ─────────────────────────── */
 @media (min-width: 768px) {
   #app { max-width: 700px; margin: 0 auto; }
@@ -269,6 +278,10 @@ nav{height:var(--nav-h);border-top:1px solid var(--border);background:var(--surf
     <button class="nav-btn" data-tab="rh" onclick="setTab('rh')">
       <span class="nav-icon">👥</span>
       <span class="nav-label">RH / BH</span>
+    </button>
+    <button class="nav-btn" data-tab="comparativo" onclick="setTab('comparativo')">
+      <span class="nav-icon">🔍</span>
+      <span class="nav-label">Comparativo</span>
     </button>
     <button class="nav-btn" onclick="window.location.href='/gn-comissoes-mestra.html'">
       <span class="nav-icon">👑</span>
@@ -337,6 +350,10 @@ let S = {
   presencaSemana: null,  // { idx, funcs:[] }
   rhSemana: null,        // Date (segunda-feira)
   rhBusca: '',           // busca por funcionário
+  // Comparativo
+  compSemana: null,      // Date (segunda-feira)
+  compFotos: [],         // [{loja, semana_ini, ocr_brutos, ...}]
+  compComissoes: {},     // {comKey: all_data}
 };
 
 // ══════════════════════════════════════════════
@@ -502,6 +519,24 @@ async function carregarFinanceiro() {
     if (fErr && fErr.code === '42P01') { S.comissaoFotoSuportado = false; }
     else { S.comissaoFotos = fotos || []; S.comissaoFotoSuportado = true; }
   } catch(_) { S.comissaoFotoSuportado = false; }
+}
+
+// ══════════════════════════════════════════════
+// DATA — COMPARATIVO FOTO vs SISTEMA
+// ══════════════════════════════════════════════
+async function carregarComparativo() {
+  if (!S.compSemana) {
+    const hj = getMondayOfWeek();
+    S.compSemana = new Date().getDay() === 1 ? datePlusWeeks(hj, -1) : hj;
+  }
+  const ini = isoWeekStr(S.compSemana);
+  const [resFotos, resCom] = await Promise.all([
+    db.from('gn_comissao_foto').select('loja,semana_ini,ocr_brutos,ocr_analisado_em,enviado_por').eq('semana_ini', ini),
+    db.from('gn_comissoes').select('loja,all_data').in('loja', LOJAS.map(l => l.comKey)),
+  ]);
+  S.compFotos = resFotos.data || [];
+  S.compComissoes = {};
+  (resCom.data || []).forEach(r => { S.compComissoes[r.loja] = r.all_data; });
 }
 
 // ══════════════════════════════════════════════
@@ -989,6 +1024,116 @@ function renderRH() {
 }
 
 // ══════════════════════════════════════════════
+// RENDER — COMPARATIVO FOTO vs SISTEMA (Tab 4)
+// ══════════════════════════════════════════════
+function renderComparativo() {
+  if (!S.compSemana) {
+    const hj = getMondayOfWeek();
+    S.compSemana = new Date().getDay() === 1 ? datePlusWeeks(hj, -1) : hj;
+  }
+  const sem = formatSemana(S.compSemana);
+  const ini = isoWeekStr(S.compSemana);
+  const semIdx = mestraWeekIdx(S.compSemana);
+  const diasNome = ['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
+
+  let nOk = 0, nDiv = 0, nSemFoto = 0;
+
+  const rows = LOJAS.map(loja => {
+    const foto = S.compFotos.find(f => f.loja === loja.chkKey);
+    const brutos = S.compComissoes[loja.comKey]?.[String(semIdx)]?.brutos || Array(7).fill(0);
+    let jaOk = false;
+    try { jaOk = !!localStorage.getItem('gn_comp_ok_' + loja.chkKey + '_' + ini); } catch(_) {}
+
+    if (!foto) {
+      nSemFoto++;
+      return `<div class="comp-card"><div class="comp-card-hdr">
+        <span class="comp-loja">${loja.display}</span>
+        <span class="badge badge-warn">Sem foto</span>
+      </div></div>`;
+    }
+
+    if (!Array.isArray(foto.ocr_brutos) || foto.ocr_brutos.length !== 7) {
+      return `<div class="comp-card"><div class="comp-card-hdr">
+        <span class="comp-loja">${loja.display}</span>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span class="badge badge-muted">Sem análise</span>
+          <button class="btn btn-sec btn-sm" onclick="setTab('financeiro')">Ir p/ Financeiro</button>
+        </div>
+      </div></div>`;
+    }
+
+    const divergencias = [];
+    for (let d = 0; d < 7; d++) {
+      const sistema = parseFloat(brutos[d]) || 0;
+      const fotoval = (foto.ocr_brutos[d] || 0) / 100;
+      const dif = sistema - fotoval;
+      if (Math.abs(dif) >= 1.0) divergencias.push({ dia: diasNome[d], sistema, fotoval, dif });
+    }
+
+    if (divergencias.length === 0) {
+      nOk++;
+      const okBtn = jaOk
+        ? `<span class="badge badge-ok" style="font-size:11px">✓ Confirmado</span>`
+        : `<button class="btn btn-sec btn-sm" style="color:var(--green);border-color:var(--green)" onclick="marcarOkComp('${loja.chkKey}','${ini}')">✓ Dar OK</button>`;
+      return `<div class="comp-card"><div class="comp-card-hdr">
+        <span class="comp-loja">${loja.display}</span>
+        <div style="display:flex;align-items:center;gap:6px">${okBtn}</div>
+      </div></div>`;
+    }
+
+    nDiv++;
+    const linhas = divergencias.map(({dia, sistema, fotoval, dif}) => {
+      const difStr = `<span style="color:${dif > 0 ? 'var(--green)' : 'var(--red)'}">${dif > 0 ? '+' : ''}${money(dif)}</span>`;
+      return `<tr><td style="color:var(--muted)">${dia}</td><td>${money(sistema)}</td><td>${money(fotoval)}</td><td>${difStr}</td></tr>`;
+    }).join('');
+
+    return `<div class="comp-card">
+      <div class="comp-card-hdr">
+        <span class="comp-loja">${loja.display}</span>
+        <span class="badge badge-err">⚠ Divergência</span>
+      </div>
+      <div class="comp-div-body">
+        <table class="comp-div-table">
+          <thead><tr style="color:var(--muted)"><td>Dia</td><td>Sistema</td><td>Foto</td><td>Diferença</td></tr></thead>
+          <tbody>${linhas}</tbody>
+        </table>
+      </div>
+    </div>`;
+  }).join('');
+
+  $('content').innerHTML = `
+    <div class="week-nav" style="margin-bottom:12px">
+      <button onclick="navegarComp(-1)">‹</button>
+      <div class="week-label">
+        <div class="week-num">S${String(sem.num).padStart(2,'0')}</div>
+        <div class="week-period">${sem.periodo}</div>
+      </div>
+      <button onclick="navegarComp(1)">›</button>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      <div class="stat" style="flex:1;text-align:center"><div class="stat-val" style="color:var(--green)">${nOk}</div><div class="stat-lbl">OK</div></div>
+      <div class="stat" style="flex:1;text-align:center"><div class="stat-val" style="color:var(--red)">${nDiv}</div><div class="stat-lbl">Divergências</div></div>
+      <div class="stat" style="flex:1;text-align:center"><div class="stat-val" style="color:var(--amber)">${nSemFoto}</div><div class="stat-lbl">Sem Foto</div></div>
+    </div>
+    ${rows}
+  `;
+}
+
+function navegarComp(delta) {
+  if (!S.compSemana) {
+    const hj = getMondayOfWeek();
+    S.compSemana = new Date().getDay() === 1 ? datePlusWeeks(hj, -1) : hj;
+  }
+  S.compSemana = datePlusWeeks(S.compSemana, delta);
+  renderContent();
+}
+
+function marcarOkComp(lojaChkKey, ini) {
+  try { localStorage.setItem('gn_comp_ok_' + lojaChkKey + '_' + ini, '1'); } catch(_) {}
+  renderComparativo();
+}
+
+// ══════════════════════════════════════════════
 // NAV + RENDER
 // ══════════════════════════════════════════════
 function setTab(tab) {
@@ -1005,9 +1150,10 @@ function renderContent() {
   $('content').innerHTML = `<div class="empty"><div class="spin"></div></div>`;
   Promise.resolve().then(async () => {
     try {
-      if (S.tab === 'operacoes')  { await carregarOperacoes();  renderOperacoes();  }
-      if (S.tab === 'financeiro') { await carregarFinanceiro(); renderFinanceiro(); }
-      if (S.tab === 'rh')         { await carregarRH();         renderRH();         }
+      if (S.tab === 'operacoes')    { await carregarOperacoes();    renderOperacoes();    }
+      if (S.tab === 'financeiro')  { await carregarFinanceiro();  renderFinanceiro();   }
+      if (S.tab === 'rh')          { await carregarRH();          renderRH();           }
+      if (S.tab === 'comparativo') { await carregarComparativo(); renderComparativo();  }
     } catch(e) {
       $('content').innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-text">Erro ao carregar: ${e.message}</div></div>`;
     }
@@ -1431,7 +1577,7 @@ async function iniciarApp() {
 
   // Ir para a primeira aba permitida
   const primeiraAba = S.abasPermitidas
-    ? (['operacoes','financeiro','rh'].find(t => S.abasPermitidas.has(t)) || 'operacoes')
+    ? (['operacoes','financeiro','rh','comparativo'].find(t => S.abasPermitidas.has(t)) || 'operacoes')
     : 'operacoes';
   setTab(primeiraAba);
 }
