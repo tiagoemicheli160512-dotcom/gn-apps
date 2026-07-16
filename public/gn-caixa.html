@@ -1060,8 +1060,8 @@ const LOJA_CHK_MAP = {
   'ITAQUERA':'Itaquera','GUARULHOS':'Guarulhos',
 };
 
-// Sincroniza venda_salao, venda_delivery e repique do caixa para o checklist do dia.
-// Soma todos os caixas + comprovantes da loja na data informada.
+// Sincroniza venda_salao, venda_delivery, repique, dinheiro_caixa e despesas do caixa para o checklist do dia.
+// Soma todos os caixas + comprovantes + despesas da loja na data informada.
 async function sincronizarChecklist(data, mostrarToast) {
   if (!S.loja || !data) return;
   try {
@@ -1069,17 +1069,37 @@ async function sincronizarChecklist(data, mostrarToast) {
     const caixas = await sb(`gn_caixa_fechamento?loja=eq.${encodeURIComponent(S.loja)}&data=eq.${data}&select=id,repique,total_real`);
     if (!caixas || !caixas.length) return;
     const ids = caixas.map(c => c.id).join(',');
-    // Buscar todos os comprovantes do dia para calcular correto
-    const comps = await sb(`gn_caixa_comprovante?fechamento_id=in.(${ids})&select=bandeira,valor`);
+    const [comps, saidasDB] = await Promise.all([
+      sb(`gn_caixa_comprovante?fechamento_id=in.(${ids})&select=bandeira,valor`),
+      sb(`gn_caixa_despesa?fechamento_id=in.(${ids})&select=id,categoria,nome,valor&order=criado_em`)
+    ]);
     const totalEntradas = (comps||[]).reduce((a,c)=>a+Number(c.valor),0);
     const vDelivery = (comps||[]).filter(c=>c.bandeira==='IFOOD'||c.bandeira==='Online').reduce((a,c)=>a+Number(c.valor),0);
     const sumRepique = caixas.reduce((a,c)=>a+(parseFloat(c.repique)||0),0);
     const vSalao = Math.max(0, totalEntradas - sumRepique - vDelivery);
     const dinheiroCaixa = caixas.reduce((a,c)=>a+(parseFloat(c.total_real)||0),0);
+    // Preservar fotos já adicionadas no checklist (match por id de despesa)
+    let existingDespesas = [];
+    try {
+      const ex = await sb(`checklist_diario?loja=eq.${encodeURIComponent(lojaChk)}&data_operacao=eq.${data}&select=despesas`);
+      if (ex && ex[0] && Array.isArray(ex[0].despesas)) existingDespesas = ex[0].despesas;
+    } catch(_) {}
+    const saidasLabel = Object.fromEntries(SAIDAS);
+    const fotoById = Object.fromEntries(existingDespesas.filter(d=>d.id && d.foto).map(d=>[String(d.id), d.foto]));
+    const fotoDinhSentinel = existingDespesas.filter(d=>d._tipo==='foto_dinheiro');
+    const despesas = [
+      ...(saidasDB||[]).map(s=>({
+        id: s.id,
+        descricao: saidasLabel[s.categoria]||s.nome||s.categoria,
+        valor: Number(s.valor),
+        foto: fotoById[String(s.id)]||''
+      })),
+      ...fotoDinhSentinel
+    ];
     await sb(`checklist_diario?on_conflict=data_operacao,loja`, {
       method: 'POST',
       prefer: 'return=minimal,resolution=merge-duplicates',
-      body: { loja: lojaChk, data_operacao: data, venda_salao: vSalao, venda_delivery: vDelivery, repique: sumRepique, dinheiro_caixa: dinheiroCaixa }
+      body: { loja: lojaChk, data_operacao: data, venda_salao: vSalao, venda_delivery: vDelivery, repique: sumRepique, dinheiro_caixa: dinheiroCaixa, despesas }
     });
     if (mostrarToast) toast('✅ Lançado no Check-list!');
   } catch(e) { if (mostrarToast) toast('❌ Erro: ' + e.message); }
