@@ -1197,6 +1197,7 @@ async function carregarFilhos() {
     sb(`gn_caixa_gorjeta?fechamento_id=eq.${fid}&select=*&order=criado_em`),
   ]);
   S.comprovantes = c || []; S.saidas = s || []; S.supr = n || []; S.notas10 = d || [];
+  setTimeout(_pfBadge, 0);
 }
 
 function entrarApp() {
@@ -1252,25 +1253,26 @@ function renderTudo() {
   });
 
   const saidaMap = Object.fromEntries(SAIDAS);
+  const _pend = x => x._pendente ? '<span style="color:#f0c050;font-size:10px;margin-left:4px" title="Aguardando sync">⏳</span>' : '';
   $('listaReceb').innerHTML = S.comprovantes.length ? S.comprovantes.slice().reverse().map(c => {
     const b = ENTRADAS.find(x => x.k === c.bandeira) || { cod: '—' };
     return `<div class="linha-item"><div class="desc">${c.bandeira}<small>${b.cod === '—' ? 'manual' : 'cód ' + b.cod}</small></div>
-    <div class="val">${money(c.valor)}</div><button class="del" onclick="excluir('gn_caixa_comprovante','${c.id}','comprovantes')">✕</button></div>`;
+    <div class="val">${money(c.valor)}${_pend(c)}</div><button class="del" onclick="excluir('gn_caixa_comprovante','${c.id}','comprovantes')">✕</button></div>`;
   }).join('') : '<div class="vazio">Nenhum recebimento.</div>';
 
   $('listaSaidas').innerHTML = S.saidas.length ? S.saidas.slice().reverse().map(s =>
     `<div class="linha-item"><div class="desc">${(saidaMap[s.categoria] || s.categoria)}<small>${s.nome || ''}</small></div>
-    <div class="val">${money(s.valor)}</div><button class="del" onclick="excluir('gn_caixa_despesa','${s.id}','saidas')">✕</button></div>`).join('')
+    <div class="val">${money(s.valor)}${_pend(s)}</div><button class="del" onclick="excluir('gn_caixa_despesa','${s.id}','saidas')">✕</button></div>`).join('')
     : '<div class="vazio">Nenhuma saída.</div>';
 
   $('listaSupr').innerHTML = S.supr.length ? S.supr.slice().reverse().map(s =>
     `<div class="linha-item"><div class="desc">Nota<small>${s.descricao || ''}</small></div>
-    <div class="val">${money(s.valor)}</div><button class="del" onclick="excluir('gn_caixa_suprimento','${s.id}','supr')">✕</button></div>`).join('')
+    <div class="val">${money(s.valor)}${_pend(s)}</div><button class="del" onclick="excluir('gn_caixa_suprimento','${s.id}','supr')">✕</button></div>`).join('')
     : '<div class="vazio">Fundo todo em dinheiro.</div>';
 
   $('listaDez').innerHTML = S.notas10.length ? S.notas10.slice().reverse().map(n =>
     `<div class="linha-item"><div class="desc">Mesa ${n.mesa || '—'}<small>${n.garcom || ''}</small></div>
-    <div class="val">${money(n.valor)}</div><button class="del" onclick="excluir('gn_caixa_gorjeta','${n.id}','notas10')">✕</button></div>`).join('')
+    <div class="val">${money(n.valor)}${_pend(n)}</div><button class="del" onclick="excluir('gn_caixa_gorjeta','${n.id}','notas10')">✕</button></div>`).join('')
     : '<div class="vazio">Sem notas.</div>';
 
   $('suprFundoTotal').textContent = money(fundo());
@@ -1556,11 +1558,22 @@ function enviarWhats() {
 
 async function excluir(tabela, id, arr) {
   if (!confirm('Excluir este lançamento?')) return;
+  const item = S[arr]?.find(x => x.id === id);
+  if (item?._pendente) {
+    _pfDequeue(id);
+    S[arr] = S[arr].filter(x => x.id !== id);
+    renderTudo(); toast('Excluído');
+    return;
+  }
   try {
     await sb(`${tabela}?id=eq.${id}`, { method: 'DELETE', prefer: 'return=minimal' });
     S[arr] = S[arr].filter(x => x.id !== id);
     renderTudo(); toast('Excluído');
-  } catch(e) { toast('Erro ao excluir'); }
+  } catch(e) {
+    _pfEnqueue({tempId:uuid(), realId:id, tabela, method:'DELETE'});
+    S[arr] = S[arr].filter(x => x.id !== id);
+    renderTudo(); toast('⚠️ Offline — exclusão pendente');
+  }
 }
 
 function abrirModal(k) {
@@ -1576,34 +1589,62 @@ function fecharModal() { $('modalBand').classList.add('hidden'); S.bandAtiva = n
 
 async function confirmarBand() {
   const v = parseMoney($('modalVal').value); if (v <= 0) { toast('Valor inválido'); return; }
+  const body = { fechamento_id: S.fech.id, bandeira: S.bandAtiva, valor: v };
+  fecharModal();
   try {
-    const row = await sb('gn_caixa_comprovante', { method: 'POST', prefer: 'return=representation', body: { fechamento_id: S.fech.id, bandeira: S.bandAtiva, valor: v } });
-    S.comprovantes.push(row[0]); fecharModal(); renderTudo(); toast('Lançado ' + money(v));
-  } catch(e) { toast('Erro ao salvar'); }
+    const row = await sb('gn_caixa_comprovante', { method: 'POST', prefer: 'return=representation', body });
+    S.comprovantes.push(row[0]); renderTudo(); toast('Lançado ' + money(v));
+  } catch(e) {
+    const tempId = uuid();
+    S.comprovantes.push({id:tempId,_pendente:true,fechamento_id:S.fech.id,bandeira:S.bandAtiva,valor:v});
+    _pfEnqueue({tempId,tabela:'gn_caixa_comprovante',method:'POST',body});
+    renderTudo(); toast('⚠️ Offline — salvo localmente');
+  }
 }
 
 async function addSaida() {
   const v = parseMoney($('saidaVal').value); if (v <= 0) { toast('Valor inválido'); return; }
+  const body = { fechamento_id: S.fech.id, categoria: $('saidaCat').value, nome: $('saidaNome').value.trim() || null, valor: v };
+  $('saidaVal').value = ''; $('saidaNome').value = '';
   try {
-    const row = await sb('gn_caixa_despesa', { method: 'POST', prefer: 'return=representation', body: { fechamento_id: S.fech.id, categoria: $('saidaCat').value, nome: $('saidaNome').value.trim() || null, valor: v } });
-    S.saidas.push(row[0]); $('saidaVal').value = ''; $('saidaNome').value = ''; renderTudo(); toast('Saída registrada');
-  } catch(e) { toast('Erro ao salvar'); }
+    const row = await sb('gn_caixa_despesa', { method: 'POST', prefer: 'return=representation', body });
+    S.saidas.push(row[0]); renderTudo(); toast('Saída registrada');
+  } catch(e) {
+    const tempId = uuid();
+    S.saidas.push({id:tempId,_pendente:true,fechamento_id:S.fech.id,categoria:body.categoria,nome:body.nome,valor:v});
+    _pfEnqueue({tempId,tabela:'gn_caixa_despesa',method:'POST',body});
+    renderTudo(); toast('⚠️ Offline — salvo localmente');
+  }
 }
 
 async function addSuprNota() {
   const v = parseMoney($('suprVal').value); if (v <= 0) { toast('Valor inválido'); return; }
+  const body = { fechamento_id: S.fech.id, descricao: $('suprDesc').value.trim() || null, valor: v };
+  $('suprVal').value = ''; $('suprDesc').value = '';
   try {
-    const row = await sb('gn_caixa_suprimento', { method: 'POST', prefer: 'return=representation', body: { fechamento_id: S.fech.id, descricao: $('suprDesc').value.trim() || null, valor: v } });
-    S.supr.push(row[0]); $('suprVal').value = ''; $('suprDesc').value = ''; renderTudo(); toast('Nota add');
-  } catch(e) { toast('Erro ao salvar'); }
+    const row = await sb('gn_caixa_suprimento', { method: 'POST', prefer: 'return=representation', body });
+    S.supr.push(row[0]); renderTudo(); toast('Nota add');
+  } catch(e) {
+    const tempId = uuid();
+    S.supr.push({id:tempId,_pendente:true,fechamento_id:S.fech.id,descricao:body.descricao,valor:v});
+    _pfEnqueue({tempId,tabela:'gn_caixa_suprimento',method:'POST',body});
+    renderTudo(); toast('⚠️ Offline — salvo localmente');
+  }
 }
 
 async function addNota10() {
   const v = parseMoney($('dezVal').value); if (v <= 0) { toast('Valor inválido'); return; }
+  const body = { fechamento_id: S.fech.id, mesa: $('dezMesa').value.trim() || null, garcom: $('dezGarcom').value.trim() || null, valor: v };
+  $('dezVal').value = ''; $('dezMesa').value = ''; $('dezGarcom').value = '';
   try {
-    const row = await sb('gn_caixa_gorjeta', { method: 'POST', prefer: 'return=representation', body: { fechamento_id: S.fech.id, mesa: $('dezMesa').value.trim() || null, garcom: $('dezGarcom').value.trim() || null, valor: v } });
-    S.notas10.push(row[0]); $('dezVal').value = ''; $('dezMesa').value = ''; $('dezGarcom').value = ''; renderTudo(); toast('Nota add');
-  } catch(e) { toast('Erro ao salvar'); }
+    const row = await sb('gn_caixa_gorjeta', { method: 'POST', prefer: 'return=representation', body });
+    S.notas10.push(row[0]); renderTudo(); toast('Nota add');
+  } catch(e) {
+    const tempId = uuid();
+    S.notas10.push({id:tempId,_pendente:true,fechamento_id:S.fech.id,mesa:body.mesa,garcom:body.garcom,valor:v});
+    _pfEnqueue({tempId,tabela:'gn_caixa_gorjeta',method:'POST',body});
+    renderTudo(); toast('⚠️ Offline — salvo localmente');
+  }
 }
 
 async function mostrarHome() {
@@ -1759,11 +1800,55 @@ document.getElementById('suprVal').addEventListener('keydown', e => { if (e.key 
 document.getElementById('dezVal').addEventListener('keydown', e => { if (e.key === 'Enter') addNota10(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') fecharModal(); });
 
+// ─── FILA OFFLINE ─────────────────────────────────────────────
+function _pfKey(){ return 'gn_cx_pend_'+(S.fech?.id||''); }
+function _pfLoad(){ try{ return JSON.parse(localStorage.getItem(_pfKey())||'[]'); }catch(_){ return []; } }
+function _pfSave(q){ try{ localStorage.setItem(_pfKey(),JSON.stringify(q)); }catch(_){} }
+function _pfEnqueue(item){ const q=_pfLoad(); q.push(item); _pfSave(q); _pfBadge(); }
+function _pfDequeue(tempId){ _pfSave(_pfLoad().filter(i=>i.tempId!==tempId)); _pfBadge(); }
+function _pfBadge(){
+  const q=_pfLoad(); const b=$('offline-banner');
+  if(!b) return;
+  if(q.length){ b.style.display=''; b.textContent=`⚠️ ${q.length} lançamento(s) offline — sincronizando ao reconectar...`; }
+  else b.style.display='none';
+}
+function _arrPorTabela(tabela){
+  if(tabela==='gn_caixa_comprovante') return 'comprovantes';
+  if(tabela==='gn_caixa_despesa') return 'saidas';
+  if(tabela==='gn_caixa_suprimento') return 'supr';
+  if(tabela==='gn_caixa_gorjeta') return 'notas10';
+  return null;
+}
+async function flushPending(){
+  if(!S.fech?.id) return;
+  const q=_pfLoad(); if(!q.length) return;
+  let rem=[...q];
+  for(const item of q){
+    try{
+      if(item.method==='DELETE'){
+        await sb(`${item.tabela}?id=eq.${item.realId}`,{method:'DELETE',prefer:'return=minimal'});
+      } else {
+        const row=await sb(item.tabela,{method:'POST',prefer:'return=representation',body:item.body});
+        const arrKey=_arrPorTabela(item.tabela);
+        if(arrKey&&row[0]){
+          const idx=S[arrKey].findIndex(r=>r.id===item.tempId);
+          if(idx>=0) S[arrKey][idx]={...row[0]};
+          else S[arrKey].push(row[0]);
+        }
+      }
+      rem=rem.filter(i=>i.tempId!==item.tempId);
+    } catch(e){ break; }
+  }
+  _pfSave(rem);
+  if(!rem.length){ renderTudo(); toast('✓ Lançamentos sincronizados!'); }
+  _pfBadge();
+}
+
 window.addEventListener('offline', () => {
-  const b = $('offline-banner'); if (b) b.style.display = '';
+  const b = $('offline-banner'); if (b) { b.style.display = ''; b.textContent = '⚠️ Sem conexão — lançamentos serão salvos localmente e sincronizados ao reconectar.'; }
 });
 window.addEventListener('online', () => {
-  const b = $('offline-banner'); if (b) b.style.display = 'none';
+  flushPending();
 });
 
 (function() {
