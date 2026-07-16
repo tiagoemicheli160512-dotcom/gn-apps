@@ -1304,7 +1304,8 @@ function HomeScreen({ session: sessionProp, onLogout }) {
   const navTo = (url) => {
     if (masterLoja) localStorage.setItem('gn_nav_loja', JSON.stringify({ loja: masterLoja, ts: Date.now() }));
     else localStorage.removeItem('gn_nav_loja');
-    window.location.href = url;
+    const sep = url.includes('?') ? '&' : '?';
+    window.location.href = url + sep + '_t=' + Date.now();
   };
 
   const abrirSenha = () => {
