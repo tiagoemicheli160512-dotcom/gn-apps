@@ -370,8 +370,16 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
     </div>
     <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
       <div class="header-data" id="header-data"></div>
-      <button class="btn-logout" onclick="logout()">Sair</button>
+      <div style="display:flex;gap:6px;align-items:center">
+        <button id="btn-salvar-pedidos" onclick="flushPendingItems(true)" title="Forçar salvamento" style="display:none;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.4);color:#22C55E;border-radius:6px;padding:4px 10px;font-size:11px;font-weight:700;cursor:pointer">💾 Salvar</button>
+        <button class="btn-logout" onclick="logout()">Sair</button>
+      </div>
     </div>
+  </div>
+
+  <!-- BANNER OFFLINE -->
+  <div id="offline-banner" style="display:none;background:#2a0808;border:1px solid #EF4444;border-radius:8px;padding:8px 14px;margin:8px 14px 0;font-size:12px;color:#EF4444;font-weight:700">
+    ⚠️ <span id="offline-banner-txt">Sem conexão — alterações serão sincronizadas ao reconectar.</span>
   </div>
 
   <div class="content" id="content"></div>
@@ -826,6 +834,58 @@ async function carregarEntregasConfirmadas() {
 // ═══════════════════════════════════════════════
 // SUPABASE — MUTATIONS
 // ═══════════════════════════════════════════════
+// ─── FILA OFFLINE ─────────────────────────────────────────────
+function _ppKey(){ return 'gn_ped_pend_'+(S.pedidoAtual?.id||''); }
+function _ppLoad(){ try{ return JSON.parse(localStorage.getItem(_ppKey())||'{}'); }catch(_){ return {}; } }
+function _ppSave(q){ try{ localStorage.setItem(_ppKey(),JSON.stringify(q)); }catch(_){} }
+function _ppSet(catalogoId, lojaSlug, qtd, custo){
+  const q=_ppLoad(); if(!q[catalogoId]) q[catalogoId]={};
+  q[catalogoId][lojaSlug]={qtd,custo}; _ppSave(q); _ppBadge();
+}
+function _ppDel(catalogoId, lojaSlug){
+  const q=_ppLoad(); if(q[catalogoId]) delete q[catalogoId][lojaSlug];
+  if(q[catalogoId]&&!Object.keys(q[catalogoId]).length) delete q[catalogoId];
+  _ppSave(q); _ppBadge();
+}
+function _ppCount(){ const q=_ppLoad(); return Object.values(q).reduce((n,ls)=>n+Object.keys(ls).length,0); }
+function _ppBadge(){
+  const n=_ppCount();
+  const b=$('offline-banner'), t=$('offline-banner-txt'), btn=$('btn-salvar-pedidos');
+  if(!b) return;
+  if(n>0){
+    b.style.display=''; if(t) t.textContent=`${n} alteração(ões) offline — sincronizando ao reconectar...`;
+    if(btn) btn.style.display='';
+  } else {
+    b.style.display='none'; if(btn) btn.style.display='none';
+  }
+}
+async function flushPendingItems(manual){
+  if(!S.pedidoAtual?.id) return;
+  const q=_ppLoad(); if(!Object.keys(q).length) return;
+  if(manual) toast('Sincronizando...','ok');
+  for(const catalogoId of Object.keys(q)){
+    for(const lojaSlug of Object.keys(q[catalogoId])){
+      const {qtd,custo}=q[catalogoId][lojaSlug];
+      const idExistente=S.pedidoItens[catalogoId]?.[lojaSlug]?.id;
+      try{
+        if(idExistente){
+          const {error}=await db.from('gn_pedido_itens').update({qtd_pedida:qtd,custo_unitario:custo}).eq('id',idExistente);
+          if(error) throw error;
+        } else {
+          const {data,error}=await db.from('gn_pedido_itens').insert([{
+            pedido_id:S.pedidoAtual.id,catalogo_id:catalogoId,loja_slug:lojaSlug,qtd_pedida:qtd,custo_unitario:custo
+          }]).select('id').single();
+          if(error) throw error;
+          if(data&&S.pedidoItens[catalogoId]?.[lojaSlug]) S.pedidoItens[catalogoId][lojaSlug].id=data.id;
+        }
+        _ppDel(catalogoId,lojaSlug);
+      } catch(e){ break; }
+    }
+  }
+  if(_ppCount()===0&&manual) toast('✓ Alterações sincronizadas!','ok');
+  _ppBadge();
+}
+
 async function salvarItem(catalogoId, lojaSlug, qtd, custo) {
   if (!S.pedidoItens[catalogoId]) S.pedidoItens[catalogoId] = {};
 
@@ -855,9 +915,11 @@ async function salvarItem(catalogoId, lojaSlug, qtd, custo) {
       if (error) throw error;
       if (data) S.pedidoItens[catalogoId][lojaSlug].id = data.id;
     }
+    _ppDel(catalogoId, lojaSlug);
   } catch (e) {
     console.error('Erro salvarItem:', e.message);
-    toast('Erro ao salvar: ' + e.message, 'err');
+    _ppSet(catalogoId, lojaSlug, qtd, custo);
+    toast('⚠️ Offline — salvo localmente', 'err');
   }
 }
 
@@ -2525,6 +2587,9 @@ async function iniciarApp() {
   // Render inicial
   setTab('pedido');
 
+  // Mostrar badge de pendências offline (se houver da sessão anterior)
+  setTimeout(_ppBadge, 0);
+
   // Verificar entregas atrasadas em background (auto-alerta após 6s)
   setTimeout(_verificarAlertasEntregaAuto, 6000);
 }
@@ -2800,6 +2865,14 @@ async function init() {
   $('splash').style.display = 'none';
   $('login').classList.add('ativo');
 }
+
+window.addEventListener('offline', () => {
+  const b = $('offline-banner'), t = $('offline-banner-txt');
+  if (b) { b.style.display = ''; if (t) t.textContent = 'Sem conexão — alterações serão sincronizadas ao reconectar.'; }
+});
+window.addEventListener('online', () => {
+  flushPendingItems(false);
+});
 
 init();
 </script>
