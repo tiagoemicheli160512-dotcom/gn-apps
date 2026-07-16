@@ -311,6 +311,9 @@ hr.div{border:none;border-top:1px solid var(--bd);margin:12px 0}
 
 <script>
 const LOJAS_LIST = [["BANGU", "Bangu"], ["CAXIAS", "Caxias"], ["SAO_GONCALO", "São Gonçalo"], ["NORTE", "Norte Shopping"], ["BOULEVARD", "Boulevard"], ["RANCHO", "Rancho"], ["PEDREIRA", "Pedreira"], ["NOVA_AMERICA", "Nova América"], ["CAMPO_GRANDE", "Campo Grande"], ["ITAQUERA", "Itaquera"], ["GUARULHOS", "Guarulhos"]];
+const LOJA_DISPLAY_M = Object.fromEntries(LOJAS_LIST);
+const MESTRA_TO_CAIXA = {'BANGU':'BANGU','CAXIAS':'CAXIAS','SAO_GONCALO':'SÃO GONÇALO','NORTE':'NORTE SHOPPING','BOULEVARD':'BOULEVARD','RANCHO':'RANCHO','PEDREIRA':'PEDREIRA','NOVA_AMERICA':'NOVA AMERICA','CAMPO_GRANDE':'CAMPO GRANDE','ITAQUERA':'ITAQUERA','GUARULHOS':'GUARULHOS'};
+const CAIXA_TO_MESTRA = Object.fromEntries(Object.entries(MESTRA_TO_CAIXA).map(([k,v])=>[v,k]));
 const SB_URL = "https://ncxttwvpafajnilpjbol.supabase.co";
 const SB_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5jeHR0d3ZwYWZham5pbHBqYm9sIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE4NDcyMDEsImV4cCI6MjA5NzQyMzIwMX0.MGDZNGY8GfSzBKAgdR7OhvOeR71i4fj9YseJRhoh5sE";
 
@@ -386,6 +389,8 @@ const FERIADOS_NACIONAIS=[
   {data:'2027-11-20',nome:'Consciência Negra'},{data:'2027-12-25',nome:'Natal'},
 ];
 let _cmvCache={}, _ferVendasCache={};
+let _statusHoje={};  // { MESTRA_KEY: {fechados:N, abertos:N, chkEnviado:bool} }
+let _manutPend=[];   // [{setor, tipo, descricao, _loja, status}, ...]
 
 let state = {
   tab: ld('tab','consolidado'),
@@ -1368,6 +1373,59 @@ async function carregarChecklistSemana(semIdx) {
   } catch(e){}
 }
 
+// ── STATUS HOJE (caixa + checklist) ──────────────────────────────
+async function carregarStatusHoje() {
+  const dataHoje = new Date().toISOString().slice(0,10);
+  const h = {'apikey':SB_ANON,'Authorization':'Bearer '+SB_ANON};
+  try {
+    const [caixaRes, chkRes] = await Promise.all([
+      fetch(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=eq.${dataHoje}&select=loja,status`, {headers:h}),
+      fetch(`${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${dataHoje}&select=loja,checklist_pct`, {headers:h})
+    ]);
+    const caixaRows = caixaRes.ok ? await caixaRes.json() : [];
+    const chkRows  = chkRes.ok  ? await chkRes.json()  : [];
+    _statusHoje = {};
+    (Array.isArray(caixaRows)?caixaRows:[]).forEach(r => {
+      const mk = CAIXA_TO_MESTRA[r.loja] || r.loja;
+      if (!_statusHoje[mk]) _statusHoje[mk] = {fechados:0,abertos:0,chkEnviado:false};
+      if (r.status === 'FECHADO') _statusHoje[mk].fechados++;
+      else _statusHoje[mk].abertos++;
+    });
+    (Array.isArray(chkRows)?chkRows:[]).forEach(r => {
+      const mk = r.loja;
+      if (!_statusHoje[mk]) _statusHoje[mk] = {fechados:0,abertos:0,chkEnviado:false};
+      if (r.checklist_pct != null) _statusHoje[mk].chkEnviado = true;
+    });
+    if (state.tab === 'consolidado') render();
+  } catch(e) {}
+}
+
+// ── MANUTENÇÕES ABERTAS (últimos 30 dias) ────────────────────────
+async function carregarManutPendentes() {
+  const prev = new Date(); prev.setDate(prev.getDate()-30);
+  const from = prev.toISOString().slice(0,10);
+  try {
+    const res = await fetch(
+      `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${from}&select=loja,manutencao`,
+      {headers:{'apikey':SB_ANON,'Authorization':'Bearer '+SB_ANON}}
+    );
+    if (!res.ok) return;
+    const rows = await res.json();
+    const seen = new Map();
+    const itens = [];
+    (Array.isArray(rows)?rows:[]).forEach(row => {
+      if (!Array.isArray(row.manutencao)) return;
+      row.manutencao.forEach(m => {
+        if (!m || m.status === 'Resolvido') return;
+        const k = `${row.loja}|${m.setor||''}|${(m.descricao||'').trim().toLowerCase()}`;
+        if (!seen.has(k)) { seen.set(k,true); itens.push({...m,_loja:row.loja}); }
+      });
+    });
+    _manutPend = itens;
+    if (state.tab === 'consolidado') render();
+  } catch(e) {}
+}
+
 // ── SYNC SUPABASE ────────────────────────────────────────────────
 function limparCacheRecarregar() {
   try { localStorage.removeItem('gn_mestra_allDataPorLoja'); } catch(_){}
@@ -1411,7 +1469,7 @@ async function carregarTodasLojas(showFeedback) {
 
   // 2. Busca todas as lojas + checklist em paralelo em background
   const promises = LOJAS_LIST.map(([key]) => carregarLoja(key, true));
-  await Promise.all([...promises, carregarChecklistSemana(state.semIdx)]);
+  await Promise.all([...promises, carregarChecklistSemana(state.semIdx), carregarStatusHoje(), carregarManutPendentes()]);
 
   // 3. Salva no localStorage e re-renderiza com dados novos
   try { localStorage.setItem('gn_mestra_allDataPorLoja', JSON.stringify(allDataPorLoja)); } catch(_){}
@@ -1582,6 +1640,9 @@ function setSemIdx(i){
 // ── TAB CONSOLIDADO ──────────────────────────────────────────────
 function renderConsolidado(ct, sem) {
   let totalBruto=0, total90=0, totalComs=0, totalPool=0;
+  let totalFaltas=0, totalAtest=0;
+  const lojasStatus=[];
+
   const cards = LOJAS_LIST.map(([key,nome]) => {
     const wd=getWDLoja(key,state.semIdx);
     const saldo=getSaldoAntesLoja(key,state.semIdx);
@@ -1590,10 +1651,33 @@ function renderConsolidado(ct, sem) {
     totalBruto+=bruto; total90+=calc.baseTotal;
     totalComs+=calc.funcCalc.reduce((s,f)=>s+f.liquido,0);
     totalPool+=calc.poolRateio;
+
+    let nFaltas=0, nAtest=0;
+    wd.funcs.filter(f=>f.nome.trim()).forEach(f=>{
+      nFaltas+=f.dias.filter(s=>['FALTA','SUSPENSÃO'].includes(s)).length;
+      nAtest+=f.dias.filter(s=>s==='ATESTADO').length;
+    });
+    totalFaltas+=nFaltas; totalAtest+=nAtest;
+    lojasStatus.push({key,nome,bruto,nFaltas,nAtest});
+
     const syncSt=syncStatusPorLoja[key]||'—';
     const syncIco=syncSt==='ok'?'✓':syncSt==='err'?'✗':syncSt==='syncing'?'⟳':'—';
     const comsLoja=calc.funcCalc.reduce((s,f)=>s+f.liquido,0);
     const chk=chkIco(checklistPctPorLoja[key]??null);
+
+    let metaBar='';
+    if(state.semIdx>0){
+      const prevWd=getWDLoja(key,state.semIdx-1);
+      const prevBruto=prevWd.brutos.reduce((s,v)=>s+(parseFloat(v)||0),0);
+      if(prevBruto>0&&bruto>0){
+        const pct=Math.round(bruto/prevBruto*100);
+        const bw=Math.min(100,pct);
+        const bc=pct>=100?'var(--gr)':pct>=85?'#F59E0B':'var(--rd)';
+        const tc=pct>=100?'var(--gr2)':pct>=85?'#FCD34D':'var(--rd2)';
+        metaBar=`<div style="margin-top:5px"><div style="display:flex;justify-content:space-between;font-size:8px;color:var(--gy);margin-bottom:2px"><span>vs sem.ant.</span><span style="color:${tc};font-weight:700">${pct}%</span></div><div style="height:3px;background:var(--bg5);border-radius:2px;overflow:hidden"><div style="height:100%;width:${bw}%;background:${bc};border-radius:2px;transition:width .3s"></div></div></div>`;
+      }
+    }
+
     return `<div class="cons-card${key===state.lojaAtiva?' sel':''}${bruto===0?' sem-dados':''}" onclick="setLoja('${key}');setTab('loja')">
       <div style="display:flex;justify-content:space-between;align-items:flex-start">
         <div class="cc-nome">${nome}${bruto===0?' <span style=\'font-size:8px;color:var(--gy)\'>sem dados</span>':''}</div>
@@ -1606,8 +1690,68 @@ function renderConsolidado(ct, sem) {
         <span style="font-size:9px;color:${chk.cor};font-weight:700">${chk.label}</span>
       </div>
       <div class="cc-sync">${syncIco} ${calc.nAtivos} func.</div>
+      ${metaBar}
     </div>`;
   }).join('');
+
+  // ── Card: Status das Lojas Hoje ───────────────────────────────
+  const hoje_str=new Date().toLocaleDateString('pt-BR');
+  const nFechou=Object.values(_statusHoje).filter(s=>s.fechados>0).length;
+  const nChkEnv=Object.values(_statusHoje).filter(s=>s.chkEnviado).length;
+  const hasStatusData=Object.keys(_statusHoje).length>0;
+  const statusRows=LOJAS_LIST.map(([key,nome])=>{
+    const st=_statusHoje[key];
+    const cxFechado=st&&st.fechados>0;
+    const cxAberto=st&&st.abertos>0&&st.fechados===0;
+    const cxIco=cxFechado?'✅':cxAberto?'⏳':'○';
+    const cxCor=cxFechado?'var(--gr2)':cxAberto?'var(--gd)':'var(--gy)';
+    const chkOk=st&&st.chkEnviado;
+    const nm=nome.split(' ')[0];
+    return `<div style="background:var(--bg4);border:1px solid var(--bd2);border-radius:8px;padding:6px 8px;min-width:56px;flex-shrink:0;text-align:center">
+      <div style="font-size:8px;font-weight:700;color:var(--txt2);margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${nm}</div>
+      <div style="font-size:10px;color:${cxCor}">${cxIco}<span style="font-size:7px;color:var(--gy);margin-left:2px">cx</span></div>
+      <div style="font-size:10px;color:${chkOk?'var(--gr2)':'var(--gy)'};margin-top:2px">${chkOk?'✅':'○'}<span style="font-size:7px;color:var(--gy);margin-left:2px">chk</span></div>
+    </div>`;
+  }).join('');
+  const statusHojeHtml=`<div style="background:var(--bg3);border:1px solid var(--bd2);border-radius:12px;padding:12px 14px;margin-bottom:10px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <div style="font-size:9px;font-weight:800;color:var(--or);letter-spacing:1.5px;text-transform:uppercase">📋 Status Hoje · ${hoje_str}</div>
+      <div style="font-size:10px">${hasStatusData?`<span style="color:var(--gr2)">${nFechou}/11 cx</span> <span style="color:var(--bd3)">·</span> <span style="color:var(--bl2)">${nChkEnv}/11 chk</span>`:'<span style="color:var(--gy)">carregando…</span>'}</div>
+    </div>
+    <div style="display:flex;gap:5px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none">${hasStatusData?statusRows:'<div style="font-size:10px;color:var(--gy);padding:4px 0">Buscando dados de hoje…</div>'}</div>
+  </div>`;
+
+  // ── Card: Faltas da Semana ────────────────────────────────────
+  const topFaltas=lojasStatus.filter(l=>l.nFaltas+l.nAtest>0).sort((a,b)=>(b.nFaltas+b.nAtest)-(a.nFaltas+a.nAtest)).slice(0,3);
+  const faltasHtml=`<div style="background:var(--bg3);border:1px solid var(--bd2);border-radius:12px;padding:12px 14px;margin-bottom:10px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <div style="font-size:9px;font-weight:800;color:var(--rd);letter-spacing:1.5px;text-transform:uppercase">👥 Faltas — S${String(CAL[state.semIdx].num).padStart(2,'0')}</div>
+      <div style="display:flex;gap:10px;font-size:10px">
+        <span style="color:var(--rd2);font-weight:700">${totalFaltas}<span style="color:var(--gy);font-weight:400"> F/S</span></span>
+        <span style="color:var(--gd);font-weight:700">${totalAtest}<span style="color:var(--gy);font-weight:400"> AT</span></span>
+      </div>
+    </div>
+    ${topFaltas.length?topFaltas.map((l,i)=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0${i<topFaltas.length-1?';border-bottom:1px solid var(--bd)':''}">
+      <span style="font-size:10px;color:var(--txt2)">${l.nome}</span>
+      <div style="display:flex;gap:8px">
+        ${l.nFaltas>0?`<span style="font-size:9px;color:var(--rd2);font-weight:700">${l.nFaltas}F</span>`:''}
+        ${l.nAtest>0?`<span style="font-size:9px;color:var(--gd);font-weight:700">${l.nAtest}AT</span>`:''}
+      </div>
+    </div>`).join(''):'<div style="font-size:10px;color:var(--gr2)">✅ Nenhuma falta registrada esta semana</div>'}
+  </div>`;
+
+  // ── Card: Manutenções Abertas ─────────────────────────────────
+  const manutPorLoja={};
+  _manutPend.forEach(m=>{ const k=m._loja||'?'; manutPorLoja[k]=(manutPorLoja[k]||0)+1; });
+  const manutTotal=_manutPend.length;
+  const topManut=Object.entries(manutPorLoja).sort((a,b)=>b[1]-a[1]).slice(0,4);
+  const manutHtml=`<div style="background:var(--bg3);border:1px solid var(--bd2);border-radius:12px;padding:12px 14px;margin-bottom:10px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <div style="font-size:9px;font-weight:800;color:var(--gd);letter-spacing:1.5px;text-transform:uppercase">🔧 Manutenções Abertas</div>
+      <span style="font-size:15px;font-weight:700;font-family:Consolas,monospace;color:${manutTotal>0?'var(--gd)':'var(--gr2)'}">${manutTotal}</span>
+    </div>
+    ${manutTotal===0?'<div style="font-size:10px;color:var(--gr2)">✅ Nenhuma pendência nos últimos 30 dias</div>':topManut.map(([loja,n],i)=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0${i<topManut.length-1?';border-bottom:1px solid var(--bd)':''}"><span style="font-size:10px;color:var(--txt2)">${LOJA_DISPLAY_M[loja]||loja}</span><span style="font-size:10px;font-weight:700;color:var(--gd)">${n}</span></div>`).join('')}
+  </div>`;
 
   const opts=CAL.map((w,i)=>`<option value="${i}"${i===state.semIdx?' selected':''}>S${String(w.num).padStart(2,'0')} · ${w.mesNome} · ${w.header}</option>`).join('');
 
@@ -1623,6 +1767,9 @@ function renderConsolidado(ct, sem) {
       <div class="kpi"><div class="kv" style="color:var(--green)">${fmtBRLShort(totalComs).replace('R$ ','')}</div><div class="kl">Total Comissões</div></div>
       <div class="kpi"><div class="kv" style="color:var(--cy)">${fmtBRLShort(totalPool).replace('R$ ','')}</div><div class="kl">Total Pool Rateio</div></div>
     </div>
+    ${statusHojeHtml}
+    ${faltasHtml}
+    ${manutHtml}
     <div class="sec-title">◄ Por Loja — Toque para detalhar</div>
     <div class="cons-grid">${cards}</div>
   </div>`;
