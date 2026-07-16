@@ -318,6 +318,16 @@ const TIPOS = [
   { key:'Outro',            icon:'🔧', cor:'#8f8fb0' },
 ];
 
+const SLA_CONFIG = {
+  'Estrutura':        { normal:7,  critico:14 },
+  'Ar Condicionado':  { normal:3,  critico:7  },
+  'Fogão/Fritadeira': { normal:2,  critico:5  },
+  'Elevador':         { normal:1,  critico:3  },
+  'Exaustor':         { normal:3,  critico:7  },
+  'Informática':      { normal:2,  critico:5  },
+  'Outro':            { normal:5,  critico:10 },
+};
+
 const LOJAS_LISTA = [
   'Bangu','Caxias','São Gonçalo','Norte Shopping','Boulevard',
   'Rancho','Pedreira','Nova América','Campo Grande','Itaquera','Guarulhos'
@@ -687,6 +697,17 @@ function renderLista(){
       :m.status==='Resolvido'
         ?`<span class="bstatus andamento" style="background:#1a1a08;color:#f0c050;">⏳ Aguard. conf. loja</span>`
         :'';
+    let slaBadge='';
+    if(m.status!=='Resolvido'&&m._data){
+      const slaConf=SLA_CONFIG[tipo];
+      if(slaConf){
+        const diffMs=Date.now()-new Date(m._data).getTime();
+        const diffDias=Math.floor(diffMs/(1000*60*60*24));
+        if(diffDias>slaConf.critico) slaBadge=`<span class="bstatus" style="background:#3a0a0a;color:#f87171;">🚨 ${diffDias}d — CRÍTICO</span>`;
+        else if(diffDias>slaConf.normal) slaBadge=`<span class="bstatus" style="background:#2a1a0a;color:#f0a050;">⚠️ ${diffDias}d — prazo excedido</span>`;
+        else if(diffDias>0) slaBadge=`<span class="bstatus" style="background:#0a1a2a;color:#60a0c0;font-size:9px;">⏰ ${diffDias}d</span>`;
+      }
+    }
     return `<div class="icard ${sc}">
       <div class="ihead">
         <div class="ibadges">
@@ -694,6 +715,7 @@ function renderLista(){
           <span class="bstatus ${sc}">${statusLabel}</span>
           ${m.prioridade==='Urgente'?`<span class="bstatus" style="background:#3a0a0a;color:#f87171;">🔴 Urgente</span>`:''}
           ${confirBadge}
+          ${slaBadge}
           ${m.resolved_at&&m.status==='Resolvido'?`<span style="font-size:9px;color:#3a5a3a;padding:2px 7px;border-radius:99px;background:#0a2010;">✓ ${new Date(m.resolved_at).toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',year:'2-digit'})}</span>`:''}
         </div>
         <span class="imeta">${fmtData(m._data)}</span>
@@ -808,10 +830,39 @@ function renderUtensPanel(){
       ${canCat?`<div class="utens-subtabs">
         <button class="utens-subtab${S.utensTab==='contagem'?' sel':''}" onclick="setUtensTab('contagem')">📋 Contagem</button>
         <button class="utens-subtab${S.utensTab==='catalogo'?' sel':''}" onclick="setUtensTab('catalogo')">📦 Catálogo</button>
-      </div>`:''}
-      <div id="utens-content">${S.utensTab==='catalogo'&&canCat?renderCatalogHTML():renderContagemHTML()}</div>
+        <button class="utens-subtab${S.utensTab==='hist_sem'?' sel':''}" onclick="setUtensTab('hist_sem')">📅 Histórico</button>
+      </div>`:`<div class="utens-subtabs">
+        <button class="utens-subtab${S.utensTab!=='hist_sem'?' sel':''}" onclick="setUtensTab('contagem')">📋 Contagem</button>
+        <button class="utens-subtab${S.utensTab==='hist_sem'?' sel':''}" onclick="setUtensTab('hist_sem')">📅 Histórico</button>
+      </div>`}
+      <div id="utens-content">${S.utensTab==='catalogo'&&canCat?renderCatalogHTML():S.utensTab==='hist_sem'?renderHistSemHTML():renderContagemHTML()}</div>
     </div>`;
   if(S.utensTab==='catalogo') attachCatalogListeners();
+}
+
+function renderHistSemHTML(){
+  const loja=!isMaster()?S.usuario.loja:(S.lojaFiltro==='Todas'?null:S.lojaFiltro);
+  if(!loja) return `<div class="utens-loja-picker"><div class="empty-icon">🏪</div><div style="font-size:14px;font-weight:600;margin-bottom:10px">Selecione uma loja para ver o histórico:</div><div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:center">${LOJAS_LISTA.map(l=>`<button class="chip loja-chip" onclick="setLojaFiltro(${JSON.stringify(l)})" style="font-size:12px">${esc(l)}</button>`).join('')}</div></div>`;
+  if(!S.utensCatalogo.length) return `<div class="empty-state"><div class="empty-icon">📦</div><div>Catálogo vazio</div></div>`;
+  // Get unique semanas from loaded contagens
+  const semanasSet = new Set();
+  Object.keys(S.utensContagens).forEach(k=>{ const p=k.split('|'); if(p[1]===loja) semanasSet.add(p[2]); });
+  const semanas=[...semanasSet].sort().reverse().slice(0,6);
+  if(!semanas.length) return `<div class="empty-state"><div class="empty-icon">📅</div><div>Sem histórico de contagens</div></div>`;
+  const fmtSem=s=>{const d=new Date(s+'T12:00:00');return d.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'});};
+  const thead=`<tr><th>Utensílio</th>${semanas.map(s=>`<th style="text-align:center;white-space:nowrap">${fmtSem(s)}</th>`).join('')}</tr>`;
+  const tbody=S.utensCatalogo.map(item=>`<tr>
+    <td style="font-size:12px">${esc(item.nome)}</td>
+    ${semanas.map(s=>{
+      const cnt=S.utensContagens[`${item.id}|${loja}|${s}`];
+      if(!cnt) return `<td style="text-align:center;color:var(--mut)">—</td>`;
+      const av=Number(cnt.avarias)||0;
+      const qtd=Number(cnt.quantidade_atual)||0;
+      return `<td style="text-align:center"><div style="font-weight:700">${qtd}</div>${av>0?`<div style="font-size:9px;color:var(--erro)">⚠️${av}</div>`:''}</td>`;
+    }).join('')}
+  </tr>`).join('');
+  return `<div style="font-size:10px;color:var(--mut);font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Histórico de semanas · ${esc(loja)}</div>
+    <div style="overflow-x:auto"><table class="umes-table"><thead>${thead}</thead><tbody>${tbody}</tbody></table></div>`;
 }
 
 function renderContagemHTML(){
