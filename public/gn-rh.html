@@ -343,6 +343,7 @@ let S = {
   caixaSemana: [],       // [{loja, data, turno, status, total_real, ...}]
   comissaoFotos: [],     // [{loja(chkKey), semana_ini, foto_base64, enviado_por}]
   comissaoFotoSuportado: true,
+  fotosCaixaSistema: {}, // {`${userKey}|${data}`: foto_base64}
   // RH
   rhLoja: LOJAS[0],
   rhMes: null,           // 'YYYY-MM'
@@ -525,6 +526,23 @@ async function carregarFinanceiro() {
     if (fErr && fErr.code === '42P01') { S.comissaoFotoSuportado = false; }
     else { S.comissaoFotos = fotos || []; S.comissaoFotoSuportado = true; }
   } catch(_) { S.comissaoFotoSuportado = false; }
+
+  // Fotos do Caixa do Sistema (checklist_diario → vinculadas ao fechamento de caixa)
+  try {
+    let qfc = db.from('checklist_diario')
+      .select('loja,data_operacao,foto_caixa_sistema')
+      .gte('data_operacao', ini).lte('data_operacao', fim)
+      .not('foto_caixa_sistema', 'is', null);
+    if (S.finLoja) qfc = qfc.eq('loja', S.finLoja);
+    const { data: fotosCaixa } = await qfc;
+    S.fotosCaixaSistema = {};
+    (fotosCaixa || []).forEach(row => {
+      // checklist_diario.loja = chkKey; map to userKey for lookup against gn_caixa_fechamento
+      const lojaObj = LOJAS.find(l => l.chkKey === row.loja);
+      const key = `${lojaObj ? lojaObj.userKey : row.loja}|${row.data_operacao}`;
+      if (row.foto_caixa_sistema) S.fotosCaixaSistema[key] = row.foto_caixa_sistema;
+    });
+  } catch(_) { S.fotosCaixaSistema = {}; }
 }
 
 // ══════════════════════════════════════════════
@@ -793,6 +811,10 @@ function renderFinanceiro() {
           const difStyle = dif === null || Math.abs(dif) < 1 ? 'color:var(--muted)' : dif > 0 ? 'color:var(--green)' : 'color:var(--red)';
           const difStr = dif === null || Math.abs(dif) < 1 ? '—' : `${dif > 0 ? '+' : ''}${money(dif)}`;
           const totalCell = totalReal != null ? money(totalReal) : '<span style="color:var(--muted)">—</span>';
+          const fotoB64 = S.fotosCaixaSistema?.[`${lojaChk}|${r.data}`];
+          const fotoCell = fotoB64
+            ? `<td style="text-align:center"><img src="${fotoB64}" style="width:30px;height:30px;object-fit:cover;border-radius:4px;cursor:pointer;border:1px solid var(--border)" onclick="verFotoCaixaRH('${lojaChk}','${r.data}')" title="Ver foto do caixa do sistema"></td>`
+            : `<td style="text-align:center;color:var(--muted);font-size:11px">—</td>`;
           return `<tr>
             <td>${fmtBRShort(r.data)}</td>
             <td style="color:var(--muted)">${r.turno}</td>
@@ -803,6 +825,7 @@ function renderFinanceiro() {
             <td class="num" style="text-align:right;color:var(--muted);font-size:11px">${money(r.venda_online)}</td>
             <td class="num" style="text-align:right;color:var(--accent);font-size:11px">${money(brutoSis)}</td>
             <td class="num" style="text-align:right;font-size:11px;${difStyle}">${difStr}</td>
+            ${fotoCell}
           </tr>`;
         }).join('');
         const difSem = totalLoja - totalSis;
@@ -813,6 +836,7 @@ function renderFinanceiro() {
           <td></td><td></td><td></td>
           <td class="num" style="text-align:right;font-weight:800;color:var(--accent)">${money(totalSis)}</td>
           <td class="num" style="text-align:right;font-weight:800;${difSemStyle}">${difSem>=0?'+':''}${money(difSem)}</td>
+          <td></td>
         </tr>`;
         return `<div class="card" style="margin-bottom:10px">
           <div class="card-header">
@@ -829,6 +853,7 @@ function renderFinanceiro() {
                 <th style="text-align:right">Online</th>
                 <th style="text-align:right">Sistema</th>
                 <th style="text-align:right">Dif.</th>
+                <th style="text-align:center">📷</th>
               </tr></thead>
               <tbody>${rowsHtml}${totalRow}</tbody>
             </table>
@@ -1493,6 +1518,23 @@ async function excluirFoto(loja, semanaIni) {
   toast('Foto removida', 'ok');
   fecharModal();
   await carregarFinanceiro(); renderFinanceiro();
+}
+
+function verFotoCaixaRH(lojaUserKey, data) {
+  const b64 = S.fotosCaixaSistema?.[`${lojaUserKey}|${data}`];
+  if (!b64) { toast('Foto não encontrada', 'err'); return; }
+  const lojaObj = LOJAS.find(l => l.userKey === lojaUserKey);
+  abrirModal(`
+    <div class="modal-handle"></div>
+    <div class="modal-title">
+      📸 Caixa do Sistema — ${lojaObj?.display||lojaUserKey} ${fmtBR(data)}
+      <button class="modal-close" onclick="fecharModal()">×</button>
+    </div>
+    <img src="${b64}" style="width:100%;border-radius:var(--rs);max-height:60dvh;object-fit:contain;background:var(--surf2)">
+    <div class="modal-actions">
+      <button class="btn btn-sec" onclick="fecharModal()">Fechar</button>
+    </div>
+  `);
 }
 
 function modalMigracaoFoto() {
