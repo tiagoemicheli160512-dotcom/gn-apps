@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>GN Check-list v88</title>
+<title>GN Check-list v89</title>
 <script>
 (function(){
   var V=87;
@@ -906,7 +906,7 @@
     <div style="display:flex;align-items:center;gap:8px;">
       <div style="width:28px;height:28px;background:#E8580A;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0;">🍽️</div>
       <div>
-        <div style="font-weight:800;font-size:13px;color:var(--t1);letter-spacing:-0.2px;" id="header-loja-nome">GN Operações</div><span style="font-size:9px;color:#f97316;font-weight:700;margin-left:4px;">v88</span>
+        <div style="font-weight:800;font-size:13px;color:var(--t1);letter-spacing:-0.2px;" id="header-loja-nome">GN Operações</div><span style="font-size:9px;color:#f97316;font-weight:700;margin-left:4px;">v89</span>
         <div style="font-size:9px;color:#444;display:flex;align-items:center;gap:6px;">
           <span id="sync-dot" class="offline"></span><span id="sync-label">Conectando...</span>
           <span id="last-save-indicator" style="display:none;color:#3a7a3a;font-size:8px;font-weight:600;"></span>
@@ -7236,7 +7236,7 @@ function _getDatasEspeciais(ano) {
 }
 
 let _gestaoMes = null, _gestaoAno = null;
-let _gestaoFatAtual = {}, _gestaoFatAnt = {}, _gestaoCMV = {};
+let _gestaoFatAtual = {}, _gestaoFatAnt = {}, _gestaoCMV = {}, _gestaoFuncCount = {};
 
 async function renderGestao() {
   const el = document.getElementById('tab-gestao');
@@ -7255,18 +7255,28 @@ async function _loadGestaoData() {
   const to    = `${a}-${pad(m+1)}-${pad(new Date(a,m+1,0).getDate())}`;
   const fromA = `${a-1}-${pad(m+1)}-01`;
   const toA   = `${a-1}-${pad(m+1)}-${pad(new Date(a-1,m+1,0).getDate())}`;
-  _gestaoFatAtual = {}; _gestaoFatAnt = {}; _gestaoCMV = {};
+  _gestaoFatAtual = {}; _gestaoFatAnt = {}; _gestaoCMV = {}; _gestaoFuncCount = {};
   if (!sb || !LOJA) return;
   try {
-    const [r1, r2, r3] = await Promise.all([
+    const [r1, r2, r3, comissoesDt] = await Promise.all([
       sb.from('checklist_diario').select('data_operacao,venda_salao,venda_delivery').eq('loja',LOJA).gte('data_operacao',from).lte('data_operacao',to),
       sb.from('checklist_diario').select('data_operacao,venda_salao,venda_delivery').eq('loja',LOJA).gte('data_operacao',fromA).lte('data_operacao',toA),
-      sb.from('gn_recebimentos').select('data,valor_recebido').eq('loja',LOJA).gte('data',from).lte('data',to)
+      sb.from('gn_recebimentos').select('data,valor_recebido').eq('loja',LOJA).gte('data',from).lte('data',to),
+      fetchComissoesAllData(comissoesLojaKey()).catch(()=>({}))
     ]);
     if (r1.error) return;
     (r1.data||[]).forEach(r => { const v=(parseFloat(r.venda_salao)||0)+(parseFloat(r.venda_delivery)||0); const k=(r.data_operacao||'').slice(0,10); _gestaoFatAtual[k]=(_gestaoFatAtual[k]||0)+v; });
     (r2.data||[]).forEach(r => { const v=(parseFloat(r.venda_salao)||0)+(parseFloat(r.venda_delivery)||0); const k=(r.data_operacao||'').slice(0,10); _gestaoFatAnt[k]=(_gestaoFatAnt[k]||0)+v; });
     (r3.data||[]).forEach(r => { _gestaoCMV[r.data]=(_gestaoCMV[r.data]||0)+(parseFloat(r.valor_recebido)||0); });
+    const lastDayN = new Date(a,m+1,0).getDate();
+    for (let d=1; d<=lastDayN; d++) {
+      const ds=`${a}-${pad(m+1)}-${pad(d)}`;
+      const idx=comissoesSemIdx(ds); if (idx===null) continue;
+      const dIdx=comissoesDiaIdx(ds);
+      const wd=(comissoesDt||{})[String(idx)]; if (!wd||!wd.funcs) continue;
+      const cnt=wd.funcs.filter(f=>f.nome&&f.nome.trim()&&ESCALA_PRESENTE_SET.has((f.dias||[])[dIdx])).length;
+      if (cnt>0) _gestaoFuncCount[ds]=cnt;
+    }
   } catch(e) {}
 }
 
@@ -7291,9 +7301,10 @@ function _renderGestaoContent(el) {
     const fat = _gestaoFatAtual[ds]||0;
     const fatA= _gestaoFatAnt[dsA]||0;
     const cmv = _gestaoCMV[ds]||0;
+    const func= _gestaoFuncCount[ds]||0;
     const feriado = datasEsp.find(f=>f.data===ds);
     totAtual+=fat; totAnt+=fatA; totCMV+=cmv;
-    dias.push({d,ds,dsA,fw,fat,fatA,cmv,feriado,isFuture:ds>hojeStr,isHoje:ds===hojeStr});
+    dias.push({d,ds,dsA,fw,fat,fatA,cmv,func,feriado,isFuture:ds>hojeStr,isHoje:ds===hojeStr});
   }
 
   const delta = totAtual - totAnt;
@@ -7301,6 +7312,13 @@ function _renderGestaoContent(el) {
   const cmvPct = totAtual>0 ? (totCMV/totAtual*100).toFixed(1) : null;
   const cmvColor = !cmvPct?'#888':parseFloat(cmvPct)>35?'#f87171':parseFloat(cmvPct)>28?'#fbbf24':'#4ade80';
   const maxFat = Math.max(...dias.map(d=>Math.max(d.fat,d.fatA,1)));
+
+  let funcDias=0, funcSoma=0;
+  dias.forEach(({fat,func}) => { if(fat>0 && func>0){ funcDias++; funcSoma+=func; } });
+  const avgFunc = funcDias>0 ? funcSoma/funcDias : 0;
+  const fatPerFuncMes = avgFunc>0 ? totAtual/avgFunc : 0;
+  const _qdrClr = r => !r?'#666':r>=18000?'#4ade80':r>=15000?'#fbbf24':'#f87171';
+  const _qdrLabel = r => !r?'—':r>=18000?'✓ Quadro OK':r>=15000?'⚠ Atenção':'✗ Quadro acima';
 
   // Summary cards
   const sumHtml = `<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">
@@ -7332,8 +7350,31 @@ function _renderGestaoContent(el) {
     </div>
   </div>`;
 
+  // Quadro card
+  const qdrColor = _qdrClr(fatPerFuncMes);
+  const qdrPct = Math.min(100, fatPerFuncMes>0 ? fatPerFuncMes/18000*100 : 0);
+  const qdrHtml = `<div style="background:#0f1729;border:1px solid #1c1c3a;border-radius:10px;padding:12px;margin-bottom:12px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+      <div>
+        <div style="font-size:10px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:.4px">👥 Venda por Funcionário</div>
+        <div style="font-size:9px;color:#666;margin-top:2px">${avgFunc>0?`Média ${avgFunc.toFixed(1)} func/dia · meta R$ 18k/func`:'Sem dados de escala no mês'}</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:20px;font-weight:700;color:${qdrColor};font-family:Consolas,monospace">${fatPerFuncMes>0?'R$ '+(fatPerFuncMes/1000).toFixed(1)+'k':'—'}</div>
+        <div style="font-size:9px;color:${qdrColor};font-weight:700">${_qdrLabel(fatPerFuncMes)}</div>
+      </div>
+    </div>
+    ${avgFunc>0?`<div style="height:6px;background:#1c1c3a;border-radius:3px;overflow:hidden">
+      <div style="height:100%;width:${qdrPct}%;background:${qdrColor};border-radius:3px;transition:width .3s"></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;margin-top:3px">
+      <div style="font-size:8px;color:#444">R$ 0</div>
+      <div style="font-size:8px;color:#666">meta R$ 18k</div>
+    </div>`:''}
+  </div>`;
+
   // Day table
-  const rowsHtml = dias.map(({d,ds,dsA,fw,fat,fatA,cmv,feriado,isFuture,isHoje}) => {
+  const rowsHtml = dias.map(({d,ds,dsA,fw,fat,fatA,cmv,func,feriado,isFuture,isHoje}) => {
     const dlt = fatA>0 ? ((fat-fatA)/fatA*100).toFixed(0) : null;
     const dltC = dlt===null?'#555':parseFloat(dlt)>=0?'#4ade80':'#f87171';
     const dColor = fw===0?'#f87171':fw===6?'#fbbf24':'#aaa';
@@ -7343,12 +7384,15 @@ function _renderGestaoContent(el) {
     const barAnt = fatA>0?`<div style="height:2px;background:#333;border-radius:1px;width:${Math.min(100,fatA/maxFat*100)}%;margin-top:1px"></div>`:'';
     const cmvD = fat>0?(cmv/fat*100).toFixed(0):null;
     const cmvDC = !cmvD?'#555':parseInt(cmvD)>35?'#f87171':parseInt(cmvD)>28?'#fbbf24':'#4ade80';
+    const fpf = (fat>0 && func>0) ? fat/func : 0;
+    const fpfC = _qdrClr(fpf);
     return `<tr style="${bg}${isFuture?'opacity:.4':''}">
       <td style="padding:4px 3px;font-size:10px;color:${dColor};font-weight:600;white-space:nowrap">${pad(d)} ${DSEM[fw]}${ferBadge}</td>
       <td style="text-align:right;padding:4px 3px"><div style="font-size:11px;font-weight:700;color:${fat>0?'#e2e8f0':'#444'};font-family:Consolas,monospace">${fat>0?_fmtBRL(fat):'—'}</div>${barA}</td>
       <td style="text-align:right;padding:4px 3px"><div style="font-size:10px;color:#666;font-family:Consolas,monospace">${fatA>0?_fmtBRL(fatA):'—'}</div>${barAnt}</td>
       <td style="text-align:right;padding:4px 3px;font-size:10px;color:${dltC}">${dlt!==null?(parseFloat(dlt)>=0?'+':'')+dlt+'%':'—'}</td>
       <td style="text-align:right;padding:4px 3px;font-size:10px;color:${cmvDC}">${cmvD!==null?cmvD+'%':'—'}</td>
+      <td style="text-align:right;padding:4px 3px;font-size:10px;color:${fpfC};font-weight:600">${fpf>0?'R$'+(fpf/1000).toFixed(0)+'k<br><span style="font-size:8px;color:#555">('+func+'f)</span>':'—'}</td>
     </tr>`;
   }).join('');
 
@@ -7360,6 +7404,7 @@ function _renderGestaoContent(el) {
         <th style="text-align:right;padding:5px 3px;font-size:8px;color:#666;font-weight:600;text-transform:uppercase;letter-spacing:.4px">${a-1}</th>
         <th style="text-align:right;padding:5px 3px;font-size:8px;color:#666;font-weight:600;text-transform:uppercase;letter-spacing:.4px">Δ%</th>
         <th style="text-align:right;padding:5px 3px;font-size:8px;color:#666;font-weight:600;text-transform:uppercase;letter-spacing:.4px">CMV</th>
+        <th style="text-align:right;padding:5px 3px;font-size:8px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:.4px">👥/func</th>
       </tr></thead>
       <tbody>${rowsHtml}
         <tr style="border-top:2px solid #1c1c3a">
@@ -7368,6 +7413,7 @@ function _renderGestaoContent(el) {
           <td style="text-align:right;padding:5px 3px;font-size:11px;font-weight:700;color:#888;font-family:Consolas,monospace">${_fmtBRL(totAnt)}</td>
           <td style="text-align:right;padding:5px 3px;font-size:10px;color:${delta>=0?'#4ade80':'#f87171'};font-weight:700">${deltaPct?(delta>=0?'+':'')+deltaPct+'%':'—'}</td>
           <td style="text-align:right;padding:5px 3px;font-size:10px;color:${cmvColor};font-weight:700">${cmvPct?cmvPct+'%':'—'}</td>
+          <td style="text-align:right;padding:5px 3px;font-size:10px;color:${_qdrClr(fatPerFuncMes)};font-weight:700">${fatPerFuncMes>0?'R$'+(fatPerFuncMes/1000).toFixed(0)+'k':'—'}</td>
         </tr>
       </tbody>
     </table>
@@ -7423,6 +7469,7 @@ function _renderGestaoContent(el) {
     </div>
     ${sumHtml}
     ${cmvHtml}
+    ${qdrHtml}
     ${ferHtml}
     <div style="font-size:10px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">📈 Faturamento Dia a Dia</div>
     ${tableHtml}
