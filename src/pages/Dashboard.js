@@ -693,12 +693,12 @@ function PainelGeral({ onSelectLoja }) {
       }).catch(() => {});
     }
 
-    // Manutenções pendentes por loja (últimos 30 dias)
+    // Manutenções pendentes por loja — apenas hoje (dia a dia, sem acumular)
     (() => {
-      const hoje30 = new Date(); hoje30.setDate(hoje30.getDate() - 30);
-      const iso30 = hoje30.getFullYear() + '-' + String(hoje30.getMonth()+1).padStart(2,'0') + '-' + String(hoje30.getDate()).padStart(2,'0');
+      const hj = new Date();
+      const isoHoje = hj.getFullYear() + '-' + String(hj.getMonth()+1).padStart(2,'0') + '-' + String(hj.getDate()).padStart(2,'0');
       fetch(
-        `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${iso30}&select=loja,manutencao`,
+        `${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${isoHoje}&select=loja,manutencao`,
         { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
       ).then(r => r.json()).then(rows => {
         const counts = {};
@@ -775,6 +775,15 @@ function PainelGeral({ onSelectLoja }) {
 
   return (
     <div style={{ padding: '0 14px 90px' }}>
+
+      {/* Header de seção — Painel de Gestão */}
+      <div style={{ display:'flex', alignItems:'center', gap:10, padding:'14px 0 14px', borderBottom:'1px solid rgba(255,255,255,.06)', marginBottom:14 }}>
+        <span style={{ width:32, height:32, borderRadius:10, background:'rgba(242,100,25,.12)', border:'1px solid rgba(242,100,25,.22)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:15, flexShrink:0 }}>📊</span>
+        <div>
+          <div style={{ fontSize:11, fontWeight:800, letterSpacing:1.5, textTransform:'uppercase', color:'rgba(255,255,255,.65)' }}>Painel de Gestão</div>
+          <div style={{ fontSize:10, color:'rgba(255,255,255,.3)', marginTop:1 }}>Visão consolidada · todas as lojas</div>
+        </div>
+      </div>
 
       {/* Lembrete segunda-feira — enviar relatório semanal */}
       {(() => {
