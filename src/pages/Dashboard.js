@@ -1429,9 +1429,9 @@ function HomeScreen({ session: sessionProp, onLogout }) {
         <div style={S.hdrUser}>{session.nome}{session.cargo ? ' · ' + session.cargo : ''}</div>
         {notifPerm !== 'unsupported' && (
           <button
-            onClick={notifPerm === 'granted' ? undefined : habilitarNotif}
+            onClick={notifPerm === 'granted' ? () => mostrarMsgNotif('🔔 Notificações ativas — alertas chegam ao abrir o app.') : habilitarNotif}
             title={notifPerm === 'granted' ? 'Notificações ativas' : notifPerm === 'denied' ? 'Notificações bloqueadas — toque para ver como ativar' : 'Habilitar notificações'}
-            style={{ background: 'transparent', border: '1px solid rgba(255,255,255,.1)', borderRadius: 8, padding: '5px 9px', fontSize: 14, lineHeight: 1, color: notifPerm === 'granted' ? '#22c55e' : notifPerm === 'denied' ? '#f87171' : 'rgba(255,255,255,.25)', fontFamily: 'inherit', cursor: notifPerm === 'granted' ? 'default' : 'pointer', flexShrink: 0 }}
+            style={{ background: 'transparent', border: '1px solid rgba(255,255,255,.1)', borderRadius: 8, padding: '5px 9px', fontSize: 14, lineHeight: 1, color: notifPerm === 'granted' ? '#22c55e' : notifPerm === 'denied' ? '#f87171' : 'rgba(255,255,255,.25)', fontFamily: 'inherit', cursor: 'pointer', flexShrink: 0 }}
           >{notifPerm === 'granted' ? '🔔' : '🔕'}</button>
         )}
         <button style={{ background: 'transparent', border: '1px solid rgba(255,255,255,.1)', borderRadius: 8, padding: '5px 9px', fontSize: 14, lineHeight: 1, color: 'rgba(255,255,255,.35)', fontFamily: 'inherit', cursor: 'pointer', flexShrink: 0 }} onClick={abrirSenha} title="Trocar login e senha">🔑</button>
