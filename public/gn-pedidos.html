@@ -372,6 +372,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
       <div class="header-data" id="header-data"></div>
       <div style="display:flex;gap:6px;align-items:center">
         <button id="btn-salvar-pedidos" onclick="flushPendingItems(true)" title="Forçar salvamento" style="display:none;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.4);color:#22C55E;border-radius:6px;padding:4px 10px;font-size:11px;font-weight:700;cursor:pointer">💾 Salvar</button>
+        <button id="btn-notif-ped" onclick="ativarNotifPedidos()" title="Ativar alertas de pedidos" style="background:transparent;border:1px solid rgba(255,255,255,.15);border-radius:6px;padding:4px 9px;font-size:13px;color:rgba(255,255,255,.35);cursor:pointer">🔕</button>
         <button class="btn-logout" onclick="logout()">Sair</button>
       </div>
     </div>
@@ -437,6 +438,71 @@ const TTL = 43200000;
 const DIAS_SEMANA = ['DOM','SEG','TER','QUA','QUI','SEX','SAB'];
 
 const db = supabase.createClient(SUPA_URL, SUPA_KEY);
+
+const GN_VAPID_PUBLIC = 'BJTEqdQLTZ1ix8DeXWwytbo1OjNfPc5Kt6RYgHq50dWq3T7514Pv3kb14Gce0MgcOx3ySRtddqtCC41TZyAsBVQ';
+
+function _urlB64ToUint8Array(b64) {
+  const pad = '='.repeat((4 - b64.length % 4) % 4);
+  const raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  const arr = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+  return arr;
+}
+
+async function registrarPushSubscription() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const existing = await reg.pushManager.getSubscription();
+    const sub = existing || await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: _urlB64ToUint8Array(GN_VAPID_PUBLIC)
+    });
+    const sess = (() => { try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch(e) { return null; } })();
+    await db.from('gn_push_subscriptions').upsert({
+      endpoint: sub.endpoint,
+      subscription: sub.toJSON(),
+      loja: sess?.loja || 'GERAL',
+      user_nome: sess?.nome || ''
+    }, { onConflict: 'endpoint' });
+    localStorage.setItem('gn_push_ativo', '1');
+  } catch(_) {}
+}
+
+async function ativarNotifPedidos() {
+  if (typeof Notification === 'undefined') { toast('⚠️ Notificações não suportadas', 'err'); return; }
+  if (Notification.permission === 'denied') {
+    toast('🔕 Bloqueado. Vá em Ajustes → Notificações e habilite para este site.', 'err'); return;
+  }
+  try {
+    const p = await Notification.requestPermission();
+    if (p !== 'granted') { toast('⚠️ Permissão negada', 'err'); return; }
+    await registrarPushSubscription();
+    _atualizarBtnNotif();
+    toast('🔔 Notificações de pedidos ativadas!', 'ok');
+  } catch(_) {
+    toast('⚠️ Para receber alertas, adicione o app à tela inicial: Compartilhar → Adicionar à Tela de Início', 'err');
+  }
+}
+
+function _atualizarBtnNotif() {
+  const btn = document.getElementById('btn-notif-ped');
+  if (!btn) return;
+  const ativo = typeof Notification !== 'undefined' && Notification.permission === 'granted';
+  if (ativo) {
+    btn.textContent = '🔔';
+    btn.style.color = '#22C55E';
+    btn.style.borderColor = 'rgba(34,197,94,.4)';
+    btn.title = 'Notificações ativas';
+    btn.onclick = () => toast('🔔 Notificações ativas — alertas de pedidos e entregas serão enviados.', 'ok');
+  } else {
+    btn.textContent = '🔕';
+    btn.style.color = Notification.permission === 'denied' ? '#f87171' : 'rgba(255,255,255,.35)';
+    btn.style.borderColor = Notification.permission === 'denied' ? 'rgba(248,113,113,.3)' : 'rgba(255,255,255,.15)';
+    btn.title = Notification.permission === 'denied' ? 'Bloqueado — toque para ver como ativar' : 'Ativar alertas de pedidos';
+    btn.onclick = ativarNotifPedidos;
+  }
+}
 
 // ═══════════════════════════════════════════════
 // STATE
@@ -2728,6 +2794,17 @@ async function iniciarApp() {
 
   // Verificar entregas atrasadas em background (auto-alerta após 6s)
   setTimeout(_verificarAlertasEntregaAuto, 6000);
+
+  // Registrar push subscription se já tem permissão
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      setTimeout(registrarPushSubscription, 3000);
+    }
+  }
+
+  // Atualizar visual do botão de notificação
+  _atualizarBtnNotif();
 
   // Carregar badge de faltas do dia em background
   setTimeout(_carregarFaltasBadge, 4000);

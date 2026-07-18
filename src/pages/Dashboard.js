@@ -1332,6 +1332,17 @@ function HomeScreen({ session: sessionProp, onLogout }) {
           if ('periodicSync' in reg) {
             await reg.periodicSync.register('gn-alerts', { minInterval: 15 * 60 * 1000 });
           }
+          if ('PushManager' in window) {
+            const VAPID_PUB = 'BJTEqdQLTZ1ix8DeXWwytbo1OjNfPc5Kt6RYgHq50dWq3T7514Pv3kb14Gce0MgcOx3ySRtddqtCC41TZyAsBVQ';
+            const toUint8 = b => { const p2='='.repeat((4-b.length%4)%4),r=atob((b+p2).replace(/-/g,'+').replace(/_/g,'/')),a=new Uint8Array(r.length); for(let i=0;i<r.length;i++)a[i]=r.charCodeAt(i); return a; };
+            const existing = await reg.pushManager.getSubscription();
+            const sub = existing || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: toUint8(VAPID_PUB) });
+            await fetch(`${SB_URL}/rest/v1/gn_push_subscriptions?on_conflict=endpoint`, {
+              method: 'POST',
+              headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}`, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' },
+              body: JSON.stringify({ endpoint: sub.endpoint, subscription: sub.toJSON(), loja: session.loja || 'GERAL', user_nome: session.nome || '' })
+            });
+          }
         } catch(_) {}
         mostrarMsgNotif('🔔 Notificações ativadas!');
       }
