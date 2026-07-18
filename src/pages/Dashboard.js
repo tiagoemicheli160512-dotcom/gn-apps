@@ -1311,25 +1311,33 @@ function HomeScreen({ session: sessionProp, onLogout }) {
   }, []);
 
   const habilitarNotif = useCallback(async () => {
-    if (typeof Notification === 'undefined') return;
+    if (typeof Notification === 'undefined') {
+      mostrarMsgNotif('⚠️ Seu navegador não suporta notificações.');
+      return;
+    }
     if (Notification.permission === 'denied') {
-      mostrarMsgNotif('🔕 Notificações bloqueadas. Vá em Ajustes do celular → Notificações → habilite para este app/navegador.');
+      mostrarMsgNotif('🔕 Bloqueado. Vá em Ajustes → Notificações → habilite para este site/app.');
       return;
     }
-    const p = await Notification.requestPermission();
-    setNotifPerm(p);
-    if (p === 'denied') {
-      mostrarMsgNotif('🔕 Permissão negada. Para ativar: Ajustes → Notificações → habilite para este app/navegador.');
-      return;
-    }
-    if (p === 'granted' && 'serviceWorker' in navigator) {
-      try {
-        const reg = await navigator.serviceWorker.ready;
-        if ('periodicSync' in reg) {
-          await reg.periodicSync.register('gn-alerts', { minInterval: 15 * 60 * 1000 });
-        }
-      } catch(_) {}
-      mostrarMsgNotif('🔔 Notificações ativadas!');
+    try {
+      const p = await Notification.requestPermission();
+      setNotifPerm(p);
+      if (p === 'denied') {
+        mostrarMsgNotif('🔕 Permissão negada. Vá em Ajustes → Notificações → habilite para este site/app.');
+        return;
+      }
+      if (p === 'granted' && 'serviceWorker' in navigator) {
+        try {
+          const reg = await navigator.serviceWorker.ready;
+          if ('periodicSync' in reg) {
+            await reg.periodicSync.register('gn-alerts', { minInterval: 15 * 60 * 1000 });
+          }
+        } catch(_) {}
+        mostrarMsgNotif('🔔 Notificações ativadas!');
+      }
+    } catch(_) {
+      // iOS Safari fora do modo standalone lança exceção
+      mostrarMsgNotif('⚠️ Para receber alertas, adicione o app à tela inicial: toque em Compartilhar → Adicionar à Tela de Início.');
     }
   }, [mostrarMsgNotif]);
 
