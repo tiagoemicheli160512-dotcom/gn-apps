@@ -427,7 +427,6 @@ function PainelGeral({ onSelectLoja }) {
   const [weekDates, setWeekDates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [semana, setSemana] = useState('');
-  const [freqData, setFreqData] = useState({});
   const [funcData, setFuncData] = useState({});
   const [caixaData, setCaixaData] = useState({});
   const [cmvPorLoja, setCmvPorLoja] = useState({});
@@ -449,7 +448,6 @@ function PainelGeral({ onSelectLoja }) {
   useEffect(() => {
     setLoading(true);
     setCmv(null);
-    setFreqData({});
     setFuncData({});
     setCaixaData({});
     setCmvPorLoja({});
@@ -520,7 +518,6 @@ function PainelGeral({ onSelectLoja }) {
       .then(r => r.json())
       .then(rows => {
         const coms = {};
-        const freq = {};
         const fData = {};
         const dbParaDisplay = {};
         Object.entries(LOJA_COM_KEY).forEach(([display, db]) => { dbParaDisplay[db] = display; });
@@ -531,23 +528,6 @@ function PainelGeral({ onSelectLoja }) {
           const total = calcComissaoTotal(wd);
           const displayKey = dbParaDisplay[row.loja] || row.loja;
           if (total !== null) coms[displayKey] = total;
-
-          // Frequência consolidada por tipo
-          if (wd?.funcs) {
-            const sm = {};
-            ['CLT / MENSALISTA','HORISTA','JOVEM APRENDIZ'].forEach(s => { sm[s] = {P:0,F:0,AT:0,total:0}; });
-            wd.funcs.filter(f => f.nome?.trim()).forEach(f => {
-              const s = f.tipo || 'CLT / MENSALISTA';
-              if (!sm[s]) return;
-              (f.dias || []).forEach(st => {
-                sm[s].total++;
-                if (['PRESENTE','HORISTA','JOVEM APRENDIZ','FOLGA','BANCO DE HORAS'].includes(st)) sm[s].P++;
-                else if (['FALTA','SUSPENSÃO'].includes(st)) sm[s].F++;
-                else if (st === 'ATESTADO') sm[s].AT++;
-              });
-            });
-            freq[displayKey] = sm;
-          }
 
           // Func ativos (com fallback para semana mais recente com dados)
           let wdFuncs = wd;
@@ -572,7 +552,6 @@ function PainelGeral({ onSelectLoja }) {
           fData[displayKey] = { count, faltas, suspensoes, atestados };
         });
         setComissoes(coms);
-        setFreqData(freq);
         setFuncData(fData);
       }) : Promise.resolve();
 
@@ -757,13 +736,6 @@ function PainelGeral({ onSelectLoja }) {
 
   const pSec  = { fontSize: 10, fontWeight: 800, letterSpacing: 1.4, textTransform: 'uppercase', color: '#d4a800', marginBottom: 10, paddingLeft: 2 };
   const pCard = (cor, temDados) => ({ display: 'flex', flexDirection: 'column', gap: 0, background: `color-mix(in srgb, ${cor} ${temDados ? 10 : 5}%, #141428)`, border: `1px solid ${temDados ? cor + '45' : '#20203a'}`, borderRadius: 14, padding: '11px 13px', cursor: 'pointer' });
-
-  const freqCons = {};
-  ['CLT / MENSALISTA','HORISTA','JOVEM APRENDIZ'].forEach(s => { freqCons[s] = {P:0,F:0,AT:0,total:0}; });
-  Object.values(freqData).forEach(sm => {
-    Object.entries(sm).forEach(([s,d]) => { if (freqCons[s]) { freqCons[s].P+=d.P; freqCons[s].F+=d.F; freqCons[s].AT+=d.AT; freqCons[s].total+=d.total; } });
-  });
-  const hasFreqData = Object.values(freqCons).some(c => c.total > 0);
 
   const semNumero = (() => {
     const anchor = new Date(2026, 0, 5);
@@ -1033,30 +1005,6 @@ function PainelGeral({ onSelectLoja }) {
         )}
       </div>
 
-      {/* Frequência Consolidada */}
-      {hasFreqData && (
-        <div style={{ background: '#0e0e1e', border: '1px solid #161628', borderRadius: 14, padding: '13px 14px', marginBottom: 12 }}>
-          <div style={pSec}>👥 Frequência — Semana Atual</div>
-          {['CLT / MENSALISTA','HORISTA','JOVEM APRENDIZ'].map(tipo => {
-            const c = freqCons[tipo];
-            if (!c || c.total === 0) return null;
-            const pct = Math.round((c.P / c.total) * 100);
-            return (
-              <div key={tipo} style={{ display:'flex', alignItems:'center', gap:10, padding:'7px 0', borderBottom:'1px solid #101020' }}>
-                <div style={{ flex:1, fontSize:11, color:'#5a5a7a', fontWeight:600 }}>{tipo}</div>
-                <div style={{ fontSize:11, color:'#22c55e', fontWeight:700 }}>✓ {c.P}</div>
-                {c.F > 0 && <div style={{ fontSize:11, color:'#ef4444', fontWeight:700 }}>✗ {c.F}</div>}
-                {c.AT > 0 && <div style={{ fontSize:11, color:'#f0c050', fontWeight:700 }}>AT {c.AT}</div>}
-                <div style={{ fontSize:11, fontWeight:800, color: pct>=90?'#22c55e':pct>=75?'#f0c050':'#ef4444', minWidth:36, textAlign:'right' }}>{pct}%</div>
-              </div>
-            );
-          })}
-          <button
-            onClick={() => { try { localStorage.setItem('gn_mestra_tab', JSON.stringify('frequencia')); } catch(e){} window.location.href='/gn-comissoes-mestra.html'; }}
-            style={{ marginTop:10, width:'100%', background:'rgba(255,255,255,.04)', border:'1px solid #161628', borderRadius:8, padding:'8px', fontSize:11, color:'#5a5a8a', cursor:'pointer', fontFamily:'inherit' }}
-          >Ver frequência por loja →</button>
-        </div>
-      )}
 
       {/* CMV Semanal */}
       {cmv !== null && (
