@@ -1174,6 +1174,7 @@ function HomeScreen({ session: sessionProp, onLogout }) {
     if (typeof Notification !== 'undefined') return Notification.permission;
     return 'unsupported';
   });
+  const [notifMsg, setNotifMsg] = useState('');
 
   const isMaster = session.loja === 'GERAL' || !!(session.permissoes || {}).master;
   const lojaEfetiva = masterLoja || session.loja;
@@ -1304,10 +1305,23 @@ function HomeScreen({ session: sessionProp, onLogout }) {
     } catch(_) {}
   }, [miniPainel, notifPerm, lojaEfetiva]);
 
+  const mostrarMsgNotif = useCallback((msg) => {
+    setNotifMsg(msg);
+    setTimeout(() => setNotifMsg(''), 7000);
+  }, []);
+
   const habilitarNotif = useCallback(async () => {
     if (typeof Notification === 'undefined') return;
+    if (Notification.permission === 'denied') {
+      mostrarMsgNotif('🔕 Notificações bloqueadas. Vá em Ajustes do celular → Notificações → habilite para este app/navegador.');
+      return;
+    }
     const p = await Notification.requestPermission();
     setNotifPerm(p);
+    if (p === 'denied') {
+      mostrarMsgNotif('🔕 Permissão negada. Para ativar: Ajustes → Notificações → habilite para este app/navegador.');
+      return;
+    }
     if (p === 'granted' && 'serviceWorker' in navigator) {
       try {
         const reg = await navigator.serviceWorker.ready;
@@ -1315,8 +1329,9 @@ function HomeScreen({ session: sessionProp, onLogout }) {
           await reg.periodicSync.register('gn-alerts', { minInterval: 15 * 60 * 1000 });
         }
       } catch(_) {}
+      mostrarMsgNotif('🔔 Notificações ativadas!');
     }
-  }, []);
+  }, [mostrarMsgNotif]);
 
   // Trigger alert check when app comes to foreground
   useEffect(() => {
@@ -1407,8 +1422,8 @@ function HomeScreen({ session: sessionProp, onLogout }) {
         {notifPerm !== 'unsupported' && (
           <button
             onClick={notifPerm === 'granted' ? undefined : habilitarNotif}
-            title={notifPerm === 'granted' ? 'Notificações ativas' : 'Habilitar notificações'}
-            style={{ background: 'transparent', border: '1px solid rgba(255,255,255,.1)', borderRadius: 8, padding: '5px 9px', fontSize: 14, lineHeight: 1, color: notifPerm === 'granted' ? '#22c55e' : 'rgba(255,255,255,.25)', fontFamily: 'inherit', cursor: notifPerm === 'granted' ? 'default' : 'pointer', flexShrink: 0 }}
+            title={notifPerm === 'granted' ? 'Notificações ativas' : notifPerm === 'denied' ? 'Notificações bloqueadas — toque para ver como ativar' : 'Habilitar notificações'}
+            style={{ background: 'transparent', border: '1px solid rgba(255,255,255,.1)', borderRadius: 8, padding: '5px 9px', fontSize: 14, lineHeight: 1, color: notifPerm === 'granted' ? '#22c55e' : notifPerm === 'denied' ? '#f87171' : 'rgba(255,255,255,.25)', fontFamily: 'inherit', cursor: notifPerm === 'granted' ? 'default' : 'pointer', flexShrink: 0 }}
           >{notifPerm === 'granted' ? '🔔' : '🔕'}</button>
         )}
         <button style={{ background: 'transparent', border: '1px solid rgba(255,255,255,.1)', borderRadius: 8, padding: '5px 9px', fontSize: 14, lineHeight: 1, color: 'rgba(255,255,255,.35)', fontFamily: 'inherit', cursor: 'pointer', flexShrink: 0 }} onClick={abrirSenha} title="Trocar login e senha">🔑</button>
@@ -1418,6 +1433,13 @@ function HomeScreen({ session: sessionProp, onLogout }) {
         }} title="Forçar atualização do app">↻ Atualizar</button>
         <button style={S.hdrSair} onClick={onLogout}>Sair</button>
       </header>
+
+      {/* Mensagem de notificação */}
+      {notifMsg && (
+        <div style={{ background: notifMsg.startsWith('🔔') ? 'rgba(34,197,94,.12)' : 'rgba(248,113,113,.12)', border: `1px solid ${notifMsg.startsWith('🔔') ? 'rgba(34,197,94,.3)' : 'rgba(248,113,113,.3)'}`, borderRadius: 8, margin: '8px 14px 0', padding: '10px 12px', fontSize: 12, color: notifMsg.startsWith('🔔') ? '#86efac' : '#fca5a5', lineHeight: 1.5 }}
+          onClick={() => setNotifMsg('')}
+        >{notifMsg}</div>
+      )}
 
       {/* HERO */}
       <div style={S.heroWrap}>
