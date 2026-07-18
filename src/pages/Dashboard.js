@@ -436,6 +436,7 @@ function PainelGeral({ onSelectLoja }) {
   const [viewMode, setViewMode] = useState('sem');
   const [semAntDados, setSemAntDados] = useState({});
   const [manutPorLoja, setManutPorLoja] = useState({});
+  const [caixaHoje, setCaixaHoje] = useState({});
   const [sortBy, setSortBy] = useState('fat');
   const [filtroAtencao, setFiltroAtencao] = useState(false);
   const [tendDados, setTendDados] = useState({});
@@ -457,6 +458,7 @@ function PainelGeral({ onSelectLoja }) {
     setDados({});
     setSemAntDados({});
     setManutPorLoja({});
+    setCaixaHoje({});
     setTendDados({});
     setMesAntDados({});
 
@@ -712,6 +714,20 @@ function PainelGeral({ onSelectLoja }) {
       }).catch(() => {});
     })();
 
+    // Caixa fechamentos de HOJE por loja (para STATUS HOJE)
+    (() => {
+      const hj = new Date();
+      const isoHj = hj.getFullYear() + '-' + String(hj.getMonth()+1).padStart(2,'0') + '-' + String(hj.getDate()).padStart(2,'0');
+      fetch(
+        `${SB_URL}/rest/v1/gn_caixa_fechamento?data=eq.${isoHj}&select=loja,total_real`,
+        { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
+      ).then(r => r.json()).then(rows => {
+        const cx = {};
+        (rows || []).forEach(r => { if (r.loja) cx[r.loja] = (cx[r.loja] || 0) + (parseFloat(r.total_real) || 0); });
+        setCaixaHoje(cx);
+      }).catch(() => {});
+    })();
+
     Promise.all([pFat, pCom, pMeta, pCaixa]).catch(() => {}).finally(() => setLoading(false));
   }, [semIdx, viewMode]);
 
@@ -748,6 +764,15 @@ function PainelGeral({ onSelectLoja }) {
     Object.entries(sm).forEach(([s,d]) => { if (freqCons[s]) { freqCons[s].P+=d.P; freqCons[s].F+=d.F; freqCons[s].AT+=d.AT; freqCons[s].total+=d.total; } });
   });
   const hasFreqData = Object.values(freqCons).some(c => c.total > 0);
+
+  const semNumero = (() => {
+    const anchor = new Date(2026, 0, 5);
+    const d = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + semIdx * 7);
+    d.setHours(0,0,0,0);
+    d.setDate(d.getDate() + 3 - (d.getDay() + 6) % 7);
+    const week1 = new Date(d.getFullYear(), 0, 4);
+    return 1 + Math.round(((d - week1) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7);
+  })();
 
   const exportarCSV = () => {
     const cols = ['Loja', 'Faturamento', 'Meta', '% Meta', 'CL Médio%', 'Comissão', 'CMV%'];
@@ -821,6 +846,99 @@ function PainelGeral({ onSelectLoja }) {
             >
               Enviar →
             </button>
+          </div>
+        );
+      })()}
+
+      {/* STATUS HOJE */}
+      {(() => {
+        const hj = new Date();
+        const isoHj = hj.getFullYear() + '-' + String(hj.getMonth()+1).padStart(2,'0') + '-' + String(hj.getDate()).padStart(2,'0');
+        const dtFmt = hj.toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric' });
+        const cxCount = LOJAS_LISTA.filter(k => (caixaHoje[k] || 0) > 0).length;
+        const clCount = LOJAS_LISTA.filter(k => clSemana[k]?.[isoHj] !== undefined).length;
+        return (
+          <div style={{ background:'rgba(255,255,255,.03)', border:'1px solid rgba(255,255,255,.07)', borderRadius:12, padding:'12px 14px', marginBottom:10 }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:10 }}>
+              <span style={{ fontSize:10, fontWeight:800, letterSpacing:1.4, textTransform:'uppercase', color:'#f59e0b' }}>📋 Status Hoje · {dtFmt}</span>
+              <div style={{ display:'flex', gap:10 }}>
+                <span style={{ fontSize:10, fontWeight:800, color:'#22c55e', fontVariantNumeric:'tabular-nums' }}>{cxCount}/{LOJAS_LISTA.length} cx</span>
+                <span style={{ fontSize:10, fontWeight:800, color:'#a78bfa', fontVariantNumeric:'tabular-nums' }}>{clCount}/{LOJAS_LISTA.length} chk</span>
+              </div>
+            </div>
+            <div style={{ display:'flex', gap:5, flexWrap:'wrap' }}>
+              {LOJAS_LISTA.map(k => {
+                const temCx = (caixaHoje[k] || 0) > 0;
+                const clPct = clSemana[k]?.[isoHj];
+                const temCl = clPct !== undefined;
+                const col = COR_LOJA[k] || '#888';
+                return (
+                  <div key={k} style={{ background:`${col}15`, border:`1px solid ${col}35`, borderRadius:8, padding:'5px 7px', minWidth:56, textAlign:'center', flexShrink:0 }}>
+                    <div style={{ fontSize:9, fontWeight:700, color:'rgba(255,255,255,.55)', marginBottom:3, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', maxWidth:70 }}>{LOJA_DISPLAY[k]}</div>
+                    <div style={{ display:'flex', gap:3, justifyContent:'center' }}>
+                      <span style={{ fontSize:9, background: temCx ? 'rgba(34,197,94,.2)' : 'rgba(255,255,255,.05)', color: temCx ? '#22c55e' : '#3a3a5a', borderRadius:3, padding:'1px 4px', fontWeight:700 }}>{temCx ? '✓' : '○'} cx</span>
+                      <span style={{ fontSize:9, background: temCl ? (clPct===100 ? 'rgba(34,197,94,.2)' : 'rgba(245,158,11,.2)') : 'rgba(255,255,255,.05)', color: temCl ? (clPct===100 ? '#22c55e' : '#f59e0b') : '#3a3a5a', borderRadius:3, padding:'1px 4px', fontWeight:700 }}>{temCl ? (clPct===100 ? '✓' : clPct+'%') : '○'} chk</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* FALTAS — Semana */}
+      {viewMode === 'sem' && Object.keys(funcData).length > 0 && (() => {
+        const totalF  = LOJAS_LISTA.reduce((s,k) => s + ((funcData[k]?.faltas||0) + (funcData[k]?.suspensoes||0)), 0);
+        const totalAT = LOJAS_LISTA.reduce((s,k) => s + (funcData[k]?.atestados||0), 0);
+        if (totalF + totalAT === 0) return null;
+        const lojasF = LOJAS_LISTA
+          .filter(k => funcData[k] && ((funcData[k].faltas||0) + (funcData[k].suspensoes||0) + (funcData[k].atestados||0)) > 0)
+          .sort((a,b) => ((funcData[b]?.faltas||0)+(funcData[b]?.suspensoes||0)+(funcData[b]?.atestados||0)) - ((funcData[a]?.faltas||0)+(funcData[a]?.suspensoes||0)+(funcData[a]?.atestados||0)));
+        return (
+          <div style={{ background:'rgba(255,255,255,.03)', border:'1px solid rgba(255,255,255,.07)', borderRadius:12, padding:'12px 14px', marginBottom:10 }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:8 }}>
+              <span style={{ fontSize:10, fontWeight:800, letterSpacing:1.4, textTransform:'uppercase', color:'#ef4444' }}>👥 Faltas — S{semNumero}</span>
+              <div style={{ display:'flex', gap:10 }}>
+                {totalF > 0 && <span style={{ fontSize:10, fontWeight:800, color:'#ef4444' }}>{totalF} F/S</span>}
+                {totalAT > 0 && <span style={{ fontSize:10, fontWeight:800, color:'#f59e0b' }}>{totalAT} AT</span>}
+              </div>
+            </div>
+            {lojasF.map((k,i) => {
+              const fd = funcData[k];
+              const f  = (fd.faltas||0) + (fd.suspensoes||0);
+              const at = fd.atestados||0;
+              return (
+                <div key={k} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'5px 0', borderTop: i===0 ? 'none' : '1px solid rgba(255,255,255,.04)' }}>
+                  <span style={{ fontSize:11, color:'rgba(255,255,255,.65)', fontWeight:600 }}>{LOJA_DISPLAY[k]}</span>
+                  <div style={{ display:'flex', gap:8 }}>
+                    {f  > 0 && <span style={{ fontSize:11, fontWeight:800, color:'#ef4444', fontVariantNumeric:'tabular-nums' }}>{f}F</span>}
+                    {at > 0 && <span style={{ fontSize:11, fontWeight:800, color:'#f59e0b', fontVariantNumeric:'tabular-nums' }}>{at}AT</span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
+
+      {/* MANUTENÇÕES ABERTAS */}
+      {Object.keys(manutPorLoja).length > 0 && (() => {
+        const total = Object.values(manutPorLoja).reduce((s,v) => s+v, 0);
+        const lojasM = LOJAS_LISTA.filter(k => (manutPorLoja[k]||0) > 0)
+          .sort((a,b) => (manutPorLoja[b]||0) - (manutPorLoja[a]||0));
+        return (
+          <div style={{ background:'rgba(255,255,255,.03)', border:'1px solid rgba(255,255,255,.07)', borderRadius:12, padding:'12px 14px', marginBottom:10 }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:8 }}>
+              <span style={{ fontSize:10, fontWeight:800, letterSpacing:1.4, textTransform:'uppercase', color:'#f97316' }}>🔧 Manutenções Abertas</span>
+              <span style={{ fontSize:13, fontWeight:900, color:'#f97316', fontVariantNumeric:'tabular-nums' }}>{total}</span>
+            </div>
+            {lojasM.map((k,i) => (
+              <div key={k} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'5px 0', borderTop: i===0 ? 'none' : '1px solid rgba(255,255,255,.04)' }}>
+                <span style={{ fontSize:11, color:'rgba(255,255,255,.65)', fontWeight:600 }}>{LOJA_DISPLAY[k]}</span>
+                <span style={{ fontSize:11, fontWeight:800, color:'#f97316', fontVariantNumeric:'tabular-nums' }}>{manutPorLoja[k]}</span>
+              </div>
+            ))}
           </div>
         );
       })()}
