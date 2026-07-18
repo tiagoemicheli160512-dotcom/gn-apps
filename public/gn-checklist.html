@@ -3511,6 +3511,7 @@ let escalaModo              = 'semanal'; // 'diaria' | 'semanal' | 'mensal'
 let escalaDiaIdx            = null;      // 0‒6, dia selecionado no modo diário
 let escalaAllData           = null;      // cache do all_data para visão mensal
 let escalaFiltroSoPresentes = false;     // oculta folga e ausentes
+let _escalaRelPeriodo       = 'semanal'; // período ativo no modal de relatório
 
 const ESCALA_TURNO_COLOR  = {MANHÃ:'#f59e0b',TARDE:'#3b82f6',NOITE:'#8b5cf6',MISTO:'#10b981',FOLGA:'#94a3b8','':'#475569'};
 const ESCALA_STATUS_COLOR = {PRESENTE:'#10b981',FALTA:'#ef4444',ATESTADO:'#f59e0b','SUSPENSÃO':'#f97316','NÃO TRABALHADO':'#94a3b8',HORISTA:'#38bdf8','JOVEM APRENDIZ':'#a78bfa',FOLGA:'#06b6d4','BANCO DE HORAS':'#8b5cf6',FÉRIAS:'#0ea5e9',AFASTAMENTO:'#14b8a6'};
@@ -4831,7 +4832,12 @@ function openRelModal(tipo){
   const title=document.getElementById('rel-title');
   const titulos={geral:'Relatório Geral',abertura:'Relatório de Abertura',checklist:'Relatório Check-list',fechamento:'Relatório de Fechamento',carnes:'Relatório de Carnes',faltas:'Relatório de Insumos',manutencao:'Relatório de Manutenção',supervisao:'🎯 Relatório de Visita',banco:'⏱ Banco de Horas',fichas:'📋 Fichas Técnicas',caixa:'💵 Livro Caixa',historico:'📅 Histórico de Operações',escala:'📅 Escala de Funcionários',vendas:'🍽️ Vendas do Dia'};
   title.textContent=titulos[tipo]||'Relatório';
-  content.textContent=buildRelatorio(tipo);
+  if(tipo==='escala'){
+    _escalaRelPeriodo = escalaModo;
+    _refreshEscalaRelContent();
+  } else {
+    content.textContent=buildRelatorio(tipo);
+  }
   modal.classList.add('open');
 }
 function closeRelModal(){document.getElementById('rel-modal').classList.remove('open');}
@@ -5538,30 +5544,148 @@ function buildRelatorioHistorico(cab){
   return txt + '\n_GN Operações_';
 }
 
+function _refreshEscalaRelContent(){
+  const el = document.getElementById('rel-content');
+  if(!el) return;
+  const perBtns = ['diaria','semanal','mensal'].map(p=>{
+    const on = p===_escalaRelPeriodo;
+    const label = p==='diaria'?'Diária':p==='semanal'?'Semanal':'Mensal';
+    return `<button onclick="_setEscalaRelPer('${p}')" style="flex:1;padding:7px 0;border-radius:7px;border:1px solid ${on?'var(--gn-color,#E8580A)':'rgba(255,255,255,.15)'};background:${on?'var(--gn-color,#E8580A)':'transparent'};color:${on?'#fff':'#94a3b8'};font-size:11px;font-weight:700;font-family:inherit;cursor:pointer;transition:all .15s">${label}</button>`;
+  }).join('');
+  const txt = escHtml(buildRelatorio('escala'));
+  el.innerHTML = `<div style="display:flex;gap:6px;margin-bottom:12px;">${perBtns}</div><pre style="white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.6;color:var(--t1);margin:0;font-family:monospace">${txt}</pre>`;
+}
+function _setEscalaRelPer(p){ _escalaRelPeriodo=p; _refreshEscalaRelContent(); }
+
 function buildRelatorioEscala(cab){
-  let txt = `📅 ESCALA DE FUNCIONÁRIOS\n${cab}\n`;
-  txt += `Gerado em: ${new Date().toLocaleDateString('pt-BR')}\n\n`;
-  if(!comissoesWD || !comissoesWD.funcs){ return txt + 'Dados de escala não disponíveis.\n\n_GN Operações_'; }
-  const dias = ['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
+  const p = _escalaRelPeriodo || escalaModo || 'semanal';
+  if(p==='diaria') return _buildEscalaDiariaRel(cab);
+  if(p==='mensal') return _buildEscalaMensalRel(cab);
+  return _buildEscalaSemanalRel(cab);
+}
+
+function _buildEscalaDiariaRel(cab){
+  if(!cab){ const d2=state.semanaLabel||(state.data?state.data.split('-').reverse().join('/'):'—'); cab=`🏪 GN ${LOJA}\n📅 Semana: ${d2}\n`; }
+  let txt = `📅 ESCALA DIÁRIA\n${cab}\n`;
+  if(!comissoesWD || comissoesWeekIdx==null) return txt + 'Dados não disponíveis. Selecione uma semana.\n\n_GN Operações_';
+  const sem = COMISSOES_CAL[comissoesWeekIdx];
+  const dIdx = (()=>{
+    if(escalaDiaIdx!=null) return escalaDiaIdx;
+    const hj=new Date(); const hd=hj.getDate(), hm=hj.getMonth()+1;
+    const f=sem.days.findIndex(x=>x.d===hd&&x.m===hm);
+    return f>=0?f:0;
+  })();
+  const dia = sem.days[dIdx];
+  txt += `📆 ${dia.nome}, ${String(dia.d).padStart(2,'0')}/${String(dia.m).padStart(2,'0')}\n\n`;
   const funcs = comissoesWD.funcs.filter(f=>f.nome&&f.nome.trim());
-  if(!funcs.length){ return txt + 'Nenhum funcionário cadastrado.\n\n_GN Operações_'; }
-  // Agrupar por setor
+  const presentes = funcs.filter(f=>ESCALA_PRESENTE_SET.has((f.dias||[])[dIdx]||'PRESENTE'));
+  const folgas    = funcs.filter(f=>{ const s=(f.dias||[])[dIdx]||'PRESENTE'; return s==='FOLGA'||s==='BANCO DE HORAS'||s==='FÉRIAS'||s==='AFASTAMENTO'; });
+  const ausentes  = funcs.filter(f=>{ const s=(f.dias||[])[dIdx]||'PRESENTE'; return !ESCALA_PRESENTE_SET.has(s)&&s!=='FOLGA'&&s!=='BANCO DE HORAS'&&s!=='FÉRIAS'&&s!=='AFASTAMENTO'; });
+  txt += `✅ TRABALHANDO (${presentes.length})\n`;
   const setores = {};
-  funcs.forEach(f=>{
-    const s = f.setor&&f.setor.trim() ? f.setor.trim() : 'Sem Setor';
-    if(!setores[s]) setores[s] = [];
-    setores[s].push(f);
-  });
-  Object.entries(setores).forEach(([setor, lista])=>{
-    txt += `【${setor}】\n`;
+  presentes.forEach(f=>{ const s=(f.setor||'').trim()||'Geral'; if(!setores[s])setores[s]=[]; setores[s].push(f); });
+  Object.entries(setores).forEach(([s,lista])=>{
+    txt += `  ▸ ${s}\n`;
     lista.forEach(f=>{
-      const linha = dias.map((_, i) => COMISSOES_STATUS_ABREV[f.dias[i]] || f.dias[i]).join(' | ');
-      txt += `  ${f.nome}\n    ${dias.join(' | ')}\n    ${linha}\n`;
-      if(f.turno) txt += `    Turno: ${f.turno}${f.horario?' ('+f.horario+')':''}\n`;
+      txt += `    • ${f.nome}${f.turno?' ('+f.turno+')':''}${f.horario?' — '+f.horario:''}`;
+      const hDia=_parseHorasHorario(f.horario); if(hDia!=null) txt+=` ⏱${hDia}h`;
+      txt+='\n';
     });
-    txt += '\n';
   });
-  return txt + '_GN Operações_';
+  txt+='\n';
+  if(folgas.length){
+    txt+=`🌴 FOLGA / AFASTAMENTO (${folgas.length})\n`;
+    folgas.forEach(f=>{ const s=(f.dias||[])[dIdx]||'FOLGA'; txt+=`  • ${f.nome} — ${s}\n`; });
+    txt+='\n';
+  }
+  if(ausentes.length){
+    txt+=`⚠️ AUSENTES (${ausentes.length})\n`;
+    ausentes.forEach(f=>{ const s=(f.dias||[])[dIdx]||'—'; txt+=`  • ${f.nome} — ${s}\n`; });
+    txt+='\n';
+  }
+  txt+=`📊 Total: ${presentes.length} trabalhando · ${folgas.length} folga · ${ausentes.length} ausentes\n`;
+  return txt+'\n_GN Operações_';
+}
+
+function _buildEscalaSemanalRel(cab){
+  if(!cab){ const d2=state.semanaLabel||(state.data?state.data.split('-').reverse().join('/'):'—'); cab=`🏪 GN ${LOJA}\n📅 Semana: ${d2}\n`; }
+  let txt = `📅 ESCALA SEMANAL\n${cab}\n`;
+  txt += `Gerado em: ${new Date().toLocaleDateString('pt-BR')}\n\n`;
+  if(!comissoesWD || comissoesWeekIdx==null) return txt+'Dados de escala não disponíveis.\n\n_GN Operações_';
+  const sem = COMISSOES_CAL[comissoesWeekIdx];
+  const funcs = comissoesWD.funcs.filter(f=>f.nome&&f.nome.trim());
+  if(!funcs.length) return txt+'Nenhum funcionário cadastrado.\n\n_GN Operações_';
+  const resumo = sem.days.map((d,i)=>{
+    const p=funcs.filter(f=>ESCALA_PRESENTE_SET.has((f.dias||[])[i]||'PRESENTE')).length;
+    const fg=funcs.filter(f=>{ const s=(f.dias||[])[i]||'PRESENTE'; return s==='FOLGA'||s==='BANCO DE HORAS'||s==='FÉRIAS'||s==='AFASTAMENTO'; }).length;
+    const a=funcs.filter(f=>{ const s=(f.dias||[])[i]||'PRESENTE'; return !ESCALA_PRESENTE_SET.has(s)&&s!=='FOLGA'&&s!=='BANCO DE HORAS'&&s!=='FÉRIAS'&&s!=='AFASTAMENTO'; }).length;
+    return `${d.nome.slice(0,3)}: ${p}P${fg?' '+fg+'FG':''}${a?' '+a+'A':''}`;
+  }).join(' | ');
+  txt+=`Resumo: ${resumo}\n\n`;
+  const diasLabel = sem.days.map(d=>d.nome.slice(0,3)+' '+String(d.d).padStart(2,'0'));
+  const setores={};
+  funcs.forEach(f=>{ const s=(f.setor||'').trim()||'Sem Setor'; if(!setores[s])setores[s]=[]; setores[s].push(f); });
+  Object.entries(setores).forEach(([setor,lista])=>{
+    txt+=`【${setor}】\n`;
+    txt+=`  ${'Funcionário'.padEnd(22)}${diasLabel.map(d=>d.padStart(7)).join('')}\n`;
+    txt+=`  ${'-'.repeat(22)}${diasLabel.map(()=>'-------').join('')}\n`;
+    lista.forEach(f=>{
+      const abrevs=sem.days.map((_,i)=>COMISSOES_STATUS_ABREV[(f.dias||[])[i]]||'P');
+      txt+=`  ${(f.nome||'').slice(0,22).padEnd(22)}${abrevs.map(a=>a.padStart(7)).join('')}`;
+      if(f.turno) txt+=`  [${f.turno}${f.horario?' '+f.horario:''}]`;
+      txt+='\n';
+    });
+    txt+='\n';
+  });
+  return txt+'_GN Operações_';
+}
+
+function _buildEscalaMensalRel(cab){
+  if(!cab){ const d2=state.semanaLabel||(state.data?state.data.split('-').reverse().join('/'):'—'); cab=`🏪 GN ${LOJA}\n📅 Semana: ${d2}\n`; }
+  let txt = `📅 ESCALA MENSAL\n${cab}\n`;
+  txt+=`Gerado em: ${new Date().toLocaleDateString('pt-BR')}\n\n`;
+  if(comissoesWeekIdx==null) return txt+'Semana não selecionada.\n\n_GN Operações_';
+  if(!escalaAllData) return txt+'⚠️ Dados mensais não carregados.\nAcesse a aba Escala → Mensal primeiro.\n\n_GN Operações_';
+  const semAtual=COMISSOES_CAL[comissoesWeekIdx];
+  const mesAlvo=semAtual.month, mesNome=semAtual.mesNome;
+  txt+=`Mês: ${mesNome}\n\n`;
+  const semsDoMes=COMISSOES_CAL.map((w,idx)=>({w,idx})).filter(({w})=>w.days.some(d=>d.m===mesAlvo));
+  const diasDoMes=[], diasSet=new Set();
+  semsDoMes.forEach(({w})=>{ w.days.forEach(d=>{ if(d.m!==mesAlvo) return; const k=`${d.m}-${d.d}`; if(!diasSet.has(k)){diasSet.add(k);diasDoMes.push(d);} }); });
+  diasDoMes.sort((a,b)=>a.d-b.d);
+  const empMap={};
+  semsDoMes.forEach(({w,idx})=>{
+    const wd=getComissoesWD(escalaAllData,idx);
+    (wd.funcs||[]).filter(f=>f.nome&&f.nome.trim()).forEach(f=>{
+      const nome=f.nome.trim();
+      if(!empMap[nome]) empMap[nome]={setor:f.setor||'',turno:f.turno||'',dias:{}};
+      if(!empMap[nome].setor&&f.setor) empMap[nome].setor=f.setor;
+      if(!empMap[nome].turno&&f.turno) empMap[nome].turno=f.turno;
+      w.days.forEach((d,di)=>{ if(d.m!==mesAlvo) return; empMap[nome].dias[`${d.m}-${d.d}`]=(f.dias||[])[di]||'PRESENTE'; });
+    });
+  });
+  const nomes=Object.keys(empMap).sort();
+  if(!nomes.length) return txt+'Sem funcionários no mês.\n\n_GN Operações_';
+  // Linha de presença por dia
+  const headerDias=diasDoMes.map(d=>String(d.d).padStart(2)).join(' ');
+  const presRow=diasDoMes.map(d=>{ const k=`${d.m}-${d.d}`; const p=nomes.filter(n=>ESCALA_PRESENTE_SET.has(empMap[n].dias[k]||'')).length; return String(p).padStart(2); }).join(' ');
+  txt+=`Dias:  ${headerDias}\nPres:  ${presRow}\n\n`;
+  const setores={};
+  nomes.forEach(n=>{ const s=(empMap[n].setor||'').trim()||'Sem Setor'; if(!setores[s])setores[s]=[]; setores[s].push(n); });
+  Object.entries(setores).forEach(([setor,lista])=>{
+    txt+=`【${setor}】\n`;
+    lista.forEach(nome=>{
+      const emp=empMap[nome];
+      const p=diasDoMes.filter(d=>ESCALA_PRESENTE_SET.has(emp.dias[`${d.m}-${d.d}`]||'')).length;
+      const fg=diasDoMes.filter(d=>{ const s=emp.dias[`${d.m}-${d.d}`]||''; return s==='FOLGA'||s==='BANCO DE HORAS'||s==='FÉRIAS'||s==='AFASTAMENTO'; }).length;
+      const a=diasDoMes.filter(d=>{ const s=emp.dias[`${d.m}-${d.d}`]||''; return s&&!ESCALA_PRESENTE_SET.has(s)&&s!=='FOLGA'&&s!=='BANCO DE HORAS'&&s!=='FÉRIAS'&&s!=='AFASTAMENTO'; }).length;
+      const abrevs=diasDoMes.map(d=>{ const s=emp.dias[`${d.m}-${d.d}`]||''; return s?(COMISSOES_STATUS_ABREV[s]||s.slice(0,2)):'—'; }).join(' ');
+      txt+=`  ${nome}${emp.turno?' ['+emp.turno+']':''}\n    ${abrevs}\n    ✅${p}P · 🌴${fg}FG · ⚠️${a}A\n`;
+    });
+    txt+='\n';
+  });
+  txt+=`Total funcionários: ${nomes.length}\n`;
+  return txt+'\n_GN Operações_';
 }
 
 function buildRelatorioVendas(cab){
