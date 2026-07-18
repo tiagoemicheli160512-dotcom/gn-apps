@@ -486,9 +486,9 @@ function showHome(sess) {
   if (dashEl) {
     if (isMaster && !masterLoja) {
       dashEl.style.display = 'block';
-      _dashFat = null;
+      _dashFat = null; _dashFatPrev = null;
       renderDashboard();
-      _loadDashFat();
+      _loadDashAll();
     } else {
       dashEl.style.display = 'none';
     }
@@ -697,16 +697,30 @@ function selecionarLojaMestre(loja) {
 }
 
 // ── DASHBOARD ────────────────────────────────────────────────────────────────
-let _dashTab = 'fat';   // 'fat' | 'att'
-let _dashWoff = 0;      // week offset from current (0 = this week, -1 = prev, …)
-let _dashFat = null;    // null = loading, {} = loaded
+let _dashTab  = 'fat';  // 'fat' | 'att' | 'metas'
+let _dashPer  = 'sem';  // 'sem' | 'mes'
+let _dashWoff = 0;      // week offset (0=current week)
+let _dashMoff = 0;      // month offset (0=current month)
+let _dashFat     = null; // {lojaKey: total} for selected period
+let _dashFatPrev = null; // {lojaKey: total} for previous period
+let _dashManut   = null; // {lojaKey: pendingCount}
+let _dashChk     = null; // Set of lojas that sent checklist today
 let _dashLoading = false;
+let _dashMetas   = {};   // {lojaKey: target} persisted in localStorage
 
 function _p2(n){ return String(n).padStart(2,'0'); }
 
+function _loadMetas() {
+  try { _dashMetas = JSON.parse(localStorage.getItem('gn_home_metas')||'{}'); } catch(e) { _dashMetas={}; }
+}
+function _saveMeta(loja, val) {
+  _dashMetas[loja] = parseFloat(val)||0;
+  try { localStorage.setItem('gn_home_metas', JSON.stringify(_dashMetas)); } catch(e) {}
+  renderDashboard();
+}
+
 function _weekRange(off) {
-  const now = new Date();
-  const dow = now.getDay();
+  const now = new Date(), dow = now.getDay();
   const mon = new Date(now);
   mon.setDate(now.getDate() + (dow===0?-6:1-dow) + off*7);
   const dates = [];
@@ -714,134 +728,237 @@ function _weekRange(off) {
     const dd = new Date(mon.getFullYear(), mon.getMonth(), mon.getDate()+i);
     dates.push(`${dd.getFullYear()}-${_p2(dd.getMonth()+1)}-${_p2(dd.getDate())}`);
   }
-  const fmtD = s => s.slice(8)+'/'+s.slice(5,7);
-  return { dates, from: dates[0], to: dates[6],
-           label: fmtD(dates[0])+'–'+fmtD(dates[6]),
-           isCurrentWeek: off===0 };
+  const fd = s => s.slice(8)+'/'+s.slice(5,7);
+  return { dates, from:dates[0], to:dates[6], label:fd(dates[0])+'–'+fd(dates[6]), isCurrent:off===0 };
+}
+
+function _monthRange(off) {
+  const now = new Date();
+  const first = new Date(now.getFullYear(), now.getMonth()+off, 1);
+  const last  = new Date(now.getFullYear(), now.getMonth()+off+1, 0);
+  const dates = [];
+  for (let d=1; d<=last.getDate(); d++)
+    dates.push(`${first.getFullYear()}-${_p2(first.getMonth()+1)}-${_p2(d)}`);
+  const M=['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+  return { dates, from:dates[0], to:dates[dates.length-1],
+           label:M[first.getMonth()]+' '+first.getFullYear(), isCurrent:off===0 };
 }
 
 function _fmtBRL(n) {
   if (!n) return 'R$ 0,00';
-  return 'R$ ' + n.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+  return 'R$ '+n.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
 }
 function _fmtBRLs(n) {
   if (!n) return '—';
   if (n>=1000000) return 'R$ '+(n/1000000).toFixed(1).replace('.',',')+'M';
-  if (n>=1000) return 'R$ '+(n/1000).toFixed(1).replace('.',',')+'k';
+  if (n>=1000)    return 'R$ '+(n/1000).toFixed(1).replace('.',',')+'k';
   return _fmtBRL(n);
 }
 
-async function _loadDashFat() {
+async function _fetchFat(dates) {
+  const orQ = dates.map(d=>`data_operacao=eq.${d}`).join(',');
+  const res = await fetch(
+    `${SB_URL}/rest/v1/checklist_diario?or=(${orQ})&select=loja,venda_salao,venda_delivery`,
+    { headers:{apikey:SB_KEY,Authorization:'Bearer '+SB_KEY} }
+  );
+  if (!res.ok) throw new Error('HTTP '+res.status);
+  const rows = await res.json();
+  const byLoja = {};
+  LOJAS_LISTA.forEach(k=>{ byLoja[k]=0; });
+  (rows||[]).forEach(r=>{
+    const v=(parseFloat(r.venda_salao)||0)+(parseFloat(r.venda_delivery)||0);
+    if (Object.prototype.hasOwnProperty.call(byLoja,r.loja)) byLoja[r.loja]+=v;
+  });
+  return byLoja;
+}
+
+async function _loadDashAll() {
   if (_dashLoading) return;
   _dashLoading = true;
-  const wk = _weekRange(_dashWoff);
-  const orQ = wk.dates.map(d=>`data_operacao=eq.${d}`).join(',');
+  const range     = _dashPer==='sem' ? _weekRange(_dashWoff)   : _monthRange(_dashMoff);
+  const prevRange = _dashPer==='sem' ? _weekRange(_dashWoff-1) : _monthRange(_dashMoff-1);
+  const hoje  = new Date().toISOString().slice(0,10);
+  const d30   = new Date(); d30.setDate(d30.getDate()-30);
+  const from30= d30.toISOString().slice(0,10);
+  const H     = {apikey:SB_KEY,Authorization:'Bearer '+SB_KEY};
   try {
-    const res = await fetch(
-      `${SB_URL}/rest/v1/checklist_diario?or=(${orQ})&select=loja,venda_salao,venda_delivery`,
-      { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
-    );
-    if (!res.ok) throw new Error('HTTP '+res.status);
-    const rows = await res.json();
-    const byLoja = {};
-    LOJAS_LISTA.forEach(k => { byLoja[k] = 0; });
-    (rows||[]).forEach(r => {
-      const v = (parseFloat(r.venda_salao)||0)+(parseFloat(r.venda_delivery)||0);
-      if (Object.prototype.hasOwnProperty.call(byLoja, r.loja)) byLoja[r.loja] += v;
+    const [fatCur, fatPrv, manutRows, chkRows] = await Promise.all([
+      _fetchFat(range.dates).catch(()=>({})),
+      _fetchFat(prevRange.dates).catch(()=>({})),
+      fetch(`${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${from30}&select=loja,manutencao`,{headers:H})
+        .then(r=>r.ok?r.json():[]).catch(()=>[]),
+      fetch(`${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hoje}&select=loja`,{headers:H})
+        .then(r=>r.ok?r.json():[]).catch(()=>[]),
+    ]);
+    _dashFat = fatCur; _dashFatPrev = fatPrv;
+    // pending maintenance deduplicated
+    const byManut = {}; LOJAS_LISTA.forEach(k=>{byManut[k]=0;});
+    const seen = new Set();
+    (manutRows||[]).forEach(row=>{
+      if(!Array.isArray(row.manutencao)) return;
+      row.manutencao.forEach(m=>{
+        if(!m||m.status==='Resolvido') return;
+        const k=`${row.loja}|${m.setor||''}|${(m.descricao||'').trim().toLowerCase()}`;
+        if(!seen.has(k)){ seen.add(k); if(Object.prototype.hasOwnProperty.call(byManut,row.loja)) byManut[row.loja]++; }
+      });
     });
-    _dashFat = byLoja;
+    _dashManut = byManut;
+    _dashChk   = new Set((chkRows||[]).map(r=>r.loja).filter(l=>LOJAS_LISTA.includes(l)));
   } catch(e) {
-    _dashFat = {};
-  } finally {
-    _dashLoading = false;
-  }
+    _dashFat=_dashFat||{}; _dashFatPrev=_dashFatPrev||{};
+    _dashManut=_dashManut||{}; _dashChk=_dashChk||new Set();
+  } finally { _dashLoading=false; }
   renderDashboard();
 }
 
 function renderDashboard() {
   const el = document.getElementById('dash-section');
-  if (!el || el.style.display === 'none') return;
-  const wk = _weekRange(_dashWoff);
-  const fat = _dashFat;
-  let total = 0, storesWithData = 0, maxVal = 0;
-  if (fat) {
-    LOJAS_LISTA.forEach(k => {
-      const v = fat[k]||0;
-      total += v;
-      if (v > 0) { storesWithData++; if (v > maxVal) maxVal = v; }
-    });
-  }
+  if (!el || el.style.display==='none') return;
+  _loadMetas();
+
+  const range   = _dashPer==='sem' ? _weekRange(_dashWoff) : _monthRange(_dashMoff);
+  const fat     = _dashFat;
+  const loading = fat===null;
+  let total=0, storesWithData=0, maxVal=0;
+  if (fat) LOJAS_LISTA.forEach(k=>{ const v=fat[k]||0; total+=v; if(v>0){storesWithData++;if(v>maxVal)maxVal=v;} });
+
+  const totalManut = _dashManut ? Object.values(_dashManut).reduce((s,n)=>s+n,0) : null;
+  const manutBanner = totalManut
+    ? `<div onclick="navTo('gn-manutencao.html')" style="background:rgba(248,113,113,.07);border:1px solid rgba(248,113,113,.18);border-radius:13px;padding:10px 14px;margin-bottom:10px;display:flex;align-items:center;gap:10px;cursor:pointer">
+        <span style="font-size:17px">🔧</span>
+        <div style="flex:1"><div style="font-size:12px;font-weight:700;color:#fca5a5">${totalManut} manutenç${totalManut===1?'ão':'ões'} pendente${totalManut===1?'':'s'}</div>
+        <div style="font-size:10px;color:rgba(255,255,255,.28);margin-top:1px">últimos 30 dias · toque para ver</div></div>
+        <span style="color:rgba(255,255,255,.2);font-size:18px">›</span></div>`
+    : '';
 
   const periodRow = `
     <div class="period-row">
-      <div class="period-toggle"><button class="on">Semanal</button></div>
+      <div class="period-toggle">
+        <button class="${_dashPer==='sem'?'on':''}" onclick="_setPer('sem')">Semanal</button>
+        <button class="${_dashPer==='mes'?'on':''}" onclick="_setPer('mes')">Mensal</button>
+      </div>
       <button class="period-arrow" onclick="_dashNav(-1)">‹</button>
-      <div class="period-label"><b>${wk.label}</b>${wk.isCurrentWeek?'<span class="period-curr">· atual</span>':''}</div>
-      <button class="period-arrow" onclick="_dashNav(1)"${wk.isCurrentWeek?' disabled':''}>›</button>
+      <div class="period-label"><b>${range.label}</b>${range.isCurrent?'<span class="period-curr">· atual</span>':''}</div>
+      <button class="period-arrow" onclick="_dashNav(1)"${range.isCurrent?' disabled':''}>›</button>
     </div>`;
 
-  let content = '';
-  if (_dashTab === 'fat') {
-    const cards = LOJAS_LISTA.map(k => {
-      const v = fat ? (fat[k]||0) : null;
-      const cor = COR_LOJA[k] || '#888';
-      const nome = LOJA_DISPLAY[k] || k;
-      const pct = maxVal > 0 && v ? Math.round(v/maxVal*100) : 0;
-      const hasData = v && v > 0;
+  let content='';
+
+  if (_dashTab==='fat') {
+    const perLabel = _dashPer==='sem' ? 'esta semana' : 'este mês';
+    const consTitle= _dashPer==='sem' ? 'SEMANA · CONSOLIDADO' : 'MÊS · CONSOLIDADO';
+    // sort desc by fat value
+    const sorted = [...LOJAS_LISTA].sort((a,b)=>(fat?(fat[b]||0):0)-(fat?(fat[a]||0):0));
+    const cards = sorted.map(k=>{
+      const v    = fat?(fat[k]||0):null;
+      const vP   = _dashFatPrev?(_dashFatPrev[k]||0):0;
+      const meta = _dashMetas[k]||0;
+      const cor  = COR_LOJA[k]||'#888';
+      const nome = LOJA_DISPLAY[k]||k;
+      const hasData = v&&v>0;
+      const pct  = maxVal>0&&v?Math.round(v/maxVal*100):0;
+      const chkOk= _dashChk?_dashChk.has(k):null;
+      const manut= _dashManut?(_dashManut[k]||0):0;
+      // % vs prev period
+      let diffHtml='';
+      if(hasData&&vP>0){
+        const d=Math.round((v-vP)/vP*100);
+        diffHtml=`<span style="font-size:9px;font-weight:700;color:${d>=0?'#4ade80':'#f87171'};margin-left:4px">${d>=0?'+':''}${d}%</span>`;
+      }
+      // progress bar — meta if set, else relative
+      let bar='';
+      if(meta>0&&fat!==null){
+        const mp=Math.min(100,Math.round((v||0)/meta*100));
+        const mc=mp>=100?'#4ade80':mp>=75?'#fbbf24':'#f87171';
+        bar=`<div style="margin-top:5px">
+          <div style="display:flex;justify-content:space-between;font-size:8px;color:rgba(255,255,255,.3);margin-bottom:2px">
+            <span>meta ${_fmtBRLs(meta)}</span><span style="color:${mc};font-weight:700">${mp}%</span>
+          </div><div class="sc-bar"><div class="sc-bar-fill" style="width:${mp}%;background:${mc}"></div></div></div>`;
+      } else if(hasData){
+        bar=`<div class="sc-bar"><div class="sc-bar-fill" style="width:${pct}%;background:${cor}88"></div></div>`;
+      }
+      // status badges
+      const badges=[];
+      if(chkOk===true)  badges.push(`<span style="font-size:9px;color:#4ade80">✅ chk</span>`);
+      else if(chkOk===false) badges.push(`<span style="font-size:9px;color:rgba(255,255,255,.22)">⚠ chk</span>`);
+      if(manut>0) badges.push(`<span style="font-size:9px;color:#f87171">🔧 ${manut}</span>`);
+      const badgeRow=badges.length?`<div style="display:flex;gap:6px;margin-top:4px">${badges.join('')}</div>`:'';
       return `
         <div class="store-card${hasData?' has-data':' no-data'}">
-          <div class="sc-nome"><span class="sc-dot" style="background:${cor}"></span><span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${nome}</span></div>
-          ${fat===null
-            ? `<div class="sc-empty">⟳</div>`
-            : hasData
-              ? `<div class="sc-val">${_fmtBRLs(v)}</div><div class="sc-bar"><div class="sc-bar-fill" style="width:${pct}%;background:${cor}88"></div></div>`
-              : `<div class="sc-empty">Sem dados</div>`}
+          <div class="sc-nome"><span class="sc-dot" style="background:${cor}"></span>
+            <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${nome}</span></div>
+          ${loading?`<div class="sc-empty">⟳</div>`
+            :hasData?`<div class="sc-val">${_fmtBRLs(v)}${diffHtml}</div>${bar}${badgeRow}`
+            :`<div class="sc-empty">Sem dados</div>${badgeRow}`}
         </div>`;
     }).join('');
-    content = `
+    content=`
+      ${manutBanner}
       <div class="cons-card">
-        <div class="cons-ttl">SEMANA · CONSOLIDADO</div>
+        <div class="cons-ttl">${consTitle}</div>
         <div class="cons-lbl">FATURAMENTO TOTAL</div>
-        <div class="cons-val">${fat===null?'—':_fmtBRL(total)}</div>
-        <div class="cons-sub">${fat===null?'Carregando dados…':storesWithData+' de '+LOJAS_LISTA.length+' lojas com dados esta semana'}</div>
+        <div class="cons-val">${loading?'—':_fmtBRL(total)}</div>
+        <div class="cons-sub">${loading?'Carregando dados…':storesWithData+' de '+LOJAS_LISTA.length+' lojas com dados '+perLabel}</div>
       </div>
       <div class="store-grid">${cards}</div>`;
-  } else {
-    const noDataStores = fat
-      ? LOJAS_LISTA.filter(k => !(fat[k]&&fat[k]>0))
-      : [];
-    if (!fat) {
-      content = '<div style="padding:28px;text-align:center;color:rgba(255,255,255,.28);font-size:12px">⟳ Carregando…</div>';
-    } else if (noDataStores.length===0) {
-      content = '<div style="padding:24px;text-align:center;font-size:13px;color:#4ade80">✅ Todas as lojas com faturamento esta semana</div>';
-    } else {
-      content = `
-        <div style="font-size:11px;color:rgba(255,255,255,.28);margin-bottom:10px">${noDataStores.length} loja${noDataStores.length!==1?'s':''} sem faturamento registrado:</div>
-        ${noDataStores.map(k=>`
-          <div class="att-item">
-            <div class="att-dot" style="background:${COR_LOJA[k]||'#888'}"></div>
-            <div><div class="att-nm">${LOJA_DISPLAY[k]||k}</div><div class="att-rs">Sem dados de venda esta semana</div></div>
-          </div>`).join('')}`;
+
+  } else if (_dashTab==='att') {
+    if(!fat){ content='<div style="padding:28px;text-align:center;color:rgba(255,255,255,.28);font-size:12px">⟳ Carregando…</div>'; }
+    else {
+      const noFat   = LOJAS_LISTA.filter(k=>!(fat[k]&&fat[k]>0));
+      const noChk   = _dashChk?LOJAS_LISTA.filter(k=>!_dashChk.has(k)):[];
+      const wManut  = _dashManut?LOJAS_LISTA.filter(k=>(_dashManut[k]||0)>0):[];
+      const row=(k,reason,icon)=>`
+        <div class="att-item"><div class="att-dot" style="background:${COR_LOJA[k]||'#888'}"></div>
+          <div style="flex:1"><div class="att-nm">${LOJA_DISPLAY[k]||k}</div><div class="att-rs">${reason}</div></div>
+          <span style="font-size:15px">${icon}</span></div>`;
+      if(!noFat.length&&!noChk.length&&!wManut.length){
+        content='<div style="padding:24px;text-align:center;font-size:13px;color:#4ade80">✅ Todas as lojas em dia</div>';
+      } else {
+        const sec=(list,label,reason,icon)=>list.length?`
+          <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,.32);letter-spacing:.5px;text-transform:uppercase;margin:12px 0 7px">${label}</div>
+          ${list.map(k=>row(k,reason,icon)).join('')}`:'';
+        content=manutBanner
+          +sec(wManut,'🔧 Com manutenção pendente','Há itens de manutenção abertos','🔧')
+          +sec(noFat, '⚠ Sem faturamento','Sem faturamento registrado no período','⚠')
+          +sec(noChk, '📋 Sem checklist hoje','Checklist do dia não enviado','📋');
+      }
     }
+
+  } else { // ⚙ Metas
+    const perLabel=_dashPer==='sem'?'semana':'mês';
+    content=`
+      <div style="font-size:11px;color:rgba(255,255,255,.35);margin-bottom:12px">
+        Meta de faturamento por loja (${perLabel}) — aparece como barra de progresso nos cards.</div>
+      ${LOJAS_LISTA.map(k=>`
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;background:#0e0e1e;border:1px solid rgba(255,255,255,.06);border-radius:11px;padding:10px 12px">
+          <span style="width:8px;height:8px;border-radius:50%;background:${COR_LOJA[k]||'#888'};flex-shrink:0;display:inline-block"></span>
+          <span style="font-size:12px;font-weight:700;color:rgba(255,255,255,.65);flex:1">${LOJA_DISPLAY[k]||k}</span>
+          <input type="number" value="${_dashMetas[k]||''}" placeholder="Meta R$"
+            style="width:110px;background:#08080f;border:1px solid rgba(255,255,255,.12);border-radius:8px;padding:6px 10px;font-size:12px;font-weight:700;color:#fff;font-family:inherit;text-align:right;outline:none"
+            oninput="_saveMeta('${k}',this.value)">
+        </div>`).join('')}`;
   }
 
-  el.innerHTML = `
+  el.innerHTML=`
     <div class="dash-wrap">
       <div class="dash-tabs">
         <button class="dash-tab${_dashTab==='fat'?' on':''}" onclick="_setDashTab('fat')">↓ Faturamento</button>
         <button class="dash-tab${_dashTab==='att'?' on':''}" onclick="_setDashTab('att')">⚠ Atenção</button>
+        <button class="dash-tab${_dashTab==='metas'?' on':''}" onclick="_setDashTab('metas')">⚙ Metas</button>
       </div>
-      ${periodRow}
+      ${_dashTab!=='metas'?periodRow:''}
       ${content}
     </div>`;
 }
 
-function _setDashTab(t) { _dashTab=t; renderDashboard(); }
-function _dashNav(dir) {
-  _dashWoff = Math.min(0, _dashWoff + dir);
-  _dashFat = null;
-  renderDashboard();
-  _loadDashFat();
+function _setDashTab(t){ _dashTab=t; renderDashboard(); }
+function _setPer(p){ _dashPer=p; _dashFat=null; _dashFatPrev=null; renderDashboard(); _loadDashAll(); }
+function _dashNav(dir){
+  if(_dashPer==='sem') _dashWoff=Math.min(0,_dashWoff+dir);
+  else                 _dashMoff=Math.min(0,_dashMoff+dir);
+  _dashFat=null; _dashFatPrev=null;
+  renderDashboard(); _loadDashAll();
 }
 
 // ── BOTTOM NAV ────────────────────────────────────────────────────────────────
