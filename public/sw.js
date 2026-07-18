@@ -123,31 +123,37 @@ async function verificarAlertas() {
     });
 
     const prev = await lerEstado();
+    const mesmodia = prev.data === hoje;
 
-    if (prev.data === hoje) {
-      // Same day — notify only when count increased
-      if (manut > prev.manut) {
-        await self.registration.showNotification('🔧 Manutenção pendente — GN', {
-          body: `${manut} item${manut !== 1 ? 's' : ''} de manutenção aberto${manut !== 1 ? 's' : ''} hoje`,
-          tag: 'gn-manut',
-          icon: '/favicon.ico',
-          requireInteraction: true,
-          vibrate: [300, 100, 300],
-          data: { url: '/gn-manutencao.html' },
-        });
-      }
-      if (faltas > prev.faltas) {
-        await self.registration.showNotification('⚠️ Faltas registradas — GN', {
-          body: `${faltas} falta${faltas !== 1 ? 's' : ''} registrada${faltas !== 1 ? 's' : ''} hoje`,
-          tag: 'gn-faltas',
-          icon: '/favicon.ico',
-          requireInteraction: true,
-          vibrate: [300, 100, 300],
-          data: { url: '/gn-pedidos.html' },
-        });
-      }
+    // Notify if: count increased, OR first time today with pending items
+    const notifManut = manut > 0 && (manut > prev.manut || !mesmodia || !prev.manutNotif);
+    const notifFaltas = faltas > 0 && (faltas > prev.faltas || !mesmodia || !prev.faltasNotif);
+
+    if (notifManut) {
+      await self.registration.showNotification('🔧 Manutenção pendente — GN', {
+        body: `${manut} item${manut !== 1 ? 's' : ''} de manutenção aberto${manut !== 1 ? 's' : ''} hoje`,
+        tag: 'gn-manut',
+        icon: '/favicon.ico',
+        requireInteraction: true,
+        vibrate: [300, 100, 300],
+        data: { url: '/gn-manutencao.html' },
+      });
     }
-    // New day or first run — save baseline silently
-    await salvarEstado({ manut, faltas, data: hoje });
+    if (notifFaltas) {
+      await self.registration.showNotification('⚠️ Faltas registradas — GN', {
+        body: `${faltas} falta${faltas !== 1 ? 's' : ''} registrada${faltas !== 1 ? 's' : ''} hoje`,
+        tag: 'gn-faltas',
+        icon: '/favicon.ico',
+        requireInteraction: true,
+        vibrate: [300, 100, 300],
+        data: { url: '/gn-pedidos.html' },
+      });
+    }
+
+    await salvarEstado({
+      manut, faltas, data: hoje,
+      manutNotif: mesmodia ? (prev.manutNotif || notifManut) : notifManut,
+      faltasNotif: mesmodia ? (prev.faltasNotif || notifFaltas) : notifFaltas,
+    });
   } catch(_) {}
 }
