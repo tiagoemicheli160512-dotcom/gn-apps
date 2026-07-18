@@ -447,12 +447,28 @@ const STATUS_CLASS = {
 // Status da presença → classe CSS
 const PRES_ABREV = {
   'PRESENTE':'P','FALTA':'F','ATESTADO':'AT','SUSPENSÃO':'S',
-  'NÃO TRABALHADO':'NT','HORISTA':'H','JOVEM APRENDIZ':'JA','FOLGA':'FG','BANCO DE HORAS':'BH'
+  'NÃO TRABALHADO':'NT','HORISTA':'H','JOVEM APRENDIZ':'JA','FOLGA':'FG','BANCO DE HORAS':'BH','FÉRIAS':'FE','AFASTAMENTO':'AF'
 };
 const PRES_CLASS = {
   'PRESENTE':'day-P','FALTA':'day-F','ATESTADO':'day-AT','SUSPENSÃO':'day-S',
-  'NÃO TRABALHADO':'day-NW','HORISTA':'day-BH','JOVEM APRENDIZ':'day-BH','FOLGA':'day-FG','BANCO DE HORAS':'day-BH'
+  'NÃO TRABALHADO':'day-NW','HORISTA':'day-BH','JOVEM APRENDIZ':'day-BH','FOLGA':'day-FG','BANCO DE HORAS':'day-BH','FÉRIAS':'day-FG','AFASTAMENTO':'day-FG'
 };
+const ESCALA_PRESENTE_SET = new Set(['PRESENTE','HORISTA','JOVEM APRENDIZ']);
+const ESCALA_TURNO_COLOR  = {MANHÃ:'#f59e0b',TARDE:'#3b82f6',NOITE:'#8b5cf6',MISTO:'#10b981',FOLGA:'#94a3b8','':'#475569'};
+const ESCALA_STATUS_COLOR = {PRESENTE:'#10b981',FALTA:'#ef4444',ATESTADO:'#f59e0b','SUSPENSÃO':'#f97316','NÃO TRABALHADO':'#94a3b8',HORISTA:'#38bdf8','JOVEM APRENDIZ':'#a78bfa',FOLGA:'#06b6d4','BANCO DE HORAS':'#8b5cf6',FÉRIAS:'#0ea5e9',AFASTAMENTO:'#14b8a6'};
+
+function _parseHorasHorario(horario) {
+  if (!horario) return null;
+  const m = horario.match(/(\d{1,2})[h:](\d{0,2})\s*[–\-]\s*(\d{1,2})[h:](\d{0,2})/i);
+  if (!m) return null;
+  const h1 = parseInt(m[1]), min1 = parseInt(m[2] || '0') || 0;
+  const h2 = parseInt(m[3]), min2 = parseInt(m[4] || '0') || 0;
+  let mins = (h2 * 60 + min2) - (h1 * 60 + min1);
+  if (mins <= 0) mins += 1440;
+  if (mins <= 0 || mins > 1440) return null;
+  if (mins >= 360) mins -= 60;
+  return Math.round(mins / 60 * 10) / 10;
+}
 
 let toastT;
 function toast(msg, tipo='ok') {
@@ -1035,9 +1051,99 @@ function renderRH() {
     });
   });
 
+  const buscaQ = (S.rhBusca||'').toLowerCase().trim();
+
+  // ── ESCALA & HORAS ──
+  const DIAS_SEM = ['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
+  let escalaBHHtml = '';
+  const escalFuncs = (S.presencaSemana?.funcs || []).filter(f => f.nome?.trim());
+  const escalFuncsFilt = buscaQ ? escalFuncs.filter(f => f.nome.toLowerCase().includes(buscaQ)) : escalFuncs;
+
+  if (escalFuncsFilt.length === 0) {
+    escalaBHHtml = `<div class="empty" style="padding:20px"><div class="empty-text">Sem dados de escala para esta semana</div></div>`;
+  } else {
+    // BH saldo por nome: usar mês mais recente disponível
+    const mesesBH = [...new Set(S.bancoHoras.map(r => r.mes))].sort();
+    const ultimoMesBH = mesesBH[mesesBH.length - 1] || null;
+    const bhSaldoNome = {}; // nome → saldo no mês mais recente
+    if (ultimoMesBH) {
+      S.bancoHoras.forEach(row => {
+        if (row.mes !== ultimoMesBH) return;
+        (row.registros || []).forEach(r => {
+          if (r.nome) bhSaldoNome[r.nome] = parseFloat(r.horas) || 0;
+        });
+      });
+    }
+
+    const thDias = DIAS_SEM.map(d => `<th style="text-align:center;min-width:32px">${d}</th>`).join('');
+    const rowsHtml = escalFuncsFilt.map(f => {
+      const hDia = _parseHorasHorario(f.horario);
+      const diasPres = (f.dias || []).filter(s => ESCALA_PRESENTE_SET.has(s || 'PRESENTE')).length;
+      const horasSem = hDia != null ? Math.round(hDia * diasPres * 10) / 10 : null;
+      const bhSaldo = bhSaldoNome[f.nome] ?? null;
+
+      // Status especial
+      const emFerias = (f.dias || []).some(s => s === 'FÉRIAS');
+      const emAfastamento = (f.dias || []).some(s => s === 'AFASTAMENTO');
+
+      // Turno pill
+      const tc = ESCALA_TURNO_COLOR[f.turno || ''] || '#475569';
+      const turnoPill = f.turno ? `<span style="font-size:9px;background:${tc}22;color:${tc};border-radius:4px;padding:1px 5px;font-weight:700;white-space:nowrap">${f.turno}</span>` : '';
+      const horPill = f.horario ? `<span style="font-size:9px;color:var(--muted)">${f.horario}</span>` : '';
+
+      // Badge especial (férias / afastamento)
+      let statusBadge = '';
+      if (emFerias) statusBadge = `<span class="badge badge-info" style="font-size:8px">🏖 Férias</span>`;
+      else if (emAfastamento) statusBadge = `<span class="badge badge-warn" style="font-size:8px">🏥 Afastado</span>${f.afastamento_just ? `<span style="font-size:9px;color:var(--muted)">${f.afastamento_just}</span>` : ''}`;
+
+      // Dia pills
+      const diaCells = DIAS_SEM.map((_, i) => {
+        const st = (f.dias || [])[i] || 'PRESENTE';
+        const abrev = PRES_ABREV[st] || st.slice(0, 2);
+        const cls   = PRES_CLASS[st] || 'day-NW';
+        return `<td style="text-align:center"><span class="day-pill ${cls}" title="${st}">${abrev}</span></td>`;
+      }).join('');
+
+      // BH saldo cor
+      const bhColor = bhSaldo == null ? 'var(--muted)' : bhSaldo > 0 ? 'var(--green)' : bhSaldo < 0 ? 'var(--red)' : 'var(--muted)';
+      const bhTxt   = bhSaldo == null ? '—' : `${bhSaldo > 0 ? '+' : ''}${bhSaldo}h`;
+
+      // Horas semana cor
+      const hColor = horasSem == null ? 'var(--muted)' : horasSem > 44 ? 'var(--red)' : horasSem > 0 ? 'var(--green)' : 'var(--muted)';
+
+      return `<tr>
+        <td class="nome-col" style="min-width:120px;padding:8px 10px">
+          <div style="font-weight:700;font-size:12px">${f.nome}</div>
+          <div style="display:flex;gap:3px;flex-wrap:wrap;margin-top:2px;align-items:center">${f.setor ? `<span style="font-size:9px;color:var(--muted)">${f.setor}</span>` : ''}${statusBadge}</div>
+          <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:2px;align-items:center">${turnoPill}${horPill}</div>
+        </td>
+        ${diaCells}
+        <td style="text-align:center;padding:8px 6px;border-left:1px solid var(--border)">
+          <div style="font-size:12px;font-weight:800;color:${hColor};font-variant-numeric:tabular-nums">${horasSem != null ? horasSem + 'h' : '—'}</div>
+          <div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">${diasPres}d/sem</div>
+        </td>
+        <td style="text-align:center;padding:8px 6px;border-left:1px solid var(--border)">
+          <div style="font-size:12px;font-weight:800;color:${bhColor};font-variant-numeric:tabular-nums">${bhTxt}</div>
+          <div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">BH ${ultimoMesBH ? MES_ABREV[parseInt((ultimoMesBH||'').split('-')[1]||'0')] : '—'}</div>
+        </td>
+      </tr>`;
+    }).join('');
+
+    escalaBHHtml = `<div class="rh-table-wrap">
+      <table class="rh-table">
+        <thead><tr>
+          <th>Funcionário</th>
+          ${thDias}
+          <th style="text-align:center;border-left:1px solid var(--border)">Horas/sem</th>
+          <th style="text-align:center;border-left:1px solid var(--border)">BH saldo</th>
+        </tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </div>`;
+  }
+
   const meses = [...new Set(S.bancoHoras.map(r=>r.mes))].sort();
 
-  const buscaQ = (S.rhBusca||'').toLowerCase().trim();
   const bhFuncsFilt = buscaQ
     ? Object.fromEntries(Object.entries(bhFuncs).filter(([n])=>n.toLowerCase().includes(buscaQ)))
     : bhFuncs;
@@ -1162,6 +1268,14 @@ function renderRH() {
         </div>
       </div>
       <div class="card-body" style="padding:0">${bhHtml}</div>
+    </div>
+
+    <div class="card" style="margin-bottom:14px">
+      <div class="card-header">
+        <span class="card-title">📊 Escala & Horas — ${S.rhLoja.display}</span>
+        <span style="font-size:11px;color:var(--muted)">Sem. ${sem.num} · ${sem.periodo}</span>
+      </div>
+      <div class="card-body" style="padding:0">${escalaBHHtml}</div>
     </div>
 
     <div class="card">
