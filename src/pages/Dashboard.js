@@ -1174,6 +1174,22 @@ function PainelGeral({ onSelectLoja }) {
                   <div style={{ height: 3, borderRadius: 2, background: 'rgba(255,255,255,.06)', overflow: 'hidden' }}>
                     <div style={{ height: '100%', borderRadius: 2, width: metaLojaPct + '%', background: metaLojaPct >= 100 ? '#22c55e' : metaLojaPct >= 70 ? '#F26419' : '#ef4444' }} />
                   </div>
+                  {/* Meta diária dinâmica — semana atual com meta não atingida */}
+                  {metaLojaPct < 100 && viewMode === 'sem' && semIdx === 0 && (() => {
+                    const todayISO = (n => n.getFullYear()+'-'+String(n.getMonth()+1).padStart(2,'0')+'-'+String(n.getDate()).padStart(2,'0'))(new Date());
+                    const diasRest = weekDates.filter(({iso}) => iso >= todayISO && new Date(iso+'T12:00:00').getDay() !== 0).length;
+                    if (diasRest <= 0) return null;
+                    const falta = metaLoja - (d?.fat || 0);
+                    if (falta <= 0) return null;
+                    const mediaNec = falta / diasRest;
+                    const mediaCor = mediaNec > (metaLoja / 6) * 1.3 ? '#ef4444' : mediaNec > (metaLoja / 6) ? '#F26419' : '#22c55e';
+                    return (
+                      <div style={{ display:'flex', justifyContent:'space-between', fontSize:9, marginTop:4, fontVariantNumeric:'tabular-nums' }}>
+                        <span style={{ color:'#44445a' }}>📅 {diasRest} dia{diasRest>1?'s':''} restante{diasRest>1?'s':''}</span>
+                        <span style={{ color: mediaCor, fontWeight:700 }}>→ {fmtR(mediaNec)}/dia</span>
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </div>
