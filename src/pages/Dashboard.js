@@ -1308,7 +1308,39 @@ function HomeScreen({ session: sessionProp, onLogout }) {
     if (typeof Notification === 'undefined') return;
     const p = await Notification.requestPermission();
     setNotifPerm(p);
+    if (p === 'granted' && 'serviceWorker' in navigator) {
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        if ('periodicSync' in reg) {
+          await reg.periodicSync.register('gn-alerts', { minInterval: 15 * 60 * 1000 });
+        }
+      } catch(_) {}
+    }
   }, []);
+
+  // Trigger alert check when app comes to foreground
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+    const trigger = () => {
+      if (document.visibilityState !== 'visible') return;
+      navigator.serviceWorker.ready
+        .then(reg => reg.active && reg.active.postMessage({ type: 'GN_CHECK_ALERTS' }))
+        .catch(() => {});
+    };
+    document.addEventListener('visibilitychange', trigger);
+    trigger();
+    return () => document.removeEventListener('visibilitychange', trigger);
+  }, []);
+
+  // Re-register periodic sync if permission already granted
+  useEffect(() => {
+    if (notifPerm !== 'granted' || !('serviceWorker' in navigator)) return;
+    navigator.serviceWorker.ready.then(reg => {
+      if ('periodicSync' in reg) {
+        reg.periodicSync.register('gn-alerts', { minInterval: 15 * 60 * 1000 }).catch(() => {});
+      }
+    }).catch(() => {});
+  }, [notifPerm]);
 
   const navTo = (url) => {
     if (masterLoja) localStorage.setItem('gn_nav_loja', JSON.stringify({ loja: masterLoja, ts: Date.now() }));
