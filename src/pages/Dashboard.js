@@ -1231,9 +1231,24 @@ function HomeScreen({ session: sessionProp, onLogout }) {
     }
 
     if (perms.lojas    || isMaster) set('lojas',   'Online', 'g');
-    if (perms.pedidos  || isMaster) set('pedidos', 'Online', 'g');
     if (isMaster && perms.mestra !== false) set('mestra',  'Visão consolidada', 'o');
     if (perms.rh  || isMaster) set('rh', 'Online', 'b');
+
+    if (perms.pedidos || isMaster) {
+      const hoje2 = new Date();
+      const day = hoje2.getDay();
+      const mon = new Date(hoje2); mon.setDate(hoje2.getDate() + (day === 0 ? -6 : 1 - day));
+      const monISO = mon.getFullYear()+'-'+String(mon.getMonth()+1).padStart(2,'0')+'-'+String(mon.getDate()).padStart(2,'0');
+      fetch(`${SB_URL}/rest/v1/gn_pedidos?semana_inicio=eq.${monISO}&select=status&order=id.desc&limit=1`,
+        { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } })
+        .then(r => r.json()).then(d => {
+          const st = d?.[0]?.status;
+          if (st === 'RASCUNHO')   set('pedidos', '✏️ Rascunho', 'b');
+          else if (st === 'CONFIRMADO') set('pedidos', '✅ Confirmado', 'g');
+          else if (st === 'ENVIADO')    set('pedidos', '📤 Enviado', 'g');
+          else set('pedidos', 'Sem pedido esta semana', 'x');
+        }).catch(() => set('pedidos', 'Online', 'g'));
+    }
 
     // Badge de manutenção com count real de pendências (últimos 30 dias)
     const lojaDispQ = LOJA_DISPLAY[loja] || loja;
@@ -1257,14 +1272,35 @@ function HomeScreen({ session: sessionProp, onLogout }) {
       const hojeD = new Date();
       const hojeISO = hojeD.getFullYear()+'-'+String(hojeD.getMonth()+1).padStart(2,'0')+'-'+String(hojeD.getDate()).padStart(2,'0');
       fetch(
-        `${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hojeISO}&loja=eq.${encodeURIComponent(lojaDispQ)}&select=checklist_pct,venda_salao,venda_delivery,manutencao`,
+        `${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hojeISO}&loja=eq.${encodeURIComponent(lojaDispQ)}&select=checklist_pct,venda_salao,venda_delivery,manutencao,faltas`,
         { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
       ).then(r => r.json()).then(data => {
         const row = data?.[0];
         const fat = row ? (parseFloat(row.venda_salao)||0) + (parseFloat(row.venda_delivery)||0) : 0;
         const pend = row && Array.isArray(row.manutencao) ? row.manutencao.filter(m => m && m.status && m.status !== 'Resolvido').length : 0;
-        setMiniPainel({ pct: row?.checklist_pct ?? null, fat, manut: pend });
-      }).catch(() => setMiniPainel({ pct: null, fat: 0, manut: 0 }));
+        const faltas = row && Array.isArray(row.faltas) ? row.faltas.length : 0;
+        setMiniPainel({ pct: row?.checklist_pct ?? null, fat, manut: pend, faltas, fatSemana: null, entregasPend: null });
+      }).catch(() => setMiniPainel({ pct: null, fat: 0, manut: 0, faltas: 0, fatSemana: null, entregasPend: null }));
+
+      // Faturamento últimos 7 dias
+      const d7 = new Date(); d7.setDate(d7.getDate() - 6);
+      const d7s = d7.getFullYear()+'-'+String(d7.getMonth()+1).padStart(2,'0')+'-'+String(d7.getDate()).padStart(2,'0');
+      fetch(
+        `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${d7s}&loja=eq.${encodeURIComponent(lojaDispQ)}&select=venda_salao,venda_delivery`,
+        { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
+      ).then(r => r.json()).then(rows => {
+        const total = (rows || []).reduce((s, r) => s + (parseFloat(r.venda_salao)||0) + (parseFloat(r.venda_delivery)||0), 0);
+        setMiniPainel(prev => prev ? { ...prev, fatSemana: total } : null);
+      }).catch(() => {});
+
+      // Entregas pendentes (global)
+      fetch(
+        `${SB_URL}/rest/v1/gn_provisoes?status=eq.AGUARDANDO&select=id`,
+        { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, Prefer: 'count=exact' } }
+      ).then(r => {
+        const count = parseInt(r.headers.get('content-range')?.split('/')[1] || '0') || 0;
+        setMiniPainel(prev => prev ? { ...prev, entregasPend: count } : null);
+      }).catch(() => {});
 
       // Streak — dias consecutivos com CL 100%
       fetch(
@@ -1485,27 +1521,48 @@ function HomeScreen({ session: sessionProp, onLogout }) {
       {/* MINI PAINEL DO DIA (apenas para view de loja) */}
       {(!isMaster || masterLoja) && miniPainel && (
         <div style={{ padding: '0 14px 4px' }}>
-          <div style={{ background: 'rgba(255,255,255,.04)', border: '1px solid rgba(255,255,255,.08)', borderRadius: 14, padding: '12px 14px', display: 'flex', gap: 0 }}>
-            {/* Check-list % */}
-            <div style={{ flex: 1, textAlign: 'center', borderRight: '1px solid rgba(255,255,255,.06)' }}>
-              <div style={{ fontSize: 18, fontWeight: 900, color: miniPainel.pct === 100 ? '#22c55e' : miniPainel.pct > 50 ? '#f0c050' : miniPainel.pct != null ? '#ef4444' : '#2a2a4a', lineHeight: 1 }}>
-                {miniPainel.pct != null ? miniPainel.pct + '%' : '—'}
+          <div style={{ background: 'rgba(255,255,255,.04)', border: '1px solid rgba(255,255,255,.08)', borderRadius: 14, padding: '12px 14px' }}>
+            {/* Linha 1: CL% | Fat hoje | Fat 7 dias */}
+            <div style={{ display: 'flex', gap: 0, paddingBottom: 10, marginBottom: 10, borderBottom: '1px solid rgba(255,255,255,.05)' }}>
+              <div style={{ flex: 1, textAlign: 'center', borderRight: '1px solid rgba(255,255,255,.06)' }}>
+                <div style={{ fontSize: 18, fontWeight: 900, color: miniPainel.pct === 100 ? '#22c55e' : miniPainel.pct > 50 ? '#f0c050' : miniPainel.pct != null ? '#ef4444' : '#2a2a4a', lineHeight: 1 }}>
+                  {miniPainel.pct != null ? miniPainel.pct + '%' : '—'}
+                </div>
+                <div style={{ fontSize: 9, color: '#44445a', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 3 }}>Check-list</div>
               </div>
-              <div style={{ fontSize: 9, color: '#44445a', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 3 }}>Check-list hoje</div>
+              <div style={{ flex: 1, textAlign: 'center', borderRight: '1px solid rgba(255,255,255,.06)' }}>
+                <div style={{ fontSize: 12, fontWeight: 900, color: miniPainel.fat > 0 ? '#e8e8f4' : '#2a2a4a', lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>
+                  {miniPainel.fat > 0 ? fmtR(miniPainel.fat) : '—'}
+                </div>
+                <div style={{ fontSize: 9, color: '#44445a', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 3 }}>Fat. hoje</div>
+              </div>
+              <div style={{ flex: 1, textAlign: 'center' }}>
+                <div style={{ fontSize: 12, fontWeight: 900, color: (miniPainel.fatSemana ?? 0) > 0 ? '#a78bfa' : miniPainel.fatSemana === null ? '#2a2a4a' : '#2a2a4a', lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>
+                  {miniPainel.fatSemana === null ? '…' : miniPainel.fatSemana > 0 ? fmtR(miniPainel.fatSemana) : '—'}
+                </div>
+                <div style={{ fontSize: 9, color: '#44445a', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 3 }}>Fat. 7 dias</div>
+              </div>
             </div>
-            {/* Faturamento hoje */}
-            <div style={{ flex: 1, textAlign: 'center', borderRight: '1px solid rgba(255,255,255,.06)' }}>
-              <div style={{ fontSize: 13, fontWeight: 900, color: miniPainel.fat > 0 ? '#e8e8f4' : '#2a2a4a', lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>
-                {miniPainel.fat > 0 ? fmtR(miniPainel.fat) : '—'}
+            {/* Linha 2: Manut | Faltas | Entregas pend */}
+            <div style={{ display: 'flex', gap: 0 }}>
+              <div style={{ flex: 1, textAlign: 'center', borderRight: '1px solid rgba(255,255,255,.06)' }}>
+                <div style={{ fontSize: 18, fontWeight: 900, color: miniPainel.manut > 0 ? '#f97316' : '#22c55e', lineHeight: 1 }}>
+                  {miniPainel.manut > 0 ? miniPainel.manut : '✓'}
+                </div>
+                <div style={{ fontSize: 9, color: '#44445a', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 3 }}>Manut. pend.</div>
               </div>
-              <div style={{ fontSize: 9, color: '#44445a', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 3 }}>Faturamento hoje</div>
-            </div>
-            {/* Manutenções pendentes */}
-            <div style={{ flex: 1, textAlign: 'center' }}>
-              <div style={{ fontSize: 18, fontWeight: 900, color: miniPainel.manut > 0 ? '#f97316' : '#22c55e', lineHeight: 1 }}>
-                {miniPainel.manut > 0 ? miniPainel.manut : '✓'}
+              <div style={{ flex: 1, textAlign: 'center', borderRight: '1px solid rgba(255,255,255,.06)' }}>
+                <div style={{ fontSize: 18, fontWeight: 900, color: miniPainel.faltas > 0 ? '#ef4444' : '#22c55e', lineHeight: 1 }}>
+                  {miniPainel.faltas > 0 ? miniPainel.faltas : '✓'}
+                </div>
+                <div style={{ fontSize: 9, color: '#44445a', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 3 }}>Faltas hoje</div>
               </div>
-              <div style={{ fontSize: 9, color: '#44445a', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 3 }}>Manut. pend.</div>
+              <div style={{ flex: 1, textAlign: 'center' }}>
+                <div style={{ fontSize: 18, fontWeight: 900, color: (miniPainel.entregasPend ?? 0) > 0 ? '#f59e0b' : miniPainel.entregasPend === null ? '#2a2a4a' : '#22c55e', lineHeight: 1 }}>
+                  {miniPainel.entregasPend === null ? '…' : miniPainel.entregasPend > 0 ? miniPainel.entregasPend : '✓'}
+                </div>
+                <div style={{ fontSize: 9, color: '#44445a', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 3 }}>Entregas pend.</div>
+              </div>
             </div>
           </div>
         </div>
