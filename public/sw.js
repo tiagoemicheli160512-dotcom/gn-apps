@@ -1,5 +1,6 @@
 // ─── OFFLINE CACHE — network-first para requests Supabase ────
-const API_CACHE = 'gn-api-v2';
+const SW_VERSION = 3;
+const API_CACHE = 'gn-api-v3';
 
 self.addEventListener('install', event => {
   self.skipWaiting();
@@ -7,15 +8,35 @@ self.addEventListener('install', event => {
 
 self.addEventListener('activate', event => {
   event.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== API_CACHE && k !== ALERTS_CACHE).map(k => caches.delete(k)))
-    ).then(() => self.clients.claim())
+    caches.keys()
+      .then(keys => Promise.all(
+        keys.filter(k => k !== API_CACHE && k !== ALERTS_CACHE).map(k => caches.delete(k))
+      ))
+      .then(() => self.clients.claim())
+      .then(() => self.clients.matchAll({ type: 'window', includeUncontrolled: true }))
+      .then(clients => Promise.all(clients.map(c => {
+        try {
+          const u = new URL(c.url);
+          u.searchParams.set('_swv', SW_VERSION);
+          return c.navigate(u.href).catch(() => {});
+        } catch(e) { return Promise.resolve(); }
+      })))
   );
 });
 
 self.addEventListener('fetch', event => {
   const url = event.request.url;
   if (event.request.method !== 'GET') return;
+
+  // HTML: sempre buscar da rede sem cache para garantir código atualizado
+  if (url.includes('.html')) {
+    event.respondWith(
+      fetch(new Request(event.request, { cache: 'no-store' }))
+        .catch(() => fetch(event.request))
+    );
+    return;
+  }
+
   if (!url.includes('supabase.co/rest/')) return;
 
   event.respondWith(
