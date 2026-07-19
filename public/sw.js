@@ -64,8 +64,8 @@ async function lerEstado() {
   try {
     const c = await caches.open(ALERTS_CACHE);
     const r = await c.match(ALERTS_STATE);
-    return r ? await r.json() : { manut: 0, faltas: 0, data: '' };
-  } catch(_) { return { manut: 0, faltas: 0, data: '' }; }
+    return r ? await r.json() : { manut: 0, faltas: 0, entregas: 0, data: '' };
+  } catch(_) { return { manut: 0, faltas: 0, entregas: 0, data: '' }; }
 }
 
 async function salvarEstado(s) {
@@ -79,9 +79,10 @@ async function verificarAlertas() {
   const H = { apikey: SB_KEY_A, Authorization: 'Bearer ' + SB_KEY_A };
 
   try {
-    const [mr, fr] = await Promise.all([
+    const [mr, fr, er] = await Promise.all([
       fetch(`${SB_URL_A}/rest/v1/checklist_diario?data_operacao=eq.${hoje}&select=manutencao`, { headers: H }).then(r => r.json()),
       fetch(`${SB_URL_A}/rest/v1/checklist_diario?data_operacao=eq.${hoje}&select=faltas`, { headers: H }).then(r => r.json()),
+      fetch(`${SB_URL_A}/rest/v1/gn_provisoes?status=eq.AGUARDANDO&select=id`, { headers: H }).then(r => r.json()),
     ]);
 
     let manut = 0;
@@ -92,11 +93,14 @@ async function verificarAlertas() {
     let faltas = 0;
     (fr || []).forEach(r => { if (Array.isArray(r.faltas)) faltas += r.faltas.length; });
 
+    const entregas = Array.isArray(er) ? er.length : 0;
+
     const prev = await lerEstado();
     const mesmodia = prev.data === hoje;
 
-    const notifManut  = manut  > 0 && (manut  > prev.manut  || !mesmodia || !prev.manutNotif);
-    const notifFaltas = faltas > 0 && (faltas > prev.faltas || !mesmodia || !prev.faltasNotif);
+    const notifManut    = manut    > 0 && (manut    > (prev.manut    || 0) || !mesmodia || !prev.manutNotif);
+    const notifFaltas   = faltas   > 0 && (faltas   > (prev.faltas   || 0) || !mesmodia || !prev.faltasNotif);
+    const notifEntregas = entregas > 0 && (entregas > (prev.entregas || 0) || !mesmodia || !prev.entregasNotif);
 
     if (notifManut) {
       await self.registration.showNotification('🔧 Manutenção pendente — GN', {
@@ -112,11 +116,19 @@ async function verificarAlertas() {
         data: { url: '/gn-pedidos.html' },
       });
     }
+    if (notifEntregas) {
+      await self.registration.showNotification('🚚 Entregas pendentes — GN', {
+        body: `${entregas} entrega${entregas !== 1 ? 's' : ''} aguardando confirmação`,
+        tag: 'gn-entregas', icon: '/favicon.ico', requireInteraction: true, vibrate: [300, 100, 300],
+        data: { url: '/gn-pedidos.html' },
+      });
+    }
 
     await salvarEstado({
-      manut, faltas, data: hoje,
-      manutNotif:  mesmodia ? (prev.manutNotif  || notifManut)  : notifManut,
-      faltasNotif: mesmodia ? (prev.faltasNotif || notifFaltas) : notifFaltas,
+      manut, faltas, entregas, data: hoje,
+      manutNotif:    mesmodia ? (prev.manutNotif    || notifManut)    : notifManut,
+      faltasNotif:   mesmodia ? (prev.faltasNotif   || notifFaltas)   : notifFaltas,
+      entregasNotif: mesmodia ? (prev.entregasNotif || notifEntregas) : notifEntregas,
     });
   } catch(_) {}
 }
