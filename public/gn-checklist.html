@@ -2940,9 +2940,47 @@ async function loadSupabaseWeek(semanaIni){
   try{
     const {data:rows,error}=await sb.from('checklist_carnes')
       .select('*').eq('semana_inicio',semanaIni).eq('loja',LOJA).single();
-    if(error||!rows) return;
+    if(error||!rows){
+      // Semana ainda sem registro — tenta semear inicial a partir da contagem final da semana anterior
+      await _seedInicialFromPrevWeek(semanaIni);
+      renderCarnes();
+      return;
+    }
     mergeWeekState(rows);
+    // Se o inicial ainda estiver todo em branco, semeia da semana anterior
+    const inicialVazio = CARNES_DEF.every(c=>
+      c.rows.every(r=>(stateWeek.carnes[c.key]?.[r.key]?.inicial||'')==='')
+    );
+    if(inicialVazio) await _seedInicialFromPrevWeek(semanaIni);
     renderCarnes();
+  }catch(e){}
+}
+
+// Pré-popula inicial da semana atual com contagem_final da semana anterior.
+// Só preenche campos ainda vazios — nunca sobrescreve dados existentes.
+async function _seedInicialFromPrevWeek(semanaIni){
+  if(!semanaIni || !LOJA) return;
+  try{
+    const d = new Date(semanaIni + 'T12:00:00');
+    d.setDate(d.getDate() - 7);
+    const prevIni = d.toISOString().slice(0,10);
+    const {data:prev,error}=await sb.from('checklist_carnes')
+      .select('carnes').eq('semana_inicio',prevIni).eq('loja',LOJA).single();
+    if(error||!prev||!prev.carnes) return;
+    let changed = false;
+    CARNES_DEF.forEach(c=>{
+      c.rows.forEach(r=>{
+        const val = prev.carnes[c.key]?.[r.key]?.contagem_final;
+        if(val===undefined||val===null||val==='') return;
+        if(!stateWeek.carnes[c.key]) stateWeek.carnes[c.key]={};
+        if(!stateWeek.carnes[c.key][r.key]) stateWeek.carnes[c.key][r.key]={};
+        if((stateWeek.carnes[c.key][r.key].inicial||'')===''){
+          stateWeek.carnes[c.key][r.key].inicial = val;
+          changed = true;
+        }
+      });
+    });
+    if(changed) autoSave();
   }catch(e){}
 }
 
