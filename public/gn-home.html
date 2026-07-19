@@ -283,7 +283,7 @@
 </div>
 
 <script>
-const APP_VERSION = 'v104';
+const APP_VERSION = 'v105';
 const SB_URL = "https://ncxttwvpafajnilpjbol.supabase.co";
 const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5jeHR0d3ZwYWZham5pbHBqYm9sIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE4NDcyMDEsImV4cCI6MjA5NzQyMzIwMX0.MGDZNGY8GfSzBKAgdR7OhvOeR71i4fj9YseJRhoh5sE";
 const SESSION_KEY = 'gn_session_v1';
@@ -467,40 +467,57 @@ function _refreshPermUI(sess) {
 }
 
 // ── FORCE UPDATE ──────────────────────────────────────────────────────────────
-// Refreshes data in-place (no navigation). The SW has no fetch handler so there
-// is nothing to cache-bust; navigating to ?v=timestamp only caused a spurious
-// SW activate → clients.claim() sequence that triggered the dashboard to reset.
+// Recarrega apenas os DADOS da tela atual — nunca toca em visibilidade de
+// elementos nem chama showHome. Isso evita qualquer risco de sumir o dashboard.
 async function forcarAtualizacao() {
   if (!session) return;
   const btns = [document.getElementById('btn-atualizar'), document.getElementById('sbn-btn-atualizar')];
   btns.forEach(b => { if (b) { b.textContent = '⟳'; b.disabled = true; } });
+
+  // 1. Limpa caches residuais de versões antigas do SW
   try {
     if ('caches' in window) {
       const keys = await caches.keys();
       await Promise.all(keys.map(k => caches.delete(k)));
     }
   } catch(e) {}
-  // Fetch fresh permissions so admin changes take effect immediately
-  try {
-    const res = await fetch(
-      `${SB_URL}/rest/v1/gn_usuarios?id=eq.${session.id}&ativo=eq.true&select=id,nome,loja,cargo,permissoes`,
-      { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
-    );
-    const data = await res.json();
-    if (data && data.length) {
-      const u = data[0];
-      const localMetas = (session.permissoes||{}).dashboard_metas;
+
+  // 2. Recarrega dados conforme a vista atual — sem chamar showHome
+  const isMaster = session.loja === 'GERAL' || !!(session.permissoes||{}).master;
+  if (isMaster && !masterLoja) {
+    // Vista "Todas as lojas": recarrega dashboard + health chips
+    _dashFat = null; _dashFatPrev = null;
+    renderDashboard();
+    _loadDashAll();
+    _renderHealthChips();
+  } else if (isMaster && masterLoja) {
+    // Vista loja específica: recarrega chips da loja
+    _loadLojaHealthChips(masterLoja);
+  }
+  loadBadges(session, isMaster);
+
+  // 3. Reabilita botões imediatamente (dados carregam em background)
+  btns.forEach(b => { if (b) { b.textContent = b.id === 'sbn-btn-atualizar' ? '↻ Atualizar app' : '↻ Atualizar'; b.disabled = false; } });
+
+  // 4. Atualiza permissões em background (usa _refreshPermUI, nunca showHome)
+  fetch(`${SB_URL}/rest/v1/gn_usuarios?id=eq.${session.id}&ativo=eq.true&select=id,nome,loja,cargo,permissoes`,
+    { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } })
+  .then(r => r.json()).then(data => {
+    if (!data || !data.length) return;
+    const u = data[0];
+    const localMetas = (session.permissoes||{}).dashboard_metas;
+    const stripMeta = p => { const c = Object.assign({}, p||{}); delete c.dashboard_metas; return c; };
+    const changed = JSON.stringify(stripMeta(session.permissoes)) !== JSON.stringify(stripMeta(u.permissoes))
+                 || session.nome !== u.nome || session.cargo !== u.cargo;
+    if (changed) {
       session.permissoes = u.permissoes || {};
       if (localMetas && !session.permissoes.dashboard_metas) session.permissoes.dashboard_metas = localMetas;
       session.nome  = u.nome;
       session.cargo = u.cargo;
       localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+      _refreshPermUI(session);
     }
-  } catch(e) {}
-  // Re-render home in place — masterLoja is preserved so dashboard stays visible
-  showHome(session);
-  // Re-enable buttons (showHome doesn't reset them)
-  btns.forEach(b => { if (b) { b.textContent = b.id === 'sbn-btn-atualizar' ? '↻ Atualizar app' : '↻ Atualizar'; b.disabled = false; } });
+  }).catch(() => {});
 }
 
 // ── THEME ─────────────────────────────────────────────────────────────────────
