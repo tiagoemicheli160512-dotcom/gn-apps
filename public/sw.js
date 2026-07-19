@@ -1,5 +1,5 @@
 // ─── OFFLINE CACHE — network-first para requests Supabase ────
-const SW_VERSION = 3;
+const SW_VERSION = 4;
 const API_CACHE = 'gn-api-v3';
 
 self.addEventListener('install', event => {
@@ -14,13 +14,9 @@ self.addEventListener('activate', event => {
       ))
       .then(() => self.clients.claim())
       .then(() => self.clients.matchAll({ type: 'window', includeUncontrolled: true }))
-      .then(clients => Promise.all(clients.map(c => {
-        try {
-          const u = new URL(c.url);
-          u.searchParams.set('_swv', SW_VERSION);
-          return c.navigate(u.href).catch(() => {});
-        } catch(e) { return Promise.resolve(); }
-      })))
+      .then(clients => clients.forEach(c => {
+        try { c.postMessage({ type: 'GN_SW_UPDATED', version: SW_VERSION }); } catch(e) {}
+      }))
   );
 });
 
