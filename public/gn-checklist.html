@@ -3115,19 +3115,46 @@ async function saveAll(){
       },{onConflict:'semana_inicio,loja'});
       if(e2) throw e2;
 
-      // Se esta semana tem contagem_final, propaga automaticamente como inicial da semana seguinte
+      // Se esta semana tem contagem_final, propaga em duas direções:
+      // 1) como inicial da MESMA semana (se ainda vazio) — contagem da segunda-feira abre a semana atual
+      // 2) como inicial da SEMANA SEGUINTE (se ainda vazio) — para semanas futuras
       const _temContagemFinal = CARNES_DEF.some(c=>
         c.rows.some(r=>(stateWeek.carnes[c.key]?.[r.key]?.contagem_final||'')!=='')
       );
       if(_temContagemFinal){
         try{
+          // 1) Propaga para inicial da MESMA semana se estiver vazio
+          const _inicialDaSemanaVazio = CARNES_DEF.every(c=>
+            c.rows.every(r=>(stateWeek.carnes[c.key]?.[r.key]?.inicial||'')==='')
+          );
+          if(_inicialDaSemanaVazio){
+            let mudou=false;
+            CARNES_DEF.forEach(c=>{
+              c.rows.forEach(r=>{
+                const val=stateWeek.carnes[c.key]?.[r.key]?.contagem_final;
+                if(val===undefined||val===null||val==='') return;
+                if(!stateWeek.carnes[c.key]) stateWeek.carnes[c.key]={};
+                if(!stateWeek.carnes[c.key][r.key]) stateWeek.carnes[c.key][r.key]={};
+                stateWeek.carnes[c.key][r.key].inicial=val;
+                mudou=true;
+              });
+            });
+            if(mudou){
+              // Re-salva com inicial preenchido
+              await sb.from('checklist_carnes').upsert({
+                semana_inicio: state.semanaInicio, semana_fim: state.semanaFim,
+                loja: LOJA, carnes: stateWeek.carnes, fat: {...stateWeek.fat, meta: stateWeek.metaSemanal}
+              },{onConflict:'semana_inicio,loja'});
+              renderCarnes();
+            }
+          }
+
+          // 2) Propaga para inicial da SEMANA SEGUINTE se estiver vazio
           const dNext=new Date(state.semanaInicio+'T12:00:00');
           dNext.setDate(dNext.getDate()+7);
           const nextIni=dNext.toISOString().slice(0,10);
-          // Busca registro da semana seguinte
           const {data:nextRow}=await sb.from('checklist_carnes')
             .select('carnes').eq('semana_inicio',nextIni).eq('loja',LOJA).single();
-          // Só propaga se o inicial da semana seguinte estiver todo vazio
           const nextInicialVazio = !nextRow || CARNES_DEF.every(c=>
             c.rows.every(r=>(nextRow.carnes?.[c.key]?.[r.key]?.inicial||'')==='')
           );
