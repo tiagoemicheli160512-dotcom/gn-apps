@@ -3114,6 +3114,46 @@ async function saveAll(){
         loja: LOJA, carnes: stateWeek.carnes, fat: {...stateWeek.fat, meta: stateWeek.metaSemanal}
       },{onConflict:'semana_inicio,loja'});
       if(e2) throw e2;
+
+      // Se esta semana tem contagem_final, propaga automaticamente como inicial da semana seguinte
+      const _temContagemFinal = CARNES_DEF.some(c=>
+        c.rows.some(r=>(stateWeek.carnes[c.key]?.[r.key]?.contagem_final||'')!=='')
+      );
+      if(_temContagemFinal){
+        try{
+          const dNext=new Date(state.semanaInicio+'T12:00:00');
+          dNext.setDate(dNext.getDate()+7);
+          const nextIni=dNext.toISOString().slice(0,10);
+          // Busca registro da semana seguinte
+          const {data:nextRow}=await sb.from('checklist_carnes')
+            .select('carnes').eq('semana_inicio',nextIni).eq('loja',LOJA).single();
+          // Só propaga se o inicial da semana seguinte estiver todo vazio
+          const nextInicialVazio = !nextRow || CARNES_DEF.every(c=>
+            c.rows.every(r=>(nextRow.carnes?.[c.key]?.[r.key]?.inicial||'')==='')
+          );
+          if(nextInicialVazio){
+            const carnesNext = nextRow ? JSON.parse(JSON.stringify(nextRow.carnes||{})) : {};
+            let propagou=false;
+            CARNES_DEF.forEach(c=>{
+              if(!carnesNext[c.key]) carnesNext[c.key]={};
+              c.rows.forEach(r=>{
+                const val=stateWeek.carnes[c.key]?.[r.key]?.contagem_final;
+                if(val===undefined||val===null||val==='') return;
+                if(!carnesNext[c.key][r.key]) carnesNext[c.key][r.key]={};
+                carnesNext[c.key][r.key].inicial=val;
+                propagou=true;
+              });
+            });
+            if(propagou){
+              const dNextFim=new Date(dNext); dNextFim.setDate(dNextFim.getDate()+6);
+              const nextFim=dNextFim.toISOString().slice(0,10);
+              await sb.from('checklist_carnes').upsert({
+                semana_inicio:nextIni, semana_fim:nextFim, loja:LOJA, carnes:carnesNext
+              },{onConflict:'semana_inicio,loja'});
+            }
+          }
+        }catch(_){}
+      }
     }
 
     const agora=new Date();
