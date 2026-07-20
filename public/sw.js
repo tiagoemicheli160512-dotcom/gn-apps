@@ -1,7 +1,7 @@
 // ─── GN SERVICE WORKER — push notifications only ────────────────────────────
 // Fetch interception removed: Vercel serves HTML with no-cache headers
 // directly to the browser, so updates deploy automatically without resets.
-const SW_VERSION = 5;
+const SW_VERSION = 6;
 const ALERTS_CACHE = 'gn-alerts-v1';
 
 self.addEventListener('install', () => self.skipWaiting());
