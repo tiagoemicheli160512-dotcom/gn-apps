@@ -7438,16 +7438,45 @@ function _getDatasEspeciais(ano) {
 }
 
 let _gestaoMes = null, _gestaoAno = null;
+let _gestaoView = 'mensal'; // 'diario' | 'semanal' | 'mensal'
+let _gestaoSemIni = null, _gestaoDataDia = null;
 let _gestaoFatAtual = {}, _gestaoFatAnt = {}, _gestaoCMV = {}, _gestaoFuncCount = {};
+let _gestaoWeekData = null, _gestaoDayRow = null;
+
+function _addDays(iso, n){
+  const d=new Date(iso+'T12:00:00'); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10);
+}
+
+function _gestaoViewSel(v){ _gestaoView=v; renderGestao(); }
+
+function _gestaoHeaderHtml(label, prevFn, nextFn, atEnd=false){
+  const tabs=[['diario','Diário'],['semanal','Semanal'],['mensal','Mensal']];
+  const btnStyle=(active)=>`background:${active?'#E8580A':'#1c1c3a'};border:1px solid ${active?'#E8580A':'#3a3a5a'};border-radius:6px;color:${active?'#fff':'#888'};font-size:10px;font-weight:700;padding:4px 10px;cursor:pointer`;
+  return `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <div>
+        <div style="font-size:15px;font-weight:700;color:var(--t1,#e2e8f0)">📊 Gestão</div>
+        <div style="font-size:10px;color:#888">${LOJA}</div>
+      </div>
+      <div style="display:flex;gap:5px">${tabs.map(([v,l])=>`<button onclick="_gestaoViewSel('${v}')" style="${btnStyle(_gestaoView===v)}">${l}</button>`).join('')}</div>
+    </div>
+    <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:14px">
+      <button onclick="${prevFn}" style="background:#1c1c3a;border:1px solid #3a3a7a;border-radius:6px;color:#aaa;width:32px;height:32px;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center">‹</button>
+      <span style="font-size:12px;font-weight:700;color:var(--t1,#e2e8f0);min-width:150px;text-align:center">${label}</span>
+      <button onclick="${nextFn}" style="background:#1c1c3a;border:1px solid #3a3a7a;border-radius:6px;color:#aaa;width:32px;height:32px;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;${atEnd?'opacity:.35;pointer-events:none':''}">›</button>
+    </div>`;
+}
 
 async function renderGestao() {
   const el = document.getElementById('tab-gestao');
   if (!el) return;
   const now = new Date();
-  if (_gestaoMes === null) { _gestaoMes = now.getMonth(); _gestaoAno = now.getFullYear(); }
+  if (_gestaoMes === null)     { _gestaoMes = now.getMonth(); _gestaoAno = now.getFullYear(); }
+  if (_gestaoSemIni === null)  { _gestaoSemIni = state.semanaInicio || hojeLocal(); }
+  if (_gestaoDataDia === null) { _gestaoDataDia = hojeLocal(); }
   el.innerHTML = '<div style="padding:32px;text-align:center;color:#888;font-size:12px">Carregando dados...</div>';
-  await _loadGestaoData();
-  _renderGestaoContent(el);
+  if (_gestaoView==='semanal')     { await _loadGestaoWeekData(); _renderGestaoSemanal(el); }
+  else if (_gestaoView==='diario') { await _loadGestaoDayData();  _renderGestaoDay(el); }
+  else                             { await _loadGestaoData();     _renderGestaoContent(el); }
 }
 
 async function _loadGestaoData() {
@@ -7658,17 +7687,7 @@ function _renderGestaoContent(el) {
   }
 
   el.innerHTML = `<div style="max-width:640px;margin:0 auto;padding:14px">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-      <div>
-        <div style="font-size:15px;font-weight:700;color:var(--t1,#e2e8f0)">📊 Gestão</div>
-        <div style="font-size:10px;color:#888">${LOJA}</div>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px">
-        <button onclick="_gestaoNavMes(-1)" style="background:#1c1c3a;border:1px solid #3a3a7a;border-radius:6px;color:#aaa;width:32px;height:32px;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center">‹</button>
-        <span style="font-size:11px;font-weight:700;color:var(--t1,#e2e8f0);min-width:100px;text-align:center">${MESES[m]} ${a}</span>
-        <button onclick="_gestaoNavMes(1)" style="background:#1c1c3a;border:1px solid #3a3a7a;border-radius:6px;color:#aaa;width:32px;height:32px;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;${isCurrentMonth?'opacity:.35;pointer-events:none':''}">›</button>
-      </div>
-    </div>
+    ${_gestaoHeaderHtml(`${MESES[m]} ${a}`,'_gestaoNavMes(-1)','_gestaoNavMes(1)',isCurrentMonth)}
     ${sumHtml}
     ${cmvHtml}
     ${qdrHtml}
@@ -7684,6 +7703,183 @@ function _gestaoNavMes(delta) {
   if (m > 11) { m = 0; a++; }
   _gestaoMes = m; _gestaoAno = a;
   renderGestao();
+}
+
+// ——— SEMANAL ———
+
+async function _loadGestaoWeekData(){
+  _gestaoWeekData = null;
+  if(!sb||!LOJA||!_gestaoSemIni) return;
+  try{
+    const semFim = _addDays(_gestaoSemIni, 6);
+    const prevIni = _addDays(_gestaoSemIni, -7);
+    const prevFim = _addDays(semFim, -7);
+    const [r1, r2, r3] = await Promise.all([
+      sb.from('checklist_diario').select('venda_salao,venda_delivery,repique').eq('loja',LOJA).gte('data_operacao',_gestaoSemIni).lte('data_operacao',semFim),
+      sb.from('checklist_diario').select('venda_salao,venda_delivery').eq('loja',LOJA).gte('data_operacao',prevIni).lte('data_operacao',prevFim),
+      _gestaoSemIni===state.semanaInicio
+        ? Promise.resolve({data:{carnes:stateWeek.carnes},error:null})
+        : sb.from('checklist_carnes').select('carnes').eq('semana_inicio',_gestaoSemIni).eq('loja',LOJA).maybeSingle()
+    ]);
+    let fat=0, fatAnt=0;
+    (r1.data||[]).forEach(r=>{ fat+=(parseFloat(r.venda_salao)||0)+(parseFloat(r.venda_delivery)||0)+(parseFloat(r.repique)||0); });
+    (r2.data||[]).forEach(r=>{ fatAnt+=(parseFloat(r.venda_salao)||0)+(parseFloat(r.venda_delivery)||0); });
+    const carnes=(r3.data||{}).carnes||{};
+    _gestaoWeekData={fat,fatAnt,carnes,semFim};
+  }catch(e){}
+}
+
+function _renderGestaoSemanal(el){
+  const d=_gestaoWeekData||{fat:0,fatAnt:0,carnes:{},semFim:_addDays(_gestaoSemIni,6)};
+  const hojeStr=hojeLocal();
+  const atEnd=_gestaoSemIni>=(state.semanaInicio||hojeStr);
+  const MESES=['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+  const _lbl=iso=>{ const[y,mo,dd]=iso.split('-'); return `${dd}/${mo}`; };
+  const label=`${_lbl(_gestaoSemIni)} → ${_lbl(d.semFim)}`;
+  const delta=d.fat-d.fatAnt;
+  const deltaPct=d.fatAnt>0?((delta/d.fatAnt)*100).toFixed(1):null;
+  const fatHtml=`<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px">
+    <div style="background:#0f1729;border:1px solid #1c1c3a;border-radius:10px;padding:10px;text-align:center">
+      <div style="font-size:9px;color:#888;text-transform:uppercase;letter-spacing:.4px;margin-bottom:3px">Semana</div>
+      <div style="font-size:15px;font-weight:700;color:#7c83fd;font-family:Consolas,monospace">${_fmtBRL(d.fat)}</div>
+    </div>
+    <div style="background:#0f1729;border:1px solid #1c1c3a;border-radius:10px;padding:10px;text-align:center">
+      <div style="font-size:9px;color:#888;text-transform:uppercase;letter-spacing:.4px;margin-bottom:3px">Sem. Ant.</div>
+      <div style="font-size:15px;font-weight:700;color:#aaa;font-family:Consolas,monospace">${_fmtBRL(d.fatAnt)}</div>
+    </div>
+    <div style="background:#0f1729;border:1px solid #1c1c3a;border-radius:10px;padding:10px;text-align:center">
+      <div style="font-size:9px;color:#888;text-transform:uppercase;letter-spacing:.4px;margin-bottom:3px">Variação</div>
+      <div style="font-size:15px;font-weight:700;font-family:Consolas,monospace;color:${delta>=0?'#4ade80':'#f87171'}">${delta>=0?'+':''}${deltaPct!==null?deltaPct+'%':'—'}</div>
+    </div>
+  </div>`;
+  el.innerHTML=`<div style="max-width:640px;margin:0 auto;padding:14px">
+    ${_gestaoHeaderHtml(label,'_gestaoNavSem(-1)','_gestaoNavSem(1)',atEnd)}
+    ${fatHtml}
+    <div style="font-size:10px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">🥩 Controle de Carnes</div>
+    ${_gestaoCarnesResumoHtml(d.carnes)}
+  </div>`;
+}
+
+function _gestaoNavSem(delta){
+  _gestaoSemIni=_addDays(_gestaoSemIni,delta*7);
+  renderGestao();
+}
+
+function _gestaoCarnesResumoHtml(carnes){
+  if(!carnes||!CARNES_DEF) return '<div style="color:#555;font-size:11px;padding:16px;text-align:center">Sem dados de carnes.</div>';
+  const cards=CARNES_DEF.map(carne=>{
+    const data=carnes[carne.key]||{};
+    let totIni=0,totFim=0;
+    const iniParts=[],fimParts=[];
+    carne.rows.forEach(r=>{
+      const rd=data[r.key]||{};
+      const ini=parseFloat(rd.inicial)||0, fim=parseFloat(rd.contagem_final)||0;
+      totIni+=ini; totFim+=fim;
+      if(ini>0) iniParts.push(r.label+' '+ini.toFixed(1));
+      if(fim>0) fimParts.push(r.label+' '+fim.toFixed(1));
+    });
+    const rawRow=carne.rows.find(r=>r.key==='in_natura'||r.key==='cru')||carne.rows[0];
+    const rawRd=data[rawRow.key]||{};
+    const totEnt=DIAS_SEMANA.slice(1).reduce((a,d)=>a+(parseFloat(rawRd['ent_'+d])||0),0);
+    if(totIni===0&&totEnt===0&&totFim===0) return '';
+    const totDisp=totIni+totEnt, venda=totDisp-totFim;
+    const vCol=venda>=-0.05?'#6bcb77':'#d05050';
+    return `<div style="background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:10px;margin-bottom:8px">
+      <div style="font-size:12px;font-weight:700;color:#E8580A;margin-bottom:8px">${carne.icon} ${carne.label}</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:8px">
+        <div style="background:#1a1a1a;border-radius:6px;padding:7px;text-align:center">
+          <div style="font-size:8px;color:#555;text-transform:uppercase;letter-spacing:.3px;margin-bottom:2px">Início</div>
+          <div style="font-size:13px;font-weight:700;color:#6b9bcb;font-family:Consolas,monospace">${totIni.toFixed(1)}</div>
+          ${iniParts.length?`<div style="font-size:7px;color:#444;margin-top:2px">${iniParts.join(' · ')}</div>`:''}
+        </div>
+        <div style="background:#1a1a1a;border-radius:6px;padding:7px;text-align:center">
+          <div style="font-size:8px;color:#555;text-transform:uppercase;letter-spacing:.3px;margin-bottom:2px">+ Compras</div>
+          <div style="font-size:13px;font-weight:700;color:#6bcb77;font-family:Consolas,monospace">+${totEnt.toFixed(1)}</div>
+          <div style="font-size:7px;color:#444;margin-top:2px">${rawRow.label}</div>
+        </div>
+        <div style="background:#1a1a1a;border-radius:6px;padding:7px;text-align:center">
+          <div style="font-size:8px;color:#555;text-transform:uppercase;letter-spacing:.3px;margin-bottom:2px">− Contagem</div>
+          <div style="font-size:13px;font-weight:700;color:#6b9bcb;font-family:Consolas,monospace">${totFim.toFixed(1)}</div>
+          ${fimParts.length?`<div style="font-size:7px;color:#444;margin-top:2px">${fimParts.join(' · ')}</div>`:''}
+        </div>
+      </div>
+      <div style="background:#1a1a1a;border-radius:6px;padding:8px;display:flex;justify-content:space-between;align-items:center">
+        <div style="font-size:10px;font-weight:700;color:#888">= Venda estimada</div>
+        <div style="font-family:Consolas,monospace;font-size:16px;font-weight:700;color:${vCol}">${Math.abs(venda).toFixed(1)} ${carne.unit}${venda<-0.05?' ⚠':''}</div>
+      </div>
+    </div>`;
+  }).filter(Boolean);
+  return cards.length ? cards.join('') : '<div style="color:#555;font-size:11px;padding:16px;text-align:center">Sem dados preenchidos para esta semana.</div>';
+}
+
+// ——— DIÁRIO ———
+
+async function _loadGestaoDayData(){
+  _gestaoDayRow=null;
+  if(!sb||!LOJA||!_gestaoDataDia) return;
+  try{
+    const{data}=await sb.from('checklist_diario')
+      .select('venda_salao,venda_delivery,repique,dinheiro_caixa,despesas,checklist_pct')
+      .eq('loja',LOJA).eq('data_operacao',_gestaoDataDia).maybeSingle();
+    _gestaoDayRow=data||null;
+  }catch(e){}
+}
+
+function _renderGestaoDay(el){
+  const r=_gestaoDayRow;
+  const hojeStr=hojeLocal();
+  const atEnd=_gestaoDataDia>=hojeStr;
+  const DSEM=['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+  const[y,mo,dd]=_gestaoDataDia.split('-').map(Number);
+  const fw=new Date(y,mo-1,dd).getDay();
+  const label=`${String(dd).padStart(2,'0')}/${String(mo).padStart(2,'0')}/${y} · ${DSEM[fw]}`;
+  const salao=r?parseFloat(r.venda_salao)||0:0;
+  const deliv=r?parseFloat(r.venda_delivery)||0:0;
+  const repiq=r?parseFloat(r.repique)||0:0;
+  const fat=salao+deliv+repiq;
+  const caixa=r?parseFloat(r.dinheiro_caixa)||0:0;
+  const desp=r?(r.despesas||[]).reduce((s,x)=>s+(parseFloat(x.valor)||0),0):0;
+  const chk=r?parseFloat(r.checklist_pct)||0:0;
+  const chkCol=chk>=90?'#4ade80':chk>=70?'#fbbf24':'#f87171';
+  const _card=(lbl,val,col='#e2e8f0')=>`
+    <div style="background:#0f1729;border:1px solid #1c1c3a;border-radius:8px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <div style="font-size:11px;color:#888">${lbl}</div>
+      <div style="font-size:14px;font-weight:700;color:${col};font-family:Consolas,monospace">${val}</div>
+    </div>`;
+  const bodyHtml=!r
+    ?`<div style="background:#0f1729;border:1px solid #1c1c3a;border-radius:10px;padding:24px;text-align:center;color:#555;font-size:12px">Sem dados para este dia.</div>`
+    :`<div>
+      ${_card('🍽️ Salão',_fmtBRL(salao),'#7c83fd')}
+      ${_card('🛵 Delivery',_fmtBRL(deliv),'#7c83fd')}
+      ${repiq>0?_card('🎵 Repique',_fmtBRL(repiq),'#7c83fd'):''}
+      <div style="background:#0f1729;border:1px solid #2a2a5a;border-radius:8px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <div style="font-size:11px;font-weight:700;color:#aaa">Total</div>
+        <div style="font-size:18px;font-weight:700;color:#e2e8f0;font-family:Consolas,monospace">${_fmtBRL(fat)}</div>
+      </div>
+      ${desp>0?_card('📦 Despesas',_fmtBRL(desp),'#f87171'):''}
+      ${caixa>0?_card('💵 Dinheiro em Caixa',_fmtBRL(caixa)):''}
+      ${chk>0?_card('✅ Check-list',chk.toFixed(0)+'%',chkCol):''}
+    </div>`;
+  el.innerHTML=`<div style="max-width:640px;margin:0 auto;padding:14px">
+    ${_gestaoHeaderHtml(label,'_gestaoNavDia(-1)','_gestaoNavDia(1)',atEnd)}
+    ${bodyHtml}
+  </div>`;
+}
+
+function _gestaoNavDia(delta){
+  _gestaoDataDia=_addDays(_gestaoDataDia,delta);
+  renderGestao();
+}
+</script>
+<script>
+// Força atualização do SW em todas as entradas (inclusive acesso direto ao checklist)
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', function(e) {
+    if (e.data && e.data.type === 'GN_SW_UPDATED') window.location.reload();
+  });
+  navigator.serviceWorker.register('/sw.js')
+    .then(function(reg) { reg.update(); })
+    .catch(function() {});
 }
 </script>
 <script>
