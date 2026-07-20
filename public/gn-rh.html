@@ -84,7 +84,7 @@ header{height:var(--hdr-h);border-bottom:1px solid var(--border);background:var(
 
 /* ── BOTTOM NAV ─────────────────────────────────── */
 nav{height:var(--nav-h);border-top:1px solid var(--border);background:var(--surf);
-  display:grid;grid-template-columns:repeat(5,1fr);flex-shrink:0;position:sticky;bottom:0;z-index:10}
+  display:grid;grid-template-columns:repeat(6,1fr);flex-shrink:0;position:sticky;bottom:0;z-index:10}
 .nav-btn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
   font-size:10px;color:var(--muted);padding:6px 0;position:relative;transition:color .15s}
 .nav-btn.ativo{color:var(--accent)}
@@ -284,6 +284,11 @@ nav{height:var(--nav-h);border-top:1px solid var(--border);background:var(--surf
       <span class="nav-icon">🔍</span>
       <span class="nav-label">Comparativo</span>
     </button>
+    <button class="nav-btn" data-tab="avarias" onclick="setTab('avarias')" style="position:relative">
+      <span class="nav-icon">⚠️</span>
+      <span class="nav-label">Avarias</span>
+      <span id="avarias-badge" style="display:none;position:absolute;top:6px;right:14px;background:var(--red);color:#fff;border-radius:10px;font-size:9px;font-weight:800;padding:1px 5px;min-width:16px;text-align:center;line-height:14px"></span>
+    </button>
     <button class="nav-btn" onclick="window.location.href='/gn-comissoes-mestra.html'">
       <span class="nav-icon">👑</span>
       <span class="nav-label">Mestra</span>
@@ -357,6 +362,8 @@ let S = {
   compSemana: null,      // Date (segunda-feira)
   compFotos: [],         // [{loja, semana_ini, ocr_brutos, ...}]
   compComissoes: {},     // {comKey: all_data}
+  // Avarias
+  avariasData: [],       // [{lojaKey, avarias:[...]}]
 };
 
 // ══════════════════════════════════════════════
@@ -1409,6 +1416,167 @@ function setTab(tab) {
   renderContent();
 }
 
+// ══════════════════════════════════════════════
+// DATA — AVARIAS
+// ══════════════════════════════════════════════
+async function carregarAvarias() {
+  const { data, error } = await db.from('gn_lojas')
+    .select('loja,all_data')
+    .in('loja', LOJAS.map(l => l.comKey));
+  if (error) throw error;
+
+  S.avariasData = (data || []).map(row => ({
+    lojaKey: row.loja,
+    avarias: (row.all_data?.avariasAll || {})[row.loja] || [],
+  }));
+
+  // Atualiza badge com contagem de pendentes
+  const pendCount = S.avariasData.reduce((t, d) =>
+    t + d.avarias.filter(a => a.status === 'loja_confirmou').length, 0);
+  const badge = $('avarias-badge');
+  if (badge) {
+    badge.textContent = pendCount;
+    badge.style.display = pendCount > 0 ? 'inline-block' : 'none';
+  }
+}
+
+// ══════════════════════════════════════════════
+// RENDER — AVARIAS (Tab 5)
+// ══════════════════════════════════════════════
+function renderAvarias() {
+  const pendentes = [];
+  const finalizados = [];
+
+  S.avariasData.forEach(({ lojaKey, avarias }) => {
+    const display = LOJAS.find(l => l.comKey === lojaKey)?.display || lojaKey;
+    avarias.forEach(av => {
+      if (av.status === 'loja_confirmou') pendentes.push({ ...av, lojaKey, display });
+      else if (av.status === 'finalizado') finalizados.push({ ...av, lojaKey, display });
+    });
+  });
+
+  pendentes.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
+  finalizados.sort((a, b) => (b.rh_conf_ts || b.ts || '').localeCompare(a.rh_conf_ts || a.ts || ''));
+
+  const fmtTs = iso => iso
+    ? new Date(iso).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+    : '—';
+  const fmtR = v => 'R$ ' + (parseFloat(v) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  let html = `
+    <div class="sec-header">
+      <div>
+        <div class="sec-title">⚠️ Avarias / Desperdício</div>
+        <div class="sec-sub">Validação de pagamentos — RH / Financeiro</div>
+      </div>
+    </div>`;
+
+  if (pendentes.length === 0 && finalizados.length === 0) {
+    html += `<div class="empty"><div class="empty-icon">✅</div><div class="empty-text">Nenhuma avaria registrada</div></div>`;
+    $('content').innerHTML = html;
+    return;
+  }
+
+  if (pendentes.length > 0) {
+    html += `<div style="font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--amber);margin-bottom:8px">
+      Aguardando confirmação RH (${pendentes.length})
+    </div>`;
+    html += pendentes.map(av => `
+      <div class="card" style="margin-bottom:8px;border-left:3px solid var(--amber)">
+        <div class="card-body">
+          <div style="display:flex;justify-content:space-between;align-items:start;gap:8px;margin-bottom:8px">
+            <div>
+              <div style="font-size:12px;font-weight:800">${av.display}</div>
+              <div style="font-size:10px;color:var(--muted)">${fmtTs(av.ts)}</div>
+            </div>
+            <span class="badge badge-warn">Aguard. RH</span>
+          </div>
+          <div style="font-size:14px;font-weight:700;margin-bottom:6px">${av.insumo}</div>
+          <div style="display:flex;gap:16px;font-size:12px;color:var(--muted);margin-bottom:6px;flex-wrap:wrap">
+            <span>Qtd: <b style="color:var(--text)">${(parseFloat(av.qtd) || 0).toFixed(3)}</b></span>
+            <span>Unit: <b style="color:var(--text)">${fmtR(av.custoUnit)}</b></span>
+            <span>Total: <b style="color:var(--red)">${fmtR(av.valorTotal)}</b></span>
+          </div>
+          <div style="font-size:10px;color:var(--muted);margin-bottom:10px;padding:6px 8px;background:var(--surf2);border-radius:var(--rs)">
+            🏪 Confirmado pela loja: <b>${av.loja_conf_por || '—'}</b>
+            ${av.loja_conf_ts ? ' · ' + fmtTs(av.loja_conf_ts) : ''}
+          </div>
+          <button onclick="confirmarAvariaRH('${av.lojaKey}','${av.id}')"
+            style="width:100%;background:var(--green-bg);border:1px solid rgba(63,185,80,.4);border-radius:var(--rs);padding:10px;color:var(--green);font-size:13px;font-weight:700;cursor:pointer">
+            ✅ Confirmar Pagamento — RH/Financeiro
+          </button>
+        </div>
+      </div>`).join('');
+  } else {
+    html += `<div class="card" style="margin-bottom:12px">
+      <div class="card-body" style="text-align:center;padding:20px">
+        <div style="font-size:28px;margin-bottom:6px">✅</div>
+        <div style="font-size:13px;font-weight:700;color:var(--green)">Nenhuma avaria pendente</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">Todas confirmadas pelo RH</div>
+      </div>
+    </div>`;
+  }
+
+  if (finalizados.length > 0) {
+    html += `<div class="divider"></div>
+      <div style="font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin-bottom:8px">
+        Histórico confirmados (${Math.min(finalizados.length, 20)})
+      </div>`;
+    html += finalizados.slice(0, 20).map(av => `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);gap:8px">
+        <div style="min-width:0;flex:1">
+          <div style="font-size:11px;font-weight:700;color:var(--muted)">${av.display}</div>
+          <div style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${av.insumo}</div>
+          <div style="font-size:10px;color:var(--muted)">RH: ${av.rh_conf_por || '—'} · ${fmtTs(av.rh_conf_ts)}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <div style="font-size:13px;font-weight:700;color:var(--red);font-variant-numeric:tabular-nums">${fmtR(av.valorTotal)}</div>
+          <span class="badge badge-ok" style="margin-top:3px">Finalizado</span>
+        </div>
+      </div>`).join('');
+  }
+
+  $('content').innerHTML = html;
+}
+
+// ══════════════════════════════════════════════
+// ACTION — CONFIRMAR AVARIA (RH)
+// ══════════════════════════════════════════════
+async function confirmarAvariaRH(lojaKey, avId) {
+  if (!confirm('Confirmar o pagamento desta avaria pelo RH/Financeiro?')) return;
+  try {
+    // Lê o registro atual da loja
+    const { data: rows, error } = await db.from('gn_lojas')
+      .select('loja,all_data').eq('loja', lojaKey);
+    if (error) throw error;
+    const row = (rows || [])[0];
+    if (!row) throw new Error('Loja não encontrada');
+
+    const allData = JSON.parse(JSON.stringify(row.all_data || {}));
+    const avarias = (allData.avariasAll || {})[lojaKey] || [];
+    const idx = avarias.findIndex(a => a.id === avId);
+    if (idx < 0) throw new Error('Avaria não encontrada');
+    if (avarias[idx].status !== 'loja_confirmou') { toast('Loja precisa confirmar antes', 'err'); return; }
+
+    avarias[idx].status = 'finalizado';
+    avarias[idx].rh_conf_por = S.usuario?.nome || 'RH';
+    avarias[idx].rh_conf_ts = new Date().toISOString();
+    if (!allData.avariasAll) allData.avariasAll = {};
+    allData.avariasAll[lojaKey] = avarias;
+
+    const { error: e2 } = await db.from('gn_lojas')
+      .update({ all_data: allData, updated_at: new Date().toISOString(), updated_by: S.usuario?.nome || 'RH' })
+      .eq('loja', lojaKey);
+    if (e2) throw e2;
+
+    toast('✅ Pagamento confirmado pelo RH!', 'ok');
+    await carregarAvarias();
+    renderAvarias();
+  } catch(e) {
+    toast('Erro: ' + e.message, 'err');
+  }
+}
+
 function renderContent() {
   $('content').innerHTML = `<div class="empty"><div class="spin"></div></div>`;
   Promise.resolve().then(async () => {
@@ -1417,6 +1585,7 @@ function renderContent() {
       if (S.tab === 'financeiro')  { await carregarFinanceiro();  renderFinanceiro();   }
       if (S.tab === 'rh')          { await carregarRH();          renderRH();           }
       if (S.tab === 'comparativo') { await carregarComparativo(); renderComparativo();  }
+      if (S.tab === 'avarias')     { await carregarAvarias();     renderAvarias();      }
     } catch(e) {
       $('content').innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-text">Erro ao carregar: ${e.message}</div></div>`;
     }
@@ -1961,7 +2130,7 @@ async function iniciarApp() {
 
   // Ir para a primeira aba permitida
   const primeiraAba = S.abasPermitidas
-    ? (['operacoes','financeiro','rh','comparativo'].find(t => S.abasPermitidas.has(t)) || 'operacoes')
+    ? (['operacoes','financeiro','rh','comparativo','avarias'].find(t => S.abasPermitidas.has(t)) || 'operacoes')
     : 'operacoes';
   setTab(primeiraAba);
 }
