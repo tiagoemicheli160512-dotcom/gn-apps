@@ -3181,6 +3181,42 @@ async function saveAll(){
           }
         }catch(_){}
       }
+
+      // Auto-heal: se a semana anterior ainda tem contagem_final vazia e a semana atual
+      // tem inicial preenchido, propaga inicial → contagem_final da semana anterior.
+      // Cobre casos onde o contagem_final foi limpo antes de propagar (ex. Boulevard).
+      try{
+        const _inicialTemValor=CARNES_DEF.some(c=>
+          c.rows.some(r=>(stateWeek.carnes[c.key]?.[r.key]?.inicial||'')!=='')
+        );
+        if(_inicialTemValor){
+          const dPrevH=new Date(state.semanaInicio+'T12:00:00');
+          dPrevH.setDate(dPrevH.getDate()-7);
+          const prevIniH=dPrevH.toISOString().slice(0,10);
+          const {data:prevRowH}=await sb.from('checklist_carnes')
+            .select('carnes,semana_fim').eq('semana_inicio',prevIniH).eq('loja',LOJA).single();
+          if(prevRowH){
+            const carnesPrevH=JSON.parse(JSON.stringify(prevRowH.carnes||{}));
+            let _propagouH=false;
+            CARNES_DEF.forEach(c=>{
+              if(!carnesPrevH[c.key]) carnesPrevH[c.key]={};
+              c.rows.forEach(r=>{
+                if((carnesPrevH[c.key][r.key]?.contagem_final||'')!=='') return;
+                const val=stateWeek.carnes[c.key]?.[r.key]?.inicial;
+                if(val===undefined||val===null||val==='') return;
+                if(!carnesPrevH[c.key][r.key]) carnesPrevH[c.key][r.key]={};
+                carnesPrevH[c.key][r.key].contagem_final=val;
+                _propagouH=true;
+              });
+            });
+            if(_propagouH){
+              await sb.from('checklist_carnes').upsert({
+                semana_inicio:prevIniH, semana_fim:prevRowH.semana_fim, loja:LOJA, carnes:carnesPrevH
+              },{onConflict:'semana_inicio,loja'});
+            }
+          }
+        }
+      }catch(_){}
     }
 
     const agora=new Date();
