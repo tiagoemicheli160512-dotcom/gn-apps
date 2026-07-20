@@ -3115,9 +3115,10 @@ async function saveAll(){
       },{onConflict:'semana_inicio,loja'});
       if(e2) throw e2;
 
-      // Se esta semana tem contagem_final, propaga em duas direções:
+      // Se esta semana tem contagem_final, propaga em três direções:
       // 1) como inicial da MESMA semana (se ainda vazio) — contagem da segunda-feira abre a semana atual
-      // 2) como inicial da SEMANA SEGUINTE (se ainda vazio) — para semanas futuras
+      // 2) como contagem_final da SEMANA ANTERIOR (se ainda vazio) — fecha o resumo da semana passada
+      // 3) como inicial da SEMANA SEGUINTE (se ainda vazio) — para semanas futuras
       const _temContagemFinal = CARNES_DEF.some(c=>
         c.rows.some(r=>(stateWeek.carnes[c.key]?.[r.key]?.contagem_final||'')!=='')
       );
@@ -3140,7 +3141,6 @@ async function saveAll(){
               });
             });
             if(mudou){
-              // Re-salva com inicial preenchido
               await sb.from('checklist_carnes').upsert({
                 semana_inicio: state.semanaInicio, semana_fim: state.semanaFim,
                 loja: LOJA, carnes: stateWeek.carnes, fat: {...stateWeek.fat, meta: stateWeek.metaSemanal}
@@ -3149,7 +3149,38 @@ async function saveAll(){
             }
           }
 
-          // 2) Propaga para inicial da SEMANA SEGUINTE se estiver vazio
+          // 2) Propaga como contagem_final da SEMANA ANTERIOR (fecha o Resumo daquela semana)
+          const dPrev=new Date(state.semanaInicio+'T12:00:00');
+          dPrev.setDate(dPrev.getDate()-7);
+          const prevIni=dPrev.toISOString().slice(0,10);
+          const {data:prevRow}=await sb.from('checklist_carnes')
+            .select('carnes,semana_fim').eq('semana_inicio',prevIni).eq('loja',LOJA).single();
+          if(prevRow){
+            const prevContagemVazio = CARNES_DEF.every(c=>
+              c.rows.every(r=>(prevRow.carnes?.[c.key]?.[r.key]?.contagem_final||'')==='')
+            );
+            if(prevContagemVazio){
+              const carnesPrev=JSON.parse(JSON.stringify(prevRow.carnes||{}));
+              let propagouPrev=false;
+              CARNES_DEF.forEach(c=>{
+                if(!carnesPrev[c.key]) carnesPrev[c.key]={};
+                c.rows.forEach(r=>{
+                  const val=stateWeek.carnes[c.key]?.[r.key]?.contagem_final;
+                  if(val===undefined||val===null||val==='') return;
+                  if(!carnesPrev[c.key][r.key]) carnesPrev[c.key][r.key]={};
+                  carnesPrev[c.key][r.key].contagem_final=val;
+                  propagouPrev=true;
+                });
+              });
+              if(propagouPrev){
+                await sb.from('checklist_carnes').upsert({
+                  semana_inicio:prevIni, semana_fim:prevRow.semana_fim, loja:LOJA, carnes:carnesPrev
+                },{onConflict:'semana_inicio,loja'});
+              }
+            }
+          }
+
+          // 3) Propaga para inicial da SEMANA SEGUINTE se estiver vazio
           const dNext=new Date(state.semanaInicio+'T12:00:00');
           dNext.setDate(dNext.getDate()+7);
           const nextIni=dNext.toISOString().slice(0,10);
