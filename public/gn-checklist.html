@@ -6,10 +6,10 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>GN Check-list v112</title>
+<title>GN Check-list v113</title>
 <script>
 (function(){
-  var V=95;
+  var V=96;
   try{
     var s=parseInt(localStorage.getItem('gn_chk_page_ver')||'0');
     if(s<V){
@@ -217,6 +217,15 @@
   input[type=date]:focus { background: #fff !important; border-color: var(--gn) !important; }
   input[type=time] { background: #fff !important; color: #1a1a2e !important; color-scheme: light; }
   input[type=time]:focus { background: #fff !important; border-color: var(--gn) !important; }
+  /* Visita fechada — bloqueia edição */
+  #tab-supervisao.sup-fechada input:not(#sup-busca):not([type=range]):not([type=file]),
+  #tab-supervisao.sup-fechada textarea {
+    pointer-events: none; opacity: 0.65; background: var(--s3) !important;
+  }
+  #tab-supervisao.sup-fechada input[type=range],
+  #tab-supervisao.sup-fechada .sup-nota-btn {
+    pointer-events: none; opacity: 0.45; cursor: not-allowed;
+  }
   input[type=file] {
     background: var(--s3);
     border: 1px dashed var(--b2);
@@ -1434,6 +1443,24 @@
     <div id="sup-plano-lista"></div>
   </div>
 
+  <!-- Banner: Visita Encerrada -->
+  <div id="sup-fechada-banner" style="display:none;background:var(--s3);border:2px solid var(--gn);border-radius:12px;padding:16px;margin-bottom:12px;text-align:center;">
+    <div style="font-size:20px;margin-bottom:6px;">🔒</div>
+    <div style="font-size:14px;font-weight:800;color:var(--t1);margin-bottom:4px;">Visita Encerrada</div>
+    <div id="sup-fechada-info" style="font-size:12px;color:var(--t3);margin-bottom:14px;"></div>
+    <button onclick="reabrirVisita()" style="background:var(--s4);border:1px solid var(--b2);color:var(--t2);font-size:12px;font-weight:700;padding:8px 18px;border-radius:8px;cursor:pointer;">🔓 Reabrir Visita</button>
+  </div>
+
+  <!-- Botão Fechar Visita -->
+  <div id="sup-fechar-btn-wrap" style="padding-bottom:16px;">
+    <button onclick="fecharVisita()"
+      style="width:100%;background:transparent;border:2px solid var(--red);color:var(--red);
+             font-size:13px;font-weight:700;padding:12px;border-radius:10px;cursor:pointer;
+             display:flex;align-items:center;justify-content:center;gap:8px;">
+      🔒 Fechar Visita
+    </button>
+  </div>
+
 </div>
 
 <!-- CALCULADORA DE CARNES -->
@@ -1991,7 +2018,7 @@ let state = {
   faltasFuncionarios:[], faltas:[], manutencao:[],
   supervisao: {
     supervisor:'', responsavel:'', data:'', hora:'', hora_chegada:'', hora_fim:'', obs:'',
-    itens:{}, notaFinal:null
+    itens:{}, notaFinal:null, fechada:false, fechada_em:'', fechada_por:''
   }
 };
 
@@ -2068,6 +2095,7 @@ function applySemana(inicio, fim){
 // Declarações globais usadas pelo init e checkSavedSession (devem vir antes do init IIFE)
 let usuarioLogado = null;
 let supDesbloqueado = false;
+let _supLockMode = 'access'; // 'access' | 'reabrir'
 
 (async function init(){
   // 1) Bridge de sessionStorage (vem do home/Dashboard — mesmo mecanismo do estoque)
@@ -5532,8 +5560,25 @@ function renderSupervisao(){
   const container = document.getElementById('sup-setores-container');
   if(!container) return;
 
-  // Restaurar campos
+  // Estado fechado
   const s = state.supervisao;
+  const fechada = !!s.fechada;
+  const tabEl = document.getElementById('tab-supervisao');
+  if(tabEl) fechada ? tabEl.classList.add('sup-fechada') : tabEl.classList.remove('sup-fechada');
+  const banner = document.getElementById('sup-fechada-banner');
+  const btnWrap = document.getElementById('sup-fechar-btn-wrap');
+  if(banner) banner.style.display = fechada ? 'block' : 'none';
+  if(btnWrap) btnWrap.style.display = fechada ? 'none' : 'block';
+  if(fechada){
+    const infoEl = document.getElementById('sup-fechada-info');
+    if(infoEl){
+      const por = s.fechada_por ? 'por ' + s.fechada_por.split(' ')[0] : '';
+      const hora = s.fechada_em ? new Date(s.fechada_em).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}) : '';
+      infoEl.textContent = ['Encerrada', por, hora ? 'às '+hora : ''].filter(Boolean).join(' ');
+    }
+  }
+
+  // Restaurar campos
   const elSup = document.getElementById('sup-supervisor');
   const elRes = document.getElementById('sup-responsavel');
   const elDat = document.getElementById('sup-data');
@@ -5591,7 +5636,7 @@ function renderSupervisao(){
         <!-- Toque rápido -->
         <div style="display:flex;gap:4px;margin-top:8px;flex-wrap:wrap;">
           ${[0,5,6,7,8,9,10].map(n=>`
-            <button onclick="updateSupNota('${setor.key}','${item.key}','${n}');renderSupervisao()"
+            <button class="sup-nota-btn" onclick="updateSupNota('${setor.key}','${item.key}','${n}');renderSupervisao()"
               style="flex:1;min-width:28px;padding:5px 2px;border:1px solid ${hasVal&&nota===n?notaColor:'var(--b1)'};
                 border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;
                 background:${hasVal&&nota===n?notaColor+'22':'var(--s3)'};
@@ -5668,6 +5713,39 @@ function updateSupField(){
   autoSave();
   // Gravar horários imediatamente no servidor (não esperar o timer de 30s)
   if(state.supervisao.hora_chegada || state.supervisao.hora_fim) saveAll();
+}
+
+function fecharVisita(){
+  if(!confirm('Encerrar a visita?\nApós fechar, edições só serão possíveis com senha de supervisor.')) return;
+  state.supervisao.fechada    = true;
+  state.supervisao.fechada_em = new Date().toISOString();
+  state.supervisao.fechada_por = usuarioLogado?.nome || state.supervisao.supervisor || '';
+  autoSave();
+  saveAll();
+  renderSupervisao();
+  showToast('🔒 Visita encerrada com sucesso', 'success');
+}
+
+function reabrirVisita(){
+  // Se já é supervisor logado, abre com confirmação simples
+  if(usuarioLogado && usuarioLogado.cargo === 'supervisor'){
+    if(!confirm('Reabrir a visita para edição?')) return;
+    state.supervisao.fechada    = false;
+    state.supervisao.fechada_em = '';
+    state.supervisao.fechada_por = '';
+    autoSave();
+    saveAll();
+    renderSupervisao();
+    showToast('🔓 Visita reaberta', 'info');
+    return;
+  }
+  // Caso contrário, exige login de supervisor
+  _supLockMode = 'reabrir';
+  document.getElementById('sup-error').classList.remove('visible');
+  document.getElementById('sup-user').value = '';
+  document.getElementById('sup-pass').value = '';
+  document.getElementById('sup-lock').classList.add('visible');
+  setTimeout(()=>document.getElementById('sup-user').focus(), 200);
 }
 
 function updateNotaDisplay(){
@@ -6442,8 +6520,10 @@ function openSupervisorLock(){
 
 function closeSupervisorLock(){
   document.getElementById('sup-lock').classList.remove('visible');
-  // Voltar para aba dados se não desbloqueou
-  if(!supDesbloqueado){
+  const wasReabrir = _supLockMode === 'reabrir';
+  _supLockMode = 'access';
+  // Voltar para aba dados se não desbloqueou (só no modo acesso normal)
+  if(!supDesbloqueado && !wasReabrir){
     switchTab('dados', document.querySelector('.tab-btn'));
   }
 }
@@ -6472,17 +6552,29 @@ async function doSupLogin(){
     if(data.cargo) data.cargo = data.cargo.toLowerCase();
     usuarioLogado = data;
     document.getElementById('sup-lock').classList.remove('visible');
-    showToast('🎯 Modo supervisão ativado — ' + data.nome.split(' ')[0], 'info');
-    // Adicionar badge supervisor se não existir
-    const syncLabel = document.getElementById('sync-label');
-    if(syncLabel && !syncLabel.parentElement.querySelector('.sup-badge')){
-      const span=document.createElement('span');
-      span.className='sup-badge';
-      span.style.cssText='margin-left:6px;background:var(--gn-dim);color:var(--gn);font-size:9px;padding:1px 6px;border-radius:4px;font-weight:700;';
-      span.textContent='SUPERVISOR';
-      syncLabel.parentElement.appendChild(span);
+
+    if(_supLockMode === 'reabrir'){
+      _supLockMode = 'access';
+      state.supervisao.fechada    = false;
+      state.supervisao.fechada_em = '';
+      state.supervisao.fechada_por = '';
+      autoSave();
+      saveAll();
+      renderSupervisao();
+      showToast('🔓 Visita reaberta — ' + data.nome.split(' ')[0], 'info');
+    } else {
+      showToast('🎯 Modo supervisão ativado — ' + data.nome.split(' ')[0], 'info');
+      // Adicionar badge supervisor se não existir
+      const syncLabel = document.getElementById('sync-label');
+      if(syncLabel && !syncLabel.parentElement.querySelector('.sup-badge')){
+        const span=document.createElement('span');
+        span.className='sup-badge';
+        span.style.cssText='margin-left:6px;background:var(--gn-dim);color:var(--gn);font-size:9px;padding:1px 6px;border-radius:4px;font-weight:700;';
+        span.textContent='SUPERVISOR';
+        syncLabel.parentElement.appendChild(span);
+      }
+      renderSupervisao();
     }
-    renderSupervisao();
 
   }catch(e){
     errEl.textContent='Erro de conexão.';
