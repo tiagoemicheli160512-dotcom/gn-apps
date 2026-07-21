@@ -343,6 +343,8 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   <button class="sidebar-link" data-sidebar-tab="entrega" onclick="setTab('entrega')"><span class="sl-icon">🚚</span>Entrega</button>
   <button class="sidebar-link" data-sidebar-tab="fichas" onclick="setTab('fichas')"><span class="sl-icon">📝</span>Fichas</button>
   <button class="sidebar-link" data-sidebar-tab="faltas-dia" onclick="setTab('faltas-dia')"><span class="sl-icon">⚠️</span>Faltas<span id="sl-faltas-badge" style="display:none;margin-left:5px;background:#ef4444;color:#fff;font-size:9px;font-weight:800;padding:1px 5px;border-radius:8px;vertical-align:middle"></span></button>
+  <div class="sidebar-section">Gestão</div>
+  <button class="sidebar-link" data-sidebar-tab="carnes" onclick="setTab('carnes')"><span class="sl-icon">🥩</span>Controle de Carnes</button>
 </nav>
 
 <div id="splash"><div class="spin"></div><span style="font-size:12px;color:var(--muted)">Carregando...</span></div>
@@ -416,6 +418,10 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
       <span id="nav-faltas-badge" style="display:none;position:absolute;top:5px;right:calc(50% - 20px);background:#ef4444;color:#fff;font-size:9px;font-weight:800;min-width:16px;height:16px;border-radius:8px;line-height:16px;text-align:center;padding:0 3px"></span>
       <span class="nav-label">Faltas</span>
     </button>
+    <button class="nav-btn" data-tab="carnes" onclick="setTab('carnes')">
+      <span class="nav-icon">🥩</span>
+      <span class="nav-label">Carnes</span>
+    </button>
   </nav>
 </div>
 
@@ -437,6 +443,29 @@ const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsI
 const SESSION_KEY = 'gn_session_v1';
 const TTL = 43200000;
 const DIAS_SEMANA = ['DOM','SEG','TER','QUA','QUI','SEX','SAB'];
+
+const CARNES_DEF_PED = [
+  { key:'carne_sol',  label:'Carne de Sol', icon:'🥩', unit:'kg', rows:[
+    {key:'pronta',    label:'Pronta'},
+    {key:'in_natura', label:'In Natura'},
+    {key:'na_salga',  label:'Na Salga'}
+  ]},
+  { key:'picanha',    label:'Picanha',      icon:'🥩', unit:'kg', rows:[
+    {key:'pronta',    label:'Pronta'},
+    {key:'in_natura', label:'In Natura'},
+    {key:'na_salga',  label:'Na Salga'}
+  ]},
+  { key:'carne_seca', label:'Carne Seca',   icon:'🥩', unit:'kg', rows:[
+    {key:'pronta',    label:'Pronta'},
+    {key:'in_natura', label:'In Natura'},
+    {key:'na_salga',  label:'Na Salga'}
+  ]},
+  { key:'camarao',    label:'Camarão',      icon:'🦐', unit:'kg', rows:[
+    {key:'cru',      label:'Cru'},
+    {key:'recheio',  label:'Recheio'}
+  ]}
+];
+const DIAS_SEM_PED = ['seg','ter','qua','qui','sex','sab','dom'];
 
 const db = supabase.createClient(SUPA_URL, SUPA_KEY);
 
@@ -525,6 +554,10 @@ let S = {
   pedidoItens: {},     // { catalogoId: { lojaSlug: { id, qtd } } }
   contagens:   {},     // { catalogoId: { lojaSlug: { atual, ul_estoque, ul_pedido } } }
   ultimoPedido:{},     // { catalogoId: { lojaSlug: qtd } } — semana anterior
+
+  // Carnes
+  carnesLoja: null,
+  carnesSemana: null,
 
   // Filtros pedido
   lojaAtiva: null,
@@ -1165,6 +1198,7 @@ function renderContent() {
     case 'entrega':     renderEntrega(); break;
     case 'fichas':      renderFichas(); break;
     case 'faltas-dia':  renderFaltaDia(); break;
+    case 'carnes':      renderCarnesCtrl(); break;
   }
 }
 
@@ -2794,7 +2828,7 @@ async function iniciarApp() {
     const _sess = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
     const abasArr = _sess && _sess.permissoes && _sess.permissoes.pedidos_abas;
     S.abasPermitidas = Array.isArray(abasArr) ? new Set(abasArr) : null;
-    const ALL_TABS = ['pedido','catalogo','fornecedores','provisoes','entrega','fichas','faltas-dia'];
+    const ALL_TABS = ['pedido','catalogo','fornecedores','provisoes','entrega','fichas','faltas-dia','carnes'];
     ALL_TABS.forEach(t => {
       const hidden = S.abasPermitidas && !S.abasPermitidas.has(t);
       document.querySelectorAll(`.sidebar-link[data-sidebar-tab="${t}"], .nav-btn[data-tab="${t}"]`).forEach(b => {
@@ -3094,6 +3128,159 @@ function renderFichas() {
     const cont = document.getElementById('fichaLinhas');
     if (cont && cont.children.length === 0) adicionarLinhaFicha();
   }, 50);
+}
+
+// ═══════════════════════════════════════════════
+// RENDER: CONTROLE DE CARNES
+// ═══════════════════════════════════════════════
+async function renderCarnesCtrl() {
+  $('content').innerHTML = '<div class="empty"><div class="spin"></div></div>';
+
+  if (!S.carnesSemana) S.carnesSemana = getMondayOfWeek();
+  if (!S.carnesLoja) S.carnesLoja = S.lojaAtiva || (S.lojas[0]?.slug_pedido);
+
+  const sem = formatarSemana(S.carnesSemana);
+  const mondayHoje = getMondayOfWeek();
+  const podeAvancar = S.carnesSemana < mondayHoje;
+  const semIni = S.carnesSemana.toISOString().slice(0, 10);
+
+  const lojaObj = S.lojas.find(l => l.slug_pedido === S.carnesLoja);
+  const lojaChecklist = lojaObj?.loja || S.carnesLoja;
+
+  let carnesData = null;
+  try {
+    const { data } = await db.from('checklist_carnes')
+      .select('carnes,semana_fim')
+      .eq('semana_inicio', semIni)
+      .eq('loja', lojaChecklist)
+      .maybeSingle();
+    carnesData = data?.carnes || null;
+  } catch(e) {}
+
+  const lojaTabsHtml = S.lojas.map(l =>
+    `<button class="store-tab${S.carnesLoja === l.slug_pedido ? ' ativo' : ''}"
+      onclick="S.carnesLoja='${l.slug_pedido}';renderCarnesCtrl()">${l.nome_display}</button>`
+  ).join('');
+
+  const semNavHtml = `
+    <div class="semana-nav">
+      <button class="semana-nav-arrow" onclick="_carnesNavSemana(-1)">‹</button>
+      <div class="semana-info">
+        <div class="semana-label">SEMANA ${sem.num} · ${sem.ano}</div>
+        <div class="semana-periodo">${sem.periodo}</div>
+        ${sem.ehAtual
+          ? '<div class="semana-atual-badge">▶ SEMANA ATUAL</div>'
+          : '<div class="semana-atual-badge" style="color:var(--muted)">semana passada</div>'}
+      </div>
+      <button class="semana-nav-arrow" onclick="_carnesNavSemana(1)" ${!podeAvancar ? 'disabled style="opacity:.3"' : ''}>›</button>
+    </div>`;
+
+  window._carnesRelatorio = function() {
+    if (!carnesData) { toast('Sem dados para relatório.'); return; }
+    const lojaDisplayNome = lojaObj?.nome_display || lojaChecklist;
+    let txt = `🥩 *GN — Controle de Carnes*\n🏪 ${lojaDisplayNome} · ${sem.periodo}\n\n`;
+    CARNES_DEF_PED.forEach(carne => {
+      const d = carnesData[carne.key] || {};
+      let totIni = 0, totEnt = 0, totFim = 0;
+      carne.rows.forEach(r => {
+        const rd = d[r.key] || {};
+        totIni += parseFloat(rd.inicial) || 0;
+        totFim += parseFloat(rd.contagem_final) || 0;
+      });
+      const rawRow = carne.rows.find(r => r.key === 'in_natura' || r.key === 'cru') || carne.rows[0];
+      const rawRd = d[rawRow.key] || {};
+      totEnt = DIAS_SEM_PED.reduce((a, dia) => a + (parseFloat(rawRd['ent_' + dia]) || 0), 0);
+      if (totIni === 0 && totEnt === 0 && totFim === 0) return;
+      const venda = totIni + totEnt - totFim;
+      txt += `${carne.icon} *${carne.label}*\n`;
+      txt += `  Início: ${totIni.toFixed(1)} ${carne.unit}\n`;
+      txt += `  + Compras: +${totEnt.toFixed(1)} ${carne.unit}\n`;
+      txt += `  − Contagem: ${totFim.toFixed(1)} ${carne.unit}\n`;
+      txt += `  = Venda estimada: ${venda.toFixed(1)} ${carne.unit}${venda < -0.05 ? ' ⚠️' : ''}\n\n`;
+    });
+    txt += `_Gerado em ${new Date().toLocaleString('pt-BR')}_`;
+    if (navigator.share && navigator.canShare({ text: txt })) {
+      navigator.share({ text: txt }).catch(() => window.open('https://wa.me/?text=' + encodeURIComponent(txt), '_blank'));
+    } else {
+      window.open('https://wa.me/?text=' + encodeURIComponent(txt), '_blank');
+    }
+  };
+
+  const cardsHtml = _carnesCardsHtml(carnesData);
+  const temDados = carnesData && cardsHtml.indexOf('empty') === -1;
+
+  $('content').innerHTML = `
+    <div class="sec-header">
+      <div class="sec-titulo">Controle de Carnes</div>
+      <button onclick="renderCarnesCtrl()" style="padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:none;color:var(--muted);font-size:11px;cursor:pointer">↻</button>
+    </div>
+    <div class="store-tabs" style="margin-bottom:12px">${lojaTabsHtml}</div>
+    ${semNavHtml}
+    ${carnesData
+      ? cardsHtml
+      : `<div class="empty" style="padding:30px 0"><div class="empty-icon">🥩</div><div class="empty-texto">Nenhum dado de carnes nesta semana.</div></div>`}
+    ${carnesData ? `
+    <button onclick="window._carnesRelatorio()" style="margin-top:12px;width:100%;background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);border-radius:11px;padding:12px;color:#22c55e;font-weight:800;font-size:13px;display:flex;align-items:center;justify-content:center;gap:6px;cursor:pointer">
+      📲 Enviar Relatório por WhatsApp
+    </button>` : ''}
+  `;
+}
+
+window._carnesNavSemana = function(dir) {
+  const d = new Date(S.carnesSemana);
+  d.setDate(d.getDate() + dir * 7);
+  if (d > getMondayOfWeek()) return;
+  S.carnesSemana = d;
+  renderCarnesCtrl();
+};
+
+function _carnesCardsHtml(carnes) {
+  if (!carnes) return '';
+  const cards = CARNES_DEF_PED.map(carne => {
+    const d = carnes[carne.key] || {};
+    let totIni = 0, totFim = 0;
+    const iniParts = [], fimParts = [];
+    carne.rows.forEach(r => {
+      const rd = d[r.key] || {};
+      const ini = parseFloat(rd.inicial) || 0, fim = parseFloat(rd.contagem_final) || 0;
+      totIni += ini; totFim += fim;
+      if (ini > 0) iniParts.push(r.label + ' ' + ini.toFixed(1));
+      if (fim > 0) fimParts.push(r.label + ' ' + fim.toFixed(1));
+    });
+    const rawRow = carne.rows.find(r => r.key === 'in_natura' || r.key === 'cru') || carne.rows[0];
+    const rawRd = d[rawRow.key] || {};
+    const totEnt = DIAS_SEM_PED.reduce((a, dia) => a + (parseFloat(rawRd['ent_' + dia]) || 0), 0);
+    if (totIni === 0 && totEnt === 0 && totFim === 0) return '';
+    const venda = totIni + totEnt - totFim;
+    const vCol = venda >= -0.05 ? '#6bcb77' : '#d05050';
+    return `<div style="background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:12px;margin-bottom:10px">
+      <div style="font-size:13px;font-weight:700;color:var(--primary);margin-bottom:10px">${carne.icon} ${carne.label}</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px">
+        <div style="background:var(--card2);border-radius:8px;padding:8px;text-align:center">
+          <div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px">Início</div>
+          <div style="font-size:14px;font-weight:700;color:#6b9bcb;font-variant-numeric:tabular-nums">${totIni.toFixed(1)}</div>
+          ${iniParts.length ? `<div style="font-size:8px;color:var(--muted);margin-top:2px">${iniParts.join(' · ')}</div>` : ''}
+        </div>
+        <div style="background:var(--card2);border-radius:8px;padding:8px;text-align:center">
+          <div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px">+ Compras</div>
+          <div style="font-size:14px;font-weight:700;color:#6bcb77;font-variant-numeric:tabular-nums">+${totEnt.toFixed(1)}</div>
+          <div style="font-size:8px;color:var(--muted);margin-top:2px">${rawRow.label}</div>
+        </div>
+        <div style="background:var(--card2);border-radius:8px;padding:8px;text-align:center">
+          <div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px">− Contagem</div>
+          <div style="font-size:14px;font-weight:700;color:#6b9bcb;font-variant-numeric:tabular-nums">${totFim.toFixed(1)}</div>
+          ${fimParts.length ? `<div style="font-size:8px;color:var(--muted);margin-top:2px">${fimParts.join(' · ')}</div>` : ''}
+        </div>
+      </div>
+      <div style="background:var(--card2);border-radius:8px;padding:10px;display:flex;justify-content:space-between;align-items:center">
+        <div style="font-size:11px;font-weight:700;color:var(--muted)">= Venda estimada</div>
+        <div style="font-size:17px;font-weight:700;color:${vCol};font-variant-numeric:tabular-nums">${Math.abs(venda).toFixed(1)} ${carne.unit}${venda < -0.05 ? ' ⚠️' : ''}</div>
+      </div>
+    </div>`;
+  }).filter(Boolean);
+  return cards.length
+    ? cards.join('')
+    : `<div class="empty" style="padding:30px 0"><div class="empty-icon">🥩</div><div class="empty-texto">Sem dados preenchidos para esta semana.</div></div>`;
 }
 
 async function init() {
