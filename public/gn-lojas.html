@@ -3316,6 +3316,18 @@ function salvarNota() {
   if (mapeamentosNovos) sbPushMasterConfig();
 
   showToast('✅ ' + salvos + ' item(s) da NF salvos! Estoque atualizado.');
+
+  // Verificar se os itens existem no cadastro de insumos
+  const _insumosConhecidos = [...SEED.insumos, ...(SEED.bebidas_insumos||[]), ...insumosCustom];
+  const _naoReconhecidos = itensValidos.filter(it => !_insumosConhecidos.includes(it.insumo));
+  if (_naoReconhecidos.length) {
+    setTimeout(()=>{
+      _naoReconhecidos.forEach(it=>{
+        showToast('⚠️ "' + it.insumo + '" não encontrado no cadastro — verifique o nome', 5000);
+      });
+    }, 800);
+  }
+
   // Limpar form
   document.getElementById('entNF').value = '';
   document.getElementById('entFornecedor').value = '';
@@ -4641,14 +4653,21 @@ function render() {
                     <div style="font-size:11px;color:#34d399;font-weight:700;flex-shrink:0">R$ ${totalNF.toFixed(2)}</div>
                   </div>
                   ${g.itens.map(e => `
-                    <div style="padding:6px 12px;border-top:1px solid rgba(255,255,255,.04);display:flex;align-items:center;gap:8px">
-                      <div style="flex:1;min-width:0">
-                        <div style="font-size:11px;font-weight:700;color:#e2e8f0">${e.insumo}</div>
-                        <div style="font-size:10px;color:#64748b">Qtd: ${e.qtd} · R$ ${(e.custoUnit||0).toFixed(2)}/un</div>
-                      </div>
-                      <div style="font-size:11px;color:#34d399;font-weight:700;flex-shrink:0">+${e.qtd} un</div>
-                      <button onclick="delEntrada('${e.id}')" style="background:none;border:none;color:#ef4444;font-size:16px;padding:0;line-height:1;flex-shrink:0">×</button>
-                    </div>`).join('')}
+                    ${(function(){
+                      const _insumosOk = [...SEED.insumos,...(SEED.bebidas_insumos||[]),...insumosCustom];
+                      const _reconhecido = _insumosOk.includes(e.insumo);
+                      return `<div style="padding:6px 12px;border-top:1px solid rgba(255,255,255,.04);display:flex;align-items:center;gap:8px">
+                        <div style="flex:1;min-width:0">
+                          <div style="font-size:11px;font-weight:700;color:${_reconhecido?'#e2e8f0':'#fbbf24'}">
+                            ${_reconhecido?'':'⚠️ '}${e.insumo}
+                          </div>
+                          <div style="font-size:10px;color:#64748b">Qtd: ${e.qtd} · R$ ${(e.custoUnit||0).toFixed(2)}/un${_reconhecido?'':' · item não reconhecido'}</div>
+                        </div>
+                        <div style="font-size:11px;color:#34d399;font-weight:700;flex-shrink:0">+${e.qtd} un</div>
+                        ${!_reconhecido?`<button onclick="pedirCorrecaoEntrada('${e.id}')" title="Corrigir nome do item" style="background:none;border:1px solid #fbbf24;border-radius:6px;color:#fbbf24;font-size:11px;padding:2px 6px;cursor:pointer;flex-shrink:0">✏️</button>`:''}
+                        <button onclick="pedirDelEntrada('${e.id}')" title="Remover entrada (requer senha mestre)" style="background:none;border:none;color:#ef4444;font-size:16px;padding:0;line-height:1;flex-shrink:0">×</button>
+                      </div>`;
+                    })()}
                 </div>`;
               }).join('')}
             </div>`;
@@ -6047,6 +6066,109 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').then(function(reg) { reg.update(); }).catch(() => {});
 }
 carregarEntregas(true);
+
+/* ═══════════ SENHA MESTRE — CORREÇÃO DE ENTRADAS ═══════════ */
+let _masterAcao = null;
+
+function pedirSenhaMestre(acao) {
+  _masterAcao = acao;
+  document.getElementById('masterLockErro').textContent = '';
+  document.getElementById('masterLockNome').value = '';
+  document.getElementById('masterLockSenha').value = '';
+  document.getElementById('masterLockModal').style.display = 'flex';
+  setTimeout(()=>document.getElementById('masterLockNome').focus(), 150);
+}
+
+function fecharMasterModal() {
+  document.getElementById('masterLockModal').style.display = 'none';
+  _masterAcao = null;
+}
+
+async function confirmarSenhaMestre() {
+  const nome  = document.getElementById('masterLockNome').value.trim();
+  const senha = document.getElementById('masterLockSenha').value;
+  const erroEl = document.getElementById('masterLockErro');
+  if (!nome || !senha) { erroEl.textContent = '⚠️ Preencha todos os campos.'; return; }
+  erroEl.textContent = 'Verificando...';
+  try {
+    const url = SB_URL + '/rest/v1/gn_usuarios?nome=eq.' + encodeURIComponent(nome)
+              + '&senha=eq.' + encodeURIComponent(senha) + '&ativo=eq.true';
+    const res = await fetch(url, { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY }});
+    const todos = await res.json();
+    const u = (todos||[])[0];
+    if (!u) { erroEl.textContent = '❌ Nome ou senha incorretos.'; return; }
+    const masterFlag = !!(u.permissoes && u.permissoes.master);
+    const podeMaster = ['gerente','sub_gerente','supervisor','compras','mestre'].includes(u.cargo)
+                    || u.loja === 'GERAL' || masterFlag;
+    if (!podeMaster) { erroEl.textContent = '🚫 Usuário sem permissão para correção.'; return; }
+    fecharMasterModal();
+    if (_masterAcao) _masterAcao();
+    _masterAcao = null;
+  } catch(e) { erroEl.textContent = 'Erro de conexão.'; }
+}
+
+function pedirCorrecaoEntrada(id) {
+  pedirSenhaMestre(function(){
+    const k = lojaKey();
+    const ent = (entradasAll[k]||[]).find(e => e.id === id);
+    if (!ent) return;
+    const novoNome = prompt('Corrigir nome do item:\nAtual: ' + ent.insumo + '\n\nNovo nome (MAIÚSCULAS):', ent.insumo);
+    if (!novoNome || novoNome.trim().toUpperCase() === ent.insumo) return;
+    const correto = novoNome.trim().toUpperCase();
+    // Reverter do estoque antigo e somar no novo
+    if (estIniAll[k]) {
+      if (estIniAll[k][ent.insumo] !== undefined)
+        estIniAll[k][ent.insumo] = Math.max(0, (estIniAll[k][ent.insumo]||0) - (ent.qtd||0));
+      estIniAll[k][correto] = (estIniAll[k][correto]||0) + (ent.qtd||0);
+    }
+    ent.insumo = correto;
+    autoSave();
+    render();
+    showToast('✅ Item corrigido para "' + correto + '"');
+  });
+}
+
+function pedirDelEntrada(id) {
+  pedirSenhaMestre(function(){
+    if (!confirm('Remover esta entrada? O estoque será revertido.')) return;
+    delEntrada(id);
+  });
+}
 </script>
+
+<!-- Modal Senha Mestre -->
+<div id="masterLockModal" style="display:none;position:fixed;inset:0;z-index:9000;
+  background:rgba(0,0,0,0.75);backdrop-filter:blur(6px);align-items:center;justify-content:center;padding:20px;">
+  <div style="background:#1e293b;border:1px solid rgba(255,255,255,.12);border-radius:20px;
+    width:100%;max-width:340px;padding:28px 24px;">
+    <div style="text-align:center;margin-bottom:20px;">
+      <div style="font-size:28px;margin-bottom:8px;">🔐</div>
+      <div style="font-size:15px;font-weight:800;color:#fff;">Confirmar com Senha Mestre</div>
+      <div style="font-size:11px;color:#64748b;margin-top:4px;">Necessário para corrigir ou remover entradas</div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px;">
+      <input id="masterLockNome" type="text" placeholder="Nome do usuário"
+        style="background:#0f172a;border:1px solid rgba(255,255,255,.1);border-radius:12px;
+          padding:11px 14px;color:#fff;font-size:13px;width:100%;box-sizing:border-box;"
+        onkeydown="if(event.key==='Enter')document.getElementById('masterLockSenha').focus()">
+      <input id="masterLockSenha" type="password" placeholder="Senha"
+        style="background:#0f172a;border:1px solid rgba(255,255,255,.1);border-radius:12px;
+          padding:11px 14px;color:#fff;font-size:13px;width:100%;box-sizing:border-box;"
+        onkeydown="if(event.key==='Enter')confirmarSenhaMestre()">
+      <div id="masterLockErro" style="font-size:11px;color:#f87171;min-height:14px;text-align:center;"></div>
+      <button onclick="confirmarSenhaMestre()"
+        style="background:linear-gradient(135deg,#e8580a,#c44d09);border:none;border-radius:12px;
+          padding:12px;color:#fff;font-weight:800;font-size:13px;cursor:pointer;width:100%;">
+        ✅ Confirmar
+      </button>
+      <button onclick="fecharMasterModal()"
+        style="background:transparent;border:1px solid rgba(255,255,255,.12);border-radius:12px;
+          padding:10px;color:#94a3b8;font-size:12px;cursor:pointer;width:100%;">
+        Cancelar
+      </button>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
