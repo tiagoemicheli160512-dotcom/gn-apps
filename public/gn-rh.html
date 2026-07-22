@@ -540,16 +540,35 @@ async function carregarFinanceiro() {
   const { data: caixaData } = await q;
   S.caixaSemana = caixaData || [];
 
-  // Comprovantes (breakdown por bandeira)
+  // Comprovantes, despesas, suprimentos e gorjetas
   S.caixaComprovantes = {};
+  S.caixaDespesas     = {};
+  S.caixaSuprimentos  = {};
+  S.caixaGorjetas     = {};
   if (S.caixaSemana.length > 0) {
     const ids = S.caixaSemana.map(r => r.id);
-    const { data: compData } = await db.from('gn_caixa_comprovante')
-      .select('fechamento_id,bandeira,valor').in('fechamento_id', ids);
-    (compData || []).forEach(c => {
+    const [resComp, resDes, resSup, resGor] = await Promise.all([
+      db.from('gn_caixa_comprovante').select('fechamento_id,bandeira,valor').in('fechamento_id', ids),
+      db.from('gn_caixa_despesa').select('fechamento_id,categoria,nome,valor').in('fechamento_id', ids),
+      db.from('gn_caixa_suprimento').select('fechamento_id,descricao,valor').in('fechamento_id', ids),
+      db.from('gn_caixa_gorjeta').select('fechamento_id,mesa,garcom,valor').in('fechamento_id', ids),
+    ]);
+    (resComp.data || []).forEach(c => {
       if (!S.caixaComprovantes[c.fechamento_id]) S.caixaComprovantes[c.fechamento_id] = {};
       S.caixaComprovantes[c.fechamento_id][c.bandeira] =
         (S.caixaComprovantes[c.fechamento_id][c.bandeira] || 0) + (parseFloat(c.valor) || 0);
+    });
+    (resDes.data || []).forEach(d => {
+      if (!S.caixaDespesas[d.fechamento_id]) S.caixaDespesas[d.fechamento_id] = [];
+      S.caixaDespesas[d.fechamento_id].push(d);
+    });
+    (resSup.data || []).forEach(s => {
+      if (!S.caixaSuprimentos[s.fechamento_id]) S.caixaSuprimentos[s.fechamento_id] = [];
+      S.caixaSuprimentos[s.fechamento_id].push(s);
+    });
+    (resGor.data || []).forEach(g => {
+      if (!S.caixaGorjetas[g.fechamento_id]) S.caixaGorjetas[g.fechamento_id] = [];
+      S.caixaGorjetas[g.fechamento_id].push(g);
     });
   }
 
@@ -814,6 +833,16 @@ const FIN_ENTRADAS_ORDER = [
   'Elo Crédito','Elo Débito','Amex','Ticket Restaurante','Alelo','Sodexo',
   'Pix','Dinheiro','IFOOD','Online',
 ];
+
+const SAIDAS_LABEL = {
+  taxa_cartao:'Taxa Cartão', gorjeta_garcom:'Gorjeta Garçom',
+  manutencao:'Manutenção', material_limpeza:'Material Limpeza',
+  descartavel:'Descartável', entrega_motoboy:'Entrega Motoboy',
+  troco:'Troco', alimentacao:'Alimentação Equipe',
+  estacionamento:'Estacionamento', transporte:'Transporte',
+  outros:'Outros', fruta_verdura:'Fruta/Verdura',
+  condominio:'Condomínio', insumo:'Insumo'
+};
 
 function toggleComprovante(id) {
   const el = document.getElementById('comp-row-' + id);
@@ -1907,6 +1936,9 @@ function verConferencia(lojaUserKey, data, id) {
   const lojaObj = LOJAS.find(function(l) { return l.userKey === lojaUserKey; });
   const b64 = S.fotosCaixaSistema ? S.fotosCaixaSistema[lojaUserKey + '|' + data] : null;
   const comps = S.caixaComprovantes[id] || {};
+  const despesas    = S.caixaDespesas    ? (S.caixaDespesas[id]    || []) : [];
+  const suprimentos = S.caixaSuprimentos ? (S.caixaSuprimentos[id] || []) : [];
+  const gorjetas    = S.caixaGorjetas    ? (S.caixaGorjetas[id]    || []) : [];
 
   // Comprovantes rows (ordered)
   const allBand = FIN_ENTRADAS_ORDER.slice();
@@ -1943,6 +1975,62 @@ function verConferencia(lojaUserKey, data, id) {
         ? '<div style="font-size:11px;' + difCompStyle + ';padding:6px 2px;font-weight:600">Dif. cofre − entradas: ' + difCompStr + '</div>'
         : '');
 
+  // Despesas (saídas)
+  let despRowsHtml = '';
+  despesas.forEach(function(d) {
+    const label2 = SAIDAS_LABEL[d.categoria] || d.categoria || 'Outro';
+    despRowsHtml += '<tr style="border-top:1px solid var(--border)">'
+      + '<td style="padding:5px 8px;font-size:12px;color:var(--muted)">' + label2
+      + (d.nome ? '<br><span style="font-size:10px;color:var(--muted)">' + d.nome + '</span>' : '')
+      + '</td>'
+      + '<td class="num" style="text-align:right;padding:5px 8px;font-size:12px;color:var(--red)">−' + money(parseFloat(d.valor) || 0) + '</td>'
+      + '</tr>';
+  });
+  const totalDesp = despesas.reduce(function(a,d) { return a + (parseFloat(d.valor) || 0); }, 0);
+  const despSection = despRowsHtml === ''
+    ? '<div style="color:var(--muted);font-size:12px;padding:4px 0">Nenhuma despesa registrada</div>'
+    : '<table style="width:100%;border-collapse:collapse"><tbody>' + despRowsHtml + '</tbody>'
+      + '<tfoot><tr style="border-top:2px solid var(--border)">'
+      + '<td style="padding:5px 8px;font-size:12px;font-weight:700">TOTAL SAÍDAS</td>'
+      + '<td class="num" style="text-align:right;padding:5px 8px;font-size:12px;font-weight:700;color:var(--red)">−' + money(totalDesp) + '</td>'
+      + '</tr></tfoot></table>';
+
+  // Suprimentos
+  let supRowsHtml = '';
+  suprimentos.forEach(function(s) {
+    const descr = s.descricao ? ' · ' + s.descricao : '';
+    supRowsHtml += '<tr style="border-top:1px solid var(--border)">'
+      + '<td style="padding:5px 8px;font-size:12px;color:var(--muted)">Nota' + descr + '</td>'
+      + '<td class="num" style="text-align:right;padding:5px 8px;font-size:12px">' + money(parseFloat(s.valor) || 0) + '</td>'
+      + '</tr>';
+  });
+  const totalSup = suprimentos.reduce(function(a,s) { return a + (parseFloat(s.valor) || 0); }, 0);
+  const supSection = supRowsHtml === ''
+    ? '<div style="color:var(--muted);font-size:12px;padding:4px 0">Nenhum suprimento registrado</div>'
+    : '<table style="width:100%;border-collapse:collapse"><tbody>' + supRowsHtml + '</tbody>'
+      + '<tfoot><tr style="border-top:2px solid var(--border)">'
+      + '<td style="padding:5px 8px;font-size:12px;font-weight:700">TOTAL SUPRIMENTO</td>'
+      + '<td class="num" style="text-align:right;padding:5px 8px;font-size:12px;font-weight:700">' + money(totalSup) + '</td>'
+      + '</tr></tfoot></table>';
+
+  // Gorjetas
+  let gorRowsHtml = '';
+  gorjetas.forEach(function(g) {
+    const desc = 'Mesa ' + (g.mesa || '—') + (g.garcom ? ' · ' + g.garcom : '');
+    gorRowsHtml += '<tr style="border-top:1px solid var(--border)">'
+      + '<td style="padding:5px 8px;font-size:12px;color:var(--muted)">' + desc + '</td>'
+      + '<td class="num" style="text-align:right;padding:5px 8px;font-size:12px">' + money(parseFloat(g.valor) || 0) + '</td>'
+      + '</tr>';
+  });
+  const totalGor = gorjetas.reduce(function(a,g) { return a + (parseFloat(g.valor) || 0); }, 0);
+  const gorSection = gorRowsHtml === ''
+    ? '<div style="color:var(--muted);font-size:12px;padding:4px 0">Nenhuma gorjeta registrada</div>'
+    : '<table style="width:100%;border-collapse:collapse"><tbody>' + gorRowsHtml + '</tbody>'
+      + '<tfoot><tr style="border-top:2px solid var(--border)">'
+      + '<td style="padding:5px 8px;font-size:12px;font-weight:700">TOTAL GORJETA</td>'
+      + '<td class="num" style="text-align:right;padding:5px 8px;font-size:12px;font-weight:700">' + money(totalGor) + '</td>'
+      + '</tr></tfoot></table>';
+
   const statusCls = STATUS_CLASS[row.status] || 'badge-muted';
   const label = lojaObj ? lojaObj.display : lojaUserKey;
 
@@ -1969,6 +2057,12 @@ function verConferencia(lojaUserKey, data, id) {
     + '</tbody></table>'
     + '<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">📋 Entradas por Bandeira</div>'
     + compSection
+    + '<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin:14px 0 8px">📤 Saídas</div>'
+    + despSection
+    + '<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin:14px 0 8px">📦 Suprimento</div>'
+    + supSection
+    + '<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin:14px 0 8px">✨ 10% Gorjeta</div>'
+    + gorSection
     + '<div class="modal-actions"><button class="btn btn-sec" onclick="fecharModal()">Fechar</button></div>'
   );
 }
