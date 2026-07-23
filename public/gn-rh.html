@@ -84,7 +84,7 @@ header{height:var(--hdr-h);border-bottom:1px solid var(--border);background:var(
 
 /* ── BOTTOM NAV ─────────────────────────────────── */
 nav{height:var(--nav-h);border-top:1px solid var(--border);background:var(--surf);
-  display:grid;grid-template-columns:repeat(6,1fr);flex-shrink:0;position:sticky;bottom:0;z-index:10}
+  display:grid;grid-template-columns:repeat(7,1fr);flex-shrink:0;position:sticky;bottom:0;z-index:10}
 .nav-btn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
   font-size:10px;color:var(--muted);padding:6px 0;position:relative;transition:color .15s}
 .nav-btn.ativo{color:var(--accent)}
@@ -228,6 +228,19 @@ nav{height:var(--nav-h);border-top:1px solid var(--border);background:var(--surf
 .comp-div-table td{padding:4px 0;border-top:1px solid var(--border)}
 .comp-div-table td:not(:first-child){text-align:right;font-variant-numeric:tabular-nums;font-family:ui-monospace,'Cascadia Code',monospace}
 
+/* ── DOSSIÊ (Tab 7) ──────────────────────────── */
+.doss-card{background:var(--surf);border:1px solid var(--border);border-radius:var(--r);overflow:hidden;margin-bottom:8px}
+.doss-hdr{padding:11px 14px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;gap:8px;-webkit-tap-highlight-color:transparent}
+.doss-hdr:active{background:var(--surf2)}
+.doss-nome{font-size:13px;font-weight:800;letter-spacing:-.1px}
+.doss-meta{font-size:10px;color:var(--muted);margin-top:2px}
+.doss-stats{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--border)}
+.doss-stat{padding:8px 4px;display:flex;flex-direction:column;align-items:center;gap:1px}
+.doss-stat:not(:last-child){border-right:1px solid var(--border)}
+.doss-stat-val{font-size:18px;font-weight:800;line-height:1;font-variant-numeric:tabular-nums}
+.doss-stat-lbl{font-size:8px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;color:var(--muted)}
+.doss-exp{padding:12px 14px;border-top:1px solid var(--border);background:var(--surf2)}
+
 /* ── DESKTOP (≥768px) ─────────────────────────── */
 @media (min-width: 768px) {
   #app { max-width: 700px; margin: 0 auto; }
@@ -288,6 +301,10 @@ nav{height:var(--nav-h);border-top:1px solid var(--border);background:var(--surf
       <span class="nav-icon">⚠️</span>
       <span class="nav-label">Avarias</span>
       <span id="avarias-badge" style="display:none;position:absolute;top:6px;right:14px;background:var(--red);color:#fff;border-radius:10px;font-size:9px;font-weight:800;padding:1px 5px;min-width:16px;text-align:center;line-height:14px"></span>
+    </button>
+    <button class="nav-btn" data-tab="dossie" onclick="setTab('dossie')">
+      <span class="nav-icon">📋</span>
+      <span class="nav-label">Dossiê</span>
     </button>
     <button class="nav-btn" onclick="window.location.href='/gn-comissoes-mestra.html'">
       <span class="nav-icon">👑</span>
@@ -364,6 +381,12 @@ let S = {
   compComissoes: {},     // {comKey: all_data}
   // Avarias
   avariasData: [],       // [{lojaKey, avarias:[...]}]
+  // Dossiê
+  dossLoja: LOJAS[0],
+  dossComData: null,     // gn_comissoes all_data for selected loja
+  dossBH: [],            // gn_banco_horas rows
+  dossExpanded: null,    // expanded employee name
+  dossBusca: '',
 };
 
 // ══════════════════════════════════════════════
@@ -1558,6 +1581,7 @@ function renderContent() {
       if (S.tab === 'rh')          { await carregarRH();          renderRH();           }
       if (S.tab === 'comparativo') { await carregarComparativo(); renderComparativo();  }
       if (S.tab === 'avarias')     { await carregarAvarias();     renderAvarias();      }
+      if (S.tab === 'dossie')      { await carregarDossie();      renderDossie();       }
     } catch(e) {
       $('content').innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-text">Erro ao carregar: ${e.message}</div></div>`;
     }
@@ -2176,6 +2200,249 @@ function exportarEscalaCSV() {
 }
 
 // ══════════════════════════════════════════════
+// DATA — DOSSIÊ
+// ══════════════════════════════════════════════
+async function carregarDossie() {
+  const loja = S.dossLoja;
+  const [resCom, resBH] = await Promise.all([
+    db.from('gn_comissoes').select('all_data').eq('loja', loja.comKey).single(),
+    db.from('gn_banco_horas').select('mes,registros').eq('loja', loja.chkKey),
+  ]);
+  S.dossComData = resCom.data?.all_data || null;
+  S.dossBH = (resBH.data || []).filter(r => r.mes !== 'CONFIG');
+}
+
+function _buildDossEmployees() {
+  const allData = S.dossComData;
+  const employees = {};
+  if (!allData) return employees;
+  const keys = Object.keys(allData).map(Number).sort((a, b) => b - a);
+  for (const k of keys) {
+    const wd = allData[String(k)];
+    (wd?.funcs || []).filter(f => f.nome?.trim()).forEach(f => {
+      if (!employees[f.nome]) {
+        employees[f.nome] = {
+          setor: f.setor || '', turno: f.turno || '',
+          horario: f.horario || '', tipo: f.tipo || '',
+          faltas: 0, suspensoes: 0, atestados: 0, bhUsado: 0,
+          ferias: 0, afastamento: 0, presencas: 0, weekCount: 0,
+        };
+      }
+      const emp = employees[f.nome];
+      if (emp.weekCount === 0) {
+        emp.setor   = f.setor   || emp.setor;
+        emp.turno   = f.turno   || emp.turno;
+        emp.horario = f.horario || emp.horario;
+        emp.tipo    = f.tipo    || emp.tipo;
+      }
+      (f.dias || []).forEach(st => {
+        const s = st || 'PRESENTE';
+        if (s === 'FALTA')          emp.faltas++;
+        else if (s === 'SUSPENSÃO') emp.suspensoes++;
+        else if (s === 'ATESTADO')  emp.atestados++;
+        else if (s === 'BANCO DE HORAS') emp.bhUsado++;
+        else if (s === 'FÉRIAS')    emp.ferias++;
+        else if (s === 'AFASTAMENTO') emp.afastamento++;
+        else if (ESCALA_PRESENTE_SET.has(s)) emp.presencas++;
+      });
+      emp.weekCount++;
+    });
+  }
+  return employees;
+}
+
+function _dossBHSaldo(nome) {
+  let total = 0;
+  S.dossBH.forEach(row => {
+    (row.registros || []).forEach(r => {
+      if (r.nome === nome) total += parseFloat(r.horas) || 0;
+    });
+  });
+  return total;
+}
+
+function _dossAvaliacoes(nome) {
+  try {
+    const key = `gn_aval_v5_${S.dossLoja.userKey.toLowerCase().replace(/\s/g,'_').replace(/[^a-z0-9_]/g,'')}`;
+    const avs = JSON.parse(localStorage.getItem(key) || '[]');
+    return avs.filter(a => a.colaborador === nome && a.finalizada)
+              .sort((a, b) => (b.data || '').localeCompare(a.data || ''));
+  } catch(_) { return []; }
+}
+
+// ══════════════════════════════════════════════
+// RENDER — DOSSIÊ (Tab 7)
+// ══════════════════════════════════════════════
+function renderDossie() {
+  const lojaTabsHtml = LOJAS.map(l =>
+    `<button class="ftab${S.dossLoja.comKey === l.comKey ? ' ativo' : ''}" onclick="filtrarDossLoja('${l.comKey}')">${l.display}</button>`
+  ).join('');
+
+  const employees = _buildDossEmployees();
+  const nomes = Object.keys(employees).sort((a, b) => a.localeCompare(b));
+  const buscaQ = (S.dossBusca || '').toLowerCase().trim();
+  const nomesFilt = buscaQ ? nomes.filter(n => n.toLowerCase().includes(buscaQ)) : nomes;
+
+  const totalFuncs  = nomes.length;
+  const totalFaltas = nomes.reduce((t, n) => t + employees[n].faltas, 0);
+  const totalSusp   = nomes.reduce((t, n) => t + employees[n].suspensoes, 0);
+
+  const MES_ABREV_D = ['','Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+
+  let cardsHtml = '';
+  if (nomesFilt.length === 0) {
+    cardsHtml = `<div class="empty"><div class="empty-icon">👤</div><div class="empty-text">${buscaQ ? 'Nenhum funcionário encontrado' : 'Sem dados para esta loja'}</div></div>`;
+  } else {
+    cardsHtml = nomesFilt.map(nome => {
+      const emp     = employees[nome];
+      const bhSaldo = _dossBHSaldo(nome);
+      const avs     = _dossAvaliacoes(nome);
+      const lastAv  = avs[0];
+      const isExp   = S.dossExpanded === nome;
+
+      const bhColor = bhSaldo > 0 ? 'var(--green)' : bhSaldo < 0 ? 'var(--red)' : 'var(--muted)';
+      const bhBadge = S.dossBH.length > 0
+        ? `<span style="font-size:11px;font-weight:800;color:${bhColor};font-variant-numeric:tabular-nums">${bhSaldo > 0 ? '+' : ''}${bhSaldo.toFixed(1)}h BH</span>`
+        : '';
+
+      let avalBadge = '';
+      if (lastAv) {
+        const nota = (lastAv.pontualidade || 0) + (lastAv.uniforme || 0) + (lastAv.criteriosSetor || []).reduce((a, v) => a + (v || 0), 0);
+        const mx   = 10 + (lastAv.criteriosSetor?.length > 0 ? lastAv.criteriosSetor.length * 5 : 0);
+        const pct  = mx > 0 ? Math.round(nota / mx * 100) : 0;
+        const acls = pct >= 85 ? 'badge-ok' : pct >= 60 ? 'badge-info' : pct >= 40 ? 'badge-warn' : 'badge-err';
+        avalBadge = `<span class="badge ${acls}" style="font-size:9px">⭐ ${pct}%</span>`;
+      }
+
+      const metaParts = [emp.setor, emp.turno, emp.horario].filter(Boolean);
+      const metaLine  = metaParts.join(' · ');
+
+      let expandedHtml = '';
+      if (isExp) {
+        // BH por mês para este funcionário
+        const bhMeses = {};
+        S.dossBH.forEach(row => {
+          (row.registros || []).forEach(r => {
+            if (r.nome === nome) bhMeses[row.mes] = parseFloat(r.horas) || 0;
+          });
+        });
+        const bhMesesKeys = Object.keys(bhMeses).sort();
+        const bhRows = bhMesesKeys.length > 0
+          ? bhMesesKeys.map(m => {
+              const [y, mo] = m.split('-');
+              const h = bhMeses[m];
+              const hc = h > 0 ? 'var(--green)' : h < 0 ? 'var(--red)' : 'var(--muted)';
+              return `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid var(--border)">
+                <span style="font-size:12px;color:var(--muted)">${MES_ABREV_D[parseInt(mo)]} ${y}</span>
+                <span class="num" style="font-size:13px;font-weight:700;color:${hc}">${h > 0 ? '+' : ''}${h}h</span>
+              </div>`;
+            }).join('')
+          : `<div style="font-size:12px;color:var(--muted);padding:5px 0">Sem registros de banco de horas</div>`;
+
+        let avalRows = '';
+        if (avs.length === 0) {
+          avalRows = `<div style="font-size:12px;color:var(--muted)">Sem avaliações neste dispositivo</div>`;
+        } else {
+          avalRows = avs.slice(0, 5).map(av => {
+            const nota = (av.pontualidade || 0) + (av.uniforme || 0) + (av.criteriosSetor || []).reduce((a, v) => a + (v || 0), 0);
+            const mx   = 10 + (av.criteriosSetor?.length > 0 ? av.criteriosSetor.length * 5 : 0);
+            const p    = mx > 0 ? Math.round(nota / mx * 100) : 0;
+            const acls = p >= 85 ? 'badge-ok' : p >= 60 ? 'badge-info' : p >= 40 ? 'badge-warn' : 'badge-err';
+            return `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border)">
+              <div>
+                <div style="font-size:12px;font-weight:600">${fmtBR(av.data)}</div>
+                <div style="font-size:10px;color:var(--muted)">${av.avaliador || '—'} · ${av.cargo || '—'}</div>
+              </div>
+              <span class="badge ${acls}">${p}%</span>
+            </div>`;
+          }).join('');
+        }
+
+        expandedHtml = `<div class="doss-exp">
+          ${emp.tipo ? `<div style="margin-bottom:10px"><span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--muted)">Contrato</span><div style="font-size:13px;font-weight:700;margin-top:2px">${emp.tipo}</div></div>` : ''}
+          <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);margin-bottom:6px">⏱ Banco de Horas — Por Mês</div>
+          ${bhRows}
+          <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);margin:12px 0 6px">⭐ Avaliações (último dispositivo)</div>
+          ${avalRows}
+        </div>`;
+      }
+
+      const nomeSafe = JSON.stringify(nome);
+      return `<div class="doss-card">
+        <div class="doss-hdr" onclick="toggleDossExpand(${nomeSafe})">
+          <div style="flex:1;min-width:0;overflow:hidden">
+            <div class="doss-nome">${nome}</div>
+            ${metaLine ? `<div class="doss-meta">${metaLine}</div>` : ''}
+          </div>
+          <div style="display:flex;align-items:center;gap:5px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
+            ${bhBadge}${avalBadge}
+            <span style="font-size:12px;color:var(--muted)">${isExp ? '▲' : '▼'}</span>
+          </div>
+        </div>
+        <div class="doss-stats">
+          <div class="doss-stat">
+            <span class="doss-stat-val" style="${emp.faltas > 0 ? 'color:var(--red)' : 'color:var(--muted)'}">${emp.faltas}</span>
+            <span class="doss-stat-lbl">Faltas</span>
+          </div>
+          <div class="doss-stat">
+            <span class="doss-stat-val" style="${emp.suspensoes > 0 ? 'color:#f97316' : 'color:var(--muted)'}">${emp.suspensoes}</span>
+            <span class="doss-stat-lbl">Suspensão</span>
+          </div>
+          <div class="doss-stat">
+            <span class="doss-stat-val" style="${emp.atestados > 0 ? 'color:var(--amber)' : 'color:var(--muted)'}">${emp.atestados}</span>
+            <span class="doss-stat-lbl">Atestados</span>
+          </div>
+          <div class="doss-stat">
+            <span class="doss-stat-val" style="color:var(--accent)">${emp.presencas}</span>
+            <span class="doss-stat-lbl">Presenças</span>
+          </div>
+        </div>
+        ${expandedHtml}
+      </div>`;
+    }).join('');
+  }
+
+  $('content').innerHTML = `
+    <div class="sec-header">
+      <div>
+        <div class="sec-title">📋 Dossiê de Funcionários</div>
+        <div class="sec-sub">${S.dossLoja.display} · ${totalFuncs} funcionário${totalFuncs !== 1 ? 's' : ''}</div>
+      </div>
+    </div>
+    <div class="filter-row">${lojaTabsHtml}</div>
+    <div style="margin-bottom:10px">
+      <input type="search" id="doss-busca" value="${(S.dossBusca || '').replace(/"/g,'&quot;')}"
+        placeholder="🔍 Pesquisar funcionário…"
+        oninput="S.dossBusca=this.value;renderDossie();setTimeout(()=>{const el=$('doss-busca');if(el){el.focus();el.setSelectionRange(el.value.length,el.value.length);}},0)"
+        style="width:100%;background:var(--surf2);border:1px solid var(--border);color:var(--text);border-radius:var(--rs);padding:8px 12px;font-size:12px;font-family:inherit;outline:none;box-sizing:border-box">
+    </div>
+    ${totalFuncs > 0 ? `<div class="stat-row" style="margin-bottom:10px">
+      <div class="stat b"><div class="stat-val">${totalFuncs}</div><div class="stat-lbl">Funcionários</div></div>
+      <div class="stat ${totalFaltas > 0 ? 'r' : ''}"><div class="stat-val">${totalFaltas}</div><div class="stat-lbl">Faltas</div></div>
+      <div class="stat ${totalSusp > 0 ? 'a' : ''}"><div class="stat-val">${totalSusp}</div><div class="stat-lbl">Suspensões</div></div>
+    </div>` : ''}
+    <div>${cardsHtml}</div>
+    <div style="height:20px"></div>`;
+}
+
+// ══════════════════════════════════════════════
+// ACTIONS — DOSSIÊ
+// ══════════════════════════════════════════════
+async function filtrarDossLoja(comKey) {
+  S.dossLoja = LOJAS.find(l => l.comKey === comKey) || LOJAS[0];
+  S.dossExpanded = null;
+  S.dossBusca = '';
+  $('content').innerHTML = `<div class="empty"><div class="spin"></div></div>`;
+  await carregarDossie();
+  renderDossie();
+}
+
+function toggleDossExpand(nome) {
+  S.dossExpanded = S.dossExpanded === nome ? null : nome;
+  renderDossie();
+}
+
+// ══════════════════════════════════════════════
 // LOGIN + INIT
 // ══════════════════════════════════════════════
 async function doLogin() {
@@ -2239,7 +2506,7 @@ async function iniciarApp() {
 
   // Ir para a primeira aba permitida
   const primeiraAba = S.abasPermitidas
-    ? (['operacoes','financeiro','rh','comparativo','avarias'].find(t => S.abasPermitidas.has(t)) || 'operacoes')
+    ? (['operacoes','financeiro','rh','comparativo','avarias','dossie'].find(t => S.abasPermitidas.has(t)) || 'operacoes')
     : 'operacoes';
   setTab(primeiraAba);
 }
