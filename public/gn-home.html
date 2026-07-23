@@ -292,7 +292,7 @@
 </div>
 
 <script>
-const APP_VERSION = 'v110';
+const APP_VERSION = 'v111';
 const SB_URL = "https://ncxttwvpafajnilpjbol.supabase.co";
 const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5jeHR0d3ZwYWZham5pbHBqYm9sIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE4NDcyMDEsImV4cCI6MjA5NzQyMzIwMX0.MGDZNGY8GfSzBKAgdR7OhvOeR71i4fj9YseJRhoh5sE";
 const SESSION_KEY = 'gn_session_v1';
@@ -911,10 +911,11 @@ async function _renderHealthChips() {
   const weekDates = _weekRange(0).dates;
 
   try {
-    const [cxRows, clRows, fatData] = await Promise.all([
+    const [cxRows, clRows, fatData, visitasRows] = await Promise.all([
       fetch(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=eq.${hoje}&select=loja,status`, { headers: H }).then(r => r.ok ? r.json() : []).catch(() => []),
       fetch(`${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hoje}&select=loja,manutencao`, { headers: H }).then(r => r.ok ? r.json() : []).catch(() => []),
       _fetchFat(weekDates).catch(() => null),
+      fetch(`${SB_URL}/rest/v1/gn_chk_visitas?data=eq.${hoje}&select=id`, { headers: H }).then(r => r.ok ? r.json() : []).catch(() => []),
     ]);
 
     const lojasComCaixa = new Set((cxRows || []).filter(r => r.status === 'FECHADO').map(r => r.loja));
@@ -933,13 +934,20 @@ async function _renderHealthChips() {
     const chip = (txt, bg, clr) =>
       `<span style="display:inline-flex;align-items:center;gap:4px;background:${bg};border-radius:20px;padding:4px 10px;font-size:10px;font-weight:700;color:${clr}">${txt}</span>`;
 
+    const visitasHoje = (visitasRows||[]).length;
+    const chipLink = (txt, bg, clr, fn) =>
+      `<span onclick="${fn}" style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;background:${bg};border-radius:20px;padding:4px 10px;font-size:10px;font-weight:700;color:${clr}">${txt}</span>`;
     const chips = [];
     if (fatTotal > 0) chips.push(chip(`📈 ${_fmtBRLs(fatTotal)} / sem`, 'rgba(242,100,25,.15)', '#fb923c'));
-    chips.push(chip(`✅ ${verdes}/${totalLojas} lojas ok`, 'rgba(34,197,94,.15)', '#22c55e'));
-    if (atencao > 0) chips.push(chip(`⚠️ ${atencao} atenção`, 'rgba(251,191,36,.12)', '#fbbf24'));
+    const okBg  = verdes===totalLojas?'rgba(34,197,94,.15)':verdes===0?'rgba(239,68,68,.15)':'rgba(251,191,36,.12)';
+    const okClr = verdes===totalLojas?'#22c55e':verdes===0?'#f87171':'#fbbf24';
+    const okIco = verdes===totalLojas?'✅':verdes===0?'⛔':'⚠️';
+    chips.push(chip(`${okIco} ${verdes}/${totalLojas} lojas ok`, okBg, okClr));
+    if (atencao > 0) chips.push(chipLink(`⚠️ ${atencao} atenção`, 'rgba(251,191,36,.12)', '#fbbf24', '_navToAtt()'));
     if (cxOk < totalLojas) chips.push(chip(`💵 ${cxOk}/${totalLojas} cx`, 'rgba(255,255,255,.07)', '#5a5a9a'));
     if (chkOk < totalLojas) chips.push(chip(`📋 ${chkOk}/${totalLojas} chk`, 'rgba(255,255,255,.07)', '#5a5a9a'));
-    if (manutPend > 0) chips.push(chip(`🔧 ${manutPend} manut.`, 'rgba(249,115,22,.12)', '#f97316'));
+    if (manutPend > 0) chips.push(chipLink(`🔧 ${manutPend} manut.`, 'rgba(249,115,22,.12)', '#f97316', "navTo('gn-manutencao.html')"));
+    if (visitasHoje > 0) chips.push(chip(`📍 ${visitasHoje} visita${visitasHoje>1?'s':''} hoje`, 'rgba(124,131,253,.12)', '#a5b4fc'));
 
     el.innerHTML = chips.join('');
   } catch(e) {
@@ -994,6 +1002,8 @@ let _dashChk     = null; // Set of lojas that sent checklist today
 let _dashLoading = false;
 let _dashMetas   = {};   // {lojaKey: target} persisted in localStorage
 let _dashRelSel  = new Set(); // lojas selecionadas para o relatório (vazio = todas)
+let _dashManutCrit = 0;       // items from gn_manut_itens older than 5 days
+let _dashLoadedAt  = null;    // timestamp of last successful data load
 
 function _p2(n){ return String(n).padStart(2,'0'); }
 
@@ -1095,12 +1105,14 @@ async function _loadDashAll() {
   const hoje  = new Date().toISOString().slice(0,10);
   const H     = {apikey:SB_KEY,Authorization:'Bearer '+SB_KEY};
   try {
-    const [fatCur, fatPrv, manutRows, chkRows] = await Promise.all([
+    const [fatCur, fatPrv, manutRows, chkRows, manutItemsRows] = await Promise.all([
       _fetchFat(range.dates).catch(()=>({})),
       _fetchFat(prevRange.dates).catch(()=>({})),
       fetch(`${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hoje}&select=loja,manutencao`,{headers:H})
         .then(r=>r.ok?r.json():[]).catch(()=>[]),
       fetch(`${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hoje}&select=loja`,{headers:H})
+        .then(r=>r.ok?r.json():[]).catch(()=>[]),
+      fetch(`${SB_URL}/rest/v1/gn_manut_itens?status=neq.Resolvido&select=criado_em`,{headers:H})
         .then(r=>r.ok?r.json():[]).catch(()=>[]),
     ]);
     _dashFat = fatCur; _dashFatPrev = fatPrv;
@@ -1114,10 +1126,12 @@ async function _loadDashAll() {
     });
     _dashManut = byManut;
     _dashChk   = new Set((chkRows||[]).map(r=>_normLoja(r.loja)).filter(l=>LOJAS_LISTA.includes(l)));
+    const old5 = new Date(); old5.setDate(old5.getDate()-5);
+    _dashManutCrit = (manutItemsRows||[]).filter(r=>r.criado_em&&new Date(r.criado_em)<old5).length;
   } catch(e) {
     _dashFat=_dashFat||{}; _dashFatPrev=_dashFatPrev||{};
     _dashManut=_dashManut||{}; _dashChk=_dashChk||new Set();
-  } finally { _dashLoading=false; }
+  } finally { _dashLoading=false; _dashLoadedAt=new Date(); }
   renderDashboard();
 }
 
@@ -1137,7 +1151,7 @@ function renderDashboard() {
     ? `<div onclick="navTo('gn-manutencao.html')" style="background:rgba(248,113,113,.07);border:1px solid rgba(248,113,113,.18);border-radius:13px;padding:10px 14px;margin-bottom:10px;display:flex;align-items:center;gap:10px;cursor:pointer">
         <span style="font-size:17px">🔧</span>
         <div style="flex:1"><div style="font-size:12px;font-weight:700;color:#fca5a5">${totalManut} manutenç${totalManut===1?'ão':'ões'} pendente${totalManut===1?'':'s'}</div>
-        <div style="font-size:10px;color:rgba(255,255,255,.28);margin-top:1px">hoje · toque para ver</div></div>
+        <div style="font-size:10px;margin-top:1px">${_dashManutCrit>0?`<span style="color:#f87171;font-weight:700">${_dashManutCrit} há mais de 5 dias</span> · <span style="color:rgba(255,255,255,.28)">toque para ver</span>`:'<span style="color:rgba(255,255,255,.28)">toque para ver</span>'}</div></div>
         <span style="color:rgba(255,255,255,.2);font-size:18px">›</span></div>`
     : '';
 
@@ -1159,6 +1173,10 @@ function renderDashboard() {
     const perLabel = _dashPer==='sem' ? 'esta semana' : 'este mês';
     const consTitle= _dashPer==='sem' ? 'SEMANA · CONSOLIDADO' : 'MÊS · CONSOLIDADO';
     // sort desc by fat value
+    const missLojas = fat ? LOJAS_LISTA.filter(k=>!(fat[k]&&fat[k]>0)) : [];
+    const subLine = loading ? 'Carregando dados…'
+      : missLojas.length===0 ? 'Todas as lojas com dados ' + perLabel
+      : storesWithData + ' de ' + LOJAS_LISTA.length + ' · sem dados: ' + missLojas.map(k=>LOJA_DISPLAY[k]||k).join(', ');
     const sorted = [...LOJAS_LISTA].sort((a,b)=>(fat?(fat[b]||0):0)-(fat?(fat[a]||0):0));
     const cards = sorted.map(k=>{
       const v    = fat?(fat[k]||0):null;
@@ -1186,7 +1204,10 @@ function renderDashboard() {
             <span>meta ${_fmtBRLs(meta)}</span><span style="color:${mc};font-weight:700">${mp}%</span>
           </div><div class="sc-bar"><div class="sc-bar-fill" style="width:${mp}%;background:${mc}"></div></div></div>`;
       } else if(hasData){
-        bar=`<div class="sc-bar"><div class="sc-bar-fill" style="width:${pct}%;background:${cor}88"></div></div>`;
+        bar=`<div style="margin-top:5px">
+          <div style="display:flex;justify-content:space-between;font-size:8px;color:rgba(255,255,255,.22);margin-bottom:2px"><span style="opacity:.6">sem meta</span><span>${pct}%</span></div>
+          <div class="sc-bar"><div class="sc-bar-fill" style="width:${pct}%;background:${cor}88"></div></div>
+        </div>`;
       }
       // status badges
       const badges=[];
@@ -1214,7 +1235,7 @@ function renderDashboard() {
         <div class="cons-ttl">${consTitle}</div>
         <div class="cons-lbl">FATURAMENTO TOTAL</div>
         <div class="cons-val">${loading?'—':_fmtBRL(total)}</div>
-        <div class="cons-sub">${loading?'Carregando dados…':storesWithData+' de '+LOJAS_LISTA.length+' lojas com dados '+perLabel}</div>
+        <div class="cons-sub">${subLine}</div>
       </div>
       <div class="store-grid">${cards}</div>`;
 
@@ -1256,13 +1277,16 @@ function renderDashboard() {
         </div>`).join('')}`;
   }
 
+  const updTxt = _dashLoadedAt
+    ? `${String(_dashLoadedAt.getHours()).padStart(2,'0')}:${String(_dashLoadedAt.getMinutes()).padStart(2,'0')}`
+    : null;
   el.innerHTML=`
     <div class="dash-wrap">
       <div style="display:flex;align-items:center;gap:10px;padding:12px 0 14px;border-bottom:1px solid rgba(255,255,255,.06);margin-bottom:14px">
         <span style="width:32px;height:32px;border-radius:10px;background:rgba(242,100,25,.12);border:1px solid rgba(242,100,25,.22);display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">📊</span>
         <div>
           <div style="font-size:11px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;color:rgba(255,255,255,.65)">Painel de Gestão</div>
-          <div style="font-size:10px;color:rgba(255,255,255,.3);margin-top:1px">Visão consolidada · todas as lojas</div>
+          <div style="font-size:10px;color:rgba(255,255,255,.3);margin-top:1px">Visão consolidada · todas as lojas${updTxt?` · atualizado às ${updTxt}`:''}</div>
         </div>
       </div>
       <div class="dash-tabs">
@@ -1276,6 +1300,7 @@ function renderDashboard() {
 }
 
 function _setDashTab(t){ _dashTab=t; renderDashboard(); }
+function _navToAtt(){ const el=document.getElementById('dash-section'); if(el)el.scrollIntoView({behavior:'smooth'}); _setDashTab('att'); }
 function _setPer(p){ _dashPer=p; _dashFat=null; _dashFatPrev=null; _dashRelSel.clear(); renderDashboard(); _loadDashAll(); }
 function _toggleDashSel(k){ if(_dashRelSel.has(k)) _dashRelSel.delete(k); else _dashRelSel.add(k); renderDashboard(); }
 function _dashNav(dir){
