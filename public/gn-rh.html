@@ -379,6 +379,7 @@ let S = {
   compSemana: null,      // Date (segunda-feira)
   compFotos: [],         // [{loja, semana_ini, ocr_brutos, ...}]
   compComissoes: {},     // {comKey: all_data}
+  compOk: {},            // {`${chkKey}|${semIni}`: true} — persistido em gn_lojas.all_data.compOk
   // Avarias
   avariasData: [],       // [{lojaKey, avarias:[...]}]
   // Dossiê
@@ -644,9 +645,10 @@ async function carregarComparativo() {
   }
   const ini  = isoWeekStr(S.compSemana);
   const ini1 = isoDate(new Date(S.compSemana.getTime() + 86400000)); // terça (fuso UTC)
-  const [resFotos, resCom] = await Promise.all([
+  const [resFotos, resCom, resLojas] = await Promise.all([
     db.from('gn_comissao_foto').select('*').in('semana_ini', [ini, ini1]),
     db.from('gn_comissoes').select('loja,all_data').in('loja', LOJAS.map(l => l.comKey)),
+    db.from('gn_lojas').select('loja,all_data').in('loja', LOJAS.map(l => l.comKey)),
   ]);
   // Prefere entrada da segunda quando há dois registros para a mesma loja
   const fotoMap = {};
@@ -656,6 +658,16 @@ async function carregarComparativo() {
   S.compFotos = Object.values(fotoMap);
   S.compComissoes = {};
   (resCom.data || []).forEach(r => { S.compComissoes[r.loja] = r.all_data; });
+  // Carrega marcações OK persistidas
+  S.compOk = {};
+  (resLojas.data || []).forEach(r => {
+    const lojaObj = LOJAS.find(l => l.comKey === r.loja);
+    if (!lojaObj) return;
+    const okMap = r.all_data?.compOk || {};
+    Object.entries(okMap).forEach(([semIni, ok]) => {
+      if (ok) S.compOk[`${lojaObj.chkKey}|${semIni}`] = true;
+    });
+  });
 }
 
 // ══════════════════════════════════════════════
@@ -918,13 +930,18 @@ function renderFinanceiro() {
         const lojaObj = LOJAS.find(l => l.userKey === lojaChk);
         const rowsHtml  = rows.map(r => {
           const statusBadge = `<span class="badge ${STATUS_CLASS[r.status]||'badge-muted'}" style="font-size:9px">${r.status}</span>`;
-          const totalReal = r.total_real != null ? parseFloat(r.total_real) : null;
-          const totalCell = totalReal != null ? money(totalReal) : '<span style="color:var(--muted)">—</span>';
-          const fotoB64 = S.fotosCaixaSistema?.[`${lojaChk}|${r.data}`];
-          const hasComps = Object.keys(S.caixaComprovantes[r.id] || {}).length > 0;
+          const totalReal  = r.total_real != null ? parseFloat(r.total_real) : null;
+          const fotoB64    = S.fotosCaixaSistema?.[`${lojaChk}|${r.data}`];
+          const hasComps   = Object.keys(S.caixaComprovantes[r.id] || {}).length > 0;
+          const despRow    = (S.caixaDespesas?.[r.id] || []);
+          const totalDesp  = despRow.reduce((a,d) => a + (parseFloat(d.valor)||0), 0);
+          const hasDetalhes= hasComps || despRow.length > 0 || (S.caixaSuprimentos?.[r.id]||[]).length > 0 || (S.caixaGorjetas?.[r.id]||[]).length > 0;
+          const totalCell  = totalReal != null
+            ? money(totalReal) + (totalDesp > 0 ? `<div style="font-size:9px;color:var(--red);font-weight:400;font-variant-numeric:tabular-nums;margin-top:1px">↓ ${money(totalDesp)}</div>` : '')
+            : '<span style="color:var(--muted)">—</span>';
           const conferirCell = fotoB64
             ? `<td style="text-align:center"><img src="${fotoB64}" style="width:30px;height:30px;object-fit:cover;border-radius:4px;cursor:pointer;border:1px solid var(--border)" onclick="verConferencia('${lojaChk}','${r.data}','${r.id}')" title="Conferir fechamento vs. sistema"></td>`
-            : `<td style="text-align:center"><button onclick="verConferencia('${lojaChk}','${r.data}','${r.id}')" style="background:none;border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:12px;padding:2px 7px;color:var(--muted);opacity:${hasComps?'1':'0.5'}" title="Conferir fechamento">🔍</button></td>`;
+            : `<td style="text-align:center"><button onclick="verConferencia('${lojaChk}','${r.data}','${r.id}')" style="background:none;border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:12px;padding:2px 7px;color:var(--muted);opacity:${hasDetalhes?'1':'0.5'}" title="Conferir fechamento">🔍</button></td>`;
 
           return `<tr>
             <td>${fmtBRShort(r.data)}</td>
@@ -1094,6 +1111,16 @@ function renderRH() {
       if (emFerias) statusBadge = `<span class="badge badge-info" style="font-size:8px">🏖 Férias</span>`;
       else if (emAfastamento) statusBadge = `<span class="badge badge-warn" style="font-size:8px">🏥 Afastado</span>${f.afastamento_just ? `<span style="font-size:9px;color:var(--muted)">${f.afastamento_just}</span>` : ''}`;
 
+      // Badges de ocorrências da semana
+      const faltasCnt = (f.dias||[]).filter(st => st === 'FALTA').length;
+      const suspsCnt  = (f.dias||[]).filter(st => st === 'SUSPENSÃO').length;
+      const atestsCnt = (f.dias||[]).filter(st => st === 'ATESTADO').length;
+      const resumoBadges = [
+        faltasCnt>0 ? `<span class="badge badge-err" style="font-size:8px">${faltasCnt}F</span>` : '',
+        suspsCnt>0  ? `<span class="badge badge-err" style="font-size:8px">${suspsCnt}S</span>`  : '',
+        atestsCnt>0 ? `<span class="badge badge-warn" style="font-size:8px">${atestsCnt}AT</span>` : '',
+      ].filter(Boolean).join(' ');
+
       // Dia pills
       const diaCells = DIAS_SEM.map((_, i) => {
         const st = (f.dias || [])[i] || 'PRESENTE';
@@ -1108,7 +1135,7 @@ function renderRH() {
       return `<tr>
         <td class="nome-col" style="min-width:120px;padding:8px 10px">
           <div style="font-weight:700;font-size:12px">${f.nome}</div>
-          <div style="display:flex;gap:3px;flex-wrap:wrap;margin-top:2px;align-items:center">${f.setor ? `<span style="font-size:9px;color:var(--muted)">${f.setor}</span>` : ''}${statusBadge}</div>
+          <div style="display:flex;gap:3px;flex-wrap:wrap;margin-top:2px;align-items:center">${f.setor ? `<span style="font-size:9px;color:var(--muted)">${f.setor}</span>` : ''}${statusBadge}${resumoBadges ? ' '+resumoBadges : ''}</div>
           <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:2px;align-items:center">${turnoPill}${horPill}</div>
         </td>
         ${diaCells}
@@ -1119,6 +1146,13 @@ function renderRH() {
       </tr>`;
     }).join('');
 
+    const faltaFooter = DIAS_SEM.map((_,i) => {
+      const cnt = escalFuncsFilt.filter(f => (f.dias||[])[i] === 'FALTA').length;
+      return cnt > 0
+        ? `<td style="text-align:center"><span class="badge badge-err" style="font-size:8px">${cnt}</span></td>`
+        : `<td></td>`;
+    }).join('');
+
     escalaBHHtml = `<div class="rh-table-wrap">
       <table class="rh-table">
         <thead><tr>
@@ -1126,7 +1160,14 @@ function renderRH() {
           ${thDias}
           <th style="text-align:center;border-left:1px solid var(--border)">Horas/sem</th>
         </tr></thead>
-        <tbody>${rowsHtml}</tbody>
+        <tbody>
+          ${rowsHtml}
+          <tr style="background:var(--surf2);border-top:2px solid var(--border)">
+            <td style="font-size:10px;color:var(--muted);font-weight:700">Faltas</td>
+            ${faltaFooter}
+            <td></td>
+          </tr>
+        </tbody>
       </table>
     </div>`;
   }
@@ -1187,57 +1228,6 @@ function renderRH() {
     </div>`;
   }
 
-  // ── ESPELHO DE FREQUÊNCIA (semana atual da comissões) ──
-  const DIAS_NAMES = ['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
-  let presFuncs = S.presencaSemana?.funcs?.filter(f=>f.nome?.trim()) || [];
-  if (buscaQ) presFuncs = presFuncs.filter(f => f.nome.toLowerCase().includes(buscaQ));
-
-  let presHtml = '';
-  if (presFuncs.length === 0) {
-    presHtml = `<div class="empty" style="padding:20px"><div class="empty-text">Sem dados de presença para esta semana</div></div>`;
-  } else {
-    const diasHeaders = DIAS_NAMES.map(d=>`<th style="text-align:center;min-width:34px">${d}</th>`).join('');
-    const rowsHtml = presFuncs.map(f => {
-      const dias = DIAS_NAMES.map((_,i) => {
-        const st = f.dias?.[i] || 'PRESENTE';
-        const abrev = PRES_ABREV[st] || st.slice(0,2);
-        const cls   = PRES_CLASS[st] || 'day-NW';
-        return `<td style="text-align:center"><span class="day-pill ${cls}" title="${st}">${abrev}</span></td>`;
-      }).join('');
-      const faltas  = (f.dias||[]).filter(d=>d==='FALTA').length;
-      const susps   = (f.dias||[]).filter(d=>d==='SUSPENSÃO').length;
-      const atests  = (f.dias||[]).filter(d=>d==='ATESTADO').length;
-      const resumo  = [
-        faltas>0   ? `<span class="badge badge-err" style="font-size:8px">${faltas}F</span>` : '',
-        susps>0    ? `<span class="badge badge-err" style="font-size:8px">${susps}S</span>` : '',
-        atests>0   ? `<span class="badge badge-warn" style="font-size:8px">${atests}AT</span>` : ''
-      ].filter(Boolean).join(' ');
-      return `<tr>
-        <td class="nome-col">${f.nome}${resumo?' <span style="margin-left:4px">'+resumo+'</span>':''}</td>
-        ${dias}
-      </tr>`;
-    }).join('');
-
-    const totDias = DIAS_NAMES.map((_,i) => {
-      const cnt = presFuncs.filter(f=>(f.dias?.[i]||'PRESENTE')==='FALTA').length;
-      return cnt > 0
-        ? `<td style="text-align:center"><span class="badge badge-err" style="font-size:8px">${cnt}</span></td>`
-        : `<td></td>`;
-    }).join('');
-
-    presHtml = `<div class="rh-table-wrap">
-      <table class="rh-table">
-        <thead><tr><th>Funcionário</th>${diasHeaders}</tr></thead>
-        <tbody>
-          ${rowsHtml}
-          <tr style="background:var(--surf2);border-top:2px solid var(--border)">
-            <td style="font-size:10px;color:var(--muted);font-weight:700">Faltas</td>${totDias}
-          </tr>
-        </tbody>
-      </table>
-    </div>`;
-  }
-
   $('content').innerHTML = `
     <div class="sec-header"><div class="sec-title">RH / Banco de Horas</div></div>
     <div class="filter-row">${lojaTabsHtml}</div>
@@ -1259,27 +1249,17 @@ function renderRH() {
       <div class="card-body" style="padding:0">${bhHtml}</div>
     </div>
 
-    <div class="card" style="margin-bottom:14px">
-      <div class="card-header">
-        <span class="card-title">📊 Escala & Horas — ${S.rhLoja.display}</span>
-        <div style="display:flex;align-items:center;gap:8px">
-          <span style="font-size:11px;color:var(--muted)">Sem. ${sem.num} · ${sem.periodo}</span>
+    <div class="card">
+      <div class="card-header" style="flex-wrap:wrap;gap:6px;align-items:center">
+        <span class="card-title">📊 Escala & Frequência — ${S.rhLoja.display}</span>
+        <div style="display:flex;align-items:center;gap:6px;margin-left:auto">
+          <button onclick="navegarRHSemana(-1)" style="width:26px;height:26px;border-radius:50%;border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--muted);background:var(--surf2)">&#8592;</button>
+          <span style="font-size:11px;font-weight:700">Sem.${sem.num} · ${sem.periodo}</span>
+          <button ${isCurrentWeek?'disabled style="opacity:.3"':''} onclick="navegarRHSemana(1)" style="width:26px;height:26px;border-radius:50%;border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--muted);background:var(--surf2)">&#8594;</button>
           ${escalFuncs.length > 0 ? `<button onclick="exportarEscalaCSV()" class="btn-sm btn-sec" style="font-size:11px;padding:3px 8px">⬇️ CSV</button>` : ''}
         </div>
       </div>
       <div class="card-body" style="padding:0">${escalaBHHtml}</div>
-    </div>
-
-    <div class="card">
-      <div class="card-header" style="flex-wrap:wrap;gap:8px">
-        <span class="card-title">📅 Espelho de Frequência</span>
-        <div style="display:flex;align-items:center;gap:8px">
-          <button onclick="navegarRHSemana(-1)" style="width:26px;height:26px;border-radius:50%;border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--muted);background:var(--surf2)">&#8592;</button>
-          <span style="font-size:11px;font-weight:700">Sem.${sem.num} · ${sem.periodo}</span>
-          <button ${isCurrentWeek?'disabled style="opacity:.3"':''} onclick="navegarRHSemana(1)" style="width:26px;height:26px;border-radius:50%;border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--muted);background:var(--surf2)">&#8594;</button>
-        </div>
-      </div>
-      <div class="card-body" style="padding:0">${presHtml}</div>
     </div>`;
 }
 
@@ -1301,8 +1281,7 @@ function renderComparativo() {
   const rows = LOJAS.map(loja => {
     const foto = S.compFotos.find(f => f.loja === loja.chkKey);
     const brutos = S.compComissoes[loja.comKey]?.[String(semIdx)]?.brutos || Array(7).fill(0);
-    let jaOk = false;
-    try { jaOk = !!localStorage.getItem('gn_comp_ok_' + loja.chkKey + '_' + ini); } catch(_) {}
+    const jaOk = !!(S.compOk?.[`${loja.chkKey}|${ini}`]);
 
     if (!foto) {
       nSemFoto++;
@@ -1399,9 +1378,21 @@ function navegarComp(delta) {
   renderContent();
 }
 
-function marcarOkComp(lojaChkKey, ini) {
-  try { localStorage.setItem('gn_comp_ok_' + lojaChkKey + '_' + ini, '1'); } catch(_) {}
+async function marcarOkComp(lojaChkKey, ini) {
+  if (!S.compOk) S.compOk = {};
+  S.compOk[`${lojaChkKey}|${ini}`] = true;
   renderComparativo();
+  const lojaObj = LOJAS.find(l => l.chkKey === lojaChkKey);
+  if (!lojaObj) return;
+  try {
+    const { data: rows } = await db.from('gn_lojas').select('loja,all_data').eq('loja', lojaObj.comKey);
+    const row = (rows || [])[0];
+    if (!row) return;
+    const allData = JSON.parse(JSON.stringify(row.all_data || {}));
+    if (!allData.compOk) allData.compOk = {};
+    allData.compOk[ini] = true;
+    await db.from('gn_lojas').update({ all_data: allData }).eq('loja', lojaObj.comKey);
+  } catch(e) { console.error('compOk save:', e); }
 }
 
 // ══════════════════════════════════════════════
@@ -1519,9 +1510,41 @@ function renderAvarias() {
   }
 
   if (finalizados.length > 0) {
+    // Total por loja
+    const totalPorLoja = {};
+    finalizados.forEach(av => {
+      if (!totalPorLoja[av.display]) totalPorLoja[av.display] = { count: 0, total: 0 };
+      totalPorLoja[av.display].count++;
+      totalPorLoja[av.display].total += parseFloat(av.valorTotal) || 0;
+    });
+    const grandTotalAv = finalizados.reduce((a, av) => a + (parseFloat(av.valorTotal) || 0), 0);
+    const resumoLojaRows = Object.entries(totalPorLoja)
+      .sort(([,a],[,b]) => b.total - a.total)
+      .map(([loja, info]) => `<tr>
+        <td style="padding:5px 8px;font-size:12px;font-weight:600">${loja}</td>
+        <td style="padding:5px 8px;font-size:12px;text-align:center;color:var(--muted)">${info.count}</td>
+        <td style="padding:5px 8px;font-size:12px;text-align:right;color:var(--red);font-weight:700;font-variant-numeric:tabular-nums">${fmtR(info.total)}</td>
+      </tr>`).join('');
+
     html += `<div class="divider"></div>
       <div style="font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);margin-bottom:8px">
-        Histórico confirmados (${Math.min(finalizados.length, 20)})
+        Histórico confirmados (${finalizados.length})
+      </div>
+      <div class="card" style="margin-bottom:12px">
+        <div class="card-header" style="padding:8px 14px">
+          <span class="card-title" style="font-size:12px">Resumo por loja</span>
+          <span style="font-size:12px;font-weight:700;color:var(--red);font-variant-numeric:tabular-nums">${fmtR(grandTotalAv)}</span>
+        </div>
+        <div style="overflow-x:auto">
+          <table style="width:100%;border-collapse:collapse">
+            <thead><tr style="background:var(--surf2)">
+              <th style="padding:5px 8px;font-size:10px;text-align:left;color:var(--muted)">Loja</th>
+              <th style="padding:5px 8px;font-size:10px;text-align:center;color:var(--muted)">Qtd</th>
+              <th style="padding:5px 8px;font-size:10px;text-align:right;color:var(--muted)">Total</th>
+            </tr></thead>
+            <tbody>${resumoLojaRows}</tbody>
+          </table>
+        </div>
       </div>`;
     html += finalizados.slice(0, 20).map(av => `
       <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);gap:8px">
