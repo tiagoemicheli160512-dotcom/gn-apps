@@ -387,6 +387,12 @@ let S = {
   dossBH: [],            // gn_banco_horas rows
   dossExpanded: null,    // expanded employee name
   dossBusca: '',
+  dossPeriodo: 'historico',  // 'dia' | 'semana' | 'mes' | 'meses' | 'historico'
+  dossPeriodoData: new Date().toISOString().split('T')[0],
+  dossPeriodoSemIdx: null,   // null = current week (lazy init)
+  dossPeriodoMes: new Date().toISOString().slice(0, 7),
+  dossPeriodoMesIni: new Date().toISOString().slice(0, 7),
+  dossPeriodoMesFim: new Date().toISOString().slice(0, 7),
 };
 
 // ══════════════════════════════════════════════
@@ -2203,6 +2209,7 @@ function exportarEscalaCSV() {
 // DATA — DOSSIÊ
 // ══════════════════════════════════════════════
 async function carregarDossie() {
+  if (S.dossPeriodoSemIdx === null) S.dossPeriodoSemIdx = mestraWeekIdx(getMondayOfWeek());
   const loja = S.dossLoja;
   const [resCom, resBH] = await Promise.all([
     db.from('gn_comissoes').select('all_data').eq('loja', loja.comKey).single(),
@@ -2210,6 +2217,132 @@ async function carregarDossie() {
   ]);
   S.dossComData = resCom.data?.all_data || null;
   S.dossBH = (resBH.data || []).filter(r => r.mes !== 'CONFIG');
+}
+
+function _dossPeriodoWeekIdxToMonday(idx) {
+  const d = new Date(2026, 0, 5);
+  d.setDate(d.getDate() + idx * 7);
+  return d;
+}
+
+function _dossPeriodoFilter() {
+  const curIdx = () => mestraWeekIdx(getMondayOfWeek());
+  switch (S.dossPeriodo) {
+    case 'dia': {
+      const parts = (S.dossPeriodoData || '').split('-');
+      if (parts.length < 3) return { weekFilter: () => false, dayFilter: () => false };
+      const sel = new Date(+parts[0], +parts[1] - 1, +parts[2]);
+      const selIdx = mestraWeekIdx(getMondayOfWeek(sel));
+      const dow = (sel.getDay() + 6) % 7; // 0=Mon 6=Sun
+      return { weekFilter: k => k === selIdx, dayFilter: (k, d) => d === dow };
+    }
+    case 'semana': {
+      const idx = S.dossPeriodoSemIdx !== null ? S.dossPeriodoSemIdx : curIdx();
+      return { weekFilter: k => k === idx, dayFilter: () => true };
+    }
+    case 'mes': {
+      const [yr, mo] = (S.dossPeriodoMes || '').split('-').map(Number);
+      if (!yr || !mo) return { weekFilter: () => true, dayFilter: () => true };
+      const first = new Date(yr, mo - 1, 1);
+      const last  = new Date(yr, mo, 0);
+      return {
+        weekFilter: k => {
+          const mon = _dossPeriodoWeekIdxToMonday(k);
+          const sun = new Date(mon); sun.setDate(sun.getDate() + 6);
+          return mon <= last && sun >= first;
+        },
+        dayFilter: (k, d) => {
+          const day = new Date(_dossPeriodoWeekIdxToMonday(k));
+          day.setDate(day.getDate() + d);
+          return day.getFullYear() === yr && day.getMonth() === mo - 1;
+        },
+      };
+    }
+    case 'meses': {
+      const [yrI, moI] = (S.dossPeriodoMesIni || '').split('-').map(Number);
+      const [yrF, moF] = (S.dossPeriodoMesFim || '').split('-').map(Number);
+      if (!yrI || !moI || !yrF || !moF) return { weekFilter: () => true, dayFilter: () => true };
+      const first = new Date(yrI, moI - 1, 1);
+      const last  = new Date(yrF, moF, 0);
+      return {
+        weekFilter: k => {
+          const mon = _dossPeriodoWeekIdxToMonday(k);
+          const sun = new Date(mon); sun.setDate(sun.getDate() + 6);
+          return mon <= last && sun >= first;
+        },
+        dayFilter: (k, d) => {
+          const day = new Date(_dossPeriodoWeekIdxToMonday(k));
+          day.setDate(day.getDate() + d);
+          return day >= first && day <= last;
+        },
+      };
+    }
+    default: // historico
+      return { weekFilter: () => true, dayFilter: () => true };
+  }
+}
+
+function _dossPeriodoLabel() {
+  const MES = ['','Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+  switch (S.dossPeriodo) {
+    case 'dia': return `Dia: ${fmtBR(S.dossPeriodoData)}`;
+    case 'semana': {
+      const idx = S.dossPeriodoSemIdx !== null ? S.dossPeriodoSemIdx : mestraWeekIdx(getMondayOfWeek());
+      const mon = _dossPeriodoWeekIdxToMonday(idx);
+      const sun = new Date(mon); sun.setDate(sun.getDate() + 6);
+      const fmt = d => d.toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit' });
+      return `Semana: ${fmt(mon)} – ${fmt(sun)}`;
+    }
+    case 'mes': {
+      const [yr, mo] = (S.dossPeriodoMes || '').split('-').map(Number);
+      return `Mês: ${MES[mo] || mo}/${yr}`;
+    }
+    case 'meses': {
+      const [yrI, moI] = (S.dossPeriodoMesIni || '').split('-').map(Number);
+      const [yrF, moF] = (S.dossPeriodoMesFim || '').split('-').map(Number);
+      return `${MES[moI] || moI}/${yrI} – ${MES[moF] || moF}/${yrF}`;
+    }
+    default: return 'Histórico completo';
+  }
+}
+
+function _dossPeriodoCtrlHtml() {
+  const inputSt = 'background:var(--surf2);border:1px solid var(--border);color:var(--text);border-radius:var(--rs);padding:6px 10px;font-size:12px;font-family:inherit;outline:none;flex:1;min-width:0';
+  switch (S.dossPeriodo) {
+    case 'dia':
+      return `<div style="display:flex;gap:6px;margin-bottom:8px">
+        <input type="date" value="${S.dossPeriodoData || ''}"
+          onchange="S.dossPeriodoData=this.value;renderDossie()" style="${inputSt}">
+      </div>`;
+    case 'semana': {
+      const curIdx = mestraWeekIdx(getMondayOfWeek());
+      const idx = S.dossPeriodoSemIdx !== null ? S.dossPeriodoSemIdx : curIdx;
+      const mon = _dossPeriodoWeekIdxToMonday(idx);
+      const sun = new Date(mon); sun.setDate(sun.getDate() + 6);
+      const fmt = d => d.toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit' });
+      const canNext = idx < curIdx;
+      return `<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
+        <button class="btn btn-sec btn-sm" onclick="S.dossPeriodoSemIdx=(S.dossPeriodoSemIdx!==null?S.dossPeriodoSemIdx:${curIdx})-1;renderDossie()" style="padding:6px 12px">◀</button>
+        <div style="flex:1;text-align:center;font-size:12px;font-weight:600">${fmt(mon)} – ${fmt(sun)}</div>
+        <button class="btn btn-sec btn-sm" onclick="if(S.dossPeriodoSemIdx!==null&&S.dossPeriodoSemIdx<${curIdx}){S.dossPeriodoSemIdx++;renderDossie()}" style="padding:6px 12px" ${canNext ? '' : 'disabled'}>▶</button>
+      </div>`;
+    }
+    case 'mes':
+      return `<div style="display:flex;gap:6px;margin-bottom:8px">
+        <input type="month" value="${S.dossPeriodoMes || ''}"
+          onchange="S.dossPeriodoMes=this.value;renderDossie()" style="${inputSt}">
+      </div>`;
+    case 'meses':
+      return `<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
+        <input type="month" value="${S.dossPeriodoMesIni || ''}"
+          onchange="S.dossPeriodoMesIni=this.value;renderDossie()" style="${inputSt}">
+        <span style="font-size:11px;color:var(--muted);flex-shrink:0">até</span>
+        <input type="month" value="${S.dossPeriodoMesFim || ''}"
+          onchange="S.dossPeriodoMesFim=this.value;renderDossie()" style="${inputSt}">
+      </div>`;
+    default:
+      return '';
+  }
 }
 
 function _buildDossEmployees() {
@@ -2237,15 +2370,18 @@ function _buildDossEmployees() {
     }
   });
 
-  // Acumula estatísticas históricas, mas só para quem está na lista ativa
+  // Acumula estatísticas, mas só para quem está na lista ativa e no período selecionado
+  const { weekFilter, dayFilter } = _dossPeriodoFilter();
   const keys = Object.keys(allData).map(Number).sort((a, b) => b - a);
   for (const k of keys) {
+    if (!weekFilter(k)) continue;
     const wd = allData[String(k)];
     (wd?.funcs || []).filter(f => f.nome?.trim()).forEach(f => {
       const nomeKey = f.nome.trim();
       const emp = employees[nomeKey];
       if (!emp) return;
-      (f.dias || []).forEach(st => {
+      (f.dias || []).forEach((st, dayIdx) => {
+        if (!dayFilter(k, dayIdx)) return;
         const s = st || 'PRESENTE';
         if (s === 'FALTA')               emp.faltas++;
         else if (s === 'SUSPENSÃO')      emp.suspensoes++;
@@ -2412,11 +2548,16 @@ function renderDossie() {
     }).join('');
   }
 
+  const PERIODO_LABELS = { dia:'Dia', semana:'Semana', mes:'Mês', meses:'Meses', historico:'Histórico' };
+  const periodTabsHtml = Object.entries(PERIODO_LABELS).map(([p, lbl]) =>
+    `<button class="ftab${S.dossPeriodo === p ? ' ativo' : ''}" onclick="setDossPeriodo('${p}')">${lbl}</button>`
+  ).join('');
+
   $('content').innerHTML = `
     <div class="sec-header">
       <div>
         <div class="sec-title">📋 Dossiê de Funcionários</div>
-        <div class="sec-sub">${S.dossLoja.display} · ${totalFuncs} funcionário${totalFuncs !== 1 ? 's' : ''}</div>
+        <div class="sec-sub">${S.dossLoja.display} · ${totalFuncs} funcionário${totalFuncs !== 1 ? 's' : ''} · ${_dossPeriodoLabel()}</div>
       </div>
       ${totalFuncs > 0 ? `<div style="display:flex;gap:6px">
         <button class="btn btn-sec btn-sm" onclick="gerarDossWpp()" style="font-size:11px;padding:5px 10px">📤 WhatsApp</button>
@@ -2424,6 +2565,8 @@ function renderDossie() {
       </div>` : ''}
     </div>
     <div class="filter-row">${lojaTabsHtml}</div>
+    <div class="filter-row" style="margin-top:4px">${periodTabsHtml}</div>
+    ${_dossPeriodoCtrlHtml()}
     <div style="margin-bottom:10px">
       <input type="search" id="doss-busca" value="${(S.dossBusca || '').replace(/"/g,'&quot;')}"
         placeholder="🔍 Pesquisar funcionário…"
@@ -2456,6 +2599,12 @@ function toggleDossExpand(nome) {
   renderDossie();
 }
 
+function setDossPeriodo(p) {
+  S.dossPeriodo = p;
+  S.dossExpanded = null;
+  renderDossie();
+}
+
 function gerarDossWpp() {
   const employees = _buildDossEmployees();
   const nomes = Object.keys(employees).sort((a, b) => a.localeCompare(b));
@@ -2466,7 +2615,7 @@ function gerarDossWpp() {
 
   const lines = [
     `📋 *Dossiê — ${S.dossLoja.display}*`,
-    `📅 ${hoje}`,
+    `📅 ${hoje} · ${_dossPeriodoLabel()}`,
     '',
     `👥 *${nomes.length}* funcionários ativos`,
     `❌ Faltas: *${totalF}* | ⚠️ Suspensões: *${totalS}* | 🏥 Atestados: *${totalA}*`,
@@ -2547,7 +2696,7 @@ function gerarDossPDF() {
   @media print{body{padding:12px}h1{font-size:16px}.sv{font-size:18px}}
 </style></head><body>
 <h1>📋 Dossiê — ${S.dossLoja.display}</h1>
-<div class="sub">Gerado em ${hoje} · ${nomes.length} funcionários ativos</div>
+<div class="sub">Gerado em ${hoje} · ${_dossPeriodoLabel()} · ${nomes.length} funcionários ativos</div>
 <div class="stats">
   <div><div class="sv" style="color:#0969da">${nomes.length}</div><div class="sl">Funcionários</div></div>
   <div><div class="sv" style="color:#cf222e">${totalF}</div><div class="sl">Faltas</div></div>
