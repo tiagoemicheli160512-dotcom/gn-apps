@@ -1515,9 +1515,13 @@ function renderVisitasPanel(){
       </div>
     </div>`;
   } else if(visitaAbertaHoje){
+    const locAtiva=visitaAbertaHoje.endereco
+      ?`<div style="font-size:11px;color:var(--mut);margin-bottom:10px;">📌 ${esc(visitaAbertaHoje.endereco)}</div>`
+      :visitaAbertaHoje.lat?`<div style="font-size:11px;color:var(--mut);margin-bottom:10px;">📌 ${esc(String(visitaAbertaHoje.lat))}, ${esc(String(visitaAbertaHoje.lon))}</div>`:'';
     quickBlock=`<div class="visita-quick">
       <div class="visita-quick-title" style="color:var(--warn)">⏳ Visita em andamento — ${esc(visitaAbertaHoje.loja)}</div>
-      <div style="font-size:12px;color:#c0c0d8;margin-bottom:10px">Oficial: <strong>${esc(visitaAbertaHoje.oficial)}</strong> · Chegada: <strong style="color:var(--ok)">${esc(visitaAbertaHoje.hora_chegada)} 🔒</strong></div>
+      <div style="font-size:12px;color:#c0c0d8;margin-bottom:6px">Oficial: <strong>${esc(visitaAbertaHoje.oficial)}</strong> · Chegada: <strong style="color:var(--ok)">${esc(visitaAbertaHoje.hora_chegada)} 🔒</strong></div>
+      ${locAtiva}
       <button class="visita-btn-said" onclick="registrarSaidaVisita('${esc(String(visitaAbertaHoje.id))}')">🚪 Registrar Saída Agora</button>
     </div>`;
   } else {
@@ -1562,6 +1566,9 @@ function renderVisitasPanel(){
       const delBtn=isMaster()
         ?`<button onclick="deletarVisita('${esc(String(v.id))}')" style="background:none;border:none;color:var(--mut);cursor:pointer;font-size:13px;padding:2px 4px;opacity:.5" title="Excluir">🗑️</button>`
         :'';
+      const locLine=v.endereco
+        ?`<div style="font-size:11px;color:var(--mut);padding:4px 12px 8px;display:flex;align-items:flex-start;gap:4px;"><span>📌</span><span>${esc(v.endereco)}</span></div>`
+        :v.lat?`<div style="font-size:11px;color:var(--mut);padding:4px 12px 8px;">📌 ${esc(String(v.lat))}, ${esc(String(v.lon))}</div>`:'';
       return `<div class="visita-card ${aberta?'aberta':'fechada'}">
         <div class="visita-card-head">
           <div>
@@ -1583,6 +1590,7 @@ function renderVisitasPanel(){
             ${saidDisplay}
           </div>
         </div>
+        ${locLine}
       </div>`;
     }).join('')
     :`<div class="empty-state"><div class="empty-icon">📍</div><div>Nenhuma visita registrada em ${periodoLabel}${S.lojaFiltro!=='Todas'?' · '+esc(S.lojaFiltro):''}</div></div>`;
@@ -1592,6 +1600,36 @@ function renderVisitasPanel(){
 
 function abrirVisitaForm(){ S._visitaFormOpen=true; renderVisitasPanel(); }
 function cancelVisitaForm(){ S._visitaFormOpen=false; renderVisitasPanel(); }
+
+async function _reverseGeocode(lat, lon){
+  try{
+    const r=await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json`,
+      {headers:{'Accept-Language':'pt-BR'}});
+    if(!r.ok) return null;
+    const j=await r.json();
+    const a=j.address||{};
+    const parts=[a.road,a.house_number,a.suburb||a.neighbourhood,a.city||a.town||a.municipality].filter(Boolean);
+    return parts.length?parts.join(', '):j.display_name?.split(',').slice(0,3).join(',').trim()||null;
+  }catch(_){ return null; }
+}
+
+async function _capturarGeoVisita(id){
+  if(!id||!navigator.geolocation) return;
+  try{
+    const pos=await new Promise((res,rej)=>
+      navigator.geolocation.getCurrentPosition(res,rej,{timeout:10000,enableHighAccuracy:true})
+    );
+    const lat=parseFloat(pos.coords.latitude.toFixed(6));
+    const lon=parseFloat(pos.coords.longitude.toFixed(6));
+    const endereco=await _reverseGeocode(lat,lon);
+    // Tenta PATCH — silently fails se colunas lat/lon/endereco ainda não existem
+    try{
+      await sb(`gn_manut_visitas?id=eq.${id}`,{method:'PATCH',prefer:'return=minimal',body:{lat,lon,endereco}});
+      await loadVisitas(); renderVisitasPanel();
+    }catch(_){}
+    toast('📌 '+(endereco||`${lat}, ${lon}`));
+  }catch(_){}
+}
 
 let _savingVisita=false;
 async function iniciarVisita(){
@@ -1611,10 +1649,14 @@ async function iniciarVisita(){
     criado_por:S.usuario.nome, criado_em:new Date().toISOString(),
   };
   try{
-    await sb('gn_manut_visitas',{method:'POST',prefer:'return=minimal',body});
+    // return=representation para obter o id e fazer PATCH de geo em seguida
+    const rows=await sb('gn_manut_visitas',{method:'POST',prefer:'return=representation',body});
+    const newId=rows?.[0]?.id;
     S._visitaFormOpen=false;
     await loadVisitas(); renderVisitasPanel();
     toast('📍 Chegada registrada: '+horaChegada);
+    // GPS em background — não bloqueia o fluxo principal
+    _capturarGeoVisita(newId);
   }catch(e){ toast('Erro ao registrar: '+e.message); }
   finally{ _savingVisita=false; }
 }
