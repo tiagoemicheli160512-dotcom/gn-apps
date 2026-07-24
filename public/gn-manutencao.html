@@ -1566,9 +1566,26 @@ function renderVisitasPanel(){
       const delBtn=isMaster()
         ?`<button onclick="deletarVisita('${esc(String(v.id))}')" style="background:none;border:none;color:var(--mut);cursor:pointer;font-size:13px;padding:2px 4px;opacity:.5" title="Excluir">🗑️</button>`
         :'';
-      const locLine=v.endereco
-        ?`<div style="font-size:11px;color:var(--mut);padding:4px 12px 8px;display:flex;align-items:flex-start;gap:4px;"><span>📌</span><span>${esc(v.endereco)}</span></div>`
-        :v.lat?`<div style="font-size:11px;color:var(--mut);padding:4px 12px 8px;">📌 ${esc(String(v.lat))}, ${esc(String(v.lon))}</div>`:'';
+      // GPS chegada
+      const gpsCheg=v.endereco
+        ?`<span style="color:var(--ok)">📌 ${esc(v.endereco)}</span>`
+        :v.lat
+          ?`<span style="color:var(--ok)">📌 ${esc(String(v.lat))}, ${esc(String(v.lon))}</span>`
+          :`<span style="color:var(--warn)">📍 Localização de chegada não informada por GPS</span>`;
+      // GPS saída
+      let gpsSaid='';
+      if(v.hora_saida){
+        const diffLoc=(v.lat&&v.lon&&v.saida_lat&&v.saida_lon)
+          ?_haversineKm(v.lat,v.lon,v.saida_lat,v.saida_lon):null;
+        gpsSaid=v.saida_endereco
+          ?(diffLoc!==null&&diffLoc>0.5
+            ?`<span style="color:var(--erro)">⚠️ Saída em local diferente (${diffLoc.toFixed(1)}km) — ${esc(v.saida_endereco)}</span>`
+            :`<span style="color:var(--mut)">🚪 ${esc(v.saida_endereco)}</span>`)
+          :v.saida_lat
+            ?`<span style="color:var(--mut)">🚪 ${esc(String(v.saida_lat))}, ${esc(String(v.saida_lon))}</span>`
+            :`<span style="color:var(--warn)">📍 Localização de saída não informada por GPS</span>`;
+      }
+      const locLine=`<div style="font-size:11px;padding:4px 12px 8px;display:flex;flex-direction:column;gap:3px">${gpsCheg}${gpsSaid?gpsSaid:''}</div>`;
       return `<div class="visita-card ${aberta?'aberta':'fechada'}">
         <div class="visita-card-head">
           <div>
@@ -1613,6 +1630,13 @@ async function _reverseGeocode(lat, lon){
   }catch(_){ return null; }
 }
 
+function _haversineKm(lat1,lon1,lat2,lon2){
+  const R=6371, toR=Math.PI/180;
+  const dLat=(lat2-lat1)*toR, dLon=(lon2-lon1)*toR;
+  const a=Math.sin(dLat/2)**2+Math.cos(lat1*toR)*Math.cos(lat2*toR)*Math.sin(dLon/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+
 async function _capturarGeoVisita(id){
   if(!id||!navigator.geolocation) return;
   try{
@@ -1629,6 +1653,33 @@ async function _capturarGeoVisita(id){
     }catch(_){}
     toast('📌 '+(endereco||`${lat}, ${lon}`));
   }catch(_){}
+}
+
+async function _capturarGeoSaida(id, chegLat, chegLon){
+  if(!id||!navigator.geolocation) return;
+  try{
+    const pos=await new Promise((res,rej)=>
+      navigator.geolocation.getCurrentPosition(res,rej,{timeout:10000,enableHighAccuracy:true})
+    );
+    const lat=parseFloat(pos.coords.latitude.toFixed(6));
+    const lon=parseFloat(pos.coords.longitude.toFixed(6));
+    const endereco=await _reverseGeocode(lat,lon);
+    try{
+      await sb(`gn_manut_visitas?id=eq.${id}`,{method:'PATCH',prefer:'return=minimal',body:{saida_lat:lat,saida_lon:lon,saida_endereco:endereco}});
+      await loadVisitas(); renderVisitasPanel();
+    }catch(_){}
+    // Validar se saída é em local diferente da chegada
+    if(chegLat&&chegLon){
+      const dist=_haversineKm(chegLat,chegLon,lat,lon);
+      if(dist>0.5){
+        toast(`⚠️ Saída em local diferente da chegada (${dist.toFixed(1)}km)`);
+      } else {
+        toast('📌 Saída: '+(endereco||`${lat}, ${lon}`));
+      }
+    } else {
+      toast('📌 Saída: '+(endereco||`${lat}, ${lon}`));
+    }
+  }catch(_){ toast('📍 Localização da saída não capturada'); }
 }
 
 let _savingVisita=false;
@@ -1668,6 +1719,9 @@ async function registrarSaidaVisita(id){
     await sb(`gn_manut_visitas?id=eq.${id}`,{method:'PATCH',prefer:'return=minimal',body:{hora_saida:horaSaida}});
     await loadVisitas(); renderVisitasPanel();
     toast('🚪 Saída registrada: '+horaSaida);
+    // GPS de saída em background — compara com chegada para validar local
+    const visita=S.visitasItems.find(v=>String(v.id)===String(id));
+    _capturarGeoSaida(id, visita?.lat||null, visita?.lon||null);
   }catch(e){ toast('Erro ao registrar saída'); }
 }
 
