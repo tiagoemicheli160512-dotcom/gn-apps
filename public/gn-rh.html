@@ -590,7 +590,7 @@ async function carregarFinanceiro() {
     const ids = S.caixaSemana.map(r => r.id);
     const [resComp, resDes, resSup, resGor] = await Promise.all([
       db.from('gn_caixa_comprovante').select('fechamento_id,bandeira,valor').in('fechamento_id', ids),
-      db.from('gn_caixa_despesa').select('id,fechamento_id,categoria,nome,valor,foto').in('fechamento_id', ids),
+      db.from('gn_caixa_despesa').select('id,fechamento_id,categoria,nome,valor').in('fechamento_id', ids),
       db.from('gn_caixa_suprimento').select('fechamento_id,descricao,valor').in('fechamento_id', ids),
       db.from('gn_caixa_gorjeta').select('fechamento_id,mesa,garcom,valor').in('fechamento_id', ids),
     ]);
@@ -2050,7 +2050,7 @@ function verFotoCaixaRH(lojaUserKey, data) {
   `);
 }
 
-function verConferencia(lojaUserKey, data, id) {
+async function verConferencia(lojaUserKey, data, id) {
   var row = S.caixaSemana.find(function(r) { return r.id === id; });
   if (!row) { toast('Dados não encontrados', 'err'); return; }
   var lojaObj = LOJAS.find(function(l) { return l.userKey === lojaUserKey; });
@@ -2059,6 +2059,20 @@ function verConferencia(lojaUserKey, data, id) {
   var despesas    = S.caixaDespesas    ? (S.caixaDespesas[id]    || []) : [];
   var suprimentos = S.caixaSuprimentos ? (S.caixaSuprimentos[id] || []) : [];
   var gorjetas    = S.caixaGorjetas    ? (S.caixaGorjetas[id]    || []) : [];
+
+  // Fotos das despesas: carregadas on-demand do checklist_diario.despesas (onde o app Caixa as persiste)
+  var despesaFotos = {};
+  if (despesas.length > 0 && lojaObj) {
+    try {
+      var chkRes = await db.from('checklist_diario').select('despesas')
+        .eq('loja', lojaObj.chkKey).eq('data_operacao', data).limit(1);
+      if (chkRes.data && chkRes.data[0] && Array.isArray(chkRes.data[0].despesas)) {
+        chkRes.data[0].despesas.forEach(function(d) {
+          if (d.id && d.foto) despesaFotos[String(d.id)] = d.foto;
+        });
+      }
+    } catch(_) {}
+  }
 
   var totalReal  = row.total_real != null ? parseFloat(row.total_real) : null;
   var totalDesp  = despesas.reduce(function(a,d) { return a + (parseFloat(d.valor)||0); }, 0);
@@ -2156,10 +2170,11 @@ function verConferencia(lojaUserKey, data, id) {
     return '<tr><td colspan="4" style="padding:5px 8px 2px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;background:var(--surf2)">' + sec + '</td></tr>';
   }
 
-  // Foto inline full-view stash (keyed by safeKey)
+  // Foto inline full-view stash (keyed by safeKey) — fotos vêm de checklist_diario.despesas
   var _confFotos = {};
   despesas.forEach(function(d) {
-    if (d.foto) _confFotos[safeKey('desp_' + d.id)] = d.foto;
+    var f = despesaFotos[String(d.id)];
+    if (f) _confFotos[safeKey('desp_' + d.id)] = f;
   });
   window._confFotosMap = _confFotos;
 
@@ -2177,7 +2192,7 @@ function verConferencia(lojaUserKey, data, id) {
     despesas.forEach(function(d) {
       var baseLabel = SAIDA_LABEL[d.categoria] || d.categoria;
       var fullLabel = d.nome && d.nome !== baseLabel ? baseLabel + ' · ' + d.nome : baseLabel;
-      confRows += makeDespRow('desp_' + d.id, fullLabel, d.valor, d.foto || null);
+      confRows += makeDespRow('desp_' + d.id, fullLabel, d.valor, despesaFotos[String(d.id)] || null);
     });
     confRows += makeReadRow('Total Saídas', totalDesp);
   }
