@@ -635,6 +635,7 @@ let pedidoCustom = [];  // itens novos criados no app [{item, fornecedor, grupo,
 let pedidoRemovidos = []; // IDs (string) de itens removidos da lista
 let pedidoConfs  = {};  // lojaKey -> [{id,ts,usuario,cargo,itens:[{produto,fornecedor,cx,und,pedidoCx,pedidoUnd}]}]
 let avariasAll   = {};  // loja -> [{id,ts,semana,insumo,qtd,custoUnit,valorTotal,status,loja_conf_por,loja_conf_ts,rh_conf_por,rh_conf_ts}]
+let devolucoesAll = {}; // loja -> [{id,ts,semana,fornecedor,insumo,qtd,motivo,obs,status,loja_conf_por,loja_conf_ts,pedidos_conf_por,pedidos_conf_ts}]
 let fatoresConversao  = {}; // insumo -> numero (ex: {"AGUA TONICA CX C/ 12 UND": 12})
 
 /* Fatores padrão — aplicados na primeira inicialização se ainda não configurados */
@@ -754,6 +755,7 @@ async function sbPush() {
       fatoresConversao, mapeamentoPedido,
       pedidoCustom, pedidoRemovidos, pedidoConfs: filterByLoja(pedidoConfs, loja),
       avariasAll: { [loja]: avariasAll[loja] || [] },
+      devolucoesAll: { [loja]: devolucoesAll[loja] || [] },
     };
     await sbRequest("gn_lojas?loja=eq." + encodeURIComponent(loja), {
       method: "PATCH",
@@ -830,6 +832,7 @@ async function sbPull(silent) {
         if (d.pedidoAll)   Object.assign(pedidoAll,   d.pedidoAll);
         if (d.pedidoConfs) Object.assign(pedidoConfs, d.pedidoConfs);
         if (d.avariasAll)  Object.assign(avariasAll,  d.avariasAll);
+        if (d.devolucoesAll) Object.assign(devolucoesAll, d.devolucoesAll);
         // Configurações globais: usa a versão mais recente (sobrescreve)
         if (d.fatoresConversao)  Object.assign(fatoresConversao,  d.fatoresConversao);
         if (d.mapeamentoPedido)  Object.assign(mapeamentoPedido,  d.mapeamentoPedido);
@@ -1996,7 +1999,7 @@ function salvarDados() {
   try {
     const payload = {
       loja, semana: semana.toISOString(),
-      estIniAll, vendasAll, contAll, minAll, lookup, entradasAll, transferAll, fichasCustom, fichasRemoved, insumosCustom, pedidoAll, pedidoCustom, pedidoRemovidos, fatoresConversao, mapeamentoPedido, avariasAll
+      estIniAll, vendasAll, contAll, minAll, lookup, entradasAll, transferAll, fichasCustom, fichasRemoved, insumosCustom, pedidoAll, pedidoCustom, pedidoRemovidos, fatoresConversao, mapeamentoPedido, avariasAll, devolucoesAll
     };
     localStorage.setItem(SAVE_KEY, JSON.stringify(payload));
     showToast("💾 Dados salvos!");
@@ -2033,7 +2036,7 @@ function autoSave() {
   try {
     const payload = {
       loja, semana: semana.toISOString(),
-      estIniAll, vendasAll, contAll, minAll, lookup, entradasAll, transferAll, fichasCustom, fichasRemoved, insumosCustom, pedidoAll, pedidoCustom, pedidoRemovidos, fatoresConversao, mapeamentoPedido, avariasAll
+      estIniAll, vendasAll, contAll, minAll, lookup, entradasAll, transferAll, fichasCustom, fichasRemoved, insumosCustom, pedidoAll, pedidoCustom, pedidoRemovidos, fatoresConversao, mapeamentoPedido, avariasAll, devolucoesAll
     };
     localStorage.setItem(SAVE_KEY, JSON.stringify(payload));
   } catch(e) {}
@@ -4035,6 +4038,65 @@ function cancelarAvaria(id) {
   render();
 }
 
+/* ═══════════ DEVOLUÇÕES ═══════════ */
+function getDevolucoesLoja() { return devolucoesAll[loja] || []; }
+
+function registrarDevolucao() {
+  const fornEl   = document.getElementById('dev-forn');
+  const insumoEl = document.getElementById('dev-insumo');
+  const qtdEl    = document.getElementById('dev-qtd');
+  const motivoEl = document.getElementById('dev-motivo');
+  const obsEl    = document.getElementById('dev-obs');
+  const fornecedor = (fornEl   ? fornEl.value   : '').trim();
+  const insumo     = (insumoEl ? insumoEl.value : '').trim().toUpperCase();
+  const qtd        = parseFloat(((qtdEl ? qtdEl.value : '') || '').replace(',','.')) || 0;
+  const motivo     = motivoEl ? motivoEl.value : '';
+  const obs        = (obsEl ? obsEl.value : '').trim();
+  if (!fornecedor) { showToast('⚠️ Informe o fornecedor.'); return; }
+  if (!insumo)     { showToast('⚠️ Informe o item a devolver.'); return; }
+  if (qtd <= 0)    { showToast('⚠️ Informe a quantidade.'); return; }
+  if (!motivo)     { showToast('⚠️ Selecione o motivo.'); return; }
+  if (!confirm('Registrar devolução de ' + qtd + ' × "' + insumo + '" para ' + fornecedor + '?')) return;
+  if (!devolucoesAll[loja]) devolucoesAll[loja] = [];
+  const id = Date.now() + '_' + Math.random().toString(36).slice(2,6);
+  devolucoesAll[loja].push({
+    id, ts: new Date().toISOString(), semana: wkKey(semana),
+    fornecedor, insumo, qtd, motivo, obs,
+    status: 'pendente',
+    loja_conf_por: null, loja_conf_ts: null,
+    pedidos_conf_por: null, pedidos_conf_ts: null,
+  });
+  autoSave();
+  showToast('✅ Devolução registrada!');
+  render();
+}
+
+function confirmarDevolucaoLoja(id) {
+  if (!devolucoesAll[loja]) return;
+  const dev = devolucoesAll[loja].find(d => d.id === id);
+  if (!dev) return;
+  if (dev.status !== 'pendente') { showToast('⚠️ Status inválido.'); return; }
+  if (!confirm('Confirmar que a devolução foi entregue ao fornecedor?')) return;
+  const user = (usuarioAtual && usuarioAtual.nome) || loja;
+  dev.status = 'loja_confirmou';
+  dev.loja_conf_por = user;
+  dev.loja_conf_ts = new Date().toISOString();
+  autoSave();
+  showToast('✅ Devolução confirmada pela loja!');
+  render();
+}
+
+function cancelarDevolucao(id) {
+  if (!devolucoesAll[loja]) return;
+  const dev = devolucoesAll[loja].find(d => d.id === id);
+  if (!dev || dev.status !== 'pendente') return;
+  if (!confirm('Cancelar esta devolução?')) return;
+  devolucoesAll[loja] = devolucoesAll[loja].filter(d => d.id !== id);
+  autoSave();
+  showToast('🗑️ Devolução cancelada.');
+  render();
+}
+
 /* ═══════════ TOAST ═══════════ */
 let toastTimer = null;
 function showToast(msg) {
@@ -5141,6 +5203,105 @@ function render() {
             </button>
           </div>`;
         }).join('')}
+
+      ${(()=>{
+        const devs = (devolucoesAll[loja]||[]).slice().reverse();
+        const devFornLista = [...new Set(
+          Object.entries(entradasAll)
+            .filter(([k]) => k.startsWith(loja+'|'))
+            .flatMap(([,arr]) => arr||[])
+            .map(e => e.fornecedor)
+            .filter(Boolean)
+            .concat(provisoesEntrega.map(p=>p.fornecedor).filter(Boolean))
+        )].sort();
+        const todosInsDevol = [...new Set([...SEED.insumos, ...(insumosCustom||[])])].sort();
+        const devPend = devs.filter(d=>d.status!=='finalizado'&&d.status!=='cancelado').length;
+        const stMapDev = {
+          pendente:       {lbl:'⏳ Aguard. confirmação loja', clr:'#f59e0b', bg:'rgba(245,158,11,.12)'},
+          loja_confirmou: {lbl:'🏪 Loja confirmou',           clr:'#60a5fa', bg:'rgba(96,165,250,.12)'},
+          finalizado:     {lbl:'✅ Finalizado',               clr:'#34d399', bg:'rgba(52,211,153,.12)'},
+          cancelado:      {lbl:'🗑️ Cancelado',               clr:'#64748b', bg:'rgba(100,116,139,.08)'},
+        };
+        const motivoLabel = {vencimento:'Vencimento',qualidade:'Qualidade ruim',excesso:'Excesso de pedido',preco:'Divergência de preço',outro:'Outro'};
+        return `
+        <div style="margin-top:16px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+            <div class="sec-label" style="margin-bottom:0">↩️ Devoluções a Fornecedores</div>
+            ${devPend>0?`<span style="background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.3);border-radius:20px;padding:2px 10px;font-size:11px;font-weight:800;color:#f87171">${devPend} pendente${devPend>1?'s':''}</span>`:''}
+          </div>
+
+          <div class="card" style="padding:14px">
+            <div class="card-header" style="margin:-14px -14px 12px">📋 Registrar Nova Devolução</div>
+            <div style="display:flex;flex-direction:column;gap:10px">
+              <div>
+                <div style="font-size:10px;font-weight:700;color:#64748b;text-transform:uppercase;margin-bottom:5px">Fornecedor</div>
+                <input id="dev-forn" list="dev-forn-list" class="inp-full" placeholder="Nome do fornecedor...">
+                <datalist id="dev-forn-list">${devFornLista.map(f=>`<option value="${f}">`).join('')}</datalist>
+              </div>
+              <div>
+                <div style="font-size:10px;font-weight:700;color:#64748b;text-transform:uppercase;margin-bottom:5px">Item / Insumo</div>
+                <input id="dev-insumo" list="dev-insumos-list" class="inp-full" placeholder="Digite ou selecione o item..." style="text-transform:uppercase">
+                <datalist id="dev-insumos-list">${todosInsDevol.map(n=>`<option value="${n}">`).join('')}</datalist>
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+                <div>
+                  <div style="font-size:10px;font-weight:700;color:#64748b;text-transform:uppercase;margin-bottom:5px">Quantidade</div>
+                  <input id="dev-qtd" type="number" min="0" step="0.001" class="inp-full" placeholder="0.000" style="text-align:right">
+                </div>
+                <div>
+                  <div style="font-size:10px;font-weight:700;color:#64748b;text-transform:uppercase;margin-bottom:5px">Motivo</div>
+                  <select id="dev-motivo" class="inp-full" style="appearance:auto;background:#1a1a35;border:1px solid #2a2a50;border-radius:8px;color:#e2e8f0;padding:7px 8px;font-size:13px;width:100%">
+                    <option value="">Selecione...</option>
+                    <option value="vencimento">Vencimento</option>
+                    <option value="qualidade">Qualidade ruim</option>
+                    <option value="excesso">Excesso de pedido</option>
+                    <option value="preco">Divergência de preço</option>
+                    <option value="outro">Outro</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <div style="font-size:10px;font-weight:700;color:#64748b;text-transform:uppercase;margin-bottom:5px">Observação (opcional)</div>
+                <input id="dev-obs" class="inp-full" type="text" placeholder="Detalhar se necessário...">
+              </div>
+              <button onclick="registrarDevolucao()" style="background:linear-gradient(135deg,#7c3aed,#5b21b6);border:none;border-radius:14px;padding:13px;color:#fff;font-weight:900;font-size:14px;width:100%">↩️ Registrar Devolução</button>
+            </div>
+          </div>
+
+          ${devs.length===0?'<div style="padding:12px;text-align:center;font-size:12px;color:#475569">Nenhuma devolução registrada.</div>':
+            `<div class="card">
+              <div class="card-header">Histórico de Devoluções — ${loja}</div>
+              ${devs.map(dev=>{
+                const st=stMapDev[dev.status]||stMapDev.pendente;
+                const dataFmt=dev.ts?new Date(dev.ts).toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';
+                return `<div class="row-item" style="flex-direction:column;align-items:stretch;gap:8px;padding:12px 13px">
+                  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+                    <div style="flex:1;min-width:0">
+                      <div style="font-size:12px;font-weight:800;color:#a78bfa;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${dev.fornecedor}</div>
+                      <div style="font-size:13px;font-weight:800;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${dev.insumo}</div>
+                      <div style="font-size:10px;color:#64748b;margin-top:1px">${dataFmt}${dev.semana?' · sem. '+dev.semana:''}</div>
+                    </div>
+                    <div style="text-align:right;flex-shrink:0">
+                      <div style="font-size:15px;font-weight:900;color:#c4b5fd;font-family:monospace">${dev.qtd} un.</div>
+                      <div style="font-size:10px;color:#94a3b8">${motivoLabel[dev.motivo]||dev.motivo||'—'}</div>
+                    </div>
+                  </div>
+                  ${dev.obs?`<div style="font-size:11px;color:#94a3b8;font-style:italic">"${dev.obs}"</div>`:''}
+                  <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap">
+                    <span style="font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;background:${st.bg};color:${st.clr}">${st.lbl}</span>
+                    <div style="display:flex;gap:6px">
+                      ${dev.status==='pendente'?`<button onclick="confirmarDevolucaoLoja('${dev.id}')" style="background:rgba(96,165,250,.15);border:1px solid rgba(96,165,250,.4);border-radius:10px;padding:5px 11px;color:#93c5fd;font-size:11px;font-weight:800">🏪 Confirmar Loja</button>`:''}
+                      ${dev.status==='loja_confirmou'?`<span style="font-size:10px;color:#94a3b8;font-style:italic">Aguard. Estoque&amp;Pedidos</span>`:''}
+                      ${dev.status==='finalizado'?`<span style="font-size:10px;color:#34d399">Conf.: ${dev.pedidos_conf_por||'—'}</span>`:''}
+                      ${dev.status==='pendente'?`<button onclick="cancelarDevolucao('${dev.id}')" style="background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:5px 8px;color:#64748b;font-size:11px">🗑️</button>`:''}
+                    </div>
+                  </div>
+                  ${dev.loja_conf_por?`<div style="font-size:10px;color:#64748b">Loja: ${dev.loja_conf_por}${dev.loja_conf_ts?' · '+new Date(dev.loja_conf_ts).toLocaleDateString('pt-BR'):''}</div>`:''}
+                </div>`;
+              }).join('')}
+            </div>`}
+        </div>`;
+      })()}
     </div>`;
 
   } else if (tab === "fichas") {
@@ -5970,6 +6131,7 @@ try {
     fatoresConversao  = p.fatoresConversao  || {};
     mapeamentoPedido = p.mapeamentoPedido || {};
     avariasAll = p.avariasAll || {};
+    devolucoesAll = p.devolucoesAll || {};
     if (p.minAll) minAll  = p.minAll;
     if (p.lookup) lookup  = p.lookup;
   }
@@ -6022,7 +6184,8 @@ async function carregarEntregas(silent) {
     const rows=await sbRequest('gn_provisoes?loja_slug=eq.'+slug+'&status=eq.AGUARDANDO&select=*,gn_catalogo(produto,und)&order=data_entrega',{method:'GET'});
     provisoesEntrega=rows||[];
     const dot=document.getElementById('dot-entrega');
-    if(dot) dot.classList.toggle('hidden',provisoesEntrega.length===0);
+    const _devPend=(devolucoesAll[loja]||[]).filter(d=>d.status!=='finalizado'&&d.status!=='cancelado').length;
+    if(dot) dot.classList.toggle('hidden',provisoesEntrega.length===0&&_devPend===0);
     if(!silent||tab==='entrega') render();
     _verificarAutoAlertaEntregas();
   }catch(e){}
