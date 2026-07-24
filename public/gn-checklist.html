@@ -1142,6 +1142,7 @@
     </div>
     <div id="func-lista" style="display:flex;flex-direction:column;gap:7px;"></div>
     <div id="func-empty" style="text-align:center;padding:16px;color:#333;font-size:11px;">Nenhum funcionário cadastrado</div>
+    <input type="file" id="funcDocInput" accept="image/*" capture="environment" style="display:none" onchange="onFuncDocChange(this)">
   </div>
 
   <!-- Faturamento semanal -->
@@ -1997,6 +1998,9 @@ let comissoesLoadErr = false;
 let comissoesVisibleSlots = {};
 let comissoesExpanded = {};
 let pendingRepiqueCaixaSync = false; // repique veio do App Caixa antes dos dados de Comissões
+let comissoesDocs = {};  // { `${funcIdx}_${tipo}`: foto_base64 } — atestados/suspensões/advertências
+let _docFuncIdx = null;
+let _docTipo = null;
 
 async function loadComissoesData(){
   comissoesLoadErr = false;
@@ -2014,7 +2018,9 @@ async function loadComissoesData(){
     comissoesWD = null;
     console.error('Erro ao carregar funcionários de Comissões:', e.message||e);
   }
+  comissoesDocs = {};
   renderComissoesFuncs();
+  loadFuncDocs(); // carrega documentos (atestados/suspensões/advertências) em background
   // Sincroniza repique que chegou do App Caixa antes dos dados de Comissões estarem prontos
   if(pendingRepiqueCaixaSync && state.repique > 0){
     pendingRepiqueCaixaSync = false;
@@ -3809,10 +3815,56 @@ function renderComissoesFuncs(){
             onblur="updComissoesAfastamentoJust(${i},this.value)" style="font-size:11px;width:100%;box-sizing:border-box;">
         </div>`:''}
         <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-top:10px;">${diasHtml}</div>
+        <div style="margin-top:10px;">
+          <div style="font-size:10px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:0.8px;margin-bottom:6px;">📎 Documentos</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            ${[{tipo:'ATESTADO',label:'📋 Atestado',cor:'#eab308'},{tipo:'SUSPENSAO',label:'⚠️ Suspensão',cor:'#f97316'},{tipo:'ADVERTENCIA',label:'📝 Advertência',cor:'#ef4444'}].map(({tipo,label,cor})=>{
+              const foto=comissoesDocs[`${i}_${tipo}`]||'';
+              return `<div style="display:flex;flex-direction:column;align-items:center;gap:3px;">
+                <button onclick="event.stopPropagation();_abrirFotoFunc(${i},'${tipo}')" style="background:none;border:1px solid ${cor}55;border-radius:7px;padding:5px 8px;font-size:10px;cursor:pointer;color:${cor};font-weight:700;white-space:nowrap;">${label}${foto?' ✓':' +'}</button>
+                ${foto?`<img src="${foto}" onclick="event.stopPropagation();this.style.maxWidth=this.style.maxWidth==='200px'?'60px':'200px';this.style.maxHeight=this.style.maxHeight==='none'?'60px':'none'" style="max-width:60px;max-height:60px;border-radius:5px;object-fit:cover;cursor:pointer;border:1px solid ${cor}55;" title="Toque para expandir">`:''}
+              </div>`;
+            }).join('')}
+          </div>
+        </div>
         <button type="button" class="btn-danger" onclick="removeComissoesFunc(${i},this)" style="width:100%;margin-top:10px;padding:8px;">🗑️ Excluir funcionário</button>
       </div>`:''}
     </div>`;
   }).join('');
+}
+
+async function loadFuncDocs(){
+  if(comissoesWeekIdx==null||!LOJA) return;
+  try{
+    const lojaKey=comissoesLojaKey();
+    const {data}=await sb.from('gn_func_docs').select('func_idx,tipo,foto').eq('loja',lojaKey).eq('semana_idx',comissoesWeekIdx);
+    comissoesDocs={};
+    (data||[]).forEach(d=>{ comissoesDocs[`${d.func_idx}_${d.tipo}`]=d.foto; });
+    renderComissoesFuncs();
+  }catch(_){}
+}
+
+function _abrirFotoFunc(funcIdx,tipo){
+  _docFuncIdx=funcIdx; _docTipo=tipo;
+  const inp=document.getElementById('funcDocInput');
+  if(inp){ inp.value=''; inp.click(); }
+}
+
+function onFuncDocChange(input){
+  const file=input.files[0];
+  if(!file||_docFuncIdx==null||!_docTipo) return;
+  _comprimirParaFoto(file,async function(b64){
+    const key=`${_docFuncIdx}_${_docTipo}`;
+    comissoesDocs[key]=b64;
+    renderComissoesFuncs();
+    try{
+      await sb.from('gn_func_docs').upsert(
+        {loja:comissoesLojaKey(),semana_idx:comissoesWeekIdx,func_idx:_docFuncIdx,tipo:_docTipo,foto:b64},
+        {onConflict:'loja,semana_idx,func_idx,tipo'}
+      );
+      showToast('📷 Documento salvo');
+    }catch(_){ showToast('📷 Documento salvo localmente'); }
+  });
 }
 
 function addComissoesFunc(){
