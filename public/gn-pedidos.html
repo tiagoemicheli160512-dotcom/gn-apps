@@ -580,6 +580,7 @@ let S = {
   entregasPendentes: [],
   entregasConfirmadas: [],
   provisoesAtrasadas: [],
+  devolucoesLojas: [], // [{lojaKey, lojaDisplay, ...dev}]
 
   // Faltas do dia
   faltaDiaLoja: '',
@@ -779,6 +780,44 @@ async function carregarLojas() {
     .select('*').eq('ativo', true).order('ordem');
   S.lojas = data || [];
   if (!S.lojaAtiva && S.lojas.length > 0) S.lojaAtiva = S.lojas[0].slug_pedido;
+}
+
+async function carregarDevolucoesLojas() {
+  try {
+    const { data } = await db.from('gn_lojas').select('loja,all_data');
+    S.devolucoesLojas = [];
+    (data || []).forEach(row => {
+      const devs = (row.all_data?.devolucoesAll || {})[row.loja] || [];
+      const lojaDisplay = S.lojas.find(l => l.nome_display?.toUpperCase() === row.loja || l.slug_pedido === (row.loja||'').toLowerCase().replace(/ /g,'_'))?.nome_display || row.loja;
+      devs.forEach(dev => {
+        S.devolucoesLojas.push({ ...dev, lojaKey: row.loja, lojaDisplay });
+      });
+    });
+  } catch(e) {}
+}
+
+async function confirmarDevolucaoPedidos(lojaKey, devId) {
+  try {
+    const { data } = await db.from('gn_lojas').select('loja,all_data').eq('loja', lojaKey).single();
+    if (!data) { toast('Loja não encontrada.', 'err'); return; }
+    const allData = data.all_data || {};
+    const devs = (allData.devolucoesAll || {})[lojaKey] || [];
+    const dev = devs.find(d => d.id === devId);
+    if (!dev) { toast('Devolução não encontrada.', 'err'); return; }
+    if (dev.status !== 'loja_confirmou') { toast('Aguardando confirmação da loja primeiro.', 'err'); return; }
+    const sess = JSON.parse(localStorage.getItem('gn_session_v1') || 'null');
+    const user = (sess && sess.nome) || 'pedidos';
+    dev.status = 'finalizado';
+    dev.pedidos_conf_por = user;
+    dev.pedidos_conf_ts = new Date().toISOString();
+    allData.devolucoesAll = allData.devolucoesAll || {};
+    allData.devolucoesAll[lojaKey] = devs;
+    const { error } = await db.from('gn_lojas').update({ all_data: allData, updated_at: new Date().toISOString(), updated_by: 'pedidos' }).eq('loja', lojaKey);
+    if (error) throw error;
+    toast('✅ Devolução finalizada!', 'ok');
+    await carregarDevolucoesLojas();
+    renderProvisoes();
+  } catch(e) { toast('Erro: ' + (e.message || e), 'err'); }
 }
 
 async function carregarPedidoAtual() {
@@ -2156,7 +2195,40 @@ async function renderProvisoes() {
       </div>
     </div>` : '';
 
-  $('content').innerHTML = bannerAtrasadas + `
+  // Build devoluções banner (loja_confirmou = awaiting pedidos confirmation)
+  const devsPend = (S.devolucoesLojas || []).filter(d => d.status === 'loja_confirmou');
+  const devsAll  = (S.devolucoesLojas || []).filter(d => d.status !== 'cancelado').slice().reverse();
+  const motivoLabelPed = {vencimento:'Vencimento',qualidade:'Qualidade ruim',excesso:'Excesso de pedido',preco:'Divergência de preço',outro:'Outro'};
+  const bannerDevolucoesHtml = devsAll.length ? `
+    <div style="background:rgba(124,58,237,.06);border:1px solid rgba(124,58,237,.25);border-radius:var(--r);margin-bottom:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:${devsAll.length?'1px solid rgba(124,58,237,.15)':'none'}">
+        <div>
+          <div style="font-size:13px;font-weight:800;color:#c4b5fd">↩️ Devoluções a Fornecedores</div>
+          <div style="font-size:10px;color:var(--muted)">Registradas pelas lojas — ${devsPend.length} aguardando confirmação</div>
+        </div>
+        <button onclick="carregarDevolucoesLojas().then(renderProvisoes)" style="background:rgba(124,58,237,.15);border:1px solid rgba(124,58,237,.3);border-radius:6px;padding:5px 10px;color:#a78bfa;font-size:11px;cursor:pointer">↻ Atualizar</button>
+      </div>
+      <div style="padding:8px 6px;display:flex;flex-direction:column;gap:4px">
+        ${devsAll.map(dev => {
+          const stCl = dev.status==='loja_confirmou' ? '#fbbf24' : dev.status==='finalizado' ? '#34d399' : '#94a3b8';
+          const stLbl = dev.status==='loja_confirmou' ? '⏳ Aguard. confirmação' : dev.status==='finalizado' ? '✅ Finalizado' : '🏪 Loja registrou';
+          return `<div style="display:flex;align-items:center;gap:8px;padding:8px 8px;background:rgba(124,58,237,.04);border-radius:8px;flex-wrap:wrap">
+            <div style="flex:1;min-width:0">
+              <div style="font-size:11px;color:#a78bfa;font-weight:700">${dev.lojaDisplay}</div>
+              <div style="font-size:12px;font-weight:800;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${dev.fornecedor} — ${dev.insumo}</div>
+              <div style="font-size:10px;color:var(--muted)">${dev.qtd} un. · ${motivoLabelPed[dev.motivo]||dev.motivo||'—'}${dev.obs?' · "'+dev.obs+'"':''}</div>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0">
+              <span style="font-size:10px;font-weight:700;color:${stCl};white-space:nowrap">${stLbl}</span>
+              ${dev.status==='loja_confirmou'?`<button onclick="confirmarDevolucaoPedidos('${dev.lojaKey}','${dev.id}')" style="background:rgba(52,211,153,.15);border:1px solid rgba(52,211,153,.4);border-radius:8px;padding:4px 10px;color:#6ee7b7;font-size:11px;font-weight:800;cursor:pointer;white-space:nowrap">✅ Confirmar</button>`:''}
+              ${dev.status==='finalizado'?`<span style="font-size:10px;color:#34d399">Conf.: ${dev.pedidos_conf_por||'—'}</span>`:''}
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>` : '';
+
+  $('content').innerHTML = bannerAtrasadas + bannerDevolucoesHtml + `
     <div class="sec-header">
       <div class="sec-titulo">Provisões <span class="badge badge-r">${provisoesFilt.length}</span></div>
       <div style="display:flex;align-items:center;gap:8px">
@@ -3068,6 +3140,8 @@ async function iniciarApp() {
     carregarContagens(),
     carregarMasterConfig(),
   ]);
+  // Load devoluções after lojas (needs S.lojas for display names)
+  carregarDevolucoesLojas().catch(() => {});
 
   await carregarPedidoAtual();
 
