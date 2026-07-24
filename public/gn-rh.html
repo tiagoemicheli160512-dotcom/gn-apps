@@ -368,6 +368,7 @@ let S = {
   comissaoFotos: [],     // [{loja(chkKey), semana_ini, foto_base64, enviado_por}]
   comissaoFotoSuportado: true,
   fotosCaixaSistema: {}, // {`${userKey}|${data}`: foto_base64}
+  caixaConferencias: {}, // {fechamento_id: {conferido_em, conferido_por, tem_divergencia, itens}}
   // RH
   rhLoja: LOJAS[0],
   rhMes: null,           // 'YYYY-MM'
@@ -633,6 +634,21 @@ async function carregarFinanceiro() {
       if (row.foto_caixa_sistema) S.fotosCaixaSistema[key] = row.foto_caixa_sistema;
     });
   } catch(_) { S.fotosCaixaSistema = {}; }
+
+  // Conferências de caixa (gn_lojas.all_data.caixa_conferencias)
+  S.caixaConferencias = {};
+  if (S.caixaSemana.length > 0) {
+    try {
+      const comKeys = [...new Set(
+        S.caixaSemana.map(r => LOJAS.find(l => l.userKey === r.loja)?.comKey).filter(Boolean)
+      )];
+      const { data: lojaConfs } = await db.from('gn_lojas').select('loja,all_data').in('loja', comKeys);
+      (lojaConfs || []).forEach(lr => {
+        const confs = lr.all_data?.caixa_conferencias || {};
+        Object.entries(confs).forEach(([fid, conf]) => { S.caixaConferencias[fid] = conf; });
+      });
+    } catch(_) {}
+  }
 }
 
 // ══════════════════════════════════════════════
@@ -939,9 +955,15 @@ function renderFinanceiro() {
           const totalCell  = totalReal != null
             ? money(totalReal) + (totalDesp > 0 ? `<div style="font-size:9px;color:var(--red);font-weight:400;font-variant-numeric:tabular-nums;margin-top:1px">↓ ${money(totalDesp)}</div>` : '')
             : '<span style="color:var(--muted)">—</span>';
+          const confSt = S.caixaConferencias?.[r.id];
+          const confBadge = confSt
+            ? (confSt.tem_divergencia
+              ? `<div style="font-size:9px;color:var(--red);font-weight:700;margin-top:1px">⚠️ Dif.</div>`
+              : `<div style="font-size:9px;color:var(--green);font-weight:700;margin-top:1px">✅ Ok</div>`)
+            : '';
           const conferirCell = fotoB64
-            ? `<td style="text-align:center"><img src="${fotoB64}" style="width:30px;height:30px;object-fit:cover;border-radius:4px;cursor:pointer;border:1px solid var(--border)" onclick="verConferencia('${lojaChk}','${r.data}','${r.id}')" title="Conferir fechamento vs. sistema"></td>`
-            : `<td style="text-align:center"><button onclick="verConferencia('${lojaChk}','${r.data}','${r.id}')" style="background:none;border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:12px;padding:2px 7px;color:var(--muted);opacity:${hasDetalhes?'1':'0.5'}" title="Conferir fechamento">🔍</button></td>`;
+            ? `<td style="text-align:center"><img src="${fotoB64}" style="width:30px;height:30px;object-fit:cover;border-radius:4px;cursor:pointer;border:1px solid var(--border)" onclick="verConferencia('${lojaChk}','${r.data}','${r.id}')" title="Conferir fechamento vs. sistema">${confBadge}</td>`
+            : `<td style="text-align:center"><button onclick="verConferencia('${lojaChk}','${r.data}','${r.id}')" style="background:none;border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:12px;padding:2px 7px;color:var(--muted);opacity:${hasDetalhes?'1':'0.5'}" title="Conferir fechamento">🔍</button>${confBadge}</td>`;
 
           return `<tr>
             <td>${fmtBRShort(r.data)}</td>
@@ -2019,141 +2041,214 @@ function verFotoCaixaRH(lojaUserKey, data) {
 }
 
 function verConferencia(lojaUserKey, data, id) {
-  const row = S.caixaSemana.find(function(r) { return r.id === id; });
+  var row = S.caixaSemana.find(function(r) { return r.id === id; });
   if (!row) { toast('Dados não encontrados', 'err'); return; }
-  const lojaObj = LOJAS.find(function(l) { return l.userKey === lojaUserKey; });
-  const b64 = S.fotosCaixaSistema ? S.fotosCaixaSistema[lojaUserKey + '|' + data] : null;
-  const comps = S.caixaComprovantes[id] || {};
-  const despesas    = S.caixaDespesas    ? (S.caixaDespesas[id]    || []) : [];
-  const suprimentos = S.caixaSuprimentos ? (S.caixaSuprimentos[id] || []) : [];
-  const gorjetas    = S.caixaGorjetas    ? (S.caixaGorjetas[id]    || []) : [];
+  var lojaObj = LOJAS.find(function(l) { return l.userKey === lojaUserKey; });
+  var b64 = S.fotosCaixaSistema ? S.fotosCaixaSistema[lojaUserKey + '|' + data] : null;
+  var comps      = S.caixaComprovantes[id] || {};
+  var despesas    = S.caixaDespesas    ? (S.caixaDespesas[id]    || []) : [];
+  var suprimentos = S.caixaSuprimentos ? (S.caixaSuprimentos[id] || []) : [];
+  var gorjetas    = S.caixaGorjetas    ? (S.caixaGorjetas[id]    || []) : [];
 
-  // Comprovantes rows (ordered)
-  const allBand = FIN_ENTRADAS_ORDER.slice();
+  var totalReal  = row.total_real != null ? parseFloat(row.total_real) : null;
+  var totalDesp  = despesas.reduce(function(a,d) { return a + (parseFloat(d.valor)||0); }, 0);
+  var totalSup   = suprimentos.reduce(function(a,s) { return a + (parseFloat(s.valor)||0); }, 0);
+  var totalGor   = gorjetas.reduce(function(a,g) { return a + (parseFloat(g.valor)||0); }, 0);
+  var label      = lojaObj ? lojaObj.display : lojaUserKey;
+  var statusCls  = STATUS_CLASS[row.status] || 'badge-muted';
+
+  // Existing conference data
+  var existConf = S.caixaConferencias ? S.caixaConferencias[id] : null;
+
+  // Bandeiras with non-zero values (ordered)
+  var allBand = FIN_ENTRADAS_ORDER.slice();
   Object.keys(comps).forEach(function(k) { if (!allBand.includes(k)) allBand.push(k); });
-  let compRowsHtml = '';
-  allBand.forEach(function(b) {
-    if (comps[b] == null || comps[b] === 0) return;
-    compRowsHtml += '<tr style="border-top:1px solid var(--border)">'
-      + '<td style="padding:5px 8px;font-size:12px;color:var(--muted)">' + b + '</td>'
-      + '<td class="num" style="text-align:right;padding:5px 8px;font-size:12px">' + money(comps[b]) + '</td>'
+  var validBand = allBand.filter(function(b) { return comps[b] != null && comps[b] !== 0; });
+
+  // Compact foto section
+  var fotoSection = b64
+    ? '<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">📷 Foto do Sistema</div>'
+      + '<img src="' + b64 + '" style="width:100%;max-height:160px;object-fit:contain;border-radius:8px;border:1px solid var(--border);background:var(--surf2);cursor:zoom-in;margin-bottom:12px" onclick="var m=this.style.maxHeight;this.style.maxHeight=m===\'none\'?\'160px\':\'none\'">'
+    : '';
+
+  // Status banner for existing conference
+  var confStatusBanner = '';
+  if (existConf) {
+    var confDate = existConf.conferido_em ? new Date(existConf.conferido_em).toLocaleString('pt-BR') : '';
+    var bStyle = existConf.tem_divergencia
+      ? 'background:#2d0a0a;color:#ff6b6b;border:1px solid #ff6b6b'
+      : 'background:#0a2d0a;color:#51cf66;border:1px solid #51cf66';
+    confStatusBanner = '<div style="border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;font-weight:700;' + bStyle + '">'
+      + (existConf.tem_divergencia ? '⚠️ Conferido com divergência' : '✅ Conferido — sem divergência')
+      + (confDate ? '<div style="font-weight:400;opacity:.8;font-size:10px;margin-top:2px">Por ' + (existConf.conferido_por||'') + ' em ' + confDate + '</div>' : '')
+      + '</div>';
+  }
+
+  // Get pre-filled value for input (existing conference value or sistema value)
+  function getConfVal(key, sistValue) {
+    if (!existConf || !existConf.itens) return sistValue != null ? parseFloat(sistValue).toFixed(2) : '0.00';
+    var entry;
+    if (key.startsWith('band_')) {
+      entry = existConf.itens.bandeiras ? existConf.itens.bandeiras[key.slice(5)] : undefined;
+    } else {
+      entry = existConf.itens[key];
+    }
+    if (entry && entry.conferido != null) return parseFloat(entry.conferido).toFixed(2);
+    return sistValue != null ? parseFloat(sistValue).toFixed(2) : '0.00';
+  }
+
+  var inputStyle = 'width:82px;background:var(--surf2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:3px 5px;text-align:right;font-family:inherit;font-variant-numeric:tabular-nums';
+  var tdSist = 'text-align:right;padding:4px 6px;font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap';
+  var tdDif  = 'text-align:right;padding:4px 6px;font-size:11px;white-space:nowrap;font-weight:600;min-width:56px';
+
+  function safeKey(k) { return k.replace(/[^a-zA-Z0-9_]/g, '-'); }
+
+  function makeRow(key, rowLabel, sistValue) {
+    var sist = sistValue != null ? parseFloat(sistValue) : null;
+    var sk = safeKey(key);
+    var confVal = getConfVal(key, sist);
+    var sistStr = sist != null ? money(sist) : '—';
+    var sistAttr = sist != null ? String(sist) : '';
+    return '<tr style="border-top:1px solid var(--border)">'
+      + '<td style="padding:4px 8px;font-size:12px;color:var(--muted)">' + rowLabel + '</td>'
+      + '<td style="' + tdSist + '">' + sistStr + '</td>'
+      + '<td style="padding:3px 4px"><input type="number" class="conf-input" id="cfinp-' + sk + '" data-key="' + key + '" data-sist="' + sistAttr + '" step="0.01" min="0" value="' + confVal + '" oninput="calcConfDif()" style="' + inputStyle + '"></td>'
+      + '<td id="cfdif-' + sk + '" style="' + tdDif + ';color:var(--muted)">—</td>'
       + '</tr>';
-  });
-  const totalComps = Object.values(comps).reduce(function(a,v) { return a + (parseFloat(v)||0); }, 0);
+  }
 
-  const totalReal = row.total_real != null ? parseFloat(row.total_real) : null;
-  const difComp = totalReal != null && totalComps > 0 ? totalReal - totalComps : null;
-  const difCompStyle = difComp === null || Math.abs(difComp) < 1 ? 'color:var(--muted)' : difComp > 0 ? 'color:var(--green)' : 'color:var(--red)';
-  const difCompStr = difComp === null ? '—' : (difComp >= 0 ? '+' : '') + money(difComp);
+  function makeSectionRow(sec) {
+    return '<tr><td colspan="4" style="padding:5px 8px 2px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;background:var(--surf2)">' + sec + '</td></tr>';
+  }
 
-  const fotoSection = b64
-    ? '<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">📷 Foto do Sistema</div>'
-      + '<img src="' + b64 + '" style="width:100%;max-height:280px;object-fit:contain;border-radius:10px;border:1px solid var(--border);background:var(--surf2);cursor:zoom-in;margin-bottom:14px" onclick="var m=this.style.maxHeight;this.style.maxHeight=m===\'none\'?\'280px\':\'none\'" />'
-    : '<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">📷 Foto do Sistema</div>'
-      + '<div style="background:var(--surf2);border-radius:8px;padding:16px;text-align:center;color:var(--muted);font-size:12px;margin-bottom:14px">Foto não disponível para este fechamento</div>';
+  var confRows = '';
+  confRows += makeRow('total_real', 'Total Real (Cofre)', totalReal);
+  confRows += makeRow('repique', 'Repique', row.repique || 0);
+  confRows += makeRow('venda_ifood', 'iFood', row.venda_ifood || 0);
+  confRows += makeRow('venda_online', 'Online', row.venda_online || 0);
+  if (validBand.length > 0) {
+    confRows += makeSectionRow('▸ Entradas por bandeira');
+    validBand.forEach(function(b) { confRows += makeRow('band_' + b, b, comps[b]); });
+  }
+  if (totalDesp > 0)  confRows += makeRow('total_despesas',    'Total Saídas',     totalDesp);
+  if (totalSup  > 0)  confRows += makeRow('total_suprimentos', 'Total Suprimento', totalSup);
+  if (totalGor  > 0)  confRows += makeRow('total_gorjetas',    'Total Gorjeta',    totalGor);
 
-  const compSection = compRowsHtml === ''
-    ? '<div style="color:var(--muted);font-size:12px;padding:4px 0">Nenhum comprovante registrado</div>'
-    : '<table style="width:100%;border-collapse:collapse"><tbody>' + compRowsHtml + '</tbody>'
-      + '<tfoot><tr style="border-top:2px solid var(--border)">'
-      + '<td style="padding:5px 8px;font-size:12px;font-weight:700">TOTAL ENTRADAS</td>'
-      + '<td class="num" style="text-align:right;padding:5px 8px;font-size:12px;font-weight:700">' + money(totalComps) + '</td>'
-      + '</tr></tfoot></table>'
-      + (difComp !== null
-        ? '<div style="font-size:11px;' + difCompStyle + ';padding:6px 2px;font-weight:600">Dif. cofre − entradas: ' + difCompStr + '</div>'
-        : '');
-
-  // Despesas (saídas)
-  let despRowsHtml = '';
-  despesas.forEach(function(d) {
-    const label2 = SAIDAS_LABEL[d.categoria] || d.categoria || 'Outro';
-    despRowsHtml += '<tr style="border-top:1px solid var(--border)">'
-      + '<td style="padding:5px 8px;font-size:12px;color:var(--muted)">' + label2
-      + (d.nome ? '<br><span style="font-size:10px;color:var(--muted)">' + d.nome + '</span>' : '')
-      + '</td>'
-      + '<td class="num" style="text-align:right;padding:5px 8px;font-size:12px;color:var(--red)">−' + money(parseFloat(d.valor) || 0) + '</td>'
-      + '</tr>'
-      + (d.foto ? '<tr><td colspan="2" style="padding:4px 8px 8px"><img src="' + d.foto + '" style="max-width:100%;max-height:100px;border-radius:6px;object-fit:cover;cursor:pointer" onclick="this.style.maxHeight=this.style.maxHeight===\'none\'?\'100px\':\'none\'" title="Toque para expandir"></td></tr>' : '');
-  });
-  const totalDesp = despesas.reduce(function(a,d) { return a + (parseFloat(d.valor) || 0); }, 0);
-  const despSection = despRowsHtml === ''
-    ? '<div style="color:var(--muted);font-size:12px;padding:4px 0">Nenhuma despesa registrada</div>'
-    : '<table style="width:100%;border-collapse:collapse"><tbody>' + despRowsHtml + '</tbody>'
-      + '<tfoot><tr style="border-top:2px solid var(--border)">'
-      + '<td style="padding:5px 8px;font-size:12px;font-weight:700">TOTAL SAÍDAS</td>'
-      + '<td class="num" style="text-align:right;padding:5px 8px;font-size:12px;font-weight:700;color:var(--red)">−' + money(totalDesp) + '</td>'
-      + '</tr></tfoot></table>';
-
-  // Suprimentos
-  let supRowsHtml = '';
-  suprimentos.forEach(function(s) {
-    const descr = s.descricao ? ' · ' + s.descricao : '';
-    supRowsHtml += '<tr style="border-top:1px solid var(--border)">'
-      + '<td style="padding:5px 8px;font-size:12px;color:var(--muted)">Nota' + descr + '</td>'
-      + '<td class="num" style="text-align:right;padding:5px 8px;font-size:12px">' + money(parseFloat(s.valor) || 0) + '</td>'
-      + '</tr>';
-  });
-  const totalSup = suprimentos.reduce(function(a,s) { return a + (parseFloat(s.valor) || 0); }, 0);
-  const supSection = supRowsHtml === ''
-    ? '<div style="color:var(--muted);font-size:12px;padding:4px 0">Nenhum suprimento registrado</div>'
-    : '<table style="width:100%;border-collapse:collapse"><tbody>' + supRowsHtml + '</tbody>'
-      + '<tfoot><tr style="border-top:2px solid var(--border)">'
-      + '<td style="padding:5px 8px;font-size:12px;font-weight:700">TOTAL SUPRIMENTO</td>'
-      + '<td class="num" style="text-align:right;padding:5px 8px;font-size:12px;font-weight:700">' + money(totalSup) + '</td>'
-      + '</tr></tfoot></table>';
-
-  // Gorjetas
-  let gorRowsHtml = '';
-  gorjetas.forEach(function(g) {
-    const desc = 'Mesa ' + (g.mesa || '—') + (g.garcom ? ' · ' + g.garcom : '');
-    gorRowsHtml += '<tr style="border-top:1px solid var(--border)">'
-      + '<td style="padding:5px 8px;font-size:12px;color:var(--muted)">' + desc + '</td>'
-      + '<td class="num" style="text-align:right;padding:5px 8px;font-size:12px">' + money(parseFloat(g.valor) || 0) + '</td>'
-      + '</tr>';
-  });
-  const totalGor = gorjetas.reduce(function(a,g) { return a + (parseFloat(g.valor) || 0); }, 0);
-  const gorSection = gorRowsHtml === ''
-    ? '<div style="color:var(--muted);font-size:12px;padding:4px 0">Nenhuma gorjeta registrada</div>'
-    : '<table style="width:100%;border-collapse:collapse"><tbody>' + gorRowsHtml + '</tbody>'
-      + '<tfoot><tr style="border-top:2px solid var(--border)">'
-      + '<td style="padding:5px 8px;font-size:12px;font-weight:700">TOTAL GORJETA</td>'
-      + '<td class="num" style="text-align:right;padding:5px 8px;font-size:12px;font-weight:700">' + money(totalGor) + '</td>'
-      + '</tr></tfoot></table>';
-
-  const statusCls = STATUS_CLASS[row.status] || 'badge-muted';
-  const label = lojaObj ? lojaObj.display : lojaUserKey;
+  var safeId = id.replace(/[^a-zA-Z0-9_]/g, '-');
 
   abrirModal(
     '<div class="modal-handle"></div>'
     + '<div class="modal-title">🔍 Conferência — ' + label
     + '<button class="modal-close" onclick="fecharModal()">×</button></div>'
-    + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">'
+    + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">'
     + '<span style="font-size:13px;font-weight:600">' + fmtBRShort(data) + ' · ' + row.turno + '</span>'
     + '<span class="badge ' + statusCls + '">' + (row.status || '') + '</span>'
     + '</div>'
+    + confStatusBanner
     + fotoSection
-    + '<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">💰 Valores do Fechamento</div>'
-    + '<table style="width:100%;border-collapse:collapse;margin-bottom:14px"><tbody>'
-    + '<tr><td style="padding:5px 8px;font-size:12px;color:var(--muted)">Total Real (Cofre)</td>'
-    + '<td class="num" style="text-align:right;padding:5px 8px;font-size:13px;font-weight:700">'
-    + (totalReal != null ? money(totalReal) : '<span style="color:var(--muted)">—</span>') + '</td></tr>'
-    + '<tr style="border-top:1px solid var(--border)"><td style="padding:5px 8px;font-size:12px;color:var(--muted)">Repique</td>'
-    + '<td class="num" style="text-align:right;padding:5px 8px;font-size:12px">' + money(row.repique || 0) + '</td></tr>'
-    + '<tr style="border-top:1px solid var(--border)"><td style="padding:5px 8px;font-size:12px;color:var(--muted)">iFood</td>'
-    + '<td class="num" style="text-align:right;padding:5px 8px;font-size:12px">' + money(row.venda_ifood || 0) + '</td></tr>'
-    + '<tr style="border-top:1px solid var(--border)"><td style="padding:5px 8px;font-size:12px;color:var(--muted)">Online</td>'
-    + '<td class="num" style="text-align:right;padding:5px 8px;font-size:12px">' + money(row.venda_online || 0) + '</td></tr>'
-    + '</tbody></table>'
-    + '<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">📋 Entradas por Bandeira</div>'
-    + compSection
-    + '<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin:14px 0 8px">📤 Saídas</div>'
-    + despSection
-    + '<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin:14px 0 8px">📦 Suprimento</div>'
-    + supSection
-    + '<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin:14px 0 8px">✨ 10% Gorjeta</div>'
-    + gorSection
-    + '<div class="modal-actions"><button class="btn btn-sec" onclick="fecharModal()">Fechar</button></div>'
+    + '<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">📋 Conferência Manual</div>'
+    + '<table style="width:100%;border-collapse:collapse;margin-bottom:10px">'
+    + '<thead><tr style="background:var(--surf2)">'
+    + '<th style="padding:4px 8px;font-size:10px;text-align:left;color:var(--muted);font-weight:600">Item</th>'
+    + '<th style="padding:4px 6px;font-size:10px;text-align:right;color:var(--muted);font-weight:600">Sistema</th>'
+    + '<th style="padding:4px 4px;font-size:10px;text-align:right;color:var(--muted);font-weight:600">Conferido</th>'
+    + '<th style="padding:4px 6px;font-size:10px;text-align:right;color:var(--muted);font-weight:600">Dif.</th>'
+    + '</tr></thead><tbody>' + confRows + '</tbody></table>'
+    + '<div id="conf-result-' + safeId + '" style="margin-bottom:12px"></div>'
+    + '<div class="modal-actions">'
+    + '<button class="btn btn-sec" onclick="fecharModal()">Fechar</button>'
+    + '<button class="btn btn-pri" id="conf-btn-' + safeId + '" onclick="salvarConferencia(\'' + id + '\',\'' + lojaUserKey.replace(/'/g, "\\'") + '\')">✅ Finalizar Conferência</button>'
+    + '</div>'
   );
+
+  setTimeout(calcConfDif, 0);
+}
+
+function calcConfDif() {
+  document.querySelectorAll('.conf-input').forEach(function(input) {
+    var key = input.dataset.key;
+    var sk = key.replace(/[^a-zA-Z0-9_]/g, '-');
+    var difEl = document.getElementById('cfdif-' + sk);
+    if (!difEl) return;
+    var sistRaw = input.dataset.sist;
+    if (sistRaw === '' || sistRaw == null) { difEl.textContent = '—'; difEl.style.color = 'var(--muted)'; return; }
+    var sist = parseFloat(sistRaw);
+    var conf = parseFloat(input.value) || 0;
+    var dif = conf - sist;
+    if (Math.abs(dif) < 0.005) {
+      difEl.innerHTML = '<span style="color:var(--green)">✅</span>';
+      difEl.style.color = '';
+    } else {
+      var sign = dif > 0 ? '+' : '−';
+      difEl.textContent = sign + ' R$ ' + Math.abs(dif).toLocaleString('pt-BR', {minimumFractionDigits:2, maximumFractionDigits:2});
+      difEl.style.color = dif > 0 ? 'var(--green)' : 'var(--red)';
+    }
+  });
+}
+
+async function salvarConferencia(fechId, lojaUserKey) {
+  var lojaObj = LOJAS.find(function(l) { return l.userKey === lojaUserKey; });
+  var comKey = lojaObj ? lojaObj.comKey : lojaUserKey;
+  var safeId = fechId.replace(/[^a-zA-Z0-9_]/g, '-');
+
+  var itens = {};
+  var bandeiras = {};
+  var temDivergencia = false;
+
+  document.querySelectorAll('.conf-input').forEach(function(input) {
+    var key = input.dataset.key;
+    var sistRaw = input.dataset.sist;
+    var sist = sistRaw !== '' && sistRaw != null ? parseFloat(sistRaw) : null;
+    var conf = parseFloat(input.value) || 0;
+    var dif = sist != null ? Math.round((conf - sist) * 100) / 100 : 0;
+    if (Math.abs(dif) >= 0.01) temDivergencia = true;
+    var entry = { sistema: sist, conferido: conf, dif: dif };
+    if (key.startsWith('band_')) {
+      bandeiras[key.slice(5)] = entry;
+    } else {
+      itens[key] = entry;
+    }
+  });
+  if (Object.keys(bandeiras).length > 0) itens.bandeiras = bandeiras;
+
+  var conferencia = {
+    conferido_em: new Date().toISOString(),
+    conferido_por: S.usuario ? S.usuario.nome : 'Usuário',
+    tem_divergencia: temDivergencia,
+    itens: itens,
+  };
+
+  var btn = document.getElementById('conf-btn-' + safeId);
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Salvando...'; }
+
+  try {
+    var resLoja = await db.from('gn_lojas').select('all_data').eq('loja', comKey);
+    if (resLoja.error) throw resLoja.error;
+    var allData = (resLoja.data && resLoja.data[0] ? resLoja.data[0].all_data : null) || {};
+    var conferencias = allData.caixa_conferencias || {};
+    conferencias[fechId] = conferencia;
+    var resUpd = await db.from('gn_lojas').update(Object.assign({}, { all_data: Object.assign({}, allData, { caixa_conferencias: conferencias }) })).eq('loja', comKey);
+    if (resUpd.error) throw resUpd.error;
+
+    if (!S.caixaConferencias) S.caixaConferencias = {};
+    S.caixaConferencias[fechId] = conferencia;
+
+    var resultEl = document.getElementById('conf-result-' + safeId);
+    if (resultEl) {
+      var bStyle2 = temDivergencia
+        ? 'background:#2d0a0a;color:#ff6b6b;border:1px solid #ff6b6b'
+        : 'background:#0a2d0a;color:#51cf66;border:1px solid #51cf66';
+      resultEl.innerHTML = '<div style="border-radius:8px;padding:10px 14px;font-size:13px;font-weight:700;' + bStyle2 + '">'
+        + (temDivergencia ? '⚠️ Conferido com divergência' : '✅ Conferido — sem divergência')
+        + '</div>';
+    }
+
+    renderFinanceiro();
+    toast(temDivergencia ? 'Conferência salva — há divergência!' : 'Conferência salva!', temDivergencia ? 'err' : 'ok');
+  } catch(e) {
+    toast('Erro ao salvar: ' + (e.message || e), 'err');
+    if (btn) { btn.disabled = false; btn.textContent = '✅ Finalizar Conferência'; }
+  }
 }
 
 function modalMigracaoFoto() {
