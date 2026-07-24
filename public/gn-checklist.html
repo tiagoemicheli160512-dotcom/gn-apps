@@ -2019,8 +2019,12 @@ async function loadComissoesData(){
     console.error('Erro ao carregar funcionários de Comissões:', e.message||e);
   }
   comissoesDocs = {};
+  if(comissoesWD){
+    comissoesWD.funcs.forEach((f,i)=>{
+      if(f.docs) Object.entries(f.docs).forEach(([tipo,foto])=>{ if(foto) comissoesDocs[`${i}_${tipo}`]=foto; });
+    });
+  }
   renderComissoesFuncs();
-  loadFuncDocs(); // carrega documentos (atestados/suspensões/advertências) em background
   // Sincroniza repique que chegou do App Caixa antes dos dados de Comissões estarem prontos
   if(pendingRepiqueCaixaSync && state.repique > 0){
     pendingRepiqueCaixaSync = false;
@@ -3833,17 +3837,6 @@ function renderComissoesFuncs(){
   }).join('');
 }
 
-async function loadFuncDocs(){
-  if(comissoesWeekIdx==null||!LOJA) return;
-  try{
-    const lojaKey=comissoesLojaKey();
-    const {data}=await sb.from('gn_func_docs').select('func_idx,tipo,foto').eq('loja',lojaKey).eq('semana_idx',comissoesWeekIdx);
-    comissoesDocs={};
-    (data||[]).forEach(d=>{ comissoesDocs[`${d.func_idx}_${d.tipo}`]=d.foto; });
-    renderComissoesFuncs();
-  }catch(_){}
-}
-
 function _abrirFotoFunc(funcIdx,tipo){
   _docFuncIdx=funcIdx; _docTipo=tipo;
   const inp=document.getElementById('funcDocInput');
@@ -3853,17 +3846,24 @@ function _abrirFotoFunc(funcIdx,tipo){
 function onFuncDocChange(input){
   const file=input.files[0];
   if(!file||_docFuncIdx==null||!_docTipo) return;
-  _comprimirParaFoto(file,async function(b64){
-    const key=`${_docFuncIdx}_${_docTipo}`;
+  const capIdx=_docFuncIdx, capTipo=_docTipo;
+  _comprimirParaFoto(file,function(b64){
+    const key=`${capIdx}_${capTipo}`;
     comissoesDocs[key]=b64;
+    // Atualiza o WD local imediatamente para re-render sem delay
+    if(comissoesWD&&comissoesWD.funcs[capIdx]){
+      if(!comissoesWD.funcs[capIdx].docs) comissoesWD.funcs[capIdx].docs={};
+      comissoesWD.funcs[capIdx].docs[capTipo]=b64;
+    }
     renderComissoesFuncs();
-    try{
-      await sb.from('gn_func_docs').upsert(
-        {loja:comissoesLojaKey(),semana_idx:comissoesWeekIdx,func_idx:_docFuncIdx,tipo:_docTipo,foto:b64},
-        {onConflict:'loja,semana_idx,func_idx,tipo'}
-      );
-      showToast('📷 Documento salvo');
-    }catch(_){ showToast('📷 Documento salvo localmente'); }
+    // Persiste dentro de gn_comissoes.all_data via mecanismo existente (sem migration)
+    scheduleComissoesOp(function(wd){
+      if(!wd.funcs[capIdx]) return wd;
+      if(!wd.funcs[capIdx].docs) wd.funcs[capIdx].docs={};
+      wd.funcs[capIdx].docs[capTipo]=b64;
+      return wd;
+    });
+    showToast('📷 Documento salvo');
   });
 }
 
