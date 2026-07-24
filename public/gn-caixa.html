@@ -860,6 +860,7 @@ select option { background: var(--graf2); color: var(--txt); }
     </div>
     <div class="section-title">Saídas registradas</div>
     <div id="listaSaidas"></div>
+    <input type="file" id="fotoSaidaInput" accept="image/*" capture="environment" style="display:none" onchange="onFotoSaidaChange(this)">
   </div>
 
   <div class="pane hidden" id="pane-supr">
@@ -1073,7 +1074,7 @@ async function sincronizarChecklist(data, mostrarToast) {
     const ids = caixas.map(c => c.id).join(',');
     const [comps, saidasDB] = await Promise.all([
       sb(`gn_caixa_comprovante?fechamento_id=in.(${ids})&select=bandeira,valor`),
-      sb(`gn_caixa_despesa?fechamento_id=in.(${ids})&select=id,categoria,nome,valor&order=criado_em`)
+      sb(`gn_caixa_despesa?fechamento_id=in.(${ids})&select=id,categoria,nome,valor,foto&order=criado_em`)
     ]);
     const totalEntradas = (comps||[]).reduce((a,c)=>a+Number(c.valor),0);
     const vDelivery = (comps||[]).filter(c=>c.bandeira==='IFOOD'||c.bandeira==='Online').reduce((a,c)=>a+Number(c.valor),0);
@@ -1094,7 +1095,7 @@ async function sincronizarChecklist(data, mostrarToast) {
         id: s.id,
         descricao: saidasLabel[s.categoria]||s.nome||s.categoria,
         valor: Number(s.valor),
-        foto: fotoById[String(s.id)]||''
+        foto: s.foto || fotoById[String(s.id)] || ''
       })),
       ...fotoDinhSentinel
     ];
@@ -1293,9 +1294,11 @@ function renderTudo() {
     <div class="val">${money(c.valor)}${_pend(c)}</div><button class="del" onclick="excluir('gn_caixa_comprovante','${c.id}','comprovantes')">✕</button></div>`;
   }).join('') : '<div class="vazio">Nenhum recebimento.</div>';
 
+  const _fotoBtn = id => S.modoConsulta ? '' : `<button onclick="_abrirFotoSaida('${id}')" style="background:none;border:none;color:var(--mut);cursor:pointer;font-size:15px;padding:2px 4px;flex-shrink:0;line-height:1" title="Adicionar foto">📷</button>`;
+  const _fotoThumb = foto => foto ? `<div style="flex:0 0 100%;margin-top:6px;"><img src="${foto}" style="max-width:100%;max-height:100px;border-radius:6px;object-fit:cover;cursor:pointer" onclick="this.style.maxHeight=this.style.maxHeight==='none'?'100px':'none'" title="Toque para expandir"></div>` : '';
   $('listaSaidas').innerHTML = S.saidas.length ? S.saidas.slice().reverse().map(s =>
-    `<div class="linha-item"><div class="desc">${(saidaMap[s.categoria] || s.categoria)}<small>${s.nome || ''}</small></div>
-    <div class="val">${money(s.valor)}${_pend(s)}</div><button class="del" onclick="excluir('gn_caixa_despesa','${s.id}','saidas')">✕</button></div>`).join('')
+    `<div class="linha-item" style="flex-wrap:wrap"><div class="desc">${(saidaMap[s.categoria] || s.categoria)}<small>${s.nome || ''}</small></div>
+    <div class="val">${money(s.valor)}${_pend(s)}</div>${_fotoBtn(s.id)}<button class="del" onclick="excluir('gn_caixa_despesa','${s.id}','saidas')">✕</button>${_fotoThumb(s.foto||'')}</div>`).join('')
     : '<div class="vazio">Nenhuma saída.</div>';
 
   $('listaSupr').innerHTML = S.supr.length ? S.supr.slice().reverse().map(s =>
@@ -1662,6 +1665,54 @@ async function excluir(tabela, id, arr) {
     S[arr] = S[arr].filter(x => x.id !== id);
     renderTudo(); toast('⚠️ Offline — exclusão pendente');
   }
+}
+
+let _fotoSaidaId = null;
+
+function _abrirFotoSaida(id) {
+  _fotoSaidaId = id;
+  const inp = document.getElementById('fotoSaidaInput');
+  if (inp) { inp.value = ''; inp.click(); }
+}
+
+function _comprimirImagem(file, maxPx, quality) {
+  return new Promise(function(resolve, reject) {
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      const img = new Image();
+      img.onload = function() {
+        let w = img.width, h = img.height;
+        if (w > maxPx || h > maxPx) {
+          if (w > h) { h = Math.round(h * maxPx / w); w = maxPx; }
+          else { w = Math.round(w * maxPx / h); h = maxPx; }
+        }
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve(c.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function onFotoSaidaChange(input) {
+  const file = input.files[0];
+  if (!file || !_fotoSaidaId) return;
+  try {
+    toast('📷 Processando...');
+    const b64 = await _comprimirImagem(file, 800, 0.7);
+    const item = S.saidas.find(x => x.id === _fotoSaidaId);
+    if (item) item.foto = b64;
+    renderTudo();
+    try {
+      await sb(`gn_caixa_despesa?id=eq.${_fotoSaidaId}`, { method: 'PATCH', prefer: 'return=minimal', body: { foto: b64 } });
+      toast('📷 Foto salva');
+    } catch(_) { toast('📷 Foto salva (sem coluna no banco)'); }
+  } catch(e) { toast('❌ Erro ao processar foto'); }
 }
 
 function abrirModal(k) {
