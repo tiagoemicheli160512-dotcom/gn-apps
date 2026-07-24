@@ -348,6 +348,16 @@ const LOJAS = [
   { display:'Guarulhos',      userKey:'GUARULHOS',    chkKey:'Guarulhos',     comKey:'GUARULHOS'    },
 ];
 
+const SAIDA_LABEL = {
+  'taxa_cartao':'Taxa Cartão','gorjeta_garcom':'Gorjeta Garçom',
+  'manutencao':'Manutenção','material_limpeza':'Material Limpeza',
+  'descartavel':'Descartável','entrega_motoboy':'Entrega Motoboy',
+  'troco':'Troco','alimentacao':'Alimentação Equipe',
+  'estacionamento':'Estacionamento','transporte':'Transporte',
+  'outros':'Outros','fruta_verdura':'Fruta/Verdura',
+  'condominio':'Condomínio','insumo':'Insumo'
+};
+
 // ══════════════════════════════════════════════
 // STATE
 // ══════════════════════════════════════════════
@@ -580,7 +590,7 @@ async function carregarFinanceiro() {
     const ids = S.caixaSemana.map(r => r.id);
     const [resComp, resDes, resSup, resGor] = await Promise.all([
       db.from('gn_caixa_comprovante').select('fechamento_id,bandeira,valor').in('fechamento_id', ids),
-      db.from('gn_caixa_despesa').select('fechamento_id,categoria,nome,valor,foto').in('fechamento_id', ids),
+      db.from('gn_caixa_despesa').select('id,fechamento_id,categoria,nome,valor,foto').in('fechamento_id', ids),
       db.from('gn_caixa_suprimento').select('fechamento_id,descricao,valor').in('fechamento_id', ids),
       db.from('gn_caixa_gorjeta').select('fechamento_id,mesa,garcom,valor').in('fechamento_id', ids),
     ]);
@@ -2117,9 +2127,41 @@ function verConferencia(lojaUserKey, data, id) {
       + '</tr>';
   }
 
+  function makeDespRow(key, rowLabel, sistValue, fotoB64) {
+    var sist = sistValue != null ? parseFloat(sistValue) : null;
+    var sk = safeKey(key);
+    var confVal = getConfVal(key, sist);
+    var sistStr = sist != null ? money(sist) : '—';
+    var sistAttr = sist != null ? String(sist) : '';
+    var thumb = fotoB64
+      ? '<img src="' + fotoB64 + '" onclick="verFotoConf(\'' + sk + '\')" style="display:block;max-width:52px;height:34px;object-fit:cover;border-radius:3px;border:1px solid var(--border);margin-top:3px;cursor:zoom-in">'
+      : '';
+    return '<tr style="border-top:1px solid var(--border)">'
+      + '<td style="padding:4px 8px;vertical-align:top"><div style="font-size:12px;color:var(--muted)">' + rowLabel + '</div>' + thumb + '</td>'
+      + '<td style="' + tdSist + ';vertical-align:top">' + sistStr + '</td>'
+      + '<td style="padding:3px 4px;vertical-align:top"><input type="number" class="conf-input" id="cfinp-' + sk + '" data-key="' + key + '" data-sist="' + sistAttr + '" data-foto="' + (fotoB64 ? sk : '') + '" step="0.01" min="0" value="' + confVal + '" oninput="calcConfDif()" style="' + inputStyle + '"></td>'
+      + '<td id="cfdif-' + sk + '" style="' + tdDif + ';color:var(--muted);vertical-align:top">—</td>'
+      + '</tr>';
+  }
+
+  function makeReadRow(rowLabel, value) {
+    var str = value != null ? money(parseFloat(value)) : '—';
+    return '<tr style="border-top:2px solid var(--border);background:var(--surf2)">'
+      + '<td style="padding:5px 8px;font-size:12px;font-weight:700" colspan="2">' + rowLabel + '</td>'
+      + '<td colspan="2" style="text-align:right;padding:5px 8px;font-size:12px;font-weight:700;font-variant-numeric:tabular-nums">' + str + '</td>'
+      + '</tr>';
+  }
+
   function makeSectionRow(sec) {
     return '<tr><td colspan="4" style="padding:5px 8px 2px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;background:var(--surf2)">' + sec + '</td></tr>';
   }
+
+  // Foto inline full-view stash (keyed by safeKey)
+  var _confFotos = {};
+  despesas.forEach(function(d) {
+    if (d.foto) _confFotos[safeKey('desp_' + d.id)] = d.foto;
+  });
+  window._confFotosMap = _confFotos;
 
   var confRows = '';
   confRows += makeRow('total_real', 'Total Real (Cofre)', totalReal);
@@ -2130,9 +2172,30 @@ function verConferencia(lojaUserKey, data, id) {
     confRows += makeSectionRow('▸ Entradas por bandeira');
     validBand.forEach(function(b) { confRows += makeRow('band_' + b, b, comps[b]); });
   }
-  if (totalDesp > 0)  confRows += makeRow('total_despesas',    'Total Saídas',     totalDesp);
-  if (totalSup  > 0)  confRows += makeRow('total_suprimentos', 'Total Suprimento', totalSup);
-  if (totalGor  > 0)  confRows += makeRow('total_gorjetas',    'Total Gorjeta',    totalGor);
+  if (despesas.length > 0) {
+    confRows += makeSectionRow('▸ Saídas');
+    despesas.forEach(function(d) {
+      var baseLabel = SAIDA_LABEL[d.categoria] || d.categoria;
+      var fullLabel = d.nome && d.nome !== baseLabel ? baseLabel + ' · ' + d.nome : baseLabel;
+      confRows += makeDespRow('desp_' + d.id, fullLabel, d.valor, d.foto || null);
+    });
+    confRows += makeReadRow('Total Saídas', totalDesp);
+  }
+  if (suprimentos.length > 0) {
+    confRows += makeSectionRow('▸ Suprimento');
+    suprimentos.forEach(function(s, i) {
+      confRows += makeRow('supr_' + i, s.descricao || 'Suprimento', s.valor);
+    });
+    confRows += makeReadRow('Total Suprimento', totalSup);
+  }
+  if (gorjetas.length > 0) {
+    confRows += makeSectionRow('▸ Gorjetas');
+    gorjetas.forEach(function(g, i) {
+      var glabel = (g.garcom ? g.garcom : '') + (g.mesa ? ' / Mesa ' + g.mesa : '');
+      confRows += makeRow('gor_' + i, glabel.trim() || 'Gorjeta', g.valor);
+    });
+    confRows += makeReadRow('Total Gorjetas', totalGor);
+  }
 
   var safeId = id.replace(/[^a-zA-Z0-9_]/g, '-');
 
@@ -2249,6 +2312,18 @@ async function salvarConferencia(fechId, lojaUserKey) {
     toast('Erro ao salvar: ' + (e.message || e), 'err');
     if (btn) { btn.disabled = false; btn.textContent = '✅ Finalizar Conferência'; }
   }
+}
+
+function verFotoConf(sk) {
+  var map = window._confFotosMap || {};
+  var b64 = map[sk];
+  if (!b64) return;
+  abrirModal(
+    '<div class="modal-handle"></div>'
+    + '<div class="modal-title">📷 Foto da Despesa<button class="modal-close" onclick="fecharModal()">×</button></div>'
+    + '<img src="' + b64 + '" style="width:100%;border-radius:8px;border:1px solid var(--border)">'
+    + '<div class="modal-actions"><button class="btn btn-sec" onclick="fecharModal()">Fechar</button></div>'
+  );
 }
 
 function modalMigracaoFoto() {
