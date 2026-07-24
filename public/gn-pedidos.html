@@ -788,11 +788,13 @@ async function carregarPedidoAtual() {
   const mondayHoje = getMondayOfWeek();
   const ehSemAtual = S.semanaAtiva.toDateString() === mondayHoje.toDateString();
 
-  // Busca pedido da semana selecionada
+  // Busca pedido da semana — prioriza CONFIRMADO/ENVIADO sobre RASCUNHO, ignora CANCELADO
   const { data } = await db.from('gn_pedidos')
     .select('*')
     .eq('semana_inicio', semIsoStr)
     .eq('regiao', 'RJ')
+    .in('status', ['CONFIRMADO', 'ENVIADO', 'RASCUNHO'])
+    .order('status', { ascending: true })
     .order('criado_em', { ascending: false })
     .limit(1);
 
@@ -1130,9 +1132,15 @@ async function confirmarPedido() {
 }
 
 async function novoPedido() {
-  if (!confirm('Criar novo pedido em branco?\nO rascunho atual será descartado.')) return;
+  const ehConfirmado = S.pedidoAtual?.status === 'CONFIRMADO';
+  const msg = ehConfirmado
+    ? 'O pedido desta semana já está CONFIRMADO.\nDeseja criar um novo rascunho em branco (sem cancelar o confirmado)?'
+    : 'Criar novo pedido em branco?\nO rascunho atual será descartado.';
+  if (!confirm(msg)) return;
   const semIsoStr = S.semanaAtiva.toISOString().split('T')[0];
-  await db.from('gn_pedidos').update({ status: 'CANCELADO' }).eq('id', S.pedidoAtual.id);
+  if (!ehConfirmado && S.pedidoAtual?.id) {
+    await db.from('gn_pedidos').update({ status: 'CANCELADO' }).eq('id', S.pedidoAtual.id);
+  }
   const { data } = await db.from('gn_pedidos')
     .insert([{ data_pedido: hoje(), semana_inicio: semIsoStr, status: 'RASCUNHO', regiao: 'RJ' }])
     .select().single();
@@ -2168,6 +2176,23 @@ async function renderProvisoes() {
         <button onclick="gerarPDFProvisoes()" style="background:rgba(192,57,43,.15);border:1px solid rgba(192,57,43,.4);border-radius:11px;padding:10px 16px;color:#e74c3c;font-weight:800;font-size:13px;display:flex;align-items:center;gap:6px">📄 PDF</button>
         ${Object.keys(por_forn).sort().map(f=>`<button onclick="gerarWppProvisoesForn('${f.replace(/'/g,"\\'")}')" style="background:rgba(37,211,102,.08);border:1px solid rgba(37,211,102,.3);border-radius:11px;padding:10px 13px;color:#4ade80;font-weight:700;font-size:11px;display:flex;align-items:center;gap:5px">📦 ${f}</button>`).join('')}
       </div>
+    </div>
+
+    <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px">
+      <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:10px;letter-spacing:.5px">📋 Relatório de Pedido para Fornecedores — Todas as Lojas</div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:rgba(232,88,10,.08);border:1px solid rgba(232,88,10,.25);border-radius:10px">
+          <span style="flex:1;font-size:12px;font-weight:700;color:var(--primary)">Pedido Completo — Todas as Lojas</span>
+          <button onclick="gerarWppPedidoProvForn(null)" style="background:rgba(37,211,102,.2);border:1px solid rgba(37,211,102,.5);border-radius:8px;padding:6px 12px;color:#22c55e;font-weight:700;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:4px">📲 WPP</button>
+          <button onclick="gerarPDFPedidoProvForn(null)" style="background:rgba(192,57,43,.15);border:1px solid rgba(192,57,43,.4);border-radius:8px;padding:6px 12px;color:#e74c3c;font-weight:700;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:4px">📄 PDF</button>
+        </div>
+        ${Object.keys(por_forn).sort().map(f=>`
+        <div style="display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:10px">
+          <span style="flex:1;font-size:11px;font-weight:600;color:var(--text)">📦 ${f}</span>
+          <button onclick="gerarWppPedidoProvForn('${f.replace(/'/g,"\\'")}')" style="background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);border-radius:7px;padding:5px 10px;color:#22c55e;font-weight:700;font-size:11px;cursor:pointer">📲</button>
+          <button onclick="gerarPDFPedidoProvForn('${f.replace(/'/g,"\\'")}')" style="background:rgba(192,57,43,.12);border:1px solid rgba(192,57,43,.35);border-radius:7px;padding:5px 10px;color:#e74c3c;font-weight:700;font-size:11px;cursor:pointer">📄</button>
+        </div>`).join('')}
+      </div>
     </div>` : ''}
   `;
 }
@@ -2342,6 +2367,82 @@ function gerarWppProvisoesForn(fornecedor) {
   msg+=`\n💰 Total: *R$ ${fmt(total)}*`;
   window.open('https://wa.me/?text='+encodeURIComponent(msg));
 }
+
+// ── Relatório de PEDIDO (formato limpo) a partir de S.provisoes ────────
+function _buildPedidoProv(fornecedor) {
+  const itens = fornecedor
+    ? S.provisoes.filter(p => (p.fornecedor || 'SEM FORNECEDOR') === fornecedor)
+    : S.provisoes;
+  const lojaMap = {};
+  itens.forEach(p => {
+    const loja = S.lojas.find(l => l.slug_pedido === p.loja_slug)?.nome_display || p.loja_slug;
+    (lojaMap[loja] = lojaMap[loja] || []).push(p);
+  });
+  return lojaMap;
+}
+
+function gerarWppPedidoProvForn(fornecedor) {
+  if (!S.provisoes.length) { toast('Nenhuma provisão carregada.', 'err'); return; }
+  const sem = formatarSemana(S.semanaAtiva || getMondayOfWeek());
+  const lojaMap = _buildPedidoProv(fornecedor);
+  if (!Object.keys(lojaMap).length) { toast('Nenhum item para este fornecedor.', 'err'); return; }
+
+  const cabecalho = fornecedor
+    ? `🛒 *PEDIDO — ${fornecedor}*\nSemana ${sem.num}/${sem.ano} (${sem.periodo})\n📍 TODAS AS LOJAS`
+    : `🛒 *PEDIDO GERAL — TODAS AS LOJAS*\nSemana ${sem.num}/${sem.ano} (${sem.periodo})`;
+  let msg = cabecalho + '\n━━━━━━━━━━━━━━━━━━\n';
+  let totalGeral = 0;
+
+  Object.entries(lojaMap).sort(([a],[b]) => a.localeCompare(b)).forEach(([lojaNome, itens]) => {
+    msg += `📍 ${lojaNome}\n`;
+    let subLoja = 0;
+    itens.forEach(p => {
+      const produto = p.gn_catalogo?.produto || '—';
+      const und = p.gn_catalogo?.und || '';
+      const qtd = p.qtd_prevista || 0;
+      const val = parseFloat(p.valor_previsto) || 0;
+      const sub = val > 0 ? ` — R$ ${fmt(val)}` : '';
+      msg += `  • ${produto}: ${fmtQtd(qtd)} ${und}${sub}\n`;
+      subLoja += val;
+      totalGeral += val;
+    });
+    if (subLoja > 0) msg += `  💰 Subtotal: R$ ${fmt(subLoja)}\n`;
+  });
+
+  if (totalGeral > 0) msg += `\n💰 *Total: R$ ${fmt(totalGeral)}*`;
+  window.open('https://wa.me/?text=' + encodeURIComponent(msg));
+}
+
+function gerarPDFPedidoProvForn(fornecedor) {
+  if (!S.provisoes.length) { toast('Nenhuma provisão carregada.', 'err'); return; }
+  const sem = formatarSemana(S.semanaAtiva || getMondayOfWeek());
+  const lojaMap = _buildPedidoProv(fornecedor);
+  if (!Object.keys(lojaMap).length) { toast('Nenhum item para este fornecedor.', 'err'); return; }
+
+  const tituloLabel = fornecedor ? fornecedor : 'PEDIDO GERAL';
+  let msg = `${tituloLabel} — TODAS AS LOJAS\nSemana ${sem.num}/${sem.ano} (${sem.periodo})\n${'─'.repeat(40)}\n`;
+  let totalGeral = 0;
+
+  Object.entries(lojaMap).sort(([a],[b]) => a.localeCompare(b)).forEach(([lojaNome, itens]) => {
+    msg += `  ${lojaNome}\n`;
+    let subLoja = 0;
+    itens.forEach(p => {
+      const produto = p.gn_catalogo?.produto || '—';
+      const und = p.gn_catalogo?.und || '';
+      const qtd = p.qtd_prevista || 0;
+      const val = parseFloat(p.valor_previsto) || 0;
+      const sub = val > 0 ? ` — R$ ${fmt(val)}` : '';
+      msg += `    • ${produto}: ${fmtQtd(qtd)} ${und}${sub}\n`;
+      subLoja += val;
+      totalGeral += val;
+    });
+    if (subLoja > 0) msg += `    Subtotal: R$ ${fmt(subLoja)}\n`;
+  });
+
+  if (totalGeral > 0) msg += `\nTotal: R$ ${fmt(totalGeral)}`;
+  gerarPDF(msg, `${tituloLabel} — Semana ${sem.num}/${sem.ano}`);
+}
+// ───────────────────────────────────────────────────────────────────────
 
 function gerarWppEntregas() {
   if(!S.entregasPendentes||!S.entregasPendentes.length){toast('Nenhuma entrega pendente.','err');return;}
