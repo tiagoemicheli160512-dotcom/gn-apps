@@ -1435,6 +1435,13 @@ function renderPedido() {
     ).map(p=>p.fornecedor)
   )].sort();
 
+  // Fornecedores com itens em QUALQUER loja (para relatórios pós-confirmação)
+  const fornsTodasLojas = [...new Set(
+    S.catalogo.filter(p=>p.ativo).filter(prod=>
+      S.lojas.some(l=>(S.pedidoItens[prod.id]?.[l.slug_pedido]?.qtd||0)>0)
+    ).map(p=>p.fornecedor)
+  )].sort();
+
   $('content').innerHTML = semNavHtml + `
     <div class="pedido-bar">
       <div class="pedido-info">
@@ -1500,6 +1507,24 @@ function renderPedido() {
         <button onclick="gerarWppPedido()" style="background:rgba(37,211,102,.2);border:1px solid rgba(37,211,102,.5);border-radius:11px;padding:10px 16px;color:#22c55e;font-weight:800;font-size:13px;display:flex;align-items:center;gap:6px">📲 Geral</button>
         <button onclick="gerarPDFPedido()" style="background:rgba(192,57,43,.15);border:1px solid rgba(192,57,43,.4);border-radius:11px;padding:10px 16px;color:#e74c3c;font-weight:800;font-size:13px;display:flex;align-items:center;gap:6px">📄 PDF</button>
         ${fornsComItens.map(f=>`<button onclick="gerarWppPedidoForn('${f.replace(/'/g,"\\'")}')" style="background:rgba(37,211,102,.08);border:1px solid rgba(37,211,102,.3);border-radius:11px;padding:10px 13px;color:#4ade80;font-weight:700;font-size:11px;display:flex;align-items:center;gap:5px">📦 ${f}</button>`).join('')}
+      </div>
+    </div>` : ''}
+
+    ${pedConfirmado && fornsTodasLojas.length ? `
+    <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px">
+      <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:10px;letter-spacing:.5px">📋 Relatórios para Fornecedores — Todas as Lojas</div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:rgba(232,88,10,.08);border:1px solid rgba(232,88,10,.25);border-radius:10px">
+          <span style="flex:1;font-size:12px;font-weight:700;color:var(--primary)">Pedido Completo — Todas as Lojas</span>
+          <button onclick="gerarWppFornAllLojas(null)" style="background:rgba(37,211,102,.2);border:1px solid rgba(37,211,102,.5);border-radius:8px;padding:6px 12px;color:#22c55e;font-weight:700;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:4px">📲 WPP</button>
+          <button onclick="gerarPDFFornAllLojas(null)" style="background:rgba(192,57,43,.15);border:1px solid rgba(192,57,43,.4);border-radius:8px;padding:6px 12px;color:#e74c3c;font-weight:700;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:4px">📄 PDF</button>
+        </div>
+        ${fornsTodasLojas.map(f=>`
+        <div style="display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:10px">
+          <span style="flex:1;font-size:11px;font-weight:600;color:var(--text)">📦 ${f}</span>
+          <button onclick="gerarWppFornAllLojas('${f.replace(/'/g,"\\'")}')" style="background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);border-radius:7px;padding:5px 10px;color:#22c55e;font-weight:700;font-size:11px;cursor:pointer">📲</button>
+          <button onclick="gerarPDFFornAllLojas('${f.replace(/'/g,"\\'")}')" style="background:rgba(192,57,43,.12);border:1px solid rgba(192,57,43,.35);border-radius:7px;padding:5px 10px;color:#e74c3c;font-weight:700;font-size:11px;cursor:pointer">📄</button>
+        </div>`).join('')}
       </div>
     </div>` : ''}
   `;
@@ -2213,6 +2238,93 @@ function gerarWppPedidoForn(fornecedor) {
   if(total>0) msg+=`\n💰 Total: *R$ ${fmt(total)}*`;
   window.open('https://wa.me/?text='+encodeURIComponent(msg));
 }
+
+// ── Relatório para fornecedor — SEMPRE todas as lojas ──────────────────
+function _buildRelatorioFornAllLojas(fornecedor) {
+  // Retorna { porForn, totalGeral } com dados de todas as lojas
+  const porForn = {};
+  const prods = fornecedor
+    ? S.catalogo.filter(p => p.ativo && p.fornecedor === fornecedor)
+    : S.catalogo.filter(p => p.ativo);
+  prods.forEach(prod => {
+    S.lojas.forEach(loja => {
+      const qtd = S.pedidoItens[prod.id]?.[loja.slug_pedido]?.qtd || 0;
+      if (qtd <= 0) return;
+      (porForn[prod.fornecedor] = porForn[prod.fornecedor] || []).push({
+        produto: prod.produto, und: prod.und, custo: prod.custo || 0,
+        loja: loja.nome_display, qtd
+      });
+    });
+  });
+  return porForn;
+}
+
+function gerarWppFornAllLojas(fornecedor) {
+  if (!S.pedidoAtual) { toast('Nenhum pedido ativo.', 'err'); return; }
+  const sem = formatarSemana(S.semanaAtiva);
+  const porForn = _buildRelatorioFornAllLojas(fornecedor);
+  const fns = Object.keys(porForn).sort();
+  if (!fns.length) { toast('Nenhum item no pedido.', 'err'); return; }
+
+  const cabecalho = fornecedor
+    ? `🛒 *PEDIDO — ${fornecedor}*\nSemana ${sem.num}/${sem.ano} (${sem.periodo})\n📍 TODAS AS LOJAS`
+    : `🛒 *PEDIDO GERAL — TODAS AS LOJAS*\nSemana ${sem.num}/${sem.ano} (${sem.periodo})`;
+  let msg = cabecalho + '\n━━━━━━━━━━━━━━━━━━\n';
+  let totalGeral = 0;
+
+  fns.forEach(forn => {
+    if (!fornecedor) msg += `\n🏭 *${forn}*\n`;
+    const lojaMap = {};
+    porForn[forn].forEach(i => (lojaMap[i.loja] = lojaMap[i.loja] || []).push(i));
+    Object.entries(lojaMap).sort(([a],[b]) => a.localeCompare(b)).forEach(([lojaNome, items]) => {
+      msg += `📍 ${lojaNome}\n`;
+      let subLoja = 0;
+      items.forEach(i => {
+        const sub = i.custo > 0 ? ` — R$ ${fmt(i.qtd * i.custo)}` : '';
+        msg += `  • ${i.produto}: ${fmtQtd(i.qtd)} ${i.und}${sub}\n`;
+        subLoja += i.qtd * i.custo;
+        totalGeral += i.qtd * i.custo;
+      });
+      if (subLoja > 0) msg += `  💰 Subtotal: R$ ${fmt(subLoja)}\n`;
+    });
+  });
+
+  if (totalGeral > 0) msg += `\n💰 *Total: R$ ${fmt(totalGeral)}*`;
+  window.open('https://wa.me/?text=' + encodeURIComponent(msg));
+}
+
+function gerarPDFFornAllLojas(fornecedor) {
+  if (!S.pedidoAtual) { toast('Nenhum pedido ativo.', 'err'); return; }
+  const sem = formatarSemana(S.semanaAtiva);
+  const porForn = _buildRelatorioFornAllLojas(fornecedor);
+  const fns = Object.keys(porForn).sort();
+  if (!fns.length) { toast('Nenhum item no pedido.', 'err'); return; }
+
+  const tituloLabel = fornecedor ? fornecedor : 'PEDIDO GERAL';
+  let msg = `${tituloLabel} — TODAS AS LOJAS\nSemana ${sem.num}/${sem.ano} (${sem.periodo})\n${'─'.repeat(40)}\n`;
+  let totalGeral = 0;
+
+  fns.forEach(forn => {
+    if (!fornecedor) msg += `\n${forn}\n`;
+    const lojaMap = {};
+    porForn[forn].forEach(i => (lojaMap[i.loja] = lojaMap[i.loja] || []).push(i));
+    Object.entries(lojaMap).sort(([a],[b]) => a.localeCompare(b)).forEach(([lojaNome, items]) => {
+      msg += `  ${lojaNome}\n`;
+      let subLoja = 0;
+      items.forEach(i => {
+        const sub = i.custo > 0 ? ` — R$ ${fmt(i.qtd * i.custo)}` : '';
+        msg += `    • ${i.produto}: ${fmtQtd(i.qtd)} ${i.und}${sub}\n`;
+        subLoja += i.qtd * i.custo;
+        totalGeral += i.qtd * i.custo;
+      });
+      if (subLoja > 0) msg += `    Subtotal: R$ ${fmt(subLoja)}\n`;
+    });
+  });
+
+  if (totalGeral > 0) msg += `\nTotal: R$ ${fmt(totalGeral)}`;
+  gerarPDF(msg, `${tituloLabel} — Semana ${sem.num}/${sem.ano}`);
+}
+// ───────────────────────────────────────────────────────────────────────
 
 function gerarWppProvisoesForn(fornecedor) {
   const itens=S.provisoes.filter(p=>(p.fornecedor||'SEM FORNECEDOR')===fornecedor);
