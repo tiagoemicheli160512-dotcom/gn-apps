@@ -290,6 +290,8 @@ body{background:var(--bg);color:#e8e8f0;font-family:-apple-system,BlinkMacSystem
   <button class="sidebar-link" data-sidebar-tab="Gastos" onclick="setFiltro('Gastos')"><span class="sl-icon">💰</span>Gastos</button>
   <div class="sidebar-section">Relatórios</div>
   <button class="sidebar-link" data-sidebar-tab="Relatórios" onclick="setFiltro('Relatórios')"><span class="sl-icon">📊</span>Relatórios</button>
+  <div class="sidebar-section" id="sb-sec-registrar" style="display:none">Oficial</div>
+  <button class="sidebar-link" data-sidebar-tab="Registrar" id="sb-lnk-registrar" style="display:none" onclick="setFiltro('Registrar')"><span class="sl-icon">📋</span>Registrar</button>
 </nav>
 
 <!-- LOGIN -->
@@ -397,6 +399,14 @@ const LOJAS_LISTA = [
   'Rancho','Pedreira','Nova América','Campo Grande','Itaquera','Guarulhos'
 ];
 
+const CHK_TO_COM = {
+  'Bangu':'BANGU','Caxias':'CAXIAS','São Gonçalo':'SAO_GONCALO',
+  'Norte Shopping':'NORTE','Boulevard':'BOULEVARD','Rancho':'RANCHO',
+  'Pedreira':'PEDREIRA','Nova América':'NOVA_AMERICA','Campo Grande':'CAMPO_GRANDE',
+  'Itaquera':'ITAQUERA','Guarulhos':'GUARULHOS'
+};
+const COM_TO_CHK = Object.fromEntries(Object.entries(CHK_TO_COM).map(([k,v])=>[v,k]));
+
 const PERIODOS = [
   { key:'semana',     label:'Esta semana' },
   { key:'semana_ant', label:'Sem. passada' },
@@ -430,6 +440,9 @@ const S = {
   visitasLoaded:  false,
   visitasSuportado: null,
   _visitaFormOpen: false,
+  // oficial registros
+  _ofFotoB64: null,
+  _ofFormOpen: false,
 };
 
 function $(id){ return document.getElementById(id); }
@@ -521,6 +534,13 @@ async function iniciarApp(){
   }
   // Para não-master, fixa loja e oculta seletor
   if(!isMaster()) S.lojaFiltro = S.usuario.loja || 'Todas';
+  // Mostra aba Registrar apenas para master
+  if(isMaster()){
+    const sbSec=document.getElementById('sb-sec-registrar');
+    const sbLnk=document.getElementById('sb-lnk-registrar');
+    if(sbSec) sbSec.style.display='';
+    if(sbLnk) sbLnk.style.display='';
+  }
   pedirPermissaoNotif();
   await carregarDados();
   setInterval(carregarDados, 30000);
@@ -539,7 +559,7 @@ async function carregarDados(){
     // Não-master só busca dados da sua própria loja no servidor
     let url=`checklist_diario?select=data_operacao,loja,manutencao&data_operacao=gte.${from}&order=data_operacao.desc`;
     if(!isMaster() && S.usuario?.loja) url+=`&loja=eq.${encodeURIComponent(S.usuario.loja)}`;
-    const rows = await sb(url);
+    const [rows, ofItems] = await Promise.all([sb(url), _carregarOfItems()]);
     const itensRaw=[];
     for(const row of rows){
       if(!Array.isArray(row.manutencao)||!row.manutencao.length) continue;
@@ -561,8 +581,8 @@ async function carregarDados(){
       return {...newest, _data:oldest._data, _dataUltima:newest._data};
     });
     verificarNovos(itens);
-    S.itens=itens;
-    const tot=itens.length, pend=itens.filter(m=>m.status!=='Resolvido').length;
+    S.itens=[...itens, ...ofItems];
+    const tot=S.itens.length, pend=S.itens.filter(m=>m.status!=='Resolvido').length;
     const hr=new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
     $('hdr-sub').textContent=`${tot} registro${tot!==1?'s':''} · ${pend} pendente${pend!==1?'s':''} · ${hr}`;
     atualizarTituloTab(pend);
@@ -572,6 +592,28 @@ async function carregarDados(){
     renderLista();
   }catch(e){ toast('Erro ao carregar'); }
   $('btnRef').textContent='🔄';
+}
+
+async function _carregarOfItems(){
+  try{
+    let url='gn_lojas?select=loja,all_data';
+    if(!isMaster()&&S.usuario?.loja){
+      const ck=CHK_TO_COM[S.usuario.loja]||S.usuario.loja;
+      url+=`&loja=eq.${encodeURIComponent(ck)}`;
+    }
+    const lojaRows=await sb(url);
+    const result=[];
+    for(const lr of lojaRows){
+      const chkKey=COM_TO_CHK[lr.loja]||lr.loja;
+      const items=lr.all_data?.manut_oficial_items;
+      if(!Array.isArray(items)) continue;
+      for(const m of items){
+        const dt=m.created_at?m.created_at.split('T')[0]:new Date().toISOString().split('T')[0];
+        result.push({...m, _loja:chkKey, _data:dt, _dataUltima:dt, _source:'oficial'});
+      }
+    }
+    return result;
+  }catch(_){ return []; }
 }
 
 // ─── ALERTAS ─────────────────────────────────────────────
@@ -655,6 +697,7 @@ function tocarAlerta(){
 
 // ─── FILTROS ─────────────────────────────────────────────
 function renderFiltros(){
+  if(S.filtro==='Registrar'){ $('filtros-wrap').classList.add('hidden'); return; }
   $('filtros-wrap').classList.remove('hidden');
 
   // Loja chips: só para master
@@ -713,6 +756,7 @@ function renderBotNav(){
   abas.push({ key:'Visitas', icon:'📍', label:'Visitas', pend:0 });
   abas.push({ key:'Gastos', icon:'💰', label:'Gastos', pend:0 });
   abas.push({ key:'Relatórios', icon:'📊', label:'Relatórios', pend:0 });
+  if(isMaster()) abas.push({ key:'Registrar', icon:'📋', label:'Registrar', pend:0 });
   if(S.filtro==='Todos') S.filtro=TIPOS[0].key;
   const nav=$('botNav');
   nav.style.overflowX='auto'; nav.style.overflowY='hidden'; nav.style.scrollbarWidth='none';
@@ -730,8 +774,8 @@ function renderBotNav(){
 async function setFiltro(f){
   S.filtro=f;
   // Limpa busca ao mudar de aba
-  if(['Utensílios','Relatórios','Gastos','Visitas'].includes(f)){ S.busca=''; const bi=$('busca-input'); if(bi) bi.value=''; }
-  const br=$('busca-row'); if(br) br.style.display=['Utensílios','Relatórios','Gastos','Visitas'].includes(f)?'none':'';
+  if(['Utensílios','Relatórios','Gastos','Visitas','Registrar'].includes(f)){ S.busca=''; const bi=$('busca-input'); if(bi) bi.value=''; }
+  const br=$('busca-row'); if(br) br.style.display=['Utensílios','Relatórios','Gastos','Visitas','Registrar'].includes(f)?'none':'';
   document.querySelectorAll('.sidebar-link').forEach(l=>l.classList.remove('active'));
   const sl=document.querySelector(`.sidebar-link[data-sidebar-tab="${f}"]`);
   if(sl) sl.classList.add('active');
@@ -759,6 +803,7 @@ function renderLista(){
   if(S.filtro==='Utensílios'){ renderUtensPanel(); return; }
   if(S.filtro==='Gastos'){ renderGastosPanel(); return; }
   if(S.filtro==='Visitas'){ renderVisitasPanel(); return; }
+  if(S.filtro==='Registrar'){ renderRegistrarPanel(); return; }
   let items=getItensFiltradosPorLojaEPeriodo();
   items=items.filter(m=>(m.tipo||'Estrutura')===S.filtro);
   // Busca rápida
@@ -792,11 +837,13 @@ function renderLista(){
     const ti=tipoInfo(tipo);
     const sc=scCls(m.status);
     const statusLabel=m.status==='Em andamento'?'🔄 Em andamento':m.status==='Resolvido'?'✅ Resolvido':'⏳ Pendente';
-    const confirBadge=m.confirmado_loja
-      ?`<span class="bstatus resolvido" style="background:#0a2818;color:#5cb85c;">✅ Conf. pela loja</span>`
-      :m.status==='Resolvido'
-        ?`<span class="bstatus andamento" style="background:#1a1a08;color:#f0c050;">⏳ Aguard. conf. loja</span>`
-        :'';
+    const confirBadge=m._source==='oficial'
+      ?(m.confirmado_loja
+        ?`<span class="bstatus resolvido" style="background:#0a2818;color:#5cb85c;">✅ Conf. pela loja</span>`
+        :m.status==='Resolvido'
+          ?`<span class="bstatus andamento" style="background:#1a1a08;color:#f0c050;">⏳ Aguard. conf. loja</span>`
+          :'')
+      :'';
     let slaBadge='';
     if(m.status!=='Resolvido'&&m._data){
       const slaConf=SLA_CONFIG[tipo];
@@ -814,6 +861,7 @@ function renderLista(){
           <span class="btipo" style="color:${ti.cor}">${ti.icon} ${esc(tipo)}</span>
           <span class="bstatus ${sc}">${statusLabel}</span>
           ${m.prioridade==='Urgente'?`<span class="bstatus" style="background:#3a0a0a;color:#f87171;">🔴 Urgente</span>`:''}
+          ${m._source==='oficial'?`<span class="btipo" style="color:#a78bfa">📋 Oficial</span>`:''}
           ${confirBadge}
           ${slaBadge}
           ${m.resolved_at&&m.status==='Resolvido'?`<span style="font-size:9px;color:#3a5a3a;padding:2px 7px;border-radius:99px;background:#0a2010;">✓ ${new Date(m.resolved_at).toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',year:'2-digit'})}</span>`:''}
@@ -834,6 +882,9 @@ function renderLista(){
           <option value="Resolvido" ${m.status==='Resolvido'?'selected':''}>✅ Resolvido</option>
         </select>
         <button class="btn-save" onclick="salvarStatus(${esc(JSON.stringify(m._loja))},${esc(JSON.stringify(m._dataUltima||m._data))},${esc(JSON.stringify(String(m.id)))})">Salvar</button>
+        ${m._source==='oficial'&&!isMaster()&&m.status==='Resolvido'&&!m.confirmado_loja
+          ?`<button class="btn-save" style="background:var(--ok);font-size:11px;padding:6px 10px" onclick="confirmarResolucao(${esc(JSON.stringify(String(m.id)))},${esc(JSON.stringify(m._loja))})">✅ Confirmar</button>`
+          :''}
       </div>
     </div>`;
   }).join('');
@@ -841,6 +892,8 @@ function renderLista(){
 
 // ─── STATUS UPDATE ────────────────────────────────────────
 async function salvarStatus(loja, data, itemId){
+  const item=S.itens.find(m=>String(m.id)===String(itemId));
+  if(item?._source==='oficial'){ await salvarStatusOficial(item._loja, itemId); return; }
   const sel=$(`sel-${itemId}`); if(!sel) return;
   const novoStatus=sel.value;
   try{
@@ -861,6 +914,51 @@ async function salvarStatus(loja, data, itemId){
     renderBotNav(); renderPendBadge(); renderLista();
     toast('Status atualizado!');
   }catch(e){ toast('Erro ao salvar'); }
+}
+
+async function salvarStatusOficial(loja, itemId){
+  const sel=$(`sel-${itemId}`); if(!sel) return;
+  const novoStatus=sel.value;
+  const comKey=CHK_TO_COM[loja]||loja;
+  try{
+    const rows=await sb(`gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`);
+    if(!rows.length){ toast('Loja não encontrada'); return; }
+    const allData=rows[0].all_data||{};
+    const items=Array.isArray(allData.manut_oficial_items)?allData.manut_oficial_items:[];
+    const idx=items.findIndex(m=>String(m.id)===String(itemId));
+    if(idx<0){ toast('Item não encontrado'); return; }
+    if(novoStatus==='Resolvido'&&items[idx].status!=='Resolvido') items[idx].resolved_at=new Date().toISOString();
+    items[idx].status=novoStatus;
+    await sb(`gn_lojas?loja=eq.${encodeURIComponent(comKey)}`,{
+      method:'PATCH',prefer:'return=minimal',body:{all_data:{...allData,manut_oficial_items:items}}
+    });
+    const local=S.itens.find(m=>String(m.id)===String(itemId));
+    if(local){ local.status=novoStatus; if(novoStatus==='Resolvido'&&!local.resolved_at) local.resolved_at=new Date().toISOString(); }
+    _lastIds=new Set(S.itens.filter(m=>m.status!=='Resolvido').map(m=>`${m._loja}:${m._data}:${m.id}`));
+    atualizarTituloTab(S.itens.filter(m=>m.status!=='Resolvido').length);
+    renderBotNav(); renderPendBadge(); renderLista();
+    toast('Status atualizado!');
+  }catch(e){ toast('Erro ao salvar'); }
+}
+
+async function confirmarResolucao(itemId, loja){
+  const comKey=CHK_TO_COM[loja]||loja;
+  try{
+    const rows=await sb(`gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`);
+    if(!rows.length){ toast('Loja não encontrada'); return; }
+    const allData=rows[0].all_data||{};
+    const items=Array.isArray(allData.manut_oficial_items)?allData.manut_oficial_items:[];
+    const idx=items.findIndex(m=>String(m.id)===String(itemId));
+    if(idx<0){ toast('Item não encontrado'); return; }
+    items[idx].confirmado_loja=true;
+    await sb(`gn_lojas?loja=eq.${encodeURIComponent(comKey)}`,{
+      method:'PATCH',prefer:'return=minimal',body:{all_data:{...allData,manut_oficial_items:items}}
+    });
+    const local=S.itens.find(m=>String(m.id)===String(itemId));
+    if(local) local.confirmado_loja=true;
+    renderLista();
+    toast('✅ Manutenção confirmada pela loja!');
+  }catch(e){ toast('Erro ao confirmar'); }
 }
 
 // ─── UTENSÍLIOS — HELPERS ────────────────────────────────
@@ -1448,6 +1546,187 @@ function gerarPDF(texto,titulo){
 }
 function gerarPDFManutencao(){gerarPDF(_buildTextoManutencao(),'GN Manutenção — Relatório');}
 
+// ─── REGISTRAR (OFICIAL) ─────────────────────────────────
+function renderRegistrarPanel(){
+  if(!isMaster()){
+    $('lista').innerHTML=`<div class="empty-state"><div class="empty-icon">🔒</div><div>Acesso restrito ao oficial de manutenção</div></div>`;
+    return;
+  }
+  const ofAll=S.itens.filter(m=>m._source==='oficial');
+  const ofFilt=S.lojaFiltro!=='Todas'?ofAll.filter(m=>m._loja===S.lojaFiltro):ofAll;
+  const lojaLabel=S.lojaFiltro!=='Todas'?S.lojaFiltro:'Todas as lojas';
+  const tipoOpts=TIPOS.map(t=>`<option value="${esc(t.key)}">${t.icon} ${esc(t.key)}</option>`).join('');
+
+  const form=S._ofFormOpen?`<div class="gasto-form">
+    <div class="gasto-form-title">📋 Nova Manutenção (Oficial)</div>
+    <div class="gasto-field">
+      <label class="gasto-label">Loja *</label>
+      <select class="gasto-input" id="of-loja">
+        <option value="">Selecionar loja…</option>
+        ${LOJAS_LISTA.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="gasto-row">
+      <div class="gasto-field">
+        <label class="gasto-label">Tipo</label>
+        <select class="gasto-input" id="of-tipo">${tipoOpts}</select>
+      </div>
+      <div class="gasto-field">
+        <label class="gasto-label">Prioridade</label>
+        <select class="gasto-input" id="of-prior">
+          <option value="Normal">Normal</option>
+          <option value="Urgente">🔴 Urgente</option>
+        </select>
+      </div>
+    </div>
+    <div class="gasto-field">
+      <label class="gasto-label">Setor</label>
+      <input class="gasto-input" type="text" id="of-setor" placeholder="Ex: Cozinha, Salão, Frigorífico">
+    </div>
+    <div class="gasto-field">
+      <label class="gasto-label">Descrição</label>
+      <textarea class="gasto-input" id="of-desc" rows="3" placeholder="Descreva o problema ou manutenção realizada…"></textarea>
+    </div>
+    <div class="gasto-field">
+      <label class="gasto-label">Foto</label>
+      <input type="file" class="gasto-input" id="of-foto" accept="image/*" capture="environment" style="padding:6px;font-size:12px">
+      <div id="of-foto-preview" style="margin-top:6px"></div>
+    </div>
+    <div class="gasto-btn-row">
+      <button class="gasto-btn sec" onclick="cancelOfForm()">Cancelar</button>
+      <button class="gasto-btn pri" id="of-save-btn" onclick="salvarRegistro()">Salvar</button>
+    </div>
+  </div>`
+  :`<button class="gasto-add-btn" onclick="abrirOfForm()">+ Registrar Nova Manutenção (Oficial)</button>`;
+
+  const ord={pendente:0,andamento:1,resolvido:2};
+  const sortedOf=[...ofFilt].sort((a,b)=>{
+    const da=ord[scCls(a.status)]??0, db=ord[scCls(b.status)]??0;
+    if(da!==db) return da-db;
+    return (b._data||'').localeCompare(a._data||'');
+  });
+
+  const cards=sortedOf.length
+    ?sortedOf.map(m=>{
+      const ti=tipoInfo(m.tipo||'Estrutura');
+      const sc=scCls(m.status);
+      const statusLabel=m.status==='Em andamento'?'🔄 Em andamento':m.status==='Resolvido'?'✅ Resolvido':'⏳ Pendente';
+      return `<div class="icard ${sc}">
+        <div class="ihead">
+          <div class="ibadges">
+            <span class="btipo" style="color:${ti.cor}">${ti.icon} ${esc(m.tipo||'Estrutura')}</span>
+            <span class="bstatus ${sc}">${statusLabel}</span>
+            ${m.prioridade==='Urgente'?`<span class="bstatus" style="background:#3a0a0a;color:#f87171;">🔴 Urgente</span>`:''}
+            ${m.confirmado_loja
+              ?`<span class="bstatus resolvido" style="background:#0a2818;color:#5cb85c;">✅ Conf. pela loja</span>`
+              :m.status==='Resolvido'
+                ?`<span class="bstatus andamento" style="background:#1a1a08;color:#f0c050;">⏳ Aguard. conf. loja</span>`
+                :''}
+          </div>
+          <span class="imeta">${fmtData(m._data)}</span>
+        </div>
+        <div class="ibody">
+          <div class="iloja">${esc(m._loja||'—')}</div>
+          <div class="isetor">Setor: ${esc(m.setor||'—')}</div>
+          ${m.descricao?`<div class="idesc">${esc(m.descricao)}</div>`:''}
+          ${m.criado_por?`<div class="icontato">👷 ${esc(m.criado_por)}</div>`:''}
+          ${m.fotoBase64?`<img class="foto-thumb" src="${m.fotoBase64}" onclick="abrirFoto(this)" title="Ver foto">`:''}
+        </div>
+        <div class="iactions">
+          <select class="status-sel" id="sel-${m.id}">
+            <option value="Pendente" ${m.status==='Pendente'?'selected':''}>⏳ Pendente</option>
+            <option value="Em andamento" ${m.status==='Em andamento'?'selected':''}>🔄 Em andamento</option>
+            <option value="Resolvido" ${m.status==='Resolvido'?'selected':''}>✅ Resolvido</option>
+          </select>
+          <button class="btn-save" onclick="salvarStatusOficial(${esc(JSON.stringify(m._loja))},${esc(JSON.stringify(String(m.id)))})">Salvar</button>
+          <button class="btn-save" style="background:#7f1d1d;font-size:11px;padding:6px 10px" onclick="excluirRegistroOficial(${esc(JSON.stringify(String(m.id)))},${esc(JSON.stringify(m._loja))})">🗑️</button>
+        </div>
+      </div>`;
+    }).join('')
+    :`<div class="empty-state"><div class="empty-icon">✅</div><div>Nenhuma manutenção registrada pelo oficial${S.lojaFiltro!=='Todas'?' · '+esc(S.lojaFiltro):''}</div></div>`;
+
+  $('lista').innerHTML=`<div>
+    <div style="display:flex;align-items:center;gap:10px;padding:2px 0 10px;border-bottom:1px solid var(--card2);margin-bottom:4px">
+      <span style="font-size:26px;line-height:1">📋</span>
+      <div>
+        <div style="font-size:15px;font-weight:800;color:var(--ouro)">Manutenções do Oficial</div>
+        <div style="font-size:10px;color:var(--mut)">${sortedOf.length} item${sortedOf.length!==1?'s':''} · ${esc(lojaLabel)}</div>
+      </div>
+    </div>
+    ${form}
+    ${cards}
+  </div>`;
+
+  const fotoEl=document.getElementById('of-foto');
+  if(fotoEl) fotoEl.addEventListener('change',e=>{
+    const file=e.target.files[0]; if(!file) return;
+    compressImage(file,b64=>{
+      S._ofFotoB64=b64;
+      const prev=document.getElementById('of-foto-preview');
+      if(prev) prev.innerHTML=`<img src="${b64}" style="width:80px;height:80px;object-fit:cover;border-radius:8px">`;
+    });
+  });
+}
+
+function abrirOfForm(){ S._ofFormOpen=true; renderRegistrarPanel(); }
+function cancelOfForm(){ S._ofFormOpen=false; S._ofFotoB64=null; renderRegistrarPanel(); }
+
+let _savingOf=false;
+async function salvarRegistro(){
+  if(_savingOf) return;
+  const loja=(document.getElementById('of-loja')?.value||'').trim();
+  if(!loja){ toast('Selecione a loja'); return; }
+  const tipo=document.getElementById('of-tipo')?.value||'Estrutura';
+  const setor=(document.getElementById('of-setor')?.value||'').trim();
+  const desc=(document.getElementById('of-desc')?.value||'').trim();
+  const prior=document.getElementById('of-prior')?.value||'Normal';
+  _savingOf=true;
+  const btn=document.getElementById('of-save-btn');
+  if(btn){ btn.disabled=true; btn.textContent='Salvando…'; }
+  const comKey=CHK_TO_COM[loja]||loja;
+  const newItem={
+    id:'of_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),
+    tipo, setor:setor||null, descricao:desc||null, status:'Pendente', prioridade:prior,
+    fotoBase64:S._ofFotoB64||null,
+    created_at:new Date().toISOString(),
+    criado_por:S.usuario.nome,
+    confirmado_loja:false, resolved_at:null,
+  };
+  try{
+    const rows=await sb(`gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`);
+    if(!rows.length){ toast('Erro: loja não encontrada no sistema'); return; }
+    const allData=rows[0].all_data||{};
+    const items=Array.isArray(allData.manut_oficial_items)?allData.manut_oficial_items:[];
+    items.push(newItem);
+    await sb(`gn_lojas?loja=eq.${encodeURIComponent(comKey)}`,{
+      method:'PATCH',prefer:'return=minimal',body:{all_data:{...allData,manut_oficial_items:items}}
+    });
+    S._ofFotoB64=null; S._ofFormOpen=false;
+    const dt=new Date().toISOString().split('T')[0];
+    S.itens.push({...newItem, _loja:loja, _data:dt, _dataUltima:dt, _source:'oficial'});
+    renderBotNav(); renderLista();
+    toast('✅ Manutenção registrada!');
+  }catch(e){ toast('Erro ao salvar: '+e.message); }
+  finally{ _savingOf=false; }
+}
+
+async function excluirRegistroOficial(itemId, loja){
+  if(!confirm('Excluir este registro?')) return;
+  const comKey=CHK_TO_COM[loja]||loja;
+  try{
+    const rows=await sb(`gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`);
+    if(!rows.length){ toast('Loja não encontrada'); return; }
+    const allData=rows[0].all_data||{};
+    const items=(Array.isArray(allData.manut_oficial_items)?allData.manut_oficial_items:[]).filter(m=>String(m.id)!==String(itemId));
+    await sb(`gn_lojas?loja=eq.${encodeURIComponent(comKey)}`,{
+      method:'PATCH',prefer:'return=minimal',body:{all_data:{...allData,manut_oficial_items:items}}
+    });
+    S.itens=S.itens.filter(m=>String(m.id)!==String(itemId));
+    renderBotNav(); renderLista();
+    toast('Registro excluído');
+  }catch(e){ toast('Erro ao excluir'); }
+}
+
 // ─── VISITAS ─────────────────────────────────────────────
 function _horaAtual(){
   const n=new Date();
@@ -2015,6 +2294,7 @@ function doLogout(){
   try{ localStorage.removeItem(SESSION_KEY); }catch(_){}
   S.usuario=null; S.itens=[]; S.utensLoaded=false; S.gastosLoaded=false; S.gastosItems=[]; S._gastoFormOpen=false;
   S.visitasLoaded=false; S.visitasItems=[]; S._visitaFormOpen=false;
+  S._ofFotoB64=null; S._ofFormOpen=false;
   $('app').classList.add('hidden');
   $('login').classList.remove('hidden');
   $('ln-user').value=''; $('ln-pass').value=''; $('ln-err').textContent='';
