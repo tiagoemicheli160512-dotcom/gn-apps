@@ -1096,7 +1096,11 @@ async function sincronizarChecklist(data, mostrarToast) {
       if (ex && ex[0] && Array.isArray(ex[0].despesas)) existingDespesas = ex[0].despesas;
     } catch(_) {}
     const saidasLabel = Object.fromEntries(SAIDAS);
-    const fotoById = Object.fromEntries(existingDespesas.filter(d=>d.id && d.foto).map(d=>[String(d.id), d.foto]));
+    // Fotos: checklist_diario como base, S.saidas em memória tem prioridade (foto recém tirada)
+    const fotoById = Object.fromEntries([
+      ...existingDespesas.filter(d=>d.id && d.foto).map(d=>[String(d.id), d.foto]),
+      ...(S.saidas||[]).filter(s=>s.id && s.foto).map(s=>[String(s.id), s.foto])
+    ]);
     const fotoDinhSentinel = existingDespesas.filter(d=>d._tipo==='foto_dinheiro');
     const despesas = [
       ...(saidasDB||[]).map(s=>({
@@ -1239,6 +1243,15 @@ async function carregarFilhos() {
     sb(`gn_caixa_gorjeta?fechamento_id=eq.${fid}&select=*&order=criado_em`),
   ]);
   S.comprovantes = c || []; S.saidas = s || []; S.supr = n || []; S.notas10 = d || [];
+  // Restaurar fotos do checklist_diario quando gn_caixa_despesa não tem coluna foto
+  try {
+    const lojaChk = LOJA_CHK_MAP[S.loja] || S.loja;
+    const chk = await sb(`checklist_diario?loja=eq.${encodeURIComponent(lojaChk)}&data_operacao=eq.${S.fech.data}&select=despesas`);
+    if (chk?.[0]?.despesas) {
+      const fotoMap = Object.fromEntries(chk[0].despesas.filter(d=>d.id && d.foto).map(d=>[String(d.id), d.foto]));
+      S.saidas.forEach(s => { if (!s.foto && fotoMap[String(s.id)]) s.foto = fotoMap[String(s.id)]; });
+    }
+  } catch(_) {}
   setTimeout(_pfBadge, 0);
 }
 
@@ -1800,10 +1813,13 @@ async function onFotoSaidaChange(input) {
     const item = S.saidas.find(x => x.id === _fotoSaidaId);
     if (item) item.foto = b64;
     renderTudo();
+    // Tentar salvar na coluna foto da despesa
     try {
       await sb(`gn_caixa_despesa?id=eq.${_fotoSaidaId}`, { method: 'PATCH', prefer: 'return=minimal', body: { foto: b64 } });
-      toast('📷 Foto salva');
-    } catch(_) { toast('📷 Foto salva (sem coluna no banco)'); }
+    } catch(_) {}
+    // Sempre persistir no checklist_diario para garantir sobrevivência ao reload
+    if (S.fech?.data) sincronizarChecklist(S.fech.data).catch(()=>{});
+    toast('📷 Foto salva');
   } catch(e) { toast('❌ Erro ao processar foto'); }
 }
 
