@@ -3019,6 +3019,46 @@ function gerarDossPDF() {
 // ══════════════════════════════════════════════
 // LOGIN + INIT
 // ══════════════════════════════════════════════
+// ── CONTROLE DE HORÁRIO DE ACESSO (cargo rh) ─────────────────────
+const _CARGOS_LIVRE_RH = ['mestre','supervisor','compras','admin','gerente'];
+
+function _podeHorarioRH(cargo) {
+  if (_CARGOS_LIVRE_RH.includes(cargo)) return true;
+  const agora = new Date();
+  const dia = agora.getDay(); // 0=dom,1=seg..5=sex,6=sab
+  const min = agora.getHours() * 60 + agora.getMinutes();
+  if (dia === 0 || dia === 6) return false;
+  return min >= 480 && min < 1020; // 08:00–17:00
+}
+
+var _vigiaRH = null;
+
+function _iniciarVigiaRH() {
+  if (_vigiaRH) clearInterval(_vigiaRH);
+  _vigiaRH = setInterval(function() {
+    if (!S.usuario) { clearInterval(_vigiaRH); _vigiaRH = null; return; }
+    if (_CARGOS_LIVRE_RH.includes(S.usuario.cargo)) return;
+    if (!_podeHorarioRH(S.usuario.cargo)) {
+      clearInterval(_vigiaRH); _vigiaRH = null;
+      toast('⏰ Horário de acesso encerrado. Até logo!', 'ok');
+      setTimeout(_forcarSaidaRH, 2500);
+    }
+  }, 60000);
+}
+
+function _forcarSaidaRH() {
+  try { localStorage.removeItem(SESSION_KEY); } catch(_) {}
+  S.usuario = null;
+  if (_vigiaRH) { clearInterval(_vigiaRH); _vigiaRH = null; }
+  $('app').classList.add('hidden');
+  $('login').classList.remove('hidden');
+  $('ln-user').value = '';
+  $('ln-pass').value = '';
+  $('ln-err').textContent = '';
+  setTimeout(() => $('ln-user').focus(), 100);
+}
+// ─────────────────────────────────────────────────────────────────
+
 async function doLogin() {
   const nome = $('ln-user').value.trim();
   const senha = $('ln-pass').value;
@@ -3042,6 +3082,15 @@ async function doLogin() {
     errEl.textContent = 'Sem permissão para acessar GN RH.'; return;
   }
 
+  // Restrição de horário para cargo rh
+  if (!_podeHorarioRH(data.cargo)) {
+    const dia = new Date().getDay();
+    errEl.textContent = (dia === 0 || dia === 6)
+      ? '🚫 Acesso disponível seg–sex das 08h às 17h.'
+      : '🚫 Acesso disponível das 08h às 17h.';
+    return;
+  }
+
   // Salva sessão
   try { localStorage.setItem(SESSION_KEY, JSON.stringify({...data, ts: Date.now()})); } catch(_) {}
   S.usuario = data;
@@ -3058,6 +3107,20 @@ async function iniciarApp() {
   }
 
   if (!S.usuario) return; // mostra login
+
+  // Verificar janela de horário ao restaurar sessão salva
+  if (!_podeHorarioRH(S.usuario.cargo)) {
+    try { localStorage.removeItem(SESSION_KEY); } catch(_) {}
+    S.usuario = null;
+    const errEl = $('ln-err');
+    if (errEl) {
+      const dia = new Date().getDay();
+      errEl.textContent = (dia === 0 || dia === 6)
+        ? '🚫 Acesso disponível seg–sex das 08h às 17h.'
+        : '🚫 Acesso disponível das 08h às 17h.';
+    }
+    return;
+  }
 
   $('login').classList.add('hidden');
   $('app').classList.remove('hidden');
@@ -3077,6 +3140,9 @@ async function iniciarApp() {
   S.opData    = new Date(); S.opData.setHours(12,0,0,0);
   S.finSemana = getMondayOfWeek();
   S.rhSemana  = getMondayOfWeek();
+
+  // Iniciar vigia de horário para cargo rh
+  _iniciarVigiaRH();
 
   // Ir para a primeira aba permitida
   const primeiraAba = S.abasPermitidas
