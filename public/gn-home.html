@@ -1037,6 +1037,8 @@ let _dashSortBy    = 'fat';
 let _dashSortDir   = 'desc';
 let _dashFatDia    = null;    // {YYYY-MM-DD: total} fat per day for current period
 let _dashComDia    = null;    // Array(7) of daily commission totals (Mon=0..Sun=6)
+let _dashFatDiaLoja = null;   // {lojaKey: {YYYY-MM-DD: valor}}
+let _dashComDiaLoja = null;   // {lojaKey: Array(7)}
 
 function _p2(n){ return String(n).padStart(2,'0'); }
 
@@ -1132,44 +1134,54 @@ async function _fetchFat(dates) {
 
 function _comSemIdx(mondayISO) {
   const mon = new Date(mondayISO + 'T12:00:00');
-  const anchor = new Date('2024-12-30T12:00:00');
-  return Math.floor((mon - anchor) / (7 * 86400000));
+  const anchor = new Date(2026, 0, 5, 12, 0, 0); // Jan 5, 2026 – mesma âncora do gn-comissoes-mestra
+  return Math.max(0, Math.floor((mon - anchor) / (7 * 86400000)));
 }
 
+const _COM_KEY_TO_LOJA = Object.fromEntries(Object.entries(LOJA_COM_KEY).map(([k,v])=>[v,k]));
+
 async function _fetchFatByDay(dates) {
-  if (!dates || !dates.length) return {};
+  if (!dates || !dates.length) return { byDay: {}, byLojaDay: {} };
   const from = dates[0], to = dates[dates.length - 1];
   const res = await fetch(
-    `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${from}&data_operacao=lte.${to}&select=data_operacao,venda_salao,venda_delivery`,
+    `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${from}&data_operacao=lte.${to}&select=loja,data_operacao,venda_salao,venda_delivery`,
     { headers: {apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY} }
   );
   if (!res.ok) throw new Error('HTTP ' + res.status);
   const rows = await res.json();
-  const byDay = {};
+  const byDay = {}, byLojaDay = {};
   (rows || []).forEach(r => {
     const v = (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0);
     byDay[r.data_operacao] = (byDay[r.data_operacao] || 0) + v;
+    const lk = _normLoja(r.loja);
+    if (LOJAS_LISTA.includes(lk)) {
+      if (!byLojaDay[lk]) byLojaDay[lk] = {};
+      byLojaDay[lk][r.data_operacao] = (byLojaDay[lk][r.data_operacao] || 0) + v;
+    }
   });
-  return byDay;
+  return { byDay, byLojaDay };
 }
 
 async function _fetchComDia(mondayISO) {
   const semIdx = String(_comSemIdx(mondayISO));
   const comKeys = Object.values(LOJA_COM_KEY).join(',');
   const res = await fetch(
-    `${SB_URL}/rest/v1/gn_comissoes?loja=in.(${comKeys})&select=all_data`,
+    `${SB_URL}/rest/v1/gn_comissoes?loja=in.(${comKeys})&select=loja,all_data`,
     { headers: {apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY} }
   );
-  if (!res.ok) return Array(7).fill(0);
+  if (!res.ok) return { totals: Array(7).fill(0), byLoja: {} };
   const rows = await res.json();
   const totals = Array(7).fill(0);
+  const byLoja = {};
   (rows || []).forEach(r => {
     if (!r.all_data || !r.all_data[semIdx]) return;
     const brutos = r.all_data[semIdx].brutos;
     if (!Array.isArray(brutos)) return;
+    const lk = _COM_KEY_TO_LOJA[r.loja];
+    if (lk) byLoja[lk] = brutos.map(v => parseFloat(v) || 0);
     for (let d = 0; d < 7; d++) totals[d] += parseFloat(brutos[d]) || 0;
   });
-  return totals;
+  return { totals, byLoja };
 }
 
 async function _loadDashAll() {
@@ -1194,11 +1206,12 @@ async function _loadDashAll() {
         .then(r=>r.ok?r.json():[]).catch(()=>[]),
       fetch(`${SB_URL}/rest/v1/gn_manut_itens?status=neq.Resolvido&select=criado_em`,{headers:H})
         .then(r=>r.ok?r.json():[]).catch(()=>[]),
-      _fetchFatByDay(_dashPer==='sem' ? range.dates : weekRange.dates).catch(()=>({})),
-      _fetchComDia(_dashPer==='sem' ? range.dates[0] : weekRange.dates[0]).catch(()=>Array(7).fill(0)),
+      _fetchFatByDay(_dashPer==='sem' ? range.dates : weekRange.dates).catch(()=>({byDay:{},byLojaDay:{}})),
+      _fetchComDia(_dashPer==='sem' ? range.dates[0] : weekRange.dates[0]).catch(()=>({totals:Array(7).fill(0),byLoja:{}})),
     ]);
     _dashFat = fatCur; _dashFatPrev = fatPrv;
-    _dashFatDia = fatDia; _dashComDia = comDia;
+    _dashFatDia = fatDia.byDay || {}; _dashFatDiaLoja = fatDia.byLojaDay || {};
+    _dashComDia = comDia.totals || Array(7).fill(0); _dashComDiaLoja = comDia.byLoja || {};
     // count pending maintenance from today's checklist only (dia a dia, sem acumular)
     const byManut = {}; LOJAS_LISTA.forEach(k=>{byManut[k]=0;});
     (manutRows||[]).forEach(row=>{
@@ -1544,6 +1557,24 @@ function renderDashboard() {
         }
         // Sparkline
         const spark=_dashSparkData&&_dashSparkData[k]?_sparkSVG(_dashSparkData[k]):'';
+        // Mini dia a dia por loja
+        let diaGrid='';
+        {
+          const wr=_weekRange(_dashPer==='sem'?_dashWoff:0);
+          const _hoje=new Date().toISOString().slice(0,10);
+          const dAbr=['S','T','Q','Q','S','S','D'];
+          const fatDL=_dashFatDiaLoja?(_dashFatDiaLoja[k]||{}):null;
+          const comDL=_dashComDiaLoja?(_dashComDiaLoja[k]||null):null;
+          const hasFD=fatDL&&wr.dates.some(dt=>fatDL[dt]>0);
+          const hasCom=comDL&&comDL.some(v=>v>0);
+          if(hasFD||hasCom){
+            const fmtV=v=>v>=1000?(v/1000).toFixed(1).replace('.',',')+'k':v>0?Math.round(v)+'':'—';
+            const hdrs=wr.dates.map((dt,i)=>`<th style="text-align:center;font-size:7px;font-weight:700;color:${dt===_hoje?'#f97316':'rgba(255,255,255,.25)'};padding:0 1px">${dAbr[i]}</th>`).join('');
+            const fatCells=wr.dates.map((dt,i)=>{const fv=(fatDL&&fatDL[dt])||0;const isH=dt===_hoje;const fut=dt>_hoje;return `<td style="text-align:center;padding:1px 1px;font-size:7px;font-weight:700;color:${fv?'#e2e8f0':'rgba(255,255,255,.15)'};${isH?'background:rgba(242,100,25,.09);':''}${fut?'opacity:.3;':''}">${fmtV(fv)}</td>`;}).join('');
+            const comCells=hasCom?wr.dates.map((dt,i)=>{const cv=(comDL&&comDL[i])||0;const isH=dt===_hoje;const fut=dt>_hoje;return `<td style="text-align:center;padding:1px 1px;font-size:7px;font-weight:700;color:${cv?'#60a5fa':'rgba(255,255,255,.15)'};${isH?'background:rgba(242,100,25,.09);':''}${fut?'opacity:.3;':''}">${fmtV(cv)}</td>`;}).join(''):'';
+            diaGrid=`<div style="margin-top:6px;border-top:1px solid rgba(255,255,255,.06);padding-top:5px"><table style="width:100%;border-collapse:collapse;table-layout:fixed"><thead><tr><th style="width:16px;font-size:6px;color:rgba(255,255,255,.18);text-align:left;padding:0 1px"></th>${hdrs}</tr></thead><tbody><tr><td style="font-size:6px;color:rgba(255,255,255,.2);padding:0 1px">Fat</td>${fatCells}</tr>${hasCom?`<tr><td style="font-size:6px;color:rgba(255,255,255,.2);padding:0 1px">Com</td>${comCells}</tr>`:''}</tbody></table></div>`;
+          }
+        }
         // status badges
         const badges=[];
         if(chkOk===true) badges.push(`<span style="font-size:9px;color:#4ade80">✅ chk</span>`);
@@ -1559,8 +1590,8 @@ function renderDashboard() {
             ${selBadge}
             <div class="sc-nome" style="justify-content:space-between"><span style="display:flex;align-items:center;gap:5px;min-width:0"><span class="sc-dot" style="background:${cor}"></span><span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${nome}</span></span>${rankBadge}</div>
             ${loading?`<div class="sc-empty">⟳</div>`
-              :hasData?`<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:4px"><div class="sc-val">${_fmtBRLs(v)}${diffHtml}</div>${spark?`<div style="margin-top:2px;flex-shrink:0">${spark}</div>`:''}</div>${bar}${badgeRow}`
-              :`<div class="sc-empty">Sem dados</div>${badgeRow}`}
+              :hasData?`<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:4px"><div class="sc-val">${_fmtBRLs(v)}${diffHtml}</div>${spark?`<div style="margin-top:2px;flex-shrink:0">${spark}</div>`:''}</div>${bar}${diaGrid}${badgeRow}`
+              :`<div class="sc-empty">Sem dados</div>${diaGrid}${badgeRow}`}
           </div>`;
       }).join('');
       mainView=`<div class="cons-card">
@@ -1621,12 +1652,12 @@ function renderDashboard() {
 
 function _setDashTab(t){ _dashTab=t; renderDashboard(); }
 function _navToAtt(){ const el=document.getElementById('dash-section'); if(el)el.scrollIntoView({behavior:'smooth'}); _setDashTab('att'); }
-function _setPer(p){ _dashPer=p; _dashFat=null; _dashFatPrev=null; _dashFatDia=null; _dashComDia=null; _dashRelSel.clear(); renderDashboard(); _loadDashAll(); }
+function _setPer(p){ _dashPer=p; _dashFat=null; _dashFatPrev=null; _dashFatDia=null; _dashComDia=null; _dashFatDiaLoja=null; _dashComDiaLoja=null; _dashRelSel.clear(); renderDashboard(); _loadDashAll(); }
 function _toggleDashSel(k){ if(_dashRelSel.has(k)) _dashRelSel.delete(k); else _dashRelSel.add(k); renderDashboard(); }
 function _dashNav(dir){
   if(_dashPer==='sem') _dashWoff=Math.min(0,_dashWoff+dir);
   else                 _dashMoff=Math.min(0,_dashMoff+dir);
-  _dashFat=null; _dashFatPrev=null; _dashFatDia=null; _dashComDia=null;
+  _dashFat=null; _dashFatPrev=null; _dashFatDia=null; _dashComDia=null; _dashFatDiaLoja=null; _dashComDiaLoja=null;
   renderDashboard(); _loadDashAll();
 }
 
