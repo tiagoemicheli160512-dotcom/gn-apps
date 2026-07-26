@@ -6981,6 +6981,7 @@ async function initAppWithLoja(){
   // Preencher dinheiro em caixa a partir do App Caixa
   carregarDinheiroCaixaDoApp();
   refreshVendasFromSupabase();
+  _loadFotoCaixaFromLojas().catch(()=>{});
   // Se há dados de vendas locais, empurra para gn_lojas para outros dispositivos lerem
   if(Object.keys(state.vendas||{}).length) _vendaSyncNow();
   // Carregar banco de horas em background para exibir badge de alerta sem precisar clicar na aba
@@ -8000,17 +8001,42 @@ function salvarFotoCaixaSistema(input){
 
 async function enviarFotoCaixaSistemaRH(b64){
   if(!sb||!LOJA||!state.data) return;
+  const lojaKey = LOJA_MAP[LOJA] || LOJA.toUpperCase();
   try{
-    await sb.from('checklist_diario').upsert(
-      {data_operacao:state.data, loja:LOJA, foto_caixa_sistema:b64},
-      {onConflict:'data_operacao,loja'}
+    const {data:ld} = await sb.from('gn_lojas').select('all_data').eq('loja',lojaKey).maybeSingle();
+    const allData = (ld?.all_data) || {};
+    if(!allData.fotos_caixa_sistema) allData.fotos_caixa_sistema = {};
+    // Limpar fotos com mais de 7 dias para não inflar o registro
+    const limite = new Date(); limite.setDate(limite.getDate()-7);
+    const limiteStr = limite.toISOString().slice(0,10);
+    Object.keys(allData.fotos_caixa_sistema).forEach(d=>{ if(d<limiteStr) delete allData.fotos_caixa_sistema[d]; });
+    allData.fotos_caixa_sistema[state.data] = b64;
+    const {error} = await sb.from('gn_lojas').upsert(
+      {loja:lojaKey, all_data:allData},
+      {onConflict:'loja'}
     );
+    if(error) throw error;
     try{ localStorage.setItem(_fotoKey('caixa-sistema-enviada'), '1'); }catch(ex){}
     renderFotosCaixaSistema();
     showToast('✓ Foto do caixa enviada ao App RH!','success');
   }catch(e){
-    // coluna ainda não existe no banco — falha silenciosa, foto fica local
+    showToast('⚠️ Erro ao enviar foto. Verifique a conexão.','error');
   }
+}
+
+async function _loadFotoCaixaFromLojas(){
+  if(!sb||!LOJA) return;
+  if(localStorage.getItem(_fotoKey('caixa-sistema'))) return;
+  const lojaKey = LOJA_MAP[LOJA] || LOJA.toUpperCase();
+  try{
+    const {data} = await sb.from('gn_lojas').select('all_data').eq('loja',lojaKey).maybeSingle();
+    const foto = data?.all_data?.fotos_caixa_sistema?.[hojeLocal()];
+    if(foto){
+      try{ localStorage.setItem(_fotoKey('caixa-sistema'), foto); }catch(ex){}
+      try{ localStorage.setItem(_fotoKey('caixa-sistema-enviada'), '1'); }catch(ex){}
+      renderFotosCaixaSistema();
+    }
+  }catch(e){}
 }
 
 function renderFotosCaixaSistema(){
@@ -8042,6 +8068,14 @@ function deletarFotoCaixaSistema(){
   try{ localStorage.removeItem(_fotoKey('caixa-sistema')); }catch(ex){}
   try{ localStorage.removeItem(_fotoKey('caixa-sistema-enviada')); }catch(ex){}
   renderFotosCaixaSistema();
+  if(!sb||!LOJA||!state.data) return;
+  const lojaKey = LOJA_MAP[LOJA] || LOJA.toUpperCase();
+  sb.from('gn_lojas').select('all_data').eq('loja',lojaKey).maybeSingle().then(({data:ld})=>{
+    const allData = ld?.all_data || {};
+    if(!allData.fotos_caixa_sistema?.[state.data]) return;
+    delete allData.fotos_caixa_sistema[state.data];
+    sb.from('gn_lojas').upsert({loja:lojaKey, all_data:allData},{onConflict:'loja'}).then(()=>{}).catch(()=>{});
+  }).catch(()=>{});
 }
 
 // =============================================
