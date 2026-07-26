@@ -506,6 +506,8 @@ input[type=date], .card input[type=date] { background: #fff !important; color: #
 .rl.venda { background: var(--graf3); font-weight: bold; color: var(--ok); }
 .rl.saida-tot { background: var(--graf3); font-weight: bold; color: var(--erro); }
 .rl.saldo { background: var(--graf3); font-weight: bold; color: var(--ouro); }
+.rl.diverg { background: rgba(255,90,110,0.1); border-left: 3px solid var(--erro); }
+.rl.diverg .v { color: var(--erro); }
 
 .conf-formula {
   font-size: 12px;
@@ -1054,7 +1056,7 @@ const SAIDAS = [
   ['condominio','Condomínio'],['insumo','Insumo']
 ];
 
-const S = { user: null, loja: null, turnoSel: null, fech: null, comprovantes: [], saidas: [], supr: [], notas10: [], bandAtiva: null, modoConsulta: false };
+const S = { user: null, loja: null, turnoSel: null, fech: null, comprovantes: [], saidas: [], supr: [], notas10: [], bandAtiva: null, modoConsulta: false, confAtual: null };
 
 // Mapeamento userKey (gn_caixa_fechamento.loja) → nome display (checklist_diario.loja)
 const LOJA_CHK_MAP = {
@@ -1236,13 +1238,17 @@ async function abrirCaixa() {
 
 async function carregarFilhos() {
   const fid = S.fech.id;
-  const [c, s, n, d] = await Promise.all([
+  const comKey = LOJA_COM_MAP[S.loja] || S.loja;
+  const [c, s, n, d, lojaConf] = await Promise.all([
     sb(`gn_caixa_comprovante?fechamento_id=eq.${fid}&select=*&order=criado_em`),
     sb(`gn_caixa_despesa?fechamento_id=eq.${fid}&select=*&order=criado_em`),
     sb(`gn_caixa_suprimento?fechamento_id=eq.${fid}&select=*&order=criado_em`),
     sb(`gn_caixa_gorjeta?fechamento_id=eq.${fid}&select=*&order=criado_em`),
+    sb(`gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`).catch(() => null),
   ]);
   S.comprovantes = c || []; S.saidas = s || []; S.supr = n || []; S.notas10 = d || [];
+  const conferencias = lojaConf?.[0]?.all_data?.caixa_conferencias || {};
+  S.confAtual = conferencias[fid] || null;
   // Restaurar fotos do checklist_diario quando gn_caixa_despesa não tem coluna foto
   try {
     const lojaChk = LOJA_CHK_MAP[S.loja] || S.loja;
@@ -1298,7 +1304,7 @@ function irPara(p) {
 }
 
 function voltarTurno() {
-  S.fech = null; S.turnoSel = null; S.comprovantes = []; S.saidas = []; S.supr = []; S.notas10 = []; S.modoConsulta = false;
+  S.fech = null; S.turnoSel = null; S.comprovantes = []; S.saidas = []; S.supr = []; S.notas10 = []; S.modoConsulta = false; S.confAtual = null;
   document.querySelectorAll('.turno-op').forEach(o => o.classList.remove('sel'));
   $('app').classList.add('hidden');
   mostrarHome();
@@ -1368,15 +1374,29 @@ function renderFechar() {
     `<div class="rl ${cls||''}"><span>${label}${extra||''}</span><span class="v">${money(v)}</span></div>`;
 
   // Entradas discriminadas por forma de pagamento
+  const _confBandeiras = S.confAtual?.itens?.bandeiras || {};
+  let _totalBandDif = 0;
+  Object.values(_confBandeiras).forEach(b => { if (typeof b?.dif === 'number') _totalBandDif += b.dif; });
+
   let entradasHtml = '';
   for (const {k, cod} of ENTRADAS) {
     const v = totEntradaK(k);
     if (v <= 0) continue;
     const codTag = !NAO_CARTAO.includes(k) ? ` <small style="color:var(--mut)">cód ${cod}</small>` : '';
-    entradasHtml += rl(k, v, '', codTag);
+    const confBand = _confBandeiras[k];
+    const hasDiverg = confBand != null && Math.abs(confBand.dif || 0) >= 0.01;
+    const difSign = (confBand?.dif ?? 0) > 0 ? '+' : '';
+    const divTag = hasDiverg
+      ? ` <span style="color:var(--erro);font-size:10px;font-weight:700"> ⚠️ ${difSign}R$${money(Math.abs(confBand.dif))}</span>`
+      : '';
+    entradasHtml += rl(k, v, hasDiverg ? 'diverg' : '', codTag + divTag);
   }
   if (!entradasHtml) entradasHtml = '<div class="rl dim"><span>Sem entradas</span><span></span></div>';
   entradasHtml += rl('TOTAL ENTRADAS = VENDA DO DIA', totEntradas(), 'venda');
+  if (Math.abs(_totalBandDif) >= 10) {
+    const sinal = _totalBandDif > 0 ? '+' : '−';
+    entradasHtml += `<div style="background:#3a0808;border:1px solid #ff4444;border-radius:8px;padding:8px 12px;margin-top:8px;font-size:12px;font-weight:700;color:#ff4444">⚠️ Total geral: diferença de ${sinal} R$${money(Math.abs(_totalBandDif))} encontrada na conferência de RH</div>`;
+  }
   $('resEntradas').innerHTML = entradasHtml;
 
   // Saídas discriminadas por item
@@ -1636,6 +1656,8 @@ async function carregarBannerConferencia() {
     const lojaRow = await sb(`gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`);
     const conferencias = lojaRow?.[0]?.all_data?.caixa_conferencias || {};
     const conf = conferencias[S.fech.id];
+    S.confAtual = conf || null;
+    renderFechar();
     if (!conf) return;
     if (conf.tem_divergencia) {
       const por = conf.conferido_por ? ` · por ${conf.conferido_por}` : '';
