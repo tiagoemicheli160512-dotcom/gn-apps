@@ -9503,7 +9503,8 @@ function _renderGestaoSemanal(el){
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
       <div style="font-size:10px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:.5px">🥩 Controle de Carnes</div>
       <div style="display:flex;gap:6px">
-        <button onclick="_gestaoClearFechamento()" style="background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3);border-radius:7px;color:#f87171;font-size:11px;font-weight:700;padding:4px 10px;cursor:pointer" title="Limpar contagem de fechamento gravada incorretamente para esta semana">🗑 Limpar Fechamento</button>
+        <button onclick="_gestaoClearFechamento()" style="background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3);border-radius:7px;color:#f87171;font-size:11px;font-weight:700;padding:4px 10px;cursor:pointer" title="Limpar contagem de fechamento desta loja nesta semana">🗑 Esta Loja</button>
+        <button onclick="_gestaoClearTodasLojas()" style="background:rgba(239,68,68,.18);border:1px solid rgba(239,68,68,.5);border-radius:7px;color:#f87171;font-size:11px;font-weight:700;padding:4px 10px;cursor:pointer" title="Limpar contagem de fechamento de TODAS as lojas nesta semana">🗑 Todas as Lojas</button>
         <button onclick="openRelModal('gestao')" style="background:rgba(232,88,10,.12);border:1px solid rgba(232,88,10,.3);border-radius:7px;color:#f97316;font-size:11px;font-weight:700;padding:4px 10px;cursor:pointer">📄 Relatório</button>
       </div>
     </div>
@@ -9549,6 +9550,43 @@ async function _gestaoClearFechamento(){
       autoSave();
     }
     showToast('Fechamento limpo com sucesso! Recalculando...','success');
+    renderGestao();
+  }catch(e){
+    showToast('Erro ao limpar fechamento: '+e.message,'error');
+  }
+}
+
+async function _gestaoClearTodasLojas(){
+  const semIni=_gestaoSemIni;
+  if(!semIni){showToast('Semana não identificada.','error');return;}
+  if(!confirm(`Limpar contagem de fechamento (contagem_final) de TODAS AS LOJAS para a semana ${semIni}?\n\nEsta ação corrige os dados corrompidos pelo auto-heal incorreto em todas as lojas.`))return;
+  try{
+    const {data:rows,error:errLoad}=await sb.from('checklist_carnes')
+      .select('loja,carnes,semana_fim').eq('semana_inicio',semIni);
+    if(errLoad) throw errLoad;
+    if(!rows||rows.length===0){showToast('Nenhum registro encontrado para esta semana.','error');return;}
+    const upserts=rows.map(row=>{
+      const carnes=JSON.parse(JSON.stringify(row.carnes||{}));
+      CARNES_DEF.forEach(c=>{
+        if(!carnes[c.key]) return;
+        c.rows.forEach(r=>{
+          if(carnes[c.key][r.key]) delete carnes[c.key][r.key].contagem_final;
+        });
+      });
+      return {semana_inicio:semIni,semana_fim:row.semana_fim,loja:row.loja,carnes};
+    });
+    const {error:errSave}=await sb.from('checklist_carnes').upsert(upserts,{onConflict:'semana_inicio,loja'});
+    if(errSave) throw errSave;
+    // Also update localStorage if current week matches
+    if(semIni===state.semanaInicio){
+      CARNES_DEF.forEach(c=>{
+        c.rows.forEach(r=>{
+          if(stateWeek.carnes[c.key]?.[r.key]) delete stateWeek.carnes[c.key][r.key].contagem_final;
+        });
+      });
+      autoSave();
+    }
+    showToast(`Fechamento limpo para ${upserts.length} loja(s)! Recalculando...`,'success');
     renderGestao();
   }catch(e){
     showToast('Erro ao limpar fechamento: '+e.message,'error');
