@@ -76,6 +76,7 @@
     .bb{background:rgba(59,130,246,.1);color:#60a5fa}
     .bo{background:rgba(242,100,25,.1);color:#F26419}
     .bx{background:rgba(255,255,255,.04);color:#44445a}
+    .br{background:rgba(239,68,68,.1);color:#ef4444}
     .mod-arrow{font-size:20px;color:rgba(255,255,255,.12);line-height:1;margin-left:2px}
 
     /* Loja picker sheet */
@@ -808,12 +809,23 @@ async function loadCaixaBadge(loja) {
 async function loadChkBadge(loja) {
   const hoje = (d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'))(new Date());
   const lojaDb = LOJA_DB_KEY[loja] || loja;
+  const d7 = new Date(); d7.setDate(d7.getDate() - 6);
+  const d7s = d7.getFullYear()+'-'+String(d7.getMonth()+1).padStart(2,'0')+'-'+String(d7.getDate()).padStart(2,'0');
   const res = await fetch(
-    `${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hoje}&loja=eq.${encodeURIComponent(lojaDb)}&select=id`,
+    `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${d7s}&loja=eq.${encodeURIComponent(lojaDb)}&select=data_operacao,checklist_pct`,
     { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
   );
   const d = await res.json();
-  setBadge('checklist', d && d.length ? 'Hoje ✓' : 'Novo hoje', d && d.length ? 'g' : 'b');
+  if (!d || !d.length) { setBadge('checklist', 'Novo hoje', 'b'); return; }
+  const todayFilled = d.some(r => r.data_operacao === hoje);
+  const pcts = d.filter(r => r.checklist_pct != null).map(r => r.checklist_pct);
+  if (pcts.length > 0) {
+    const avg = Math.round(pcts.reduce((s,v) => s+v, 0) / pcts.length);
+    const col = avg >= 80 ? 'g' : avg >= 60 ? 'o' : 'r';
+    setBadge('checklist', `${avg}% · ${todayFilled ? 'Hoje ✓' : 'Pendente'}`, col);
+  } else {
+    setBadge('checklist', todayFilled ? 'Hoje ✓' : 'Novo hoje', todayFilled ? 'g' : 'b');
+  }
 }
 
 function loadAvalBadge(disp) {
@@ -821,7 +833,14 @@ function loadAvalBadge(disp) {
     const norm = (disp||'').toLowerCase().replace(/\s+/g,'_').replace(/[^a-z0-9_]/g,'');
     const avs = JSON.parse(localStorage.getItem('gn_aval_v5_' + norm) || '[]');
     const fin = avs.filter(a => a.finalizada).length;
-    setBadge('avaliacoes', fin > 0 ? `${fin} finalizada${fin>1?'s':''}` : 'Nenhuma ainda', fin > 0 ? 'g' : 'x');
+    // Check for collaborators overdue 90+ days without evaluation
+    const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 90);
+    const cutoffStr = cutoff.toISOString().slice(0,10);
+    const lastAv = {};
+    avs.forEach(a => { if (a.colaborador && a.data > (lastAv[a.colaborador]||'')) lastAv[a.colaborador] = a.data; });
+    const overdue = Object.values(lastAv).filter(d => d < cutoffStr).length;
+    if (overdue > 0) setBadge('avaliacoes', `${overdue} atrasada${overdue>1?'s':''}`, 'o');
+    else setBadge('avaliacoes', fin > 0 ? `${fin} finalizada${fin>1?'s':''}` : 'Nenhuma ainda', fin > 0 ? 'g' : 'x');
   } catch(e) { setBadge('avaliacoes', '—'); }
 }
 
@@ -833,28 +852,43 @@ async function loadComBadge(comKey) {
   const d = await res.json();
   if (!d || !d.length || !d[0]?.updated_at) { setBadge('comissoes', 'Sem dados', 'x'); return; }
   const row = d[0];
-  // Calcular semana atual (segunda-feira)
-  const now = new Date();
-  const dow = now.getDay(); // 0=dom,1=seg,...,6=sab
-  const diff = dow === 0 ? -6 : 1 - dow;
-  const seg = new Date(now); seg.setDate(now.getDate() + diff);
-  const semAtual = seg.toISOString().slice(0,10);
-  // Verificar se semana atual tem dados
-  let semPreenchida = false;
-  try {
-    const ad = typeof row.all_data === 'string' ? JSON.parse(row.all_data) : row.all_data;
-    if (ad && ad.semanas) {
-      const semana = ad.semanas.find(s => s.semana_inicio === semAtual || s.inicio === semAtual);
-      if (semana) {
-        const brutos = semana.brutos || [];
-        semPreenchida = brutos.some(v => (parseFloat(v) || 0) > 0);
-      }
+  const ad = typeof row.all_data === 'string' ? JSON.parse(row.all_data) : (row.all_data || {});
+  // semIdx = weeks since anchor Mon Jan 5 2026
+  const anchor = new Date(2026, 0, 5, 12);
+  const today = new Date(); today.setHours(12,0,0,0);
+  const curIdx = Math.max(0, Math.floor((today - anchor) / (7 * 86400000)));
+  // Find most recent semana with bruto data (last 8 weeks)
+  let bestIdx = -1, bestWd = null;
+  for (let i = curIdx; i >= Math.max(0, curIdx - 8); i--) {
+    const wd = ad[String(i)];
+    if (wd && Array.isArray(wd.brutos) && wd.brutos.some(v => (parseFloat(v)||0) > 0)) {
+      bestIdx = i; bestWd = wd; break;
     }
-  } catch(e) {}
+  }
   const dt = new Date(row.updated_at);
   const dtStr = dt.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'});
-  if (semPreenchida) setBadge('comissoes', `Sem. atual ✓ · ${dtStr}`, 'g');
-  else setBadge('comissoes', `Sem. atual pendente · ${dtStr}`, 'o');
+  if (!bestWd) { setBadge('comissoes', `Sem dados · ${dtStr}`, 'x'); return; }
+  try {
+    const wd = {
+      brutos: bestWd.brutos,
+      funcs: (bestWd.funcs||[]).map(f => ({
+        nome: f.nome||'', tipo: f.tipo||'CLT / MENSALISTA',
+        dias: Array.isArray(f.dias)&&f.dias.length===7 ? f.dias : Array(7).fill('PRESENTE')
+      })),
+      dist: bestWd.dist || 'NAO', vDist: bestWd.vDist || 0
+    };
+    const calc = calcSemana(wd, 0);
+    const retido = calc.retido;
+    const semLabel = bestIdx === curIdx ? 'Sem. atual' : 'Última sem.';
+    if (retido > 1) {
+      const retStr = Math.round(retido).toLocaleString('pt-BR');
+      setBadge('comissoes', `R$ ${retStr} retido`, 'o');
+    } else {
+      setBadge('comissoes', `${semLabel} ✓ · ${dtStr}`, 'g');
+    }
+  } catch(e) {
+    setBadge('comissoes', `Atualizado ${dtStr}`, 'g');
+  }
 }
 
 function setBadge(id, text, color) {
