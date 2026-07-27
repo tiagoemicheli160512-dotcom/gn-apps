@@ -635,7 +635,8 @@ let minAll     = {};   // loja    -> {insumo: val}
 let entradasAll= {};   // lojaKey -> [{id,data,nf,fornecedor,insumo,qtd,custoUnit}]
 let transferAll  = {};  // lojaKey -> [{id,data,origem,destino,insumo,qtd,motivo}]
 let pedidoAll    = {};  // lojaKey -> {item_id: {atual, pedido, obs}}
-let provisoesEntrega = []; // entregas pendentes/histórico desta loja
+let provisoesEntrega = []; // entregas pendentes (AGUARDANDO) desta loja
+let provisoesHistorico = []; // entregas já confirmadas desta loja (últimos 30 dias)
 let _entregaItensMap = {}; // id -> itens (para recalc sem JSON no onclick)
 let pedidoCustom = [];  // itens novos criados no app [{item, fornecedor, grupo, subgrupo, produto, und, custo, posIndex}]
 let pedidoRemovidos = []; // IDs (string) de itens removidos da lista
@@ -5542,6 +5543,33 @@ function render() {
           </div>`;
         }).join('')}
 
+      ${provisoesHistorico.length>0?`
+      <div style="margin-top:14px;margin-bottom:6px;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em">📋 Recebimentos Confirmados</div>
+      ${provisoesHistorico.map(prov=>{
+        const produto=prov.gn_catalogo?.produto||'—';
+        const und=prov.gn_catalogo?.und||'';
+        const dtDisplay=prov.data_entrega?new Date(prov.data_entrega+'T12:00:00').toLocaleDateString('pt-BR'):'Sem data';
+        const rec=Array.isArray(prov.gn_recebimentos)?prov.gn_recebimentos[0]:prov.gn_recebimentos;
+        const qtdRec=parseFloat(rec?.qtd_recebida??prov.qtd_prevista)||0;
+        const valRec=parseFloat(rec?.valor_recebido??prov.valor_previsto)||0;
+        const validadoPor=rec?.validado_por||'';
+        const isDiverg=prov.status==='DIVERGENCIA';
+        return `<div class="card" style="padding:11px 13px;border-left:3px solid ${isDiverg?'#f59e0b':'#059669'};margin-bottom:6px;opacity:0.85">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start">
+            <div style="flex:1;min-width:0">
+              <div style="font-weight:700;font-size:12px;color:${isDiverg?'#fbbf24':'#34d399'}">${isDiverg?'⚠️ Divergência':'✅ Recebido'} — ${prov.fornecedor||'—'}</div>
+              <div style="font-size:12px;color:#e2e8f0;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${produto}</div>
+              <div style="font-size:10px;color:#64748b;margin-top:1px">📅 ${dtDisplay}${validadoPor?' · '+validadoPor:''}</div>
+            </div>
+            <div style="text-align:right;flex-shrink:0;margin-left:8px">
+              <div style="font-size:13px;font-weight:800;color:${isDiverg?'#fbbf24':'#34d399'}">R$ ${valRec.toFixed(2).replace('.',',')}</div>
+              <div style="font-size:11px;color:#64748b">${qtdRec} ${und}</div>
+            </div>
+          </div>
+        </div>`;
+      }).join('')}
+      `:''}
+
       ${(()=>{
         const devs = (devolucoesAll[loja]||[]).slice().reverse();
         // Fornecedores das entregas pendentes desta loja
@@ -6545,8 +6573,12 @@ aplicarDefaults();
 async function carregarEntregas(silent) {
   try{
     const slug=LOJA_SLUG[loja]||loja.toLowerCase().replace(/ /g,'_');
-    const rows=await sbRequest('gn_provisoes?loja_slug=eq.'+slug+'&status=eq.AGUARDANDO&select=*,gn_catalogo(produto,und)&order=data_entrega',{method:'GET'});
-    provisoesEntrega=rows||[];
+    const [rowsPend,rowsHist]=await Promise.all([
+      sbRequest('gn_provisoes?loja_slug=eq.'+slug+'&status=eq.AGUARDANDO&select=*,gn_catalogo(produto,und)&order=data_entrega',{method:'GET'}),
+      sbRequest('gn_provisoes?loja_slug=eq.'+slug+'&status=in.(RECEBIDO_OK,DIVERGENCIA)&select=*,gn_catalogo(produto,und),gn_recebimentos(qtd_recebida,valor_recebido,validado_por,diferenca_qtd)&order=data_entrega.desc&limit=30',{method:'GET'})
+    ]);
+    provisoesEntrega=rowsPend||[];
+    provisoesHistorico=rowsHist||[];
     const dot=document.getElementById('dot-entrega');
     const _devPend=(devolucoesAll[loja]||[]).filter(d=>d.status!=='finalizado'&&d.status!=='cancelado').length;
     if(dot) dot.classList.toggle('hidden',provisoesEntrega.length===0&&_devPend===0);
