@@ -6500,9 +6500,19 @@ function renderVisitasCalendario(){
     const dataStr = `${_visitasCalMes}-${String(d).padStart(2,'0')}`;
     const visitas = porData[dataStr] || [];
     const isHoje = dataStr === hoje;
-    const temVisita = visitas.length > 0;
-    const lojasPills = [...new Set(visitas.map(v=>v.loja))].map(l=>`<div style="background:${_lojaColor(l)};border-radius:4px;padding:1px 4px;font-size:8px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;margin-top:1px;">${l}</div>`).join('');
-    html += `<div onclick="mostrarDiaVisitas('${dataStr}')" style="border-radius:8px;padding:5px 3px;background:${temVisita?'rgba(99,102,241,.15)':'var(--s2)'};border:1px solid ${isHoje?'#6366f1':temVisita?'rgba(99,102,241,.3)':'var(--b2)'};cursor:${temVisita?'pointer':'default'};min-height:54px;display:flex;flex-direction:column;align-items:center;">
+    const reais = visitas.filter(v=>v.loja!=='FOLGA'&&v.loja!=='FÉRIAS');
+    const ausencia = visitas.find(v=>v.loja==='FOLGA'||v.loja==='FÉRIAS');
+    const temVisita = reais.length > 0 || !!ausencia;
+    let cellBg = 'var(--s2)', cellBorder = 'var(--b2)';
+    if(isHoje) cellBorder = '#6366f1';
+    else if(ausencia?.loja==='FOLGA') { cellBg='rgba(6,182,212,.1)'; cellBorder='rgba(6,182,212,.3)'; }
+    else if(ausencia?.loja==='FÉRIAS') { cellBg='rgba(14,165,233,.1)'; cellBorder='rgba(14,165,233,.3)'; }
+    else if(reais.length > 0) { cellBg='rgba(99,102,241,.15)'; cellBorder='rgba(99,102,241,.3)'; }
+    const lojasPills = [
+      ...reais.map(v=>`<div style="background:${_lojaColor(v.loja)};border-radius:4px;padding:1px 4px;font-size:7px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;margin-top:1px;">${v.loja}</div>`),
+      ...(ausencia ? [`<div style="background:${ausencia.loja==='FOLGA'?'#06b6d4':'#0ea5e9'};border-radius:4px;padding:1px 4px;font-size:7px;font-weight:700;color:#fff;margin-top:1px;">${ausencia.loja==='FOLGA'?'🌴 Folga':'✈️ Férias'}</div>`] : [])
+    ].join('');
+    html += `<div onclick="mostrarDiaVisitas('${dataStr}')" style="border-radius:8px;padding:5px 3px;background:${cellBg};border:1px solid ${cellBorder};cursor:pointer;min-height:54px;display:flex;flex-direction:column;align-items:center;">
       <div style="font-size:11px;font-weight:${isHoje?'800':'600'};color:${isHoje?'#a5b4fc':temVisita?'var(--t1)':'var(--t3)'};">${d}</div>
       ${lojasPills}
     </div>`;
@@ -6537,22 +6547,105 @@ function _visitasCalNav(delta){
   loadVisitasCalendario();
 }
 
-function mostrarDiaVisitas(data){
+async function mostrarDiaVisitas(data){
   const detalhe = document.getElementById('visitas-cal-detalhe');
   if(!detalhe) return;
-  const visitas = _visitasCalData.filter(v=>v.data===data);
-  if(!visitas.length){ detalhe.innerHTML=''; return; }
   const [a,m,d] = data.split('-');
   const dsem = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'][new Date(data+'T12:00').getDay()];
-  detalhe.innerHTML = `<div style="background:var(--s2);border:1px solid var(--b2);border-radius:12px;padding:12px;">
-    <div style="font-size:11px;font-weight:700;color:var(--t2);margin-bottom:8px;">${dsem}, ${d}/${m}/${a}</div>
-    ${visitas.map(v=>`<div style="border-left:3px solid ${_lojaColor(v.loja)};padding:6px 10px;margin-bottom:6px;background:var(--s3);border-radius:0 8px 8px 0;">
-      <div style="font-size:12px;font-weight:700;color:var(--t1);">${v.loja}</div>
-      <div style="font-size:11px;color:var(--t3);">📍 ${v.hora_chegada} → ${v.hora_saida||'em andamento'} 🚪</div>
+  const visitas = _visitasCalData.filter(v=>v.data===data);
+  const reais = visitas.filter(v=>v.loja!=='FOLGA'&&v.loja!=='FÉRIAS');
+  const ausencia = visitas.find(v=>v.loja==='FOLGA'||v.loja==='FÉRIAS');
+
+  let html = `<div style="background:var(--s2);border:1px solid var(--b2);border-radius:12px;padding:12px;margin-top:4px;">
+    <div style="font-size:11px;font-weight:700;color:var(--t2);margin-bottom:10px;">${dsem}, ${d}/${m}/${a}</div>`;
+
+  // Visitas reais
+  for(const v of reais){
+    // Buscar supervisão do checklist_diario para essa loja+data
+    let supHtml = '';
+    try{
+      const lojaKey = LOJA_MAP[v.loja] || v.loja.toUpperCase();
+      const { data: cdRows } = await sb.from('checklist_diario')
+        .select('supervisao').eq('loja', lojaKey).eq('data', data).maybeSingle();
+      if(cdRows?.supervisao){
+        const sup = cdRows.supervisao;
+        const nota = sup.nota ?? sup.notaFinal ?? null;
+        const supervisor = sup.supervisor || '';
+        if(nota !== null){
+          const cor = nota>=8?'#22c55e':nota>=6?'#f59e0b':'#ef4444';
+          supHtml = `<div style="display:inline-flex;align-items:center;gap:5px;background:${cor}22;border:1px solid ${cor}55;border-radius:6px;padding:3px 8px;margin-top:4px;">
+            <span style="font-size:10px;">📋</span>
+            <span style="font-size:10px;font-weight:700;color:${cor};">Supervisão: ${nota.toFixed(1)}/10${supervisor?' · '+supervisor:''}</span>
+          </div>`;
+        } else if(supervisor){
+          supHtml = `<div style="font-size:10px;color:var(--t3);margin-top:4px;">📋 Checklist realizado por ${supervisor}</div>`;
+        }
+      }
+    } catch(_){}
+
+    html += `<div style="border-left:3px solid ${_lojaColor(v.loja)};padding:8px 10px;margin-bottom:8px;background:var(--s3);border-radius:0 8px 8px 0;">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <span style="font-size:12px;font-weight:700;color:var(--t1);">${v.loja}</span>
+        ${supDesbloqueado?`<button onclick="deletarVisitaChk('${v.id}');mostrarDiaVisitas('${data}')" style="background:none;border:none;color:var(--t3);font-size:12px;cursor:pointer;padding:2px 4px;">✕</button>`:''}
+      </div>
+      <div style="font-size:11px;color:var(--t3);margin-top:2px;">📍 ${v.hora_chegada} → ${v.hora_saida||'em andamento'} 🚪</div>
       ${v.endereco?`<div style="font-size:10px;color:var(--t3);margin-top:2px;">📌 ${v.endereco}</div>`:''}
-      ${v.obs?`<div style="font-size:10px;color:var(--t2);margin-top:2px;">💬 ${v.obs}</div>`:''}
-    </div>`).join('')}
-  </div>`;
+      ${supHtml}
+      <div style="display:flex;gap:6px;margin-top:8px;">
+        <input id="obs-vcal-${v.id}" type="text" value="${(v.obs||'').replace(/"/g,'&quot;')}" placeholder="Observação da visita…"
+          style="flex:1;background:var(--s4);color:var(--t1);border:1px solid var(--b2);border-radius:8px;padding:6px 9px;font-size:11px;outline:none;font-family:inherit;">
+        <button onclick="salvarObsVisitaCalDia('${v.id}','${data}')" style="background:var(--s4);border:1px solid var(--b2);color:var(--t2);border-radius:8px;padding:6px 10px;font-size:11px;cursor:pointer;white-space:nowrap;">💾</button>
+      </div>
+    </div>`;
+  }
+
+  // Ausência (folga/férias)
+  if(ausencia){
+    const cor = ausencia.loja==='FOLGA'?'#06b6d4':'#0ea5e9';
+    html += `<div style="background:${cor}15;border:1px solid ${cor}44;border-radius:8px;padding:8px 12px;display:flex;align-items:center;justify-content:space-between;">
+      <span style="font-size:12px;font-weight:700;color:${cor};">${ausencia.loja==='FOLGA'?'🌴 Folga':'✈️ Férias'}</span>
+      <button onclick="deletarVisitaChk('${ausencia.id}');_visitasCalData=_visitasCalData.filter(v=>String(v.id)!=='${ausencia.id}');mostrarDiaVisitas('${data}');renderVisitasCalendario();"
+        style="background:none;border:none;color:var(--t3);font-size:12px;cursor:pointer;padding:2px 4px;">✕</button>
+    </div>`;
+  }
+
+  // Sem nenhuma entrada: opção de marcar folga/férias
+  if(!reais.length && !ausencia){
+    html += `<div style="text-align:center;padding:8px 0 4px;">
+      <div style="font-size:11px;color:var(--t3);margin-bottom:10px;">Sem visita registrada neste dia.</div>
+      <div style="display:flex;gap:8px;justify-content:center;">
+        <button onclick="marcarAusenciaVisita('${data}','FOLGA')" style="flex:1;background:rgba(6,182,212,.15);border:1px solid rgba(6,182,212,.4);border-radius:10px;padding:10px 6px;color:#67e8f9;font-size:12px;font-weight:700;cursor:pointer;">🌴 Folga</button>
+        <button onclick="marcarAusenciaVisita('${data}','FÉRIAS')" style="flex:1;background:rgba(14,165,233,.15);border:1px solid rgba(14,165,233,.4);border-radius:10px;padding:10px 6px;color:#7dd3fc;font-size:12px;font-weight:700;cursor:pointer;">✈️ Férias</button>
+      </div>
+    </div>`;
+  }
+
+  html += `</div>`;
+  detalhe.innerHTML = html;
+}
+
+async function salvarObsVisitaCalDia(id, data){
+  const inp = document.getElementById('obs-vcal-'+id);
+  if(!inp) return;
+  const val = inp.value.trim();
+  try{
+    await sb.from('gn_chk_visitas').update({obs:val}).eq('id', id);
+    const v = _visitasCalData.find(x=>String(x.id)===String(id));
+    if(v) v.obs = val;
+    showToast('Observação salva','success');
+  } catch(_){ showToast('Erro ao salvar obs','err'); }
+}
+
+async function marcarAusenciaVisita(data, tipo){
+  const nome = usuarioLogado?.nome || 'Sem identificação';
+  const cargo = usuarioLogado?.cargo || '';
+  const body = { loja: tipo, data, visitante: nome, cargo, hora_chegada: null, hora_saida: null, lat: null, lon: null, endereco: null };
+  const { data: rows, error } = await sb.from('gn_chk_visitas').insert([body]).select();
+  if(error){ showToast('Erro ao salvar','err'); return; }
+  if(rows?.[0]) _visitasCalData.push(rows[0]);
+  renderVisitasCalendario();
+  mostrarDiaVisitas(data);
+  showToast(`${tipo==='FOLGA'?'🌴 Folga':'✈️ Férias'} marcada`,'success');
 }
 
 async function loadVisitasRelatorio(){
