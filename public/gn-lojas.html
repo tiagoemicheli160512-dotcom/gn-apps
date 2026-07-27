@@ -3016,6 +3016,18 @@ async function _sincronizarComPedidos(produtosSync) {
 
 async function confirmarPedido(modo) {
   // modo: 'urgencia' (contagem rápida, envia pedido) | 'final' (fecha semana + Excel)
+
+  // 1. Flush: garantir que o input focado (se houver) já propagou seu valor ao estado
+  const activeEl = document.activeElement;
+  if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
+    activeEl.blur();
+    await new Promise(r => setTimeout(r, 40)); // aguarda oninput/onblur processar
+  }
+
+  // 2. Desabilitar botões para evitar duplo clique
+  const btnUrg = document.querySelector('[onclick*="confirmarPedido"]');
+  if (btnUrg) { btnUrg.disabled = true; btnUrg.style.opacity = '0.5'; }
+
   const p = getPedido();
   const k = lojaKey();
   const semanaAnterior = addDays(semana, -7);
@@ -3100,9 +3112,11 @@ async function confirmarPedido(modo) {
     itens: itensConf,
   });
 
+  // 3. Salvar no localStorage imediatamente (cancelando qualquer timer pendente)
+  if (sbSyncTimer) { clearTimeout(sbSyncTimer); sbSyncTimer = null; }
   autoSave();
 
-  // Enviar ao app Pedidos ANTES de avançar semana (usa semana atual como referência)
+  // 4. Enviar ao app Pedidos ANTES de avançar semana (usa semana atual como referência)
   let syncResult = null;
   if (produtosParaSync.length > 0) {
     try {
@@ -3112,18 +3126,29 @@ async function confirmarPedido(modo) {
     }
   }
 
-  // Avançar semana (estoque da próxima semana parte da contagem atual)
-  avancarSemana();
-
-  // Toast consolidado (substitui o toast de avancarSemana)
-  if (produtosParaSync.length > 0) {
-    const pedOk = syncResult && syncResult.erros === 0;
-    showToast('✅ ' + atualizados + ' produto(s) confirmados!\nEstoque + semana atualizados.' + (pedOk ? '\nApp Pedidos: OK ✓' : '\nApp Pedidos: sem conexão'));
-  } else {
-    showToast('✅ ' + atualizados + ' produto(s) confirmados!\nEstoque e semana atualizados.');
+  // 5. Push direto para Supabase (sem delay) — garante que a nuvem tem os dados
+  //    antes de avançar a semana e antes de mostrar o toast de sucesso
+  let cloudOk = false;
+  try {
+    await sbPush();
+    cloudOk = true;
+  } catch(e) {
+    cloudOk = false;
   }
 
-  // Gerar Excel apenas no modo final
+  // 6. Avançar semana (estoque da próxima semana parte da contagem atual)
+  avancarSemana();
+
+  // 7. Reabilitar botões
+  document.querySelectorAll('[onclick*="confirmarPedido"]').forEach(b => { b.disabled = false; b.style.opacity = ''; });
+
+  // 8. Toast consolidado com status explícito da nuvem
+  const pedOk = syncResult && syncResult.erros === 0;
+  const cloudStr = cloudOk ? '☁️ Salvo na nuvem ✓' : '⚠️ Sem internet — salvo só neste celular';
+  const pedStr   = produtosParaSync.length > 0 ? (pedOk ? '\nApp Pedidos: OK ✓' : '\nApp Pedidos: sem conexão') : '';
+  showToast('⚡ ' + atualizados + ' item(s) confirmados!\n' + cloudStr + pedStr, cloudOk ? 'success' : 'warn', 6000);
+
+  // 9. Gerar Excel apenas no modo final
   if (modo === 'final') {
     setTimeout(gerarExcelPedido, 400);
   }
@@ -4267,12 +4292,13 @@ function cancelarDevolucao(id) {
 
 /* ═══════════ TOAST ═══════════ */
 let toastTimer = null;
-function showToast(msg) {
+function showToast(msg, type, ms) {
   const t = document.getElementById("toast");
   t.textContent = msg;
   t.style.opacity = "1";
+  t.style.background = type === 'warn' ? '#92400e' : type === 'err' ? '#7f1d1d' : '';
   if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.style.opacity = "0"; }, 2500);
+  toastTimer = setTimeout(() => { t.style.opacity = "0"; t.style.background = ''; }, ms || 2500);
 }
 
 /* ═══════════ RENDER ═══════════ */
