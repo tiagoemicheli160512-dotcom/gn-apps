@@ -969,17 +969,34 @@ async function carregarProvisoes() {
   const monday = semAtiva.toISOString().split('T')[0];
   const sunday = getSundayOfWeek(semAtiva).toISOString().split('T')[0];
 
-  let q = db.from('gn_provisoes')
-    .select('*, gn_catalogo(produto,und,grupo), gn_recebimentos(validado_por,qtd_recebida,valor_recebido,diferenca_qtd)')
-    .gte('data_entrega', monday)
-    .lte('data_entrega', sunday)
-    .order('data_entrega', {ascending:true})
-    .order('fornecedor');
+  const SEL = '*, gn_catalogo(produto,und,grupo), gn_recebimentos(validado_por,qtd_recebida,valor_recebido,diferenca_qtd)';
 
-  if (S.provLoja) q = q.eq('loja_slug', S.provLoja);
+  // Itens pendentes: filtro direto por data_entrega da semana
+  let qPend = db.from('gn_provisoes').select(SEL)
+    .eq('status', 'AGUARDANDO')
+    .gte('data_entrega', monday).lte('data_entrega', sunday)
+    .order('data_entrega', {ascending:true}).order('fornecedor');
+  if (S.provLoja) qPend = qPend.eq('loja_slug', S.provLoja);
 
-  const { data } = await q;
-  S.provisoes = data || [];
+  // Itens confirmados: via pedido_id da semana (mesma lógica de carregarEntregasConfirmadas)
+  const { data: pedidos } = await db.from('gn_pedidos').select('id')
+    .or(`semana_inicio.eq.${monday},and(data_pedido.gte.${monday},data_pedido.lte.${sunday})`);
+  const pedidoIds = (pedidos || []).map(p => p.id);
+
+  let qConf = Promise.resolve({ data: [] });
+  if (pedidoIds.length) {
+    let q2 = db.from('gn_provisoes').select(SEL)
+      .in('status', ['RECEBIDO_OK', 'DIVERGENCIA'])
+      .in('pedido_id', pedidoIds)
+      .order('data_entrega', {ascending:true}).order('fornecedor');
+    if (S.provLoja) q2 = q2.eq('loja_slug', S.provLoja);
+    qConf = q2;
+  }
+
+  const [{ data: pending }, { data: confirmed }] = await Promise.all([qPend, qConf]);
+  const seen = new Set();
+  const all = [...(pending || []), ...(confirmed || [])];
+  S.provisoes = all.filter(p => { if (seen.has(p.id)) return false; seen.add(p.id); return true; });
 }
 
 async function carregarEntregasPendentes() {
@@ -2178,7 +2195,7 @@ async function renderProvisoes() {
           };
           const lojaDisplay = S.lojas.find(l=>l.slug_pedido===p.loja_slug)?.nome_display || p.loja_slug;
           const _rec = Array.isArray(p.gn_recebimentos) ? p.gn_recebimentos[0] : p.gn_recebimentos;
-          const _recTs = '';
+          const _recTs = p.atualizado_em ? new Date(p.atualizado_em).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
           const _recPor = _rec?.validado_por || '';
           const _isConfirmed = p.status === 'RECEBIDO_OK' || p.status === 'DIVERGENCIA';
           return `<div class="prov-item">
