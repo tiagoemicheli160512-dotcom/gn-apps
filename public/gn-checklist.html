@@ -1966,7 +1966,7 @@ function getComissoesFuncsHerdados(allData, idx){
           // FOLGA, NT, FÉRIAS e AFASTAMENTO persistem para semana seguinte; FALTA/SUSPENSÃO/BANCO voltam para PRESENTE
           const MANTER_SEM = new Set(['FOLGA','NÃO TRABALHADO','FÉRIAS','AFASTAMENTO']);
           const diasHerd = Array(7).fill(null).map((_,di)=>{ const s=(f.dias||[])[di]; return (s && MANTER_SEM.has(s)) ? s : 'PRESENTE'; });
-          return {id:f.id, nome:f.nome, tipo:f.tipo, setor:f.setor||'', turno:f.turno||'', horario:f.horario||'', ferias_ini:f.ferias_ini||'', ferias_fim:f.ferias_fim||'', afastamento_just:f.afastamento_just||'', dias:diasHerd};
+          return {id:f.id, nome:f.nome, tipo:f.tipo, setor:f.setor||'', turno:f.turno||'', horario:f.horario||'', ferias_ini:f.ferias_ini||'', ferias_fim:f.ferias_fim||'', afastamento_just:f.afastamento_just||'', inicio_contrato:f.inicio_contrato||'', fim_contrato:f.fim_contrato||'', horario_dias:f.horario_dias||null, aval_exp_45:f.aval_exp_45||null, aval_exp_90:f.aval_exp_90||null, encerramento_solicitado:f.encerramento_solicitado||false, encerramento_data:f.encerramento_data||'', dias:diasHerd};
         });
         while(herdados.length<COMISSOES_MAX_FUNC) herdados.push({id:herdados.length,nome:'',tipo:'CLT / MENSALISTA',setor:'',dias:Array(7).fill('PRESENTE')});
         return herdados;
@@ -3742,6 +3742,30 @@ function fmtR(v){ return 'R$ '+(parseFloat(v)||0).toLocaleString('pt-BR',{minimu
 // =============================================
 // FUNCIONÁRIOS (espelha o app de Comissões, sem valores monetários)
 // =============================================
+function _calcExperiencia(inicioContrato){
+  if(!inicioContrato) return null;
+  const ini=new Date(inicioContrato+'T00:00:00');
+  const hoje=new Date(); hoje.setHours(0,0,0,0);
+  const dias=Math.floor((hoje-ini)/86400000);
+  if(dias<0||dias>365) return null;
+  return {dias, diasRestantes90:Math.max(0,90-dias)};
+}
+function _calcHorasSemanais(f){
+  const hd=f.horario_dias;
+  if(!hd) return null;
+  let tot=0, has=false;
+  hd.forEach(h=>{
+    if(!h||!h.entrada||!h.saida) return;
+    const [eH,eM]=h.entrada.split(':').map(Number);
+    const [sH,sM]=h.saida.split(':').map(Number);
+    const m=(sH*60+sM)-(eH*60+eM);
+    if(m>0){tot+=m;has=true;}
+  });
+  if(!has) return null;
+  const h=Math.floor(tot/60),m=tot%60;
+  return m>0?`${h}h${m}min`:`${h}h`;
+}
+
 function renderComissoesFuncs(){
   const lista=document.getElementById('func-lista');
   const empty=document.getElementById('func-empty');
@@ -3770,9 +3794,23 @@ function renderComissoesFuncs(){
   empty.style.display=indicesVisiveis.length?'none':'block';
   empty.textContent='Nenhum funcionário cadastrado';
 
+  const DIAS_NOMES_HD=['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
   lista.innerHTML=indicesVisiveis.map(i=>{
     const f=comissoesWD.funcs[i];
-    const exp=comissoesExpanded[i]||false;
+    const expI=comissoesExpanded[i]||false;
+    const exp=_calcExperiencia(f.inicio_contrato||'');
+    const horasSemanais=_calcHorasSemanais(f);
+
+    // Badge de experiência na linha colapsada
+    let expBadge='';
+    if(f.encerramento_solicitado){
+      expBadge=`<span style="font-size:9px;background:#ef4444;color:#fff;border-radius:4px;padding:1px 6px;font-weight:700;flex-shrink:0">⛔ ENCERRANDO</span>`;
+    } else if(exp&&exp.dias<90){
+      const ico=(exp.dias>=85&&!f.aval_exp_90)?'🔴':(exp.dias>=40&&!f.aval_exp_45)?'⚠️':'🟡';
+      expBadge=`<span style="font-size:9px;background:rgba(245,158,11,.15);color:#f59e0b;border-radius:4px;padding:1px 6px;font-weight:700;flex-shrink:0;border:1px solid rgba(245,158,11,.3)">${ico} Exp. ${exp.dias}d</span>`;
+    }
+
+    // Grid de presença semanal
     const diasHtml=sem.days.map((day,d)=>{
       const st=f.dias[d];
       const opts=COMISSOES_STATUS.map(s=>`<option value="${s}"${s===st?' selected':''}>${COMISSOES_STATUS_ABREV[s]}</option>`).join('');
@@ -3781,19 +3819,122 @@ function renderComissoesFuncs(){
         <select class="dia-sel" data-s="${st}" onchange="updComissoesDia(${i},${d},this)">${opts}</select>
       </div>`;
     }).join('');
+
+    // Grid horário por dia (Seg–Dom, fixo)
+    const hd=f.horario_dias||[];
+    const horarioDiasHtml=DIAS_NOMES_HD.map((dn,d)=>{
+      const h=hd[d]||{entrada:'',saida:''};
+      return `<div style="display:flex;flex-direction:column;align-items:center;gap:2px;">
+        <div style="font-size:9px;color:var(--t3);font-weight:700;margin-bottom:1px;">${dn}</div>
+        <input type="time" value="${h.entrada||''}" title="Entrada ${dn}"
+          onchange="updComissoesHorarioDia(${i},${d},'entrada',this.value)"
+          style="font-size:9px;width:100%;padding:2px 2px;text-align:center;box-sizing:border-box;">
+        <input type="time" value="${h.saida||''}" title="Saída ${dn}"
+          onchange="updComissoesHorarioDia(${i},${d},'saida',this.value)"
+          style="font-size:9px;width:100%;padding:2px 2px;text-align:center;box-sizing:border-box;">
+      </div>`;
+    }).join('');
+
+    // Seção período de experiência
+    let expSection='';
+    if(exp&&exp.dias<=120){
+      const baraPct=Math.min(100,Math.round(exp.dias/90*100));
+      const baraCor=exp.dias<45?'#f59e0b':exp.dias<85?'#3b82f6':'#ef4444';
+
+      let aval45Html='';
+      if(exp.dias>=40){
+        if(f.aval_exp_45){
+          aval45Html=`<div style="background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.3);border-radius:8px;padding:8px;margin-top:6px;">
+            <div style="font-size:10px;font-weight:700;color:#10b981;">✅ Avaliação 45 dias — ${escHtml(f.aval_exp_45.decisao||'')}</div>
+            <div style="font-size:10px;color:var(--t3);margin-top:2px;">${f.aval_exp_45.data||''} por ${escHtml(f.aval_exp_45.avaliador||'')}${f.aval_exp_45.obs?' — '+escHtml(f.aval_exp_45.obs):''}</div>
+          </div>`;
+        } else {
+          aval45Html=`<div style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.35);border-radius:8px;padding:8px;margin-top:6px;">
+            <div style="font-size:10px;font-weight:700;color:#f59e0b;margin-bottom:6px;">⚠️ Avaliação 45 dias pendente</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end;">
+              <div style="flex:1;min-width:100px;">
+                <label class="field-label">Decisão</label>
+                <select id="dec45_${i}" style="font-size:11px;">
+                  <option value="">— Selecione —</option>
+                  <option value="APROVADO">Aprovado</option>
+                  <option value="APROVADO COM RESSALVAS">Aprovado c/ ressalvas</option>
+                  <option value="ENCERRAR">Encerrar contrato</option>
+                </select>
+              </div>
+              <div style="flex:2;min-width:120px;">
+                <label class="field-label">Observação</label>
+                <input type="text" id="obs45_${i}" placeholder="Opcional..." style="font-size:11px;">
+              </div>
+            </div>
+            <button onclick="salvarAvalExperiencia(${i},'aval_exp_45','dec45_${i}','obs45_${i}')"
+              style="margin-top:6px;background:#f59e0b;color:#000;border:none;border-radius:7px;padding:6px 14px;font-size:11px;font-weight:700;cursor:pointer;width:100%;">Salvar avaliação 45 dias</button>
+          </div>`;
+        }
+      }
+
+      let aval90Html='';
+      if(exp.dias>=85){
+        if(f.aval_exp_90){
+          aval90Html=`<div style="background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.3);border-radius:8px;padding:8px;margin-top:6px;">
+            <div style="font-size:10px;font-weight:700;color:#10b981;">✅ Decisão 90 dias — ${escHtml(f.aval_exp_90.decisao||'')}</div>
+            <div style="font-size:10px;color:var(--t3);margin-top:2px;">${f.aval_exp_90.data||''} por ${escHtml(f.aval_exp_90.avaliador||'')}${f.aval_exp_90.obs?' — '+escHtml(f.aval_exp_90.obs):''}</div>
+          </div>`;
+        } else {
+          const urgente=exp.dias>=90;
+          aval90Html=`<div style="background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);border-radius:8px;padding:8px;margin-top:6px;">
+            <div style="font-size:10px;font-weight:700;color:#ef4444;margin-bottom:6px;">${urgente?'🔴 URGENTE: ':''}Decisão 90 dias${urgente?' — prazo vencido':' — '+exp.diasRestantes90+' dia(s) restante(s)'}</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end;">
+              <div style="flex:1;min-width:100px;">
+                <label class="field-label">Decisão</label>
+                <select id="dec90_${i}" style="font-size:11px;">
+                  <option value="">— Selecione —</option>
+                  <option value="EFETIVADO">Efetivar</option>
+                  <option value="ENCERRAR">Encerrar contrato</option>
+                </select>
+              </div>
+              <div style="flex:2;min-width:120px;">
+                <label class="field-label">Observação</label>
+                <input type="text" id="obs90_${i}" placeholder="Opcional..." style="font-size:11px;">
+              </div>
+            </div>
+            <button onclick="salvarAvalExperiencia(${i},'aval_exp_90','dec90_${i}','obs90_${i}')"
+              style="margin-top:6px;background:#ef4444;color:#fff;border:none;border-radius:7px;padding:6px 14px;font-size:11px;font-weight:700;cursor:pointer;width:100%;">Salvar decisão 90 dias</button>
+          </div>`;
+        }
+      }
+
+      expSection=`<div style="margin-top:10px;border:1px solid rgba(245,158,11,.25);border-radius:10px;padding:10px;">
+        <div style="font-size:10px;font-weight:700;color:#f59e0b;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:8px;">🆕 Período de Experiência</div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+          <div style="flex:1;background:rgba(255,255,255,.06);border-radius:4px;height:6px;overflow:hidden;">
+            <div style="width:${baraPct}%;background:${baraCor};height:6px;border-radius:4px;"></div>
+          </div>
+          <div style="font-size:10px;color:var(--t2);white-space:nowrap;font-variant-numeric:tabular-nums;">${exp.dias}/90 dias</div>
+        </div>
+        ${aval45Html}${aval90Html}
+      </div>`;
+    }
+
+    // Banner encerramento
+    const encerramentoBanner=f.encerramento_solicitado?`<div style="background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.4);border-radius:8px;padding:8px;margin-top:8px;">
+      <div style="font-size:11px;font-weight:700;color:#ef4444;">⛔ Encerramento solicitado${f.encerramento_data?' em '+f.encerramento_data:''}</div>
+      <div style="font-size:10px;color:var(--t3);margin-top:2px;">Aviso visível no app RH — Dossiê.</div>
+    </div>`:'';
+
     return `<div class="card-inner p-3" id="cf-${i}">
       <div style="display:flex;align-items:center;gap:8px;cursor:pointer;" onclick="toggleComissoesFunc(${i})">
         <div style="font-size:10px;color:var(--t3);font-weight:700;width:16px;">${i+1}</div>
         <input type="text" placeholder="Funcionário ${i+1}" value="${escHtml(f.nome)}"
           onclick="event.stopPropagation()" onblur="updComissoesNome(${i},this.value)"
           style="flex:1;">
+        ${expBadge}
         ${f.setor&&f.setor.trim()?`<span style="font-size:9px;color:var(--ouro,#F5D98A);background:rgba(245,217,138,.12);border-radius:4px;padding:1px 6px;white-space:nowrap;font-weight:700;flex-shrink:0">${escHtml(f.setor)}</span>`:''}
         ${f.nome&&f.nome.trim()?`<button onclick="event.stopPropagation();abrirModalBancoHoras('${f.nome.trim().replace(/'/g,"\\'")}')"
           title="Banco de horas"
           style="background:#0d2d1a;border:1px solid #1a5a3a;border-radius:7px;padding:4px 8px;color:#4ade80;font-size:11px;cursor:pointer;flex-shrink:0;font-weight:700;">⏱</button>`:''}
-        <div style="font-size:11px;color:var(--t3);">${exp?'▲':'▼'}</div>
+        <div style="font-size:11px;color:var(--t3);">${expI?'▲':'▼'}</div>
       </div>
-      ${exp?`<div style="margin-top:9px;">
+      ${expI?`<div style="margin-top:9px;">
         <label class="field-label">Tipo</label>
         <select onchange="updComissoesTipo(${i},this.value)">
           ${COMISSOES_TIPOS.map(t=>`<option${t===f.tipo?' selected':''}>${t}</option>`).join('')}
@@ -3810,9 +3951,21 @@ function renderComissoesFuncs(){
             </select>
           </div>
           <div>
-            <label class="field-label">Horário</label>
+            <label class="field-label">Horário geral</label>
             <input type="text" placeholder="Ex: 08:00–16:00" value="${escHtml(f.horario||'')}"
               onblur="updComissoesHorario(${i},this.value)" style="font-size:11px;">
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;">
+          <div>
+            <label class="field-label">📅 Início de contrato</label>
+            <input type="date" value="${escHtml(f.inicio_contrato||'')}"
+              onchange="updComissoesInicioContrato(${i},this.value)" style="font-size:11px;">
+          </div>
+          <div>
+            <label class="field-label">📅 Fim de contrato</label>
+            <input type="date" value="${escHtml(f.fim_contrato||'')}"
+              onchange="updComissoesFimContrato(${i},this.value)" style="font-size:11px;">
           </div>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;">
@@ -3832,7 +3985,16 @@ function renderComissoesFuncs(){
           <input type="text" value="${escHtml(f.afastamento_just||'')}" placeholder="INSS, CID, motivo..."
             onblur="updComissoesAfastamentoJust(${i},this.value)" style="font-size:11px;width:100%;box-sizing:border-box;">
         </div>`:''}
-        <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-top:10px;">${diasHtml}</div>
+        <div style="margin-top:10px;">
+          <div style="font-size:10px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:0.8px;margin-bottom:6px;">⏰ Horário por dia${horasSemanais?` — <span style="color:var(--gn-color,#E8580A);font-weight:700;">${horasSemanais}/sem</span>`:''}</div>
+          <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:3px;">${horarioDiasHtml}</div>
+        </div>
+        <div style="margin-top:10px;">
+          <div style="font-size:10px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:0.8px;margin-bottom:6px;">📅 Presença semana</div>
+          <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;">${diasHtml}</div>
+        </div>
+        ${expSection}
+        ${encerramentoBanner}
         <div style="margin-top:10px;">
           <div style="font-size:10px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:0.8px;margin-bottom:6px;">📎 Documentos</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;">
@@ -4045,6 +4207,54 @@ function updComissoesAfastamentoJust(i,v){
   const mutator=wd=>{ wd={...wd}; wd.funcs=[...wd.funcs]; wd.funcs[i]={...wd.funcs[i],afastamento_just:v}; return wd; };
   comissoesWD=mutator(comissoesWD);
   scheduleComissoesOp(mutator);
+}
+function updComissoesInicioContrato(i,v){
+  if(!comissoesWD) return;
+  const mutator=wd=>{ wd={...wd}; wd.funcs=[...wd.funcs]; wd.funcs[i]={...wd.funcs[i],inicio_contrato:v}; return wd; };
+  comissoesWD=mutator(comissoesWD);
+  scheduleComissoesOp(mutator);
+  renderComissoesFuncs();
+}
+function updComissoesFimContrato(i,v){
+  if(!comissoesWD) return;
+  const mutator=wd=>{ wd={...wd}; wd.funcs=[...wd.funcs]; wd.funcs[i]={...wd.funcs[i],fim_contrato:v}; return wd; };
+  comissoesWD=mutator(comissoesWD);
+  scheduleComissoesOp(mutator);
+}
+function updComissoesHorarioDia(i,diaIdx,campo,val){
+  if(!comissoesWD) return;
+  const mutator=wd=>{
+    wd={...wd}; wd.funcs=[...wd.funcs]; wd.funcs[i]={...wd.funcs[i]};
+    const base=wd.funcs[i].horario_dias||Array(7).fill(null).map(()=>({entrada:'',saida:''}));
+    const hd=[...base];
+    hd[diaIdx]={...(hd[diaIdx]||{entrada:'',saida:''}),[campo]:val};
+    wd.funcs[i].horario_dias=hd;
+    return wd;
+  };
+  comissoesWD=mutator(comissoesWD);
+  scheduleComissoesOp(mutator);
+  // Re-render para atualizar total de horas
+  renderComissoesFuncs();
+}
+async function salvarAvalExperiencia(i,campo,decisaoId,obsId){
+  const decisao=document.getElementById(decisaoId)?.value;
+  if(!decisao){ showToast('Selecione uma decisão','err'); return; }
+  const obs=document.getElementById(obsId)?.value||'';
+  const avaliador=usuarioLogado?.nome||'';
+  const data=hojeLocal();
+  const aval={data,avaliador,decisao,obs};
+  const mutator=wd=>{
+    wd={...wd}; wd.funcs=[...wd.funcs]; wd.funcs[i]={...wd.funcs[i],[campo]:aval};
+    if(decisao==='ENCERRAR'){
+      wd.funcs[i].encerramento_solicitado=true;
+      wd.funcs[i].encerramento_data=data;
+    }
+    return wd;
+  };
+  comissoesWD=mutator(comissoesWD);
+  scheduleComissoesOp(mutator);
+  renderComissoesFuncs();
+  showToast('Avaliação registrada','success');
 }
 
 function updComissoeSetor(i,v){
