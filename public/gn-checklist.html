@@ -1573,22 +1573,34 @@
 
 <!-- ===================== ABA VISITAS ===================== -->
 <div id="tab-visitas" class="tab-content" style="max-width:640px;margin:0 auto;padding:14px;">
-  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
     <div>
       <div style="font-size:14px;font-weight:700;color:var(--t1);">📍 Visitas</div>
       <div style="font-size:10px;color:var(--t3);">Entrada e saída — horário fixado sem alteração</div>
     </div>
-    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;" onclick="openRelModal('visitas')">📄 Relatório</button>
   </div>
 
-  <!-- Ação rápida -->
-  <div class="visita-chk-action">
-    <div id="visita-chk-ativa-wrap"></div>
-    <div id="visita-chk-geo-status"></div>
+  <!-- Seletor de visão -->
+  <div style="display:flex;gap:6px;margin-bottom:12px;">
+    <button id="visitas-btn-hoje"      onclick="switchVisitasView('hoje')"      style="flex:1;padding:7px 0;border-radius:8px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:#94a3b8;font-size:11px;font-weight:700;font-family:inherit;cursor:pointer;transition:all .15s">📍 Hoje</button>
+    <button id="visitas-btn-calendario" onclick="switchVisitasView('calendario')" style="flex:1;padding:7px 0;border-radius:8px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:#94a3b8;font-size:11px;font-weight:700;font-family:inherit;cursor:pointer;transition:all .15s">📅 Calendário</button>
+    <button id="visitas-btn-relatorio"  onclick="switchVisitasView('relatorio')"  style="flex:1;padding:7px 0;border-radius:8px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:#94a3b8;font-size:11px;font-weight:700;font-family:inherit;cursor:pointer;transition:all .15s">📊 Relatório</button>
   </div>
 
-  <!-- Lista de visitas do dia -->
-  <div id="visita-chk-lista" style="display:flex;flex-direction:column;gap:8px;"></div>
+  <!-- Visão: Hoje -->
+  <div id="visitas-view-hoje">
+    <div class="visita-chk-action">
+      <div id="visita-chk-ativa-wrap"></div>
+      <div id="visita-chk-geo-status"></div>
+    </div>
+    <div id="visita-chk-lista" style="display:flex;flex-direction:column;gap:8px;"></div>
+  </div>
+
+  <!-- Visão: Calendário -->
+  <div id="visitas-view-calendario" style="display:none;"></div>
+
+  <!-- Visão: Relatório -->
+  <div id="visitas-view-relatorio" style="display:none;"></div>
 </div>
 
 <!-- ===================== ABA BANDA ===================== -->
@@ -5384,7 +5396,7 @@ function switchTab(tab,btn){
     renderSupervisao();
   }
   if(tab==='historico') loadHistorico();
-  if(tab==='visitas'){ loadVisitasChk(); }
+  if(tab==='visitas'){ switchVisitasView(_visitasView||'hoje'); }
   if(tab==='caixa') renderLivroCaixa();
   if(tab==='fichas') carregarFichas(false);
   if(tab==='banco') carregarBancoHoras(false);
@@ -6187,6 +6199,11 @@ function updateAcaoCorretiva(idx, val){
 let _visitasChk = [];
 let _visitasChkLoaded = false;
 let _savingVisitaChk = false;
+let _visitasView = 'hoje';
+let _visitasCalMes = new Date().toISOString().slice(0,7); // 'YYYY-MM'
+let _visitasCalData = [];
+let _visitasRelData = [];
+let _visitasRelLoja = null; // null = todas
 
 async function loadVisitasChk(){
   if(!LOJA) return;
@@ -6407,6 +6424,250 @@ function buildVisitasChkSection(){
     if(v.obs) txt += `     💬 ${v.obs}\n`;
   });
   return txt;
+}
+
+// ─── VISITAS: CONTROLE DE PRESENÇA ────────────────────────────────────────────
+
+function _lojaColor(loja){
+  const cols = ['#3b82f6','#8b5cf6','#10b981','#f59e0b','#ef4444','#06b6d4','#ec4899','#84cc16','#f97316','#6366f1','#14b8a6'];
+  let h = 0; for(let i=0;i<loja.length;i++) h=(h*31+loja.charCodeAt(i))&0xffff;
+  return cols[h % cols.length];
+}
+
+function switchVisitasView(view){
+  _visitasView = view;
+  ['hoje','calendario','relatorio'].forEach(v => {
+    const el = document.getElementById('visitas-view-'+v);
+    if(el) el.style.display = v===view ? '' : 'none';
+    const btn = document.getElementById('visitas-btn-'+v);
+    if(btn){ btn.style.background = v===view ? 'rgba(99,102,241,.25)' : 'rgba(255,255,255,.04)'; btn.style.color = v===view ? '#a5b4fc' : '#94a3b8'; btn.style.border = v===view ? '1px solid rgba(99,102,241,.5)' : '1px solid rgba(255,255,255,.1)'; }
+  });
+  if(view==='hoje') loadVisitasChk();
+  else if(view==='calendario') loadVisitasCalendario();
+  else if(view==='relatorio') loadVisitasRelatorio();
+}
+
+async function loadVisitasCalendario(){
+  const nome = usuarioLogado?.nome;
+  const wrap = document.getElementById('visitas-view-calendario');
+  if(!wrap) return;
+  wrap.innerHTML = '<div style="text-align:center;padding:30px;color:var(--t3);font-size:12px;">Carregando...</div>';
+  const [ano, mes] = _visitasCalMes.split('-').map(Number);
+  const inicio = `${_visitasCalMes}-01`;
+  const ultimoDia = new Date(ano, mes, 0).getDate();
+  const fim = `${_visitasCalMes}-${String(ultimoDia).padStart(2,'0')}`;
+  const { data } = await sb.from('gn_chk_visitas')
+    .select('*').eq('visitante', nome).gte('data', inicio).lte('data', fim)
+    .order('data').order('hora_chegada');
+  _visitasCalData = data || [];
+  renderVisitasCalendario();
+}
+
+function renderVisitasCalendario(){
+  const wrap = document.getElementById('visitas-view-calendario');
+  if(!wrap) return;
+  const [ano, mes] = _visitasCalMes.split('-').map(Number);
+  const ultimoDia = new Date(ano, mes, 0).getDate();
+  const primeiroDia = new Date(ano, mes-1, 1).getDay(); // 0=Dom
+  const meses = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+  const diasNome = ['D','S','T','Q','Q','S','S'];
+
+  // Agrupar visitas por data
+  const porData = {};
+  _visitasCalData.forEach(v => { if(!porData[v.data]) porData[v.data]=[]; porData[v.data].push(v); });
+
+  // Totais por loja
+  const porLoja = {};
+  _visitasCalData.forEach(v => { porLoja[v.loja]=(porLoja[v.loja]||0)+1; });
+
+  // Cabeçalho de navegação
+  let html = `
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+    <button onclick="_visitasCalNav(-1)" style="background:var(--s3);border:1px solid var(--b2);border-radius:8px;padding:6px 12px;color:var(--t2);cursor:pointer;font-size:14px;">‹</button>
+    <div style="font-size:13px;font-weight:700;color:var(--t1);">${meses[mes-1]} ${ano}</div>
+    <button onclick="_visitasCalNav(1)" style="background:var(--s3);border:1px solid var(--b2);border-radius:8px;padding:6px 12px;color:var(--t2);cursor:pointer;font-size:14px;">›</button>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:2px;margin-bottom:4px;">
+    ${diasNome.map(d=>`<div style="text-align:center;font-size:9px;font-weight:700;color:var(--t3);padding:4px 0;text-transform:uppercase;">${d}</div>`).join('')}
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:3px;">`;
+
+  // Células vazias antes do dia 1
+  for(let i=0;i<primeiroDia;i++) html += `<div></div>`;
+
+  const hoje = new Date().toISOString().split('T')[0];
+  for(let d=1;d<=ultimoDia;d++){
+    const dataStr = `${_visitasCalMes}-${String(d).padStart(2,'0')}`;
+    const visitas = porData[dataStr] || [];
+    const isHoje = dataStr === hoje;
+    const temVisita = visitas.length > 0;
+    const lojasPills = [...new Set(visitas.map(v=>v.loja))].map(l=>`<div style="background:${_lojaColor(l)};border-radius:4px;padding:1px 4px;font-size:8px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;margin-top:1px;">${l}</div>`).join('');
+    html += `<div onclick="mostrarDiaVisitas('${dataStr}')" style="border-radius:8px;padding:5px 3px;background:${temVisita?'rgba(99,102,241,.15)':'var(--s2)'};border:1px solid ${isHoje?'#6366f1':temVisita?'rgba(99,102,241,.3)':'var(--b2)'};cursor:${temVisita?'pointer':'default'};min-height:54px;display:flex;flex-direction:column;align-items:center;">
+      <div style="font-size:11px;font-weight:${isHoje?'800':'600'};color:${isHoje?'#a5b4fc':temVisita?'var(--t1)':'var(--t3)'};">${d}</div>
+      ${lojasPills}
+    </div>`;
+  }
+  html += `</div>`;
+
+  // Resumo por loja
+  if(Object.keys(porLoja).length > 0){
+    html += `<div style="margin-top:14px;border-top:1px solid var(--b2);padding-top:12px;">
+      <div style="font-size:11px;font-weight:700;color:var(--t2);margin-bottom:8px;">Resumo do mês</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;">
+        ${Object.entries(porLoja).sort((a,b)=>b[1]-a[1]).map(([l,n])=>`<div style="background:${_lojaColor(l)}22;border:1px solid ${_lojaColor(l)}66;border-radius:8px;padding:6px 10px;display:flex;align-items:center;gap:6px;">
+          <div style="width:8px;height:8px;border-radius:50%;background:${_lojaColor(l)};flex-shrink:0;"></div>
+          <span style="font-size:11px;font-weight:700;color:var(--t1);">${l}</span>
+          <span style="font-size:11px;color:var(--t3);">${n} visita${n>1?'s':''}</span>
+        </div>`).join('')}
+      </div>
+    </div>`;
+  } else {
+    html += `<div style="text-align:center;padding:20px;color:var(--t3);font-size:12px;">Nenhuma visita neste mês</div>`;
+  }
+
+  // Detalhe do dia selecionado
+  html += `<div id="visitas-cal-detalhe" style="margin-top:10px;"></div>`;
+  wrap.innerHTML = html;
+}
+
+function _visitasCalNav(delta){
+  const [ano, mes] = _visitasCalMes.split('-').map(Number);
+  const d = new Date(ano, mes-1+delta, 1);
+  _visitasCalMes = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+  loadVisitasCalendario();
+}
+
+function mostrarDiaVisitas(data){
+  const detalhe = document.getElementById('visitas-cal-detalhe');
+  if(!detalhe) return;
+  const visitas = _visitasCalData.filter(v=>v.data===data);
+  if(!visitas.length){ detalhe.innerHTML=''; return; }
+  const [a,m,d] = data.split('-');
+  const dsem = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'][new Date(data+'T12:00').getDay()];
+  detalhe.innerHTML = `<div style="background:var(--s2);border:1px solid var(--b2);border-radius:12px;padding:12px;">
+    <div style="font-size:11px;font-weight:700;color:var(--t2);margin-bottom:8px;">${dsem}, ${d}/${m}/${a}</div>
+    ${visitas.map(v=>`<div style="border-left:3px solid ${_lojaColor(v.loja)};padding:6px 10px;margin-bottom:6px;background:var(--s3);border-radius:0 8px 8px 0;">
+      <div style="font-size:12px;font-weight:700;color:var(--t1);">${v.loja}</div>
+      <div style="font-size:11px;color:var(--t3);">📍 ${v.hora_chegada} → ${v.hora_saida||'em andamento'} 🚪</div>
+      ${v.endereco?`<div style="font-size:10px;color:var(--t3);margin-top:2px;">📌 ${v.endereco}</div>`:''}
+      ${v.obs?`<div style="font-size:10px;color:var(--t2);margin-top:2px;">💬 ${v.obs}</div>`:''}
+    </div>`).join('')}
+  </div>`;
+}
+
+async function loadVisitasRelatorio(){
+  const nome = usuarioLogado?.nome;
+  const wrap = document.getElementById('visitas-view-relatorio');
+  if(!wrap) return;
+  wrap.innerHTML = '<div style="text-align:center;padding:30px;color:var(--t3);font-size:12px;">Carregando...</div>';
+  // Período padrão: mês atual
+  const hoje = new Date();
+  const de  = document.getElementById('visitas-rel-de')?.value  || `${hoje.getFullYear()}-${String(hoje.getMonth()+1).padStart(2,'0')}-01`;
+  const ate = document.getElementById('visitas-rel-ate')?.value || hoje.toISOString().split('T')[0];
+  let query = sb.from('gn_chk_visitas').select('*').eq('visitante', nome).gte('data', de).lte('data', ate).order('data').order('hora_chegada');
+  if(_visitasRelLoja) query = query.eq('loja', _visitasRelLoja);
+  const { data } = await query;
+  _visitasRelData = data || [];
+  renderVisitasRelatorio(de, ate);
+}
+
+function renderVisitasRelatorio(de, ate){
+  const wrap = document.getElementById('visitas-view-relatorio');
+  if(!wrap) return;
+  const hoje = new Date();
+  const deDefault = `${hoje.getFullYear()}-${String(hoje.getMonth()+1).padStart(2,'0')}-01`;
+  const ateDefault = hoje.toISOString().split('T')[0];
+  const deVal = de || deDefault;
+  const ateVal = ate || ateDefault;
+
+  const lojas = [...new Set(_visitasRelData.map(v=>v.loja))].sort();
+
+  let html = `
+  <div style="display:flex;gap:6px;margin-bottom:10px;">
+    <input type="date" id="visitas-rel-de" value="${deVal}" onchange="loadVisitasRelatorio()" style="flex:1;background:var(--s3);border:1px solid var(--b2);border-radius:8px;padding:7px 9px;color:var(--t1);font-size:12px;font-family:inherit;">
+    <input type="date" id="visitas-rel-ate" value="${ateVal}" onchange="loadVisitasRelatorio()" style="flex:1;background:var(--s3);border:1px solid var(--b2);border-radius:8px;padding:7px 9px;color:var(--t1);font-size:12px;font-family:inherit;">
+  </div>`;
+
+  // Filtro por loja
+  if(lojas.length > 0 || _visitasRelLoja){
+    const todas = _visitasRelLoja === null;
+    html += `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px;">
+      <button onclick="_visitasRelSetLoja(null)" style="padding:4px 10px;border-radius:20px;border:1px solid ${todas?'#6366f1':'rgba(255,255,255,.15)'};background:${todas?'rgba(99,102,241,.25)':'transparent'};color:${todas?'#a5b4fc':'var(--t3)'};font-size:11px;font-weight:700;cursor:pointer;">Todas</button>
+      ${lojas.map(l=>`<button onclick="_visitasRelSetLoja('${l}')" style="padding:4px 10px;border-radius:20px;border:1px solid ${_visitasRelLoja===l?_lojaColor(l):'rgba(255,255,255,.15)'};background:${_visitasRelLoja===l?_lojaColor(l)+'33':'transparent'};color:${_visitasRelLoja===l?_lojaColor(l):'var(--t3)'};font-size:11px;font-weight:700;cursor:pointer;">${l}</button>`).join('')}
+    </div>`;
+  }
+
+  if(_visitasRelData.length === 0){
+    html += '<div style="text-align:center;padding:30px;color:var(--t3);font-size:12px;">Nenhuma visita no período selecionado.</div>';
+    wrap.innerHTML = html;
+    return;
+  }
+
+  // Resumo por loja
+  const porLoja = {};
+  _visitasRelData.forEach(v => { porLoja[v.loja]=(porLoja[v.loja]||0)+1; });
+  html += `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:12px;">
+    ${Object.entries(porLoja).sort((a,b)=>b[1]-a[1]).map(([l,n])=>`<div style="background:${_lojaColor(l)}22;border:1px solid ${_lojaColor(l)}66;border-radius:8px;padding:5px 10px;display:flex;align-items:center;gap:5px;">
+      <div style="width:7px;height:7px;border-radius:50%;background:${_lojaColor(l)};flex-shrink:0;"></div>
+      <span style="font-size:11px;font-weight:700;color:var(--t1);">${l}</span>
+      <span style="font-size:11px;color:var(--t3);">${n}×</span>
+    </div>`).join('')}
+  </div>`;
+
+  // Botão exportar WPP
+  html += `<button onclick="exportarVisitasWpp()" style="width:100%;background:linear-gradient(135deg,#16a34a,#15803d);border:none;border-radius:10px;padding:9px;color:#fff;font-size:12px;font-weight:800;cursor:pointer;margin-bottom:10px;">📲 Exportar para WhatsApp</button>`;
+
+  // Tabela de visitas
+  html += `<div style="display:flex;flex-direction:column;gap:6px;">`;
+  let dataAtual = '';
+  _visitasRelData.forEach(v => {
+    if(v.data !== dataAtual){
+      dataAtual = v.data;
+      const [a,m,d] = v.data.split('-');
+      const dsem = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'][new Date(v.data+'T12:00').getDay()];
+      html += `<div style="font-size:10px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;margin-top:6px;padding-left:2px;">${dsem}, ${d}/${m}/${a}</div>`;
+    }
+    html += `<div style="background:var(--s2);border:1px solid var(--b2);border-radius:10px;padding:10px 12px;border-left:3px solid ${_lojaColor(v.loja)};">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+        <span style="font-size:12px;font-weight:700;color:var(--t1);">${v.loja}</span>
+        <span style="font-size:11px;color:var(--t3);">📍 ${v.hora_chegada} → ${v.hora_saida||'andamento'} 🚪</span>
+      </div>
+      ${v.endereco?`<div style="font-size:10px;color:var(--t3);">📌 ${v.endereco}</div>`:''}
+      ${v.obs?`<div style="font-size:10px;color:var(--t2);margin-top:3px;">💬 ${v.obs}</div>`:''}
+    </div>`;
+  });
+  html += `</div>`;
+  wrap.innerHTML = html;
+}
+
+function _visitasRelSetLoja(loja){
+  _visitasRelLoja = loja;
+  loadVisitasRelatorio();
+}
+
+function exportarVisitasWpp(){
+  if(!_visitasRelData.length){ showToast('Sem dados para exportar','err'); return; }
+  const de = document.getElementById('visitas-rel-de')?.value || '';
+  const ate = document.getElementById('visitas-rel-ate')?.value || '';
+  const fmt = s => s ? s.split('-').reverse().join('/') : '';
+  let txt = `📍 RELATÓRIO DE VISITAS\n👤 ${usuarioLogado?.nome||''}${_visitasRelLoja?' · '+_visitasRelLoja:''}\n📅 ${fmt(de)} a ${fmt(ate)}\n\n`;
+  const porLoja = {};
+  _visitasRelData.forEach(v => { porLoja[v.loja]=(porLoja[v.loja]||0)+1; });
+  txt += Object.entries(porLoja).sort((a,b)=>b[1]-a[1]).map(([l,n])=>`• ${l}: ${n} visita${n>1?'s':''}`).join('\n') + '\n\n';
+  let dataAtual = '';
+  _visitasRelData.forEach(v => {
+    if(v.data !== dataAtual){
+      dataAtual = v.data;
+      const [a,m,d] = v.data.split('-');
+      const dsem = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'][new Date(v.data+'T12:00').getDay()];
+      txt += `\n*${dsem} ${d}/${m}*\n`;
+    }
+    txt += `  📍 ${v.loja} — ${v.hora_chegada} → ${v.hora_saida||'em andamento'} 🔒\n`;
+    if(v.endereco) txt += `     📌 ${v.endereco}\n`;
+    if(v.obs) txt += `     💬 ${v.obs}\n`;
+  });
+  txt += '\n_GN Operações_';
+  navigator.clipboard?.writeText(txt).then(()=>showToast('📋 Copiado para a área de transferência','success')).catch(()=>showToast(txt,'info'));
 }
 
 function buildRelatorioSupervisao(cab){
