@@ -1,0 +1,91 @@
+name: Supabase Migration
+
+on:
+  workflow_dispatch:
+
+env:
+  SB_HOST: db.ncxttwvpafajnilpjbol.supabase.co
+  SB_PORT: 5432
+  SB_USER: postgres
+  SB_DB: postgres
+  SB_REF: ncxttwvpafajnilpjbol
+  SB_ANON: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5jeHR0d3ZwYWZham5pbHBqYm9sIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE4NDcyMDEsImV4cCI6MjA5NzQyMzIwMX0.MGDZNGY8GfSzBKAgdR7OhvOeR71i4fj9YseJRhoh5sE
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Criar tabela gn_trios_agenda
+        env:
+          PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SB_PAT: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          SQL="
+          CREATE TABLE IF NOT EXISTS gn_trios_agenda (
+            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            data date NOT NULL,
+            horario_inicio text,
+            horario_fim text,
+            loja text NOT NULL,
+            artista text NOT NULL,
+            cache numeric DEFAULT 0,
+            confirmado boolean DEFAULT false,
+            confirmado_por text,
+            confirmado_em timestamptz,
+            created_at timestamptz DEFAULT now()
+          );
+          ALTER TABLE gn_trios_agenda ENABLE ROW LEVEL SECURITY;
+          DO \$\$ BEGIN
+            IF NOT EXISTS (
+              SELECT 1 FROM pg_policies
+              WHERE tablename='gn_trios_agenda' AND policyname='anon_all'
+            ) THEN
+              EXECUTE 'CREATE POLICY anon_all ON gn_trios_agenda FOR ALL TO anon USING (true) WITH CHECK (true)';
+            END IF;
+          END \$\$;
+          "
+
+          if [ -n "$PGPASSWORD" ]; then
+            echo "=== Tentativa 1: psql direto ==="
+            if psql -h "$SB_HOST" -p "$SB_PORT" -U "$SB_USER" -d "$SB_DB" -c "$SQL"; then
+              echo "✅ Tabela criada via psql!"
+              exit 0
+            else
+              echo "psql falhou, tentando próximo método..."
+            fi
+          else
+            echo "Secret SUPABASE_DB_PASSWORD não configurado, pulando psql."
+          fi
+
+          if [ -n "$SB_PAT" ]; then
+            echo "=== Tentativa 2: Management API (PAT) ==="
+            PAYLOAD=$(jq -n --arg q "$SQL" '{"query": $q}')
+            R=$(curl -s -o /tmp/r.txt -w "%{http_code}" -X POST \
+              "https://api.supabase.com/v1/projects/${SB_REF}/database/query" \
+              -H "Authorization: Bearer $SB_PAT" \
+              -H "Content-Type: application/json" \
+              -d "$PAYLOAD")
+            echo "HTTP $R: $(cat /tmp/r.txt)"
+            if [ "$R" = "200" ]; then
+              echo "✅ Tabela criada via Management API!"
+              exit 0
+            fi
+          else
+            echo "Secret SUPABASE_ACCESS_TOKEN não configurado, pulando Management API."
+          fi
+
+          echo ""
+          echo "❌ Nenhum método funcionou."
+          echo ""
+          echo "Para criar a tabela automaticamente, adicione UM destes segredos no GitHub:"
+          echo "  Settings → Secrets and variables → Actions → New repository secret"
+          echo ""
+          echo "  Opção A — SUPABASE_DB_PASSWORD"
+          echo "    Senha do banco Postgres, disponível em:"
+          echo "    supabase.com → projeto → Settings → Database → Database password"
+          echo ""
+          echo "  Opção B — SUPABASE_ACCESS_TOKEN"
+          echo "    Token pessoal Supabase, disponível em:"
+          echo "    supabase.com → Account → Access Tokens → Generate new token"
+          echo ""
+          exit 1
