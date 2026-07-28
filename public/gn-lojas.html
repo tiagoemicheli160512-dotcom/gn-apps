@@ -253,6 +253,10 @@ input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-
     <span class="nav-label">Relat&#243;rio</span>
     <span class="nav-dot hidden" id="dot-relatorio" style="background:#ef4444"></span>
   </button>
+  <button class="nav-btn" id="nav-gestao" onclick="goTab('gestao')" style="display:none">
+    <span class="nav-icon">&#9881;&#65039;</span>
+    <span class="nav-label">Gest&#227;o</span>
+  </button>
   <!-- Botão Usuários inserido via JS só no master (sem LOJA_TRAVADA) -->
 </div>
 
@@ -659,7 +663,8 @@ let fichasCustom  = {};  // cod -> {codigo, nome, insumos:[{insumo,qtd,unidade,q
 let fichasRemoved = [];  // lista de codigos removidos
 let insumosCustom = [];  // novos insumos adicionados pelo master
 let alertasWpp    = [];  // [{nome, numero}] — contatos que recebem alerta de estoque
-let nfMapeamentos = {};  // { "DESCRICAO NF-e": "NOME INSUMO APP" } — mapeamentos permanentes
+let nfMapeamentos    = {};  // { "DESCRICAO NF-e": "NOME INSUMO APP" } — mapeamentos permanentes
+let fichasMapeamentos = {}; // { "NOME FICHA ERRADO": "NOME CANÔNICO" } — de-para ingredientes de fichas
 let lookup     = Object.assign({}, SEED.ficha_lookup);
 
 /* inicializar minAll */
@@ -819,7 +824,8 @@ async function sbPull(silent) {
             d.insumosCustom.forEach(n => { if (!insumosCustom.includes(n)) insumosCustom.push(n); });
           }
           if (Array.isArray(d.alertasWpp)) alertasWpp = d.alertasWpp;
-          if (d.nfMapeamentos && typeof d.nfMapeamentos === 'object') Object.assign(nfMapeamentos, d.nfMapeamentos);
+          if (d.nfMapeamentos    && typeof d.nfMapeamentos    === 'object') Object.assign(nfMapeamentos,    d.nfMapeamentos);
+          if (d.fichasMapeamentos && typeof d.fichasMapeamentos === 'object') Object.assign(fichasMapeamentos, d.fichasMapeamentos);
           return;
         }
         if (d.estIniAll) {
@@ -2834,7 +2840,7 @@ function adicionarInsumoCustom(nome) {
    numa linha especial "MASTER_CONFIG" que todas as lojas leem no pull */
 async function sbPushMasterConfig() {
   try {
-    const payload = { fichasCustom, fichasRemoved, insumosCustom, alertasWpp, nfMapeamentos };
+    const payload = { fichasCustom, fichasRemoved, insumosCustom, alertasWpp, nfMapeamentos, fichasMapeamentos };
     await sbRequest("gn_lojas?loja=eq.MASTER_CONFIG", {
       method: "PATCH",
       headers: { "Prefer": "return=minimal" },
@@ -2843,6 +2849,212 @@ async function sbPushMasterConfig() {
   } catch(e) {
     showToast("⚠️ Erro ao enviar fichas: " + e.message);
   }
+}
+
+// ═══════════ GESTÃO DE INSUMOS ════════════════════════════════════════════════
+
+function _auditarFichas() {
+  const canonico = new Set(getAllInsumos().map(n => n.trim().toUpperCase()));
+  const todasFichas = getAllFichas();
+  const divergencias = {}; // nomeUsado → {fichas:[], sugestao:''}
+  Object.values(todasFichas).forEach(f => {
+    (f.insumos || []).forEach(row => {
+      const nome = (row.insumo || '').trim().toUpperCase();
+      if (!nome || canonico.has(nome)) return;
+      if (!divergencias[nome]) {
+        // fuzzy: encontrar o canônico mais próximo
+        const canon = [...canonico];
+        let bestScore = 0, bestMatch = '';
+        canon.forEach(c => {
+          const words = nome.split(' ');
+          const score = words.filter(w => c.includes(w)).length / words.length;
+          if (score > bestScore) { bestScore = score; bestMatch = c; }
+        });
+        divergencias[nome] = { fichas: [], sugestao: bestScore > 0.4 ? bestMatch : '' };
+      }
+      if (!divergencias[nome].fichas.includes(f.nome)) divergencias[nome].fichas.push(f.nome);
+    });
+  });
+  return divergencias;
+}
+
+function buildGestaoTab() {
+  const canonico = getAllInsumos();
+  const div = _auditarFichas();
+  const totalDiv = Object.keys(div).length;
+  const jaVinculados = Object.keys(fichasMapeamentos);
+
+  const auditRows = Object.entries(div).map(([nome, {fichas, sugestao}]) => {
+    const jaMap = fichasMapeamentos[nome] || '';
+    const cor = jaMap ? '#34d399' : (sugestao ? '#f59e0b' : '#f87171');
+    const status = jaMap ? `✅ → ${jaMap}` : (sugestao ? `⚠️ Sugestão: ${sugestao}` : '❌ Sem sugestão');
+    return `<tr>
+      <td style="padding:7px 8px;font-size:11px;color:#e2e8f0;font-weight:600;word-break:break-word">${nome}</td>
+      <td style="padding:7px 8px;font-size:10px;color:#64748b">${fichas.slice(0,3).join(', ')}${fichas.length>3?' +'+( fichas.length-3)+'...':''}</td>
+      <td style="padding:7px 8px;font-size:10px;color:${cor};font-weight:700">${status}</td>
+    </tr>`;
+  }).join('');
+
+  return `<div class="section" style="padding-top:16px">
+
+    <!-- AUDITORIA -->
+    <div class="card" style="padding:14px;margin-bottom:14px">
+      <div class="sec-label" style="margin-bottom:10px">🔍 Auditoria de Fichas Técnicas</div>
+      ${totalDiv === 0
+        ? `<div style="text-align:center;padding:18px;color:#34d399;font-size:13px;font-weight:700">✅ Todos os ingredientes das fichas estão no cadastro canônico!</div>`
+        : `<div style="font-size:11px;color:#f59e0b;margin-bottom:10px">
+             <b>${totalDiv}</b> ingrediente(s) de fichas não encontrado(s) na lista canônica.
+             Itens com ✅ já têm de-para configurado.
+           </div>
+           <div style="overflow-x:auto;border-radius:10px;border:1px solid rgba(255,255,255,.08)">
+             <table style="width:100%;border-collapse:collapse;min-width:420px">
+               <thead>
+                 <tr style="background:rgba(255,255,255,.05)">
+                   <th style="padding:7px 8px;font-size:10px;color:#64748b;font-weight:700;text-align:left">Nome na Ficha</th>
+                   <th style="padding:7px 8px;font-size:10px;color:#64748b;font-weight:700;text-align:left">Fichas Afetadas</th>
+                   <th style="padding:7px 8px;font-size:10px;color:#64748b;font-weight:700;text-align:left">Status</th>
+                 </tr>
+               </thead>
+               <tbody>${auditRows}</tbody>
+             </table>
+           </div>`}
+    </div>
+
+    <!-- INSUMOS CUSTOMIZADOS -->
+    <div class="card" style="padding:14px;margin-bottom:14px">
+      <div class="sec-label" style="margin-bottom:10px">📋 Insumos Customizados (${insumosCustom.length})</div>
+      <div style="font-size:11px;color:#64748b;margin-bottom:10px">
+        Estes insumos foram adicionados manualmente e complementam os ${(window.GN_LOJAS_SEED||{}).insumos?.length||0} insumos da base.
+      </div>
+      <div id="gestaoInsumosLista" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
+        ${insumosCustom.map(n => `
+          <span style="display:flex;align-items:center;gap:4px;background:rgba(99,102,241,.12);border:1px solid rgba(99,102,241,.25);border-radius:20px;padding:4px 10px 4px 12px;font-size:11px;color:#a5b4fc">
+            ${n}
+            <button onclick="gestaoRemoverInsumo('${n.replace(/'/g,"\\'")}',this)" style="background:none;border:none;color:#f87171;cursor:pointer;padding:0 2px;font-size:13px;line-height:1">✕</button>
+          </span>`).join('')}
+        ${insumosCustom.length===0?`<span style="font-size:11px;color:#475569;font-style:italic">Nenhum insumo customizado ainda.</span>`:''}
+      </div>
+      <div style="display:flex;gap:8px">
+        <input id="gestaoNovoInsumo" class="inp-full" type="text" placeholder="Novo insumo (ex: CARNE ESPECIAL DO GN)" style="font-size:12px;padding:7px 10px;flex:1;text-transform:uppercase" oninput="this.value=this.value.toUpperCase()"/>
+        <button onclick="gestaoAdicionarInsumo()" style="background:rgba(99,102,241,.2);border:1px solid rgba(99,102,241,.4);border-radius:11px;padding:7px 14px;color:#a5b4fc;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap">+ Adicionar</button>
+      </div>
+    </div>
+
+    <!-- DE-PARA FICHAS -->
+    <div class="card" style="padding:14px;margin-bottom:14px">
+      <div class="sec-label" style="margin-bottom:4px">🔄 De-Para de Ingredientes de Fichas</div>
+      <div style="font-size:11px;color:#64748b;margin-bottom:12px">
+        Vincule nomes usados nas fichas técnicas ao nome canônico correto. Após salvar, clique em "Aplicar" para corrigir as fichas customizadas.
+      </div>
+      <div id="gestaoFichasMapList">
+        ${_renderFichasMapRows()}
+      </div>
+      <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+        <input id="gestaoFichaKey" class="inp-full" type="text" placeholder="Nome na ficha (errado/diferente)" style="font-size:11px;padding:6px 8px;flex:1;min-width:120px;text-transform:uppercase" oninput="this.value=this.value.toUpperCase()"/>
+        <span style="color:#64748b;font-size:16px;align-self:center">→</span>
+        <input id="gestaoFichaVal" class="inp-full" type="text" list="gestaoCanList" placeholder="Nome canônico (correto)" style="font-size:11px;padding:6px 8px;flex:1;min-width:120px;text-transform:uppercase" oninput="this.value=this.value.toUpperCase()"/>
+        <datalist id="gestaoCanList">${canonico.map(n=>`<option value="${n}"></option>`).join('')}</datalist>
+        <button onclick="gestaoAdicionarFichaMap()" style="background:rgba(245,158,11,.15);border:1px solid rgba(245,158,11,.3);border-radius:10px;padding:6px 12px;color:#f59e0b;font-size:11px;font-weight:700;cursor:pointer">+ Adicionar</button>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button onclick="gestaoSalvarFichasMap()" style="flex:1;background:linear-gradient(135deg,#059669,#047857);border:none;border-radius:12px;padding:11px 0;color:#fff;font-weight:800;font-size:12px;cursor:pointer">💾 Salvar De-Para</button>
+        <button onclick="gestaoAplicarDeParaFichas()" style="flex:1;background:rgba(245,158,11,.15);border:1px solid rgba(245,158,11,.4);border-radius:12px;padding:11px 0;color:#f59e0b;font-weight:800;font-size:12px;cursor:pointer">⚙️ Aplicar em Fichas Customizadas</button>
+      </div>
+      <div style="font-size:10px;color:#475569;margin-top:6px;text-align:center">
+        "Aplicar" renomeia ingredientes somente nas fichas que você criou/editou. Fichas da base original não são modificadas.
+      </div>
+    </div>
+
+  </div>`;
+}
+
+function _renderFichasMapRows() {
+  const entries = Object.entries(fichasMapeamentos);
+  if (!entries.length) return `<div style="font-size:11px;color:#475569;font-style:italic;padding:4px 0">Nenhum de-para configurado ainda.</div>`;
+  return `<div style="display:flex;flex-direction:column;gap:4px">` +
+    entries.map(([k,v]) => `
+      <div style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:rgba(255,255,255,.04);border-radius:8px;font-size:11px">
+        <span style="flex:1;color:#e2e8f0;font-weight:600;word-break:break-word">${k}</span>
+        <span style="color:#64748b;flex-shrink:0">→</span>
+        <span style="flex:1;color:#34d399;font-weight:600;word-break:break-word">${v}</span>
+        <button onclick="gestaoRemoverFichaMap('${k.replace(/'/g,"\\'")}',this)" style="background:none;border:none;color:#f87171;cursor:pointer;font-size:13px;flex-shrink:0">✕</button>
+      </div>`).join('') + `</div>`;
+}
+
+function gestaoAdicionarInsumo() {
+  const el = document.getElementById('gestaoNovoInsumo');
+  const nome = (el?.value||'').trim().toUpperCase();
+  if (!nome) { showToast('⚠️ Digite o nome do insumo.'); return; }
+  if (insumosCustom.includes(nome) || (window.GN_LOJAS_SEED?.insumos||[]).includes(nome)) {
+    showToast('⚠️ Este insumo já está no cadastro.'); return;
+  }
+  insumosCustom.push(nome);
+  sbPushMasterConfig();
+  el.value = '';
+  showToast('✅ Insumo adicionado!');
+  goTab('gestao');
+}
+
+function gestaoRemoverInsumo(nome) {
+  insumosCustom = insumosCustom.filter(n => n !== nome);
+  sbPushMasterConfig();
+  showToast('🗑️ Insumo removido.');
+  goTab('gestao');
+}
+
+function gestaoAdicionarFichaMap() {
+  const k = (document.getElementById('gestaoFichaKey')?.value||'').trim().toUpperCase();
+  const v = (document.getElementById('gestaoFichaVal')?.value||'').trim().toUpperCase();
+  if (!k || !v) { showToast('⚠️ Preencha os dois campos.'); return; }
+  const canonico = new Set(getAllInsumos().map(n => n.trim().toUpperCase()));
+  if (!canonico.has(v)) { showToast('⚠️ "' + v + '" não está na lista canônica. Adicione-o primeiro em Insumos Customizados.'); return; }
+  fichasMapeamentos[k] = v;
+  document.getElementById('gestaoFichasMapList').innerHTML = _renderFichasMapRows();
+  document.getElementById('gestaoFichaKey').value = '';
+  document.getElementById('gestaoFichaVal').value = '';
+}
+
+function gestaoRemoverFichaMap(key) {
+  delete fichasMapeamentos[key];
+  const el = document.getElementById('gestaoFichasMapList');
+  if (el) el.innerHTML = _renderFichasMapRows();
+}
+
+function gestaoSalvarFichasMap() {
+  sbPushMasterConfig();
+  showToast('✅ De-para de fichas salvo!');
+  goTab('gestao');
+}
+
+function gestaoAplicarDeParaFichas() {
+  const mapa = fichasMapeamentos;
+  if (!Object.keys(mapa).length) { showToast('⚠️ Nenhum de-para configurado.'); return; }
+  if (!confirm('Isso irá renomear ingredientes nas fichas que você criou/editou, usando o de-para configurado.\n\nAs fichas da base original NÃO serão modificadas.\n\nDeseja continuar?')) return;
+
+  let corrigidas = 0, ingredientesCorrigidos = 0;
+  Object.entries(fichasCustom).forEach(([cod, ficha]) => {
+    if (!ficha.insumos) return;
+    let mudou = false;
+    ficha.insumos = ficha.insumos.map(row => {
+      const nome = (row.insumo||'').trim().toUpperCase();
+      const canonical = mapa[nome];
+      if (canonical && canonical !== nome) {
+        ingredientesCorrigidos++;
+        mudou = true;
+        return { ...row, insumo: canonical };
+      }
+      return row;
+    });
+    if (mudou) corrigidas++;
+  });
+
+  if (corrigidas === 0) {
+    showToast('Nenhuma ficha precisou de correção com o de-para atual.');
+    return;
+  }
+  sbPushMasterConfig();
+  showToast(`✅ ${ingredientesCorrigidos} ingrediente(s) corrigido(s) em ${corrigidas} ficha(s)!`);
+  goTab('gestao');
 }
 
 function editarFicha(codigo) {
@@ -4584,9 +4796,11 @@ function render() {
   if (navFichas) navFichas.style.display = _fichasOk ? "" : "none";
   const sidebarFichas = document.getElementById("sidebar-fichas");
   if (sidebarFichas) sidebarFichas.style.display = _fichasOk ? "" : "none";
+  const navGestao = document.getElementById("nav-gestao");
+  if (navGestao) navGestao.style.display = _fichasOk ? "" : "none";
   // Tab permissions
   if (abasPermitidas) {
-    ['home','pedido','fichas','estoque','vendas','contagem','entradas','vinculos','transf','entrega','avarias','relatorio'].forEach(function(tid) {
+    ['home','pedido','fichas','gestao','estoque','vendas','contagem','entradas','vinculos','transf','entrega','avarias','relatorio'].forEach(function(tid) {
       const nb = document.getElementById('nav-' + tid);
       if (nb) nb.style.display = abasPermitidas.includes(tid) ? '' : 'none';
       const sb = document.getElementById('sidebar-' + tid);
@@ -6281,6 +6495,12 @@ function render() {
 
   /* scroll topo */
   c.scrollTop = 0;
+
+  // ─── ABA GESTÃO DE INSUMOS ───────────────────────────────────────────────────
+  if (tab === "gestao") {
+    c.innerHTML = buildGestaoTab();
+    return;
+  }
 
   // Aba Usuários (master only) — gerenciamento centralizado em gn-usuarios.html
   if (tab === "usuarios") {
