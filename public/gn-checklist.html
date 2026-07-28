@@ -3271,6 +3271,8 @@ function abrirRelatorioBancoHoras(){
   const meses = _bhMeses(periodo_inicio, periodo_fim);
   const funcionarios = _bhTodosFuncionarios();
   const LIMITE=8;
+  const temSal = _bhConfig?.salariosSetor && Object.keys(_bhConfig.salariosSetor).length>0;
+  const hoje = hojeLocal().slice(0,7);
 
   let txt = `⏱ BANCO DE HORAS — ${LOJA}\n`;
   txt += `Período: ${_bhMesLabel(meses[0])} → ${_bhMesLabel(meses[meses.length-1])}\n`;
@@ -3278,15 +3280,61 @@ function abrirRelatorioBancoHoras(){
 
   funcionarios.forEach(nome=>{
     const saldo = _bhSaldoFunc(nome);
-    txt += `👤 ${nome}\n`;
+    const vh = _bhValorHoraFunc(nome);
+    const func = comissoesWD?.funcs?.find(f=>f.nome===nome);
+    if(func?.setor) txt += `👤 ${nome} (${func.setor})\n`;
+    else txt += `👤 ${nome}\n`;
+    if(temSal && vh>0) txt += `  Valor/hora: ${_bhFmtR(vh)}/h\n`;
     meses.forEach(m=>{
       const r = (_bhRegistros[m]||[]).find(x=>x.nome===nome);
-      if(r) txt += `  ${_bhMesLabel(m)}: ${_bhFmtH(r.horas)}${r.obs?' ('+r.obs+')':''}\n`;
+      if(r){
+        const h = parseFloat(r.horas)||0;
+        const valorMes = temSal && vh>0 ? ` → ${_bhFmtR(Math.abs(h)*vh)}` : '';
+        txt += `  ${_bhMesLabel(m)}: ${_bhFmtH(r.horas)}${valorMes}${r.obs?' ('+r.obs+')':''}\n`;
+      }
     });
     txt += `  Saldo total: ${_bhFmtH(saldo)}`;
+    if(temSal && vh>0) txt += ` → ${_bhFmtR(Math.abs(saldo)*vh)}`;
     if(Math.abs(saldo)>LIMITE) txt += ' ⚠️ ACIMA DO LIMITE';
     txt += '\n\n';
   });
+
+  // Resumo monetário consolidado
+  if(temSal){
+    let posGeral=0, negGeral=0;
+    funcionarios.forEach(nome=>{
+      const vh=_bhValorHoraFunc(nome); if(vh<=0) return;
+      const s=_bhSaldoFunc(nome);
+      if(s>0) posGeral+=s*vh; else if(s<0) negGeral+=Math.abs(s)*vh;
+    });
+    const liquido=posGeral-negGeral;
+    txt += `─────────────────────\n`;
+    txt += `💰 RESUMO MONETÁRIO DO PERÍODO\n`;
+    txt += `✅ Extras (a pagar):     ${_bhFmtR(posGeral)}\n`;
+    txt += `❌ Negativos (já pagos): ${_bhFmtR(negGeral)}\n`;
+    txt += `📊 Saldo líquido:        ${_bhFmtR(Math.abs(liquido))} ${liquido>0?'(a pagar)':liquido<0?'(a recuperar)':'(equilibrado)'}\n`;
+    // Fechamento mês anterior
+    const [hy,hm]=hoje.split('-').map(Number);
+    const mesAnt=hm===1?`${hy-1}-12`:`${hy}-${String(hm-1).padStart(2,'0')}`;
+    if(meses.includes(mesAnt)){
+      let posMes=0, negMes=0;
+      funcionarios.forEach(nome=>{
+        const vh=_bhValorHoraFunc(nome); if(vh<=0) return;
+        const r=(_bhRegistros[mesAnt]||[]).find(x=>x.nome===nome);
+        const h=r?parseFloat(r.horas)||0:0;
+        if(h>0) posMes+=h*vh; else if(h<0) negMes+=Math.abs(h)*vh;
+      });
+      txt += `\n📅 FECHAMENTO ${_bhMesLabel(mesAnt).toUpperCase()}\n`;
+      txt += `  Extras:    ${posMes>0?_bhFmtR(posMes):'—'}\n`;
+      txt += `  Negativos: ${negMes>0?_bhFmtR(negMes):'—'}\n`;
+    }
+    const mesesDecorridos=meses.filter(m=>m<=hoje).length;
+    if(mesesDecorridos>=meses.length-1 && meses.length>0){
+      txt += `\n⚠️ ALERTA PRÓXIMO PERÍODO\n`;
+      txt += `Neste período: ${_bhFmtR(negGeral)} em negativos e ${_bhFmtR(posGeral)} em extras.\n`;
+    }
+    txt += '\n';
+  }
 
   const modal = document.getElementById('rel-modal');
   const content = document.getElementById('rel-content');
@@ -7611,22 +7659,71 @@ function buildRelatorioBanco(cab){
   }
   const {periodo_inicio, periodo_fim} = _bhConfig;
   const meses = _bhMeses(periodo_inicio, periodo_fim);
+  const hoje = hojeLocal().slice(0,7);
   txt += `Período: ${_bhMesLabel(meses[0])} → ${_bhMesLabel(meses[meses.length-1])}\n`;
   txt += `Gerado em: ${new Date().toLocaleDateString('pt-BR')}\n\n`;
   const funcs = _bhTodosFuncionarios();
+  const temSal = _bhConfig?.salariosSetor && Object.keys(_bhConfig.salariosSetor).length>0;
   if(!funcs.length){ txt += 'Nenhum funcionário cadastrado.\n'; }
   else {
     funcs.forEach(nome=>{
       const saldo = _bhSaldoFunc(nome);
       const abs = Math.abs(saldo);
       const icone = abs > 8 ? (saldo < 0 ? '❌' : '⚠️') : '✅';
-      txt += `${icone} ${nome}: ${_bhFmtH(saldo)}\n`;
+      const vh = _bhValorHoraFunc(nome);
+      const valorStr = temSal && vh>0 ? ` → ${_bhFmtR(abs*vh)}` : '';
+      txt += `${icone} ${nome}: ${_bhFmtH(saldo)}${valorStr}\n`;
     });
     txt += '\n';
     const alertas = _bhCalcularAlertas();
     if(alertas.length){
       txt += `⚠️ ALERTAS (saldo > ±8h):\n`;
-      alertas.forEach(a=>{ txt += `  • ${a.nome}: ${_bhFmtH(a.saldo)} ${a.tipo==='critico'?'🚨 CRÍTICO':''}\n`; });
+      alertas.forEach(a=>{
+        const vh = _bhValorHoraFunc(a.nome);
+        const valorStr = temSal && vh>0 ? ` → ${_bhFmtR(a.abs*vh)}` : '';
+        txt += `  • ${a.nome}: ${_bhFmtH(a.saldo)}${valorStr} ${a.tipo==='critico'?'🚨 CRÍTICO':''}\n`;
+      });
+      txt += '\n';
+    }
+    // Resumo monetário
+    if(temSal){
+      let posGeral=0, negGeral=0;
+      funcs.forEach(nome=>{
+        const vh=_bhValorHoraFunc(nome);
+        if(vh<=0) return;
+        const s=_bhSaldoFunc(nome);
+        if(s>0) posGeral+=s*vh;
+        else if(s<0) negGeral+=Math.abs(s)*vh;
+      });
+      const liquido = posGeral-negGeral;
+      txt += `─────────────────────\n`;
+      txt += `💰 RESUMO MONETÁRIO DO PERÍODO\n`;
+      txt += `✅ Extras (a pagar):     ${_bhFmtR(posGeral)}\n`;
+      txt += `❌ Negativos (já pagos): ${_bhFmtR(negGeral)}\n`;
+      txt += `📊 Saldo líquido:        ${_bhFmtR(Math.abs(liquido))} ${liquido>0?'(a pagar)':liquido<0?'(a recuperar)':'(equilibrado)'}\n`;
+      // Fechamento do mês anterior
+      const [hy,hm]=hoje.split('-').map(Number);
+      const mesAnt = hm===1?`${hy-1}-12`:`${hy}-${String(hm-1).padStart(2,'0')}`;
+      if(meses.includes(mesAnt)){
+        let posMes=0, negMes=0;
+        funcs.forEach(nome=>{
+          const vh=_bhValorHoraFunc(nome);
+          if(vh<=0) return;
+          const r=(_bhRegistros[mesAnt]||[]).find(x=>x.nome===nome);
+          const h=r?parseFloat(r.horas)||0:0;
+          if(h>0) posMes+=h*vh; else if(h<0) negMes+=Math.abs(h)*vh;
+        });
+        txt += `\n📅 FECHAMENTO ${_bhMesLabel(mesAnt).toUpperCase()}\n`;
+        txt += `  Extras:    ${posMes>0?_bhFmtR(posMes):'—'}\n`;
+        txt += `  Negativos: ${negMes>0?_bhFmtR(negMes):'—'}\n`;
+      }
+      // Alerta próximo período
+      const mesesDecorridos=meses.filter(m=>m<=hoje).length;
+      if(mesesDecorridos>=meses.length-1 && meses.length>0){
+        txt += `\n⚠️ ALERTA PRÓXIMO PERÍODO\n`;
+        txt += `Neste período: ${_bhFmtR(negGeral)} em negativos e ${_bhFmtR(posGeral)} em extras.\n`;
+        txt += `Ajuste o planejamento da escala para o próximo período.\n`;
+      }
     }
   }
   return txt + '\n_GN Operações_';
