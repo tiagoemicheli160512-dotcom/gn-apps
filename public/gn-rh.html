@@ -371,6 +371,7 @@ let S = {
   // RH
   rhLoja: LOJAS[0],
   rhMes: null,           // 'YYYY-MM'
+  bhConfig: null,        // CONFIG row registros: {periodo_inicio, periodo_fim, salariosSetor}
   bancoHoras: [],        // [{loja(chkKey), mes, registros:[{nome,horas,obs}]}]
   presencaSemana: null,  // { idx, funcs:[] }
   rhSemana: null,        // Date (segunda-feira)
@@ -727,6 +728,8 @@ async function carregarRH() {
     db.from('gn_banco_horas').select('mes,registros').eq('loja', loja.chkKey),
     db.from('gn_comissoes').select('all_data').eq('loja', loja.comKey).single(),
   ]);
+  const configRow = (resBH.data || []).find(r => r.mes === 'CONFIG');
+  S.bhConfig = configRow?.registros || null;
   S.bancoHoras = (resBH.data || []).filter(r => r.mes !== 'CONFIG');
 
   // Extrai funcs da semana selecionada (com fallback para semana mais recente disponível)
@@ -1116,6 +1119,19 @@ function renderFinanceiro() {
     ${caixaHtml}`;
 }
 
+function _rhFmtR(valor) {
+  return 'R$ ' + Math.abs(valor).toLocaleString('pt-BR', {minimumFractionDigits:2, maximumFractionDigits:2});
+}
+
+function _rhValorHoraFunc(nome, funcs) {
+  const salariosSetor = S.bhConfig?.salariosSetor;
+  if (!salariosSetor) return 0;
+  const func = (funcs || []).find(f => f.nome === nome);
+  if (!func?.setor) return 0;
+  const salario = parseFloat(salariosSetor[func.setor]) || 0;
+  return salario / 220;
+}
+
 // ══════════════════════════════════════════════
 // RENDER — RH / BANCO DE HORAS (Tab 3)
 // ══════════════════════════════════════════════
@@ -1251,6 +1267,9 @@ function renderRH() {
     ? Object.fromEntries(Object.entries(bhFuncs).filter(([n])=>n.toLowerCase().includes(buscaQ)))
     : bhFuncs;
 
+  const rhTemSalarios = S.bhConfig?.salariosSetor && Object.keys(S.bhConfig.salariosSetor).length > 0;
+  const rhFuncs = S.presencaSemana?.funcs || [];
+
   let bhHtml = '';
   if (Object.keys(bhFuncs).length === 0) {
     bhHtml = `<div class="empty" style="padding:24px"><div class="empty-icon">⏱</div><div class="empty-text">Sem dados de banco de horas para ${S.rhLoja.display}</div></div>`;
@@ -1258,7 +1277,8 @@ function renderRH() {
     const mesHeaders = meses.map(m => {
       const [y,mo] = m.split('-');
       return `<th style="text-align:center">${MES_ABREV[parseInt(mo)]} ${y.slice(2)}</th>`;
-    }).join('') + `<th style="text-align:center;border-left:2px solid var(--border)">Total</th>`;
+    }).join('') + `<th style="text-align:center;border-left:2px solid var(--border)">Total</th>` +
+      (rhTemSalarios ? `<th style="text-align:center;border-left:1px solid var(--border);color:#fbbf24">Valor R$</th>` : '');
 
     const rowsHtml = Object.entries(bhFuncsFilt).sort(([a],[b])=>a.localeCompare(b)).map(([nome, mesSaldo]) => {
       const ultimoMes = meses[meses.length-1];
@@ -1276,7 +1296,13 @@ function renderRH() {
       }).join('');
       const totalColor = totalFunc > 0 ? 'color:var(--green);font-weight:800' : totalFunc < 0 ? 'color:var(--red);font-weight:800' : 'color:var(--muted);font-weight:800';
       const totalCell = `<td class="num" style="text-align:center;border-left:2px solid var(--border);${totalColor}">${totalFunc>0?'+':''}${totalFunc.toFixed(1)}h</td>`;
-      return `<tr style="${rowBg}"><td class="nome-col">${nome}${negBadge}</td>${celulas}${totalCell}</tr>`;
+      let valorCell = '';
+      if (rhTemSalarios) {
+        const vh = _rhValorHoraFunc(nome, rhFuncs);
+        const valorColor = vh > 0 ? (totalFunc > 0 ? 'color:var(--green)' : 'color:var(--red)') : 'color:var(--muted)';
+        valorCell = `<td class="num" style="text-align:center;border-left:1px solid var(--border);font-weight:700;${valorColor}">${vh > 0 ? _rhFmtR(Math.abs(totalFunc)*vh) : '—'}</td>`;
+      }
+      return `<tr style="${rowBg}"><td class="nome-col">${nome}${negBadge}</td>${celulas}${totalCell}${valorCell}</tr>`;
     }).join('');
 
     const totHtml = meses.map(m => {
@@ -1287,6 +1313,7 @@ function renderRH() {
     const grandTotal = Object.values(bhFuncsFilt).reduce((s,mb) => s + meses.reduce((a,m) => a + (parseFloat(mb[m])||0), 0), 0);
     const grandColor = grandTotal > 0 ? 'color:var(--green)' : grandTotal < 0 ? 'color:var(--red)' : 'color:var(--muted)';
     const grandTotCell = `<td class="num" style="text-align:center;font-weight:800;border-left:2px solid var(--border);${grandColor}">${grandTotal>0?'+':''}${grandTotal.toFixed(1)}h</td>`;
+    const grandValorCell = rhTemSalarios ? `<td style="text-align:center;color:var(--muted);font-size:10px;border-left:1px solid var(--border)">—</td>` : '';
 
     bhHtml = `<div class="rh-table-wrap">
       <table class="rh-table">
@@ -1294,7 +1321,7 @@ function renderRH() {
         <tbody>
           ${rowsHtml}
           <tr style="border-top:2px solid var(--border);background:var(--surf2)">
-            <td style="font-weight:800;font-size:11px;color:var(--muted)">TOTAL</td>${totHtml}${grandTotCell}
+            <td style="font-weight:800;font-size:11px;color:var(--muted)">TOTAL</td>${totHtml}${grandTotCell}${grandValorCell}
           </tr>
         </tbody>
       </table>

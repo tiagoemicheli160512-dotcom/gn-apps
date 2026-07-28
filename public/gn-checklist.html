@@ -1652,6 +1652,8 @@
     <div style="font-size:10px;color:#64748b;margin-top:1px;" id="escala-semana-label">—</div>
   </div>
   <div id="escala-container"></div>
+  <!-- Salários por Setor -->
+  <div id="card-salarios-setor" style="margin-top:14px;"></div>
 </div>
 
 <!-- ===================== ABA VENDAS ===================== -->
@@ -2910,6 +2912,8 @@ async function carregarBancoHoras(forcar){
       if(ei) ei.value=_bhConfig.periodo_inicio||'';
       if(ef) ef.value=_bhConfig.periodo_fim||'';
     }
+    // Atualizar card de salários na aba escala (se já estiver visível)
+    renderSalariosSetorCard();
   }catch(e){
     document.getElementById('bh-tabela').innerHTML =
       '<div style="text-align:center;padding:30px;color:#e04040;font-size:12px;">Falha ao carregar dados</div>';
@@ -2925,7 +2929,7 @@ async function salvarConfigBancoHoras(){
   const fim    = document.getElementById('bh-config-fim').value;
   if(!inicio||!fim){ showToast('Preencha início e fim do período','error'); return; }
   if(inicio>=fim){ showToast('Início deve ser anterior ao fim','error'); return; }
-  _bhConfig = {periodo_inicio:inicio, periodo_fim:fim};
+  _bhConfig = {periodo_inicio:inicio, periodo_fim:fim, salariosSetor:_bhConfig?.salariosSetor||{}};
   try{
     const {error} = await sb.from('gn_banco_horas').upsert(
       {loja:LOJA, mes:'CONFIG', registros:_bhConfig, updated_at:new Date().toISOString()},
@@ -2997,6 +3001,70 @@ function _bhFmtH(h){
   return (v>0?'+':'')+v.toFixed(1)+'h';
 }
 
+/* ─── Formatar valor monetário ─── */
+function _bhFmtR(valor){
+  return 'R$ '+Math.abs(valor).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+
+/* ─── Valor/hora do funcionário baseado no setor ─── */
+function _bhValorHoraFunc(nome){
+  if(!_bhConfig||!_bhConfig.salariosSetor) return 0;
+  const func = comissoesWD?.funcs?.find(f=>f.nome===nome);
+  if(!func||!func.setor) return 0;
+  const salario = parseFloat(_bhConfig.salariosSetor[func.setor])||0;
+  return salario/220;
+}
+
+/* ─── Renderizar card de salários por setor (aba escala) ─── */
+function renderSalariosSetorCard(){
+  const card = document.getElementById('card-salarios-setor');
+  if(!card) return;
+  const setores = COMISSOES_SETORES.filter(s=>s);
+  const salariosSetor = _bhConfig?.salariosSetor||{};
+  const rows = setores.map(s=>{
+    const sal = salariosSetor[s]!=null ? salariosSetor[s] : '';
+    const vh = sal!=='' ? ' = '+_bhFmtR(parseFloat(sal)/220)+'/h' : '';
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+      <label style="font-size:11px;color:#94a3b8;width:110px;flex-shrink:0;">${_esc(s)}</label>
+      <input type="number" min="0" step="0.01" data-setor="${_esc(s)}" value="${sal}"
+        oninput="this.nextElementSibling.textContent=this.value?' = '+_bhFmtR(parseFloat(this.value)/220)+'/h':''"
+        style="width:110px;padding:5px 8px;border-radius:8px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:#e2e8f0;font-size:12px;font-family:inherit;">
+      <span style="font-size:10px;color:#4ade80;font-family:'JetBrains Mono',monospace;">${vh}</span>
+    </div>`;
+  }).join('');
+  card.innerHTML=`
+    <div class="card" style="padding:14px;">
+      <div style="font-size:13px;font-weight:700;color:#e2e8f0;margin-bottom:4px;">💰 Salários por Setor</div>
+      <div style="font-size:10px;color:#64748b;margin-bottom:12px;">Valor hora = salário ÷ 220 — usado no banco de horas</div>
+      ${rows}
+      <button onclick="salvarSalariosSetor()" style="margin-top:6px;padding:8px 18px;border-radius:10px;background:#0d2d1a;border:1px solid #4ade80;color:#4ade80;font-size:12px;font-weight:700;font-family:inherit;cursor:pointer;">💾 Salvar Salários</button>
+    </div>`;
+}
+
+/* ─── Salvar salários por setor ─── */
+async function salvarSalariosSetor(){
+  const inputs = document.querySelectorAll('#card-salarios-setor input[data-setor]');
+  const salariosSetor = {};
+  inputs.forEach(inp=>{
+    const s = inp.dataset.setor;
+    const v = parseFloat(inp.value);
+    if(s&&!isNaN(v)&&v>0) salariosSetor[s]=v;
+  });
+  if(!_bhConfig) _bhConfig={};
+  _bhConfig.salariosSetor = salariosSetor;
+  try{
+    const {error} = await sb.from('gn_banco_horas').upsert(
+      {loja:LOJA, mes:'CONFIG', registros:_bhConfig, updated_at:new Date().toISOString()},
+      {onConflict:'loja,mes'}
+    );
+    if(error) throw error;
+    showToast('✓ Salários salvos','success');
+    renderBancoHoras();
+  }catch(e){
+    showToast('⚠️ Erro ao salvar salários','error');
+  }
+}
+
 /* ─── Renderizar a aba ─── */
 function renderBancoHoras(){
   if(!_bhConfig || !_bhConfig.periodo_inicio){
@@ -3030,11 +3098,14 @@ function renderBancoHoras(){
       <div style="background:${ehPreclose?'rgba(220,38,38,0.12)':'rgba(234,179,8,0.1)'};border:1px solid ${ehPreclose?'rgba(220,38,38,0.4)':'rgba(234,179,8,0.3)'};border-radius:12px;padding:12px 14px;">
         <div style="font-size:12px;font-weight:700;color:${ehPreclose?'#ef4444':'#eab308'};margin-bottom:8px;">${titulo}</div>
         <div style="font-size:10px;color:#888;margin-bottom:8px;">Funcionários com saldo acima de ±8h:</div>
-        ${alertas.map(a=>`
-          <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.05);">
+        ${alertas.map(a=>{
+          const vh = _bhValorHoraFunc(a.nome);
+          const valorStr = vh>0 ? ' · <span style="font-size:11px;color:#fbbf24;">'+_bhFmtR(a.abs*vh)+'</span>' : '';
+          return `<div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.05);">
             <span style="font-size:12px;color:#e2e8f0;font-weight:600;">${_esc(a.nome)}</span>
-            <span style="font-size:12px;font-weight:800;font-family:'JetBrains Mono',monospace;color:${a.saldo>0?'#4ade80':'#f87171'};">${_bhFmtH(a.saldo)}</span>
-          </div>`).join('')}
+            <span style="font-size:12px;font-weight:800;font-family:'JetBrains Mono',monospace;color:${a.saldo>0?'#4ade80':'#f87171'};">${_bhFmtH(a.saldo)}${valorStr}</span>
+          </div>`;
+        }).join('')}
       </div>`;
   } else {
     alertasEl.style.display='none';
@@ -3052,6 +3123,8 @@ function renderBancoHoras(){
   // Cabeçalhos dos meses (abreviados)
   const thMeses = meses.map(m=>`<th style="font-size:9px;color:#555;font-weight:700;text-align:center;padding:5px 4px;white-space:nowrap;">${_bhMesLabel(m)}</th>`).join('');
 
+  const temSalarios = _bhConfig?.salariosSetor && Object.keys(_bhConfig.salariosSetor).length>0;
+
   // Linhas por funcionário
   const linhas = funcionarios.map(nome=>{
     const saldoTotal = _bhSaldoFunc(nome);
@@ -3065,6 +3138,8 @@ function renderBancoHoras(){
     const saldoCor = saldoTotal>0?'#4ade80':saldoTotal<0?'#f87171':'#888';
     const saldoAbs = Math.abs(saldoTotal);
     const alerta = saldoAbs > 8 ? ' ⚠️' : '';
+    const vh = _bhValorHoraFunc(nome);
+    const tdValor = temSalarios ? `<td style="text-align:center;font-size:10px;font-weight:700;font-family:'JetBrains Mono',monospace;color:${vh>0?(saldoTotal>0?'#4ade80':'#f87171'):'#555'};padding:4px 4px;white-space:nowrap;">${vh>0?_bhFmtR(saldoAbs*vh):'—'}</td>` : '';
     return `
       <tr style="border-bottom:1px solid #505050;">
         <td style="font-size:11px;font-weight:700;color:#e2e8f0;padding:6px 6px 6px 2px;white-space:nowrap;">
@@ -3074,8 +3149,11 @@ function renderBancoHoras(){
         </td>
         ${tdMeses}
         <td style="text-align:center;font-size:11px;font-weight:800;font-family:'JetBrains Mono',monospace;color:${saldoCor};padding:4px 4px;white-space:nowrap;">${_bhFmtH(saldoTotal)}${alerta}</td>
+        ${tdValor}
       </tr>`;
   }).join('');
+
+  const thValor = temSalarios ? `<th style="font-size:9px;color:#fbbf24;font-weight:700;text-align:center;padding:5px 4px;white-space:nowrap;">Valor R$</th>` : '';
 
   document.getElementById('bh-tabela').innerHTML=`
     <div class="card" style="padding:0;overflow:hidden;">
@@ -3086,6 +3164,7 @@ function renderBancoHoras(){
               <th style="font-size:10px;color:#555;font-weight:700;text-align:left;padding:8px 6px 8px 2px;">Funcionário</th>
               ${thMeses}
               <th style="font-size:9px;color:#E8580A;font-weight:700;text-align:center;padding:5px 4px;">Saldo</th>
+              ${thValor}
             </tr>
           </thead>
           <tbody>${linhas}</tbody>
@@ -4324,6 +4403,7 @@ function renderEscala(){
   if(escalaModo==='diaria')  _renderEscalaDiaria();
   else if(escalaModo==='mensal') _renderEscalaMensal();
   else                           _renderEscalaSemanal();
+  renderSalariosSetorCard();
 }
 
 function _renderEscalaSemanal(){
