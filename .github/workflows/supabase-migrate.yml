@@ -1,0 +1,65 @@
+name: Supabase Migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      sql:
+        description: 'SQL to execute (leave blank to run pending migrations)'
+        required: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run migration
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_PROJECT_REF: ncxttwvpafajnilpjbol
+        run: |
+          SQL=$(cat <<'ENDSQL'
+          CREATE TABLE IF NOT EXISTS gn_trios_agenda (
+            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            data date NOT NULL,
+            horario_inicio text,
+            horario_fim text,
+            loja text NOT NULL,
+            artista text NOT NULL,
+            cache numeric DEFAULT 0,
+            confirmado boolean DEFAULT false,
+            confirmado_por text,
+            confirmado_em timestamptz,
+            created_at timestamptz DEFAULT now()
+          );
+
+          ALTER TABLE gn_trios_agenda ENABLE ROW LEVEL SECURITY;
+
+          DO $$
+          BEGIN
+            IF NOT EXISTS (
+              SELECT 1 FROM pg_policies
+              WHERE tablename = 'gn_trios_agenda' AND policyname = 'anon_all'
+            ) THEN
+              EXECUTE 'CREATE POLICY anon_all ON gn_trios_agenda FOR ALL TO anon USING (true) WITH CHECK (true)';
+            END IF;
+          END $$;
+          ENDSQL
+          )
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "https://api.supabase.com/v1/projects/${SUPABASE_PROJECT_REF}/database/query" \
+            -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\": $(echo "$SQL" | jq -Rs .)}")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+
+          echo "HTTP: $HTTP_CODE"
+          echo "Response: $BODY"
+
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
+            echo "Migration failed!"
+            exit 1
+          fi
+
+          echo "Migration completed successfully!"
