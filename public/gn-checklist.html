@@ -2795,19 +2795,38 @@ function _bhMesLabel(ym){
   return meses[parseInt(m,10)-1]+'/'+y.slice(2);
 }
 
+function _bhNormNome(n){
+  // Normaliza nome para comparação: sem espaços/hífens, sem acentos, minúsculas
+  return (n||'').trim().toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g,'')
+    .replace(/[\s\-]+/g,'');
+}
+
+function _bhFindReg(arr, nome){
+  // Busca registro no array comparando por nome normalizado
+  const key = _bhNormNome(nome);
+  return (arr||[]).find(x => _bhNormNome(x.nome) === key);
+}
+
 function _bhSaldoFunc(nome){
   return Object.values(_bhRegistros).reduce((sum, arr)=>{
-    const r = (arr||[]).find(x=>x.nome===nome);
+    const r = _bhFindReg(arr, nome);
     return sum + (r ? parseFloat(r.horas)||0 : 0);
   }, 0);
 }
 
 function _bhTodosFuncionarios(){
   // Combina funcionários ativos (comissões) + quem aparece nos registros
-  const nomes = new Set();
-  if(comissoesWD) comissoesWD.funcs.forEach(f=>{ if(f.nome&&f.nome.trim()) nomes.add(f.nome.trim()); });
-  Object.values(_bhRegistros).forEach(arr=>(arr||[]).forEach(r=>{ if(r.nome) nomes.add(r.nome); }));
-  return [...nomes].sort((a,b)=>a.localeCompare(b,'pt-BR'));
+  // Usa Map com chave normalizada para deduplicar nomes com variações de acento/espaço
+  // A versão das comissões tem precedência como nome canônico
+  const map = new Map();
+  if(comissoesWD) comissoesWD.funcs.forEach(f=>{
+    if(f.nome&&f.nome.trim()) map.set(_bhNormNome(f.nome), f.nome.trim());
+  });
+  Object.values(_bhRegistros).forEach(arr=>(arr||[]).forEach(r=>{
+    if(r.nome){ const k = _bhNormNome(r.nome); if(!map.has(k)) map.set(k, r.nome); }
+  }));
+  return [...map.values()].sort((a,b)=>a.localeCompare(b,'pt-BR'));
 }
 
 /* ─── Modal de registro ─── */
@@ -2830,7 +2849,7 @@ function abrirModalBancoHoras(nome){
 
 function _bhPreencherExistente(mes){
   const arr = _bhRegistros[mes] || [];
-  const existente = arr.find(x=>x.nome===_bhModalFunc);
+  const existente = _bhFindReg(arr, _bhModalFunc);
   const el = document.getElementById('bh-modal-existente');
   if(existente){
     el.style.display='block';
@@ -2881,7 +2900,7 @@ async function salvarRegistroBancoHoras(){
 
   // Atualizar _bhRegistros em memória
   if(!_bhRegistros[mes]) _bhRegistros[mes] = [];
-  const idx = _bhRegistros[mes].findIndex(x=>x.nome===_bhModalFunc);
+  const idx = _bhRegistros[mes].findIndex(x=>_bhNormNome(x.nome)===_bhNormNome(_bhModalFunc));
   if(idx>=0) _bhRegistros[mes][idx] = {nome:_bhModalFunc, horas, obs};
   else _bhRegistros[mes].push({nome:_bhModalFunc, horas, obs});
 
@@ -3001,7 +3020,7 @@ function _bhCalcularAlertas(){
   funcionarios.forEach(nome=>{
     // Saldo até os meses decorridos
     const saldo = mesesDecorridos.reduce((sum, m)=>{
-      const r = (_bhRegistros[m]||[]).find(x=>x.nome===nome);
+      const r = _bhFindReg(_bhRegistros[m], nome);
       return sum + (r ? parseFloat(r.horas)||0 : 0);
     }, 0);
     const abs = Math.abs(saldo);
@@ -3029,7 +3048,8 @@ function _bhFmtR(valor){
 /* ─── Valor/hora do funcionário baseado no setor ─── */
 function _bhValorHoraFunc(nome){
   if(!_bhConfig||!_bhConfig.salariosSetor) return 0;
-  const func = comissoesWD?.funcs?.find(f=>f.nome===nome);
+  const key = _bhNormNome(nome);
+  const func = comissoesWD?.funcs?.find(f=>_bhNormNome(f.nome)===key);
   if(!func||!func.setor) return 0;
   const salario = parseFloat(_bhConfig.salariosSetor[func.setor])||0;
   return salario/220;
@@ -3157,7 +3177,7 @@ function renderBancoHoras(){
   const linhas = funcionarios.map(nome=>{
     const saldoTotal = _bhSaldoFunc(nome);
     const tdMeses = meses.map(m=>{
-      const r = (_bhRegistros[m]||[]).find(x=>x.nome===nome);
+      const r = _bhFindReg(_bhRegistros[m], nome);
       if(!r) return `<td style="text-align:center;font-size:10px;color:#333;padding:4px 2px;">—</td>`;
       const h = parseFloat(r.horas)||0;
       const cor = h>0?'#4ade80':h<0?'#f87171':'#888';
@@ -3232,7 +3252,7 @@ function _bhRenderResumoMonetario(meses, funcionarios, hoje){
     else if(saldoGeral<0) negGeral += Math.abs(saldoGeral)*vh;
 
     if(mesAnterior){
-      const r = (_bhRegistros[mesAnterior]||[]).find(x=>x.nome===nome);
+      const r = _bhFindReg(_bhRegistros[mesAnterior], nome);
       const h = r ? parseFloat(r.horas)||0 : 0;
       if(h>0) posFecha += h*vh;
       else if(h<0) negFecha += Math.abs(h)*vh;
@@ -3305,12 +3325,12 @@ function abrirRelatorioBancoHoras(){
   funcionarios.forEach(nome=>{
     const saldo = _bhSaldoFunc(nome);
     const vh = _bhValorHoraFunc(nome);
-    const func = comissoesWD?.funcs?.find(f=>f.nome===nome);
+    const func = comissoesWD?.funcs?.find(f=>_bhNormNome(f.nome)===_bhNormNome(nome));
     if(func?.setor) txt += `👤 ${nome} (${func.setor})\n`;
     else txt += `👤 ${nome}\n`;
     if(temSal && vh>0) txt += `  Valor/hora: ${_bhFmtR(vh)}/h\n`;
     meses.forEach(m=>{
-      const r = (_bhRegistros[m]||[]).find(x=>x.nome===nome);
+      const r = _bhFindReg(_bhRegistros[m], nome);
       if(r){
         const h = parseFloat(r.horas)||0;
         const valorMes = temSal && vh>0 ? ` → ${_bhFmtR(Math.abs(h)*vh)}` : '';
@@ -3344,7 +3364,7 @@ function abrirRelatorioBancoHoras(){
       let posMes=0, negMes=0;
       funcionarios.forEach(nome=>{
         const vh=_bhValorHoraFunc(nome); if(vh<=0) return;
-        const r=(_bhRegistros[mesAnt]||[]).find(x=>x.nome===nome);
+        const r=_bhFindReg(_bhRegistros[mesAnt], nome);
         const h=r?parseFloat(r.horas)||0:0;
         if(h>0) posMes+=h*vh; else if(h<0) negMes+=Math.abs(h)*vh;
       });
@@ -7733,7 +7753,7 @@ function buildRelatorioBanco(cab){
         funcs.forEach(nome=>{
           const vh=_bhValorHoraFunc(nome);
           if(vh<=0) return;
-          const r=(_bhRegistros[mesAnt]||[]).find(x=>x.nome===nome);
+          const r=_bhFindReg(_bhRegistros[mesAnt], nome);
           const h=r?parseFloat(r.horas)||0:0;
           if(h>0) posMes+=h*vh; else if(h<0) negMes+=Math.abs(h)*vh;
         });
