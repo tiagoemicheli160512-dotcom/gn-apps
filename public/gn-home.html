@@ -393,7 +393,28 @@ function _normLoja(n) {
   return (n || '').toUpperCase();
 }
 
-const LOJAS_LISTA = GN_LOJAS.map(l=>l.userKey);
+const LOJAS_TODAS = GN_LOJAS.map(l=>l.userKey);
+let LOJAS_LISTA = LOJAS_TODAS;
+let _lojasRestritas = false; // true quando a sessão é de um supervisor com rota de lojas cadastrada
+
+// Cargo supervisor só enxerga/abre as lojas cadastradas na rota dele (permissoes.lojas_supervisor,
+// definido no app Usuários). Sem rota cadastrada, mantém acesso a todas (comportamento anterior,
+// evita travar contas antigas até o mestre configurar a rota). Cargo mestre sempre vê tudo.
+function _lbTodasLojas() { return _lojasRestritas ? 'Todas as lojas (rota)' : 'Todas as lojas'; }
+
+function _computeLojasVisiveis(sess) {
+  if (!sess) { _lojasRestritas = false; return LOJAS_TODAS; }
+  const cargo = (sess.cargo || '').toLowerCase();
+  if (cargo === 'supervisor') {
+    const rota = Array.isArray((sess.permissoes||{}).lojas_supervisor) ? (sess.permissoes||{}).lojas_supervisor.filter(Boolean) : [];
+    if (rota.length) {
+      _lojasRestritas = true;
+      return LOJAS_TODAS.filter(k => rota.includes(k));
+    }
+  }
+  _lojasRestritas = false;
+  return LOJAS_TODAS;
+}
 
 // geralOnly: só aparece no Painel de Gestão (masterLoja vazio) para sessões
 // master/mestre — some do menu quando uma loja específica está aberta.
@@ -465,6 +486,8 @@ if (session) {
 // Updates header, sidebar, modules, and badges WITHOUT resetting the dashboard.
 function _refreshPermUI(sess) {
   if (!document.getElementById('home-screen') || document.getElementById('home-screen').style.display === 'none') return;
+  LOJAS_LISTA = _computeLojasVisiveis(sess);
+  if (masterLoja && !LOJAS_LISTA.includes(masterLoja)) masterLoja = null;
   const isMaster = sess.loja === 'GERAL' || !!(sess.permissoes||{}).master;
   // Header / sidebar user info
   const nameStr = sess.nome + (sess.cargo ? ' · ' + sess.cargo : '');
@@ -613,6 +636,9 @@ function showHome(sess) {
   const verEl = document.getElementById('hdr-ver');
   if (verEl) verEl.textContent = APP_VERSION;
 
+  LOJAS_LISTA = _computeLojasVisiveis(sess);
+  if (masterLoja && !LOJAS_LISTA.includes(masterLoja)) masterLoja = null; // loja fora da rota atual (ex.: rota editada pelo mestre)
+
   const isMaster = sess.loja === 'GERAL' || !!(sess.permissoes||{}).master;
   const lojaEfetiva = masterLoja || sess.loja;
   setTheme(lojaEfetiva);
@@ -624,7 +650,7 @@ function showHome(sess) {
   document.body.classList.add('home-active');
   document.getElementById('sb-user').textContent = sess.nome + (sess.cargo ? ' · ' + sess.cargo : '');
   document.getElementById('sb-loja').textContent = isMaster
-    ? (masterLoja ? 'Loja ' + (LOJA_DISPLAY[masterLoja] || masterLoja) : 'Todas as lojas')
+    ? (masterLoja ? 'Loja ' + (LOJA_DISPLAY[masterLoja] || masterLoja) : _lbTodasLojas())
     : 'Loja ' + (LOJA_DISPLAY[sess.loja] || sess.loja);
   const permsNav = sess.permissoes || {};
   document.getElementById('sb-modules').innerHTML = MODULES
@@ -645,7 +671,7 @@ function showHome(sess) {
   document.getElementById('hero-greeting').textContent = `${saudacao}, ${sess.nome.split(' ')[0]}!`;
 
   if (isMaster) {
-    const dispLoja = masterLoja ? 'Loja ' + (LOJA_DISPLAY[masterLoja] || masterLoja) : 'Todas as lojas';
+    const dispLoja = masterLoja ? 'Loja ' + (LOJA_DISPLAY[masterLoja] || masterLoja) : _lbTodasLojas();
     document.getElementById('hero-loja-name').textContent = dispLoja;
     document.getElementById('hero-sel-btn').style.display = 'flex';
     // Chip de loja ativa
@@ -919,7 +945,7 @@ function renderLojaPickerGrid() {
   }).join('') + `
     <button class="pick-btn${masterLoja === null ? ' active' : ''}" onclick="selecionarLojaMestre(null)" style="grid-column:1/-1">
       <span class="pick-dot" style="background:#F26419"></span>
-      <span class="pick-name">Todas as lojas (padrão mestre)</span>
+      <span class="pick-name">${_lojasRestritas ? 'Todas as lojas (rota)' : 'Todas as lojas (padrão mestre)'}</span>
     </button>`;
 }
 
@@ -996,7 +1022,7 @@ async function _renderHealthChips() {
         .filter(r => r.hora_chegada !== 'PLAN' && r.loja !== 'FOLGA' && r.loja !== 'FÉRIAS')
         .map(r => ({ loja: r.loja, nome: r.visitante, cargo: r.cargo, horaChegada: r.hora_chegada, horaSaida: r.hora_saida, origem: 'Visitante' })),
       ...(visitasManutRows || []).map(r => ({ loja: r.loja, nome: r.oficial, cargo: 'Manutenção', horaChegada: r.hora_chegada, horaSaida: r.hora_saida, origem: 'Manutenção' })),
-    ];
+    ].filter(r => LOJAS_LISTA.includes(_normLoja(r.loja)));
 
     const lojasComCaixa = new Set((cxRows || []).filter(r => r.status === 'FECHADO').map(r => r.loja));
     const lojasComChk   = new Set((clRows  || []).map(r => _normLoja(r.loja)));
@@ -1004,9 +1030,11 @@ async function _renderHealthChips() {
     const manutPorLoja = {};
     (clRows || []).forEach(r => {
       if (!Array.isArray(r.manutencao)) return;
+      const mk = _normLoja(r.loja);
+      if (!LOJAS_LISTA.includes(mk)) return;
       const n = r.manutencao.filter(m => m && m.status !== 'Resolvido').length;
       manutPend += n;
-      if (n > 0) manutPorLoja[_normLoja(r.loja)] = (manutPorLoja[_normLoja(r.loja)] || 0) + n;
+      if (n > 0) manutPorLoja[mk] = (manutPorLoja[mk] || 0) + n;
     });
     const visitasAndamento = (visitasRows || []).filter(r => !r.horaSaida);
 
@@ -1267,7 +1295,8 @@ async function _fetchComDia(mondayISO) {
     const brutos = r.all_data[semIdx].brutos;
     if (!Array.isArray(brutos)) return;
     const lk = _COM_KEY_TO_LOJA[r.loja];
-    if (lk) byLoja[lk] = brutos.map(v => parseFloat(v) || 0);
+    if (!lk || !LOJAS_LISTA.includes(lk)) return;
+    byLoja[lk] = brutos.map(v => parseFloat(v) || 0);
     for (let d = 0; d < 7; d++) totals[d] += parseFloat(brutos[d]) || 0;
   });
   return { totals, byLoja };
