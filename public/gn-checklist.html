@@ -2127,7 +2127,7 @@ let state = {
   vendas:{},
   checklist:{}, abertura:{}, fechamento:{},
   obs_abertura:'', obs_checklist:'', obs_fechamento:'',
-  faltasFuncionarios:[], faltas:[], manutencao:[],
+  faltasFuncionarios:[], faltas:[], manutencao:[], manutOficial:[],
   supervisao: {
     supervisor:'', responsavel:'', data:'', hora:'', hora_chegada:'', hora_fim:'', obs:'',
     itens:{}, notaFinal:null, fechada:false, fechada_em:'', fechada_por:''
@@ -5774,12 +5774,47 @@ async function confirmarResolucao(id){
   showToast('✅ Resolução confirmada!','success');
 }
 
+// Manutenções "oficiais" — registradas pelo RH/master direto no app GN Manutenção
+// (gn_lojas.all_data.manut_oficial_items). Aqui só lemos e confirmamos; quem cria/
+// edita o status continua sendo o app Manutenção, pra não duplicar o fluxo.
+async function carregarManutOficial(){
+  try{
+    const ck=comissoesLojaKey();
+    const {data,error}=await sb.from('gn_lojas').select('all_data').eq('loja',ck).maybeSingle();
+    state.manutOficial=(!error&&data&&Array.isArray(data.all_data?.manut_oficial_items))
+      ? data.all_data.manut_oficial_items : [];
+  }catch(e){ state.manutOficial=[]; }
+  renderManutencao();
+}
+
+async function confirmarResolucaoOficial(id){
+  try{
+    const ck=comissoesLojaKey();
+    const {data,error}=await sb.from('gn_lojas').select('all_data').eq('loja',ck).maybeSingle();
+    if(error||!data){ showToast('Erro ao confirmar','error'); return; }
+    const allData=data.all_data||{};
+    const items=Array.isArray(allData.manut_oficial_items)?allData.manut_oficial_items:[];
+    const idx=items.findIndex(m=>String(m.id)===String(id));
+    if(idx<0){ showToast('Item não encontrado','error'); return; }
+    items[idx].confirmado_loja=true;
+    const {error:e2}=await sb.from('gn_lojas').update({all_data:{...allData,manut_oficial_items:items}}).eq('loja',ck);
+    if(e2){ showToast('Erro ao confirmar','error'); return; }
+    const local=state.manutOficial.find(m=>String(m.id)===String(id));
+    if(local) local.confirmado_loja=true;
+    renderManutencao();
+    showToast('✅ Resolução confirmada!','success');
+  }catch(e){ showToast('Erro ao confirmar','error'); }
+}
+
 function renderManutencao(){
   const lista=document.getElementById('manut-lista');
   const empty=document.getElementById('manut-empty');
+  const manutOficial=state.manutOficial||[];
   // Itens que precisam de ação: não concluídos (não resolvido+confirmado)
-  const pendCount=state.manutencao.filter(m=>!(m.status==='Resolvido'&&m.confirmado_loja)).length;
-  const aguardConf=state.manutencao.filter(m=>m.status==='Resolvido'&&!m.confirmado_loja).length;
+  const pendCount=state.manutencao.filter(m=>!(m.status==='Resolvido'&&m.confirmado_loja)).length
+    + manutOficial.filter(m=>!(m.status==='Resolvido'&&m.confirmado_loja)).length;
+  const aguardConf=state.manutencao.filter(m=>m.status==='Resolvido'&&!m.confirmado_loja).length
+    + manutOficial.filter(m=>m.status==='Resolvido'&&!m.confirmado_loja).length;
   const tabBtnManut=document.getElementById('tab-btn-manutencao');
   if(tabBtnManut){
     if(pendCount>0){
@@ -5788,12 +5823,58 @@ function renderManutencao(){
       tabBtnManut.textContent='🔧 Manutenção';
     }
   }
-  const resumo=[state.manutencao.length+' problema'+(state.manutencao.length!==1?'s':''),
+  const totalItens=state.manutencao.length+manutOficial.length;
+  const resumo=[totalItens+' problema'+(totalItens!==1?'s':''),
     pendCount&&!aguardConf?pendCount+' pendente'+(pendCount>1?'s':''):'',
     aguardConf?aguardConf+' aguardando confirmação':''
   ].filter(Boolean).join(' · ');
   document.getElementById('manut-count').textContent=resumo;
-  empty.style.display=state.manutencao.length?'none':'block';
+  empty.style.display=totalItens?'none':'block';
+  const itensOficialHtml = manutOficial.length ? `<div style="margin:14px 0 8px;padding-top:10px;border-top:1px solid #2a2a2a;font-size:11px;font-weight:800;color:#a78bfa;text-transform:uppercase;letter-spacing:.4px">📋 Registrado pelo RH/Manutenção</div>` +
+    manutOficial.map(m=>{
+      const statusLabel=m.status==='Resolvido'?'✅ Resolvido':m.status==='Em andamento'?'🔄 Em andamento':'⏳ Pendente';
+      const statusColor=m.status==='Resolvido'?'background:#0f2a0f;color:#5cb85c;':m.status==='Em andamento'?'background:#1e1e0f;color:#f0c050;':'background:#1e0f0f;color:#d05050;';
+      const ofBadge=`<span style="font-size:9px;color:#a78bfa;">📋 Oficial</span>`;
+      if(m.status==='Resolvido'&&m.confirmado_loja){
+        return `<div class="card p-3" style="opacity:.55;border:1px solid #1a3a1a;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+            <span style="font-size:10px;padding:2px 9px;border-radius:99px;font-weight:700;background:#0a2818;color:#5cb85c;">✅ Concluído · confirmado</span>
+            ${ofBadge}
+          </div>
+          <div style="font-size:12px;color:#666;">${escHtml(m.tipo||'Estrutura')} · ${escHtml(m.setor||'—')}</div>
+          ${m.descricao?`<div style="font-size:11px;color:#555;margin-top:2px;">${escHtml(m.descricao)}</div>`:''}
+        </div>`;
+      }
+      if(m.status==='Resolvido'){
+        return `<div class="card p-3" style="border:1.5px solid #2a5a2a;background:#0b1e0b;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <span style="font-size:10px;padding:2px 9px;border-radius:99px;font-weight:700;background:#0f2a0f;color:#5cb85c;">✅ Resolvido pelo setor de manutenção</span>
+            ${ofBadge}
+          </div>
+          <div style="font-size:12px;color:#bbb;margin-bottom:4px;">${escHtml(m.tipo||'Estrutura')} · ${escHtml(m.setor||'—')}</div>
+          ${m.descricao?`<div style="font-size:12px;margin-bottom:6px;">${escHtml(m.descricao)}</div>`:''}
+          ${m.fotoBase64?`<img src="${m.fotoBase64}" class="foto-thumb" style="margin-bottom:8px;">`:''}
+          <div style="font-size:11px;color:#888;margin-bottom:8px;">Verifique se o problema foi de fato corrigido antes de confirmar.</div>
+          <button onclick="confirmarResolucaoOficial(${JSON.stringify(String(m.id))})"
+            style="width:100%;padding:11px;background:#1a5a1a;color:#5ade5a;border:1.5px solid #2a7a2a;border-radius:8px;font-weight:800;font-size:13px;cursor:pointer;letter-spacing:.3px;">
+            ✅ Confirmar que foi resolvido
+          </button>
+        </div>`;
+      }
+      return `<div class="card p-3">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;">
+            <span style="font-size:10px;padding:2px 9px;border-radius:99px;font-weight:700;${statusColor}">${statusLabel}</span>
+            ${m.prioridade==='Urgente'?`<span style="font-size:10px;padding:2px 9px;border-radius:99px;font-weight:700;background:#3a0a0a;color:#f87171;">🔴 Urgente</span>`:''}
+          </div>
+          ${ofBadge}
+        </div>
+        <div style="font-size:12px;color:#bbb;margin-bottom:4px;">${escHtml(m.tipo||'Estrutura')} · ${escHtml(m.setor||'—')}</div>
+        ${m.descricao?`<div style="font-size:12px;margin-bottom:6px;">${escHtml(m.descricao)}</div>`:''}
+        ${m.fotoBase64?`<img src="${m.fotoBase64}" class="foto-thumb">`:''}
+        <div style="font-size:10px;color:#666;margin-top:6px;">Registrado pelo RH/Manutenção — aguarde atualização de status.</div>
+      </div>`;
+    }).join('') : '';
   lista.innerHTML=state.manutencao.map(m=>{
     // ── RESOLVIDO: card compacto de confirmação ──
     if(m.status==='Resolvido'){
@@ -5872,7 +5953,7 @@ function renderManutencao(){
           </div>`:''}</div>
       </div>
     </div>`;
-  }).join('');
+  }).join('') + itensOficialHtml;
 }
 
 // =============================================
@@ -8292,6 +8373,8 @@ async function initAppWithLoja(){
   if(Object.keys(state.vendas||{}).length) _vendaSyncNow();
   // Carregar banco de horas em background para exibir badge de alerta sem precisar clicar na aba
   carregarBancoHoras(false);
+  // Carregar manutenções "oficiais" (registradas pelo RH direto no app Manutenção)
+  carregarManutOficial();
 
   // Carryover: aplica se hoje ainda está vazio — independente de todayFound
   // (mergeState não sobrescreve com array vazio, então state.faltas só tem dados se Supabase tinha algo)
