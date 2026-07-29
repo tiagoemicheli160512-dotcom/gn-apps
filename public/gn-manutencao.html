@@ -414,6 +414,7 @@ const S = {
   lojaFiltro:  'Todas',
   periodo:     '30d',
   busca:       '',
+  mostrarResolvidos: false,
   // utensílios
   utensTab:       'contagem',
   utensCatalogo:  [],
@@ -796,6 +797,65 @@ async function setFiltro(f){
   renderLista();
 }
 
+function _itemCardHtml(m){
+  const tipo=m.tipo||'Estrutura';
+  const ti=tipoInfo(tipo);
+  const sc=scCls(m.status);
+  const statusLabel=m.status==='Em andamento'?'🔄 Em andamento':m.status==='Resolvido'?'✅ Resolvido':'⏳ Pendente';
+  const confirBadge=m._source==='oficial'
+    ?(m.confirmado_loja
+      ?`<span class="bstatus resolvido" style="background:#0a2818;color:#5cb85c;">✅ Conf. pela loja</span>`
+      :m.status==='Resolvido'
+        ?`<span class="bstatus andamento" style="background:#1a1a08;color:#f0c050;">⏳ Aguard. conf. loja</span>`
+        :'')
+    :'';
+  let slaBadge='';
+  if(m.status!=='Resolvido'&&m._data){
+    const slaConf=SLA_CONFIG[tipo];
+    if(slaConf){
+      const diffMs=Date.now()-new Date(m._data).getTime();
+      const diffDias=Math.floor(diffMs/(1000*60*60*24));
+      if(diffDias>slaConf.critico) slaBadge=`<span class="bstatus" style="background:#3a0a0a;color:#f87171;">🚨 ${diffDias}d — CRÍTICO</span>`;
+      else if(diffDias>slaConf.normal) slaBadge=`<span class="bstatus" style="background:#2a1a0a;color:#f0a050;">⚠️ ${diffDias}d — prazo excedido</span>`;
+      else if(diffDias>0) slaBadge=`<span class="bstatus" style="background:#0a1a2a;color:#60a0c0;font-size:9px;">⏰ ${diffDias}d</span>`;
+    }
+  }
+  return `<div class="icard ${sc}">
+    <div class="ihead">
+      <div class="ibadges">
+        <span class="btipo" style="color:${ti.cor}">${ti.icon} ${esc(tipo)}</span>
+        <span class="bstatus ${sc}">${statusLabel}</span>
+        ${m.prioridade==='Urgente'?`<span class="bstatus" style="background:#3a0a0a;color:#f87171;">🔴 Urgente</span>`:''}
+        ${m._source==='oficial'?`<span class="btipo" style="color:#a78bfa">📋 Oficial</span>`:''}
+        ${confirBadge}
+        ${slaBadge}
+        ${m.resolved_at&&m.status==='Resolvido'?`<span style="font-size:9px;color:#3a5a3a;padding:2px 7px;border-radius:99px;background:#0a2010;">✓ ${new Date(m.resolved_at).toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',year:'2-digit'})}</span>`:''}
+      </div>
+      <span class="imeta">${fmtData(m._data)}</span>
+    </div>
+    <div class="ibody">
+      <div class="iloja">${esc(m._loja||'—')}</div>
+      <div class="isetor">Setor: ${esc(m.setor||'—')}</div>
+      ${m.descricao?`<div class="idesc">${esc(m.descricao)}</div>`:''}
+      ${m.contato?`<div class="icontato">📞 ${esc(m.contato)}</div>`:''}
+      ${m.fotoBase64?`<img class="foto-thumb" src="${m.fotoBase64}" onclick="abrirFoto(this)" title="Ver foto">`:''}
+    </div>
+    <div class="iactions">
+      <select class="status-sel" id="sel-${m.id}">
+        <option value="Pendente" ${m.status==='Pendente'?'selected':''}>⏳ Pendente</option>
+        <option value="Em andamento" ${m.status==='Em andamento'?'selected':''}>🔄 Em andamento</option>
+        <option value="Resolvido" ${m.status==='Resolvido'?'selected':''}>✅ Resolvido</option>
+      </select>
+      <button class="btn-save" onclick="salvarStatus(${esc(JSON.stringify(m._loja))},${esc(JSON.stringify(m._dataUltima||m._data))},${esc(JSON.stringify(String(m.id)))})">Salvar</button>
+      ${m._source==='oficial'&&!isMaster()&&m.status==='Resolvido'&&!m.confirmado_loja
+        ?`<button class="btn-save" style="background:var(--ok);font-size:11px;padding:6px 10px" onclick="confirmarResolucao(${esc(JSON.stringify(String(m.id)))},${esc(JSON.stringify(m._loja))})">✅ Confirmar</button>`
+        :''}
+    </div>
+  </div>`;
+}
+
+function toggleResolvidosManut(){ S.mostrarResolvidos=!S.mostrarResolvidos; renderLista(); }
+
 function renderLista(){
   if(S.filtro==='Relatórios'){ renderRelatoriosPanel(); return; }
   if(S.filtro==='Utensílios'){ renderUtensPanel(); return; }
@@ -809,20 +869,23 @@ function renderLista(){
     const q=S.busca.toLowerCase();
     items=items.filter(m=>(m.descricao||'').toLowerCase().includes(q)||(m.setor||'').toLowerCase().includes(q)||(m._loja||'').toLowerCase().includes(q));
   }
-  const ord={pendente_urgente:0,pendente:1,andamento:2,resolvido:3};
+  const ti=tipoInfo(S.filtro);
+  const pendentes=items.filter(m=>m.status!=='Resolvido');
+  const resolvidos=items.filter(m=>m.status==='Resolvido');
+  const ordPend={pendente_urgente:0,pendente:1,andamento:2};
   const getPrioKey=m=>{ const sc=scCls(m.status); return (sc==='pendente'&&m.prioridade==='Urgente')?'pendente_urgente':sc; };
-  items=[...items].sort((a,b)=>{
-    const da=ord[getPrioKey(a)],db=ord[getPrioKey(b)];
+  pendentes.sort((a,b)=>{
+    const da=ordPend[getPrioKey(a)],db=ordPend[getPrioKey(b)];
     if(da!==db) return da-db;
     return (b._data||'').localeCompare(a._data||'');
   });
-  const ti=tipoInfo(S.filtro);
-  const pend=items.filter(m=>m.status!=='Resolvido').length;
+  resolvidos.sort((a,b)=>(b.resolved_at||b._data||'').localeCompare(a.resolved_at||a._data||''));
+
   const sectionHdr=`<div style="display:flex;align-items:center;gap:10px;padding:2px 0 10px;border-bottom:1px solid var(--card2);margin-bottom:4px">
     <span style="font-size:26px;line-height:1">${ti.icon}</span>
     <div>
       <div style="font-size:15px;font-weight:800;color:var(--ouro)">${esc(S.filtro)}</div>
-      <div style="font-size:10px;color:var(--mut)">${items.length} item${items.length!==1?'s':''} · ${pend} pendente${pend!==1?'s':''}</div>
+      <div style="font-size:10px;color:var(--mut)">${items.length} item${items.length!==1?'s':''} · ${pendentes.length} pendente${pendentes.length!==1?'s':''}</div>
     </div>
   </div>`;
   if(!items.length){
@@ -830,62 +893,17 @@ function renderLista(){
     $('lista').innerHTML=sectionHdr+`<div class="empty-state"><div class="empty-icon">✅</div><div>Nenhuma manutenção neste tipo em ${periodoLabel}${S.lojaFiltro!=='Todas'?' · '+esc(S.lojaFiltro):''}</div></div>`;
     return;
   }
-  $('lista').innerHTML=sectionHdr+items.map(m=>{
-    const tipo=m.tipo||'Estrutura';
-    const ti=tipoInfo(tipo);
-    const sc=scCls(m.status);
-    const statusLabel=m.status==='Em andamento'?'🔄 Em andamento':m.status==='Resolvido'?'✅ Resolvido':'⏳ Pendente';
-    const confirBadge=m._source==='oficial'
-      ?(m.confirmado_loja
-        ?`<span class="bstatus resolvido" style="background:#0a2818;color:#5cb85c;">✅ Conf. pela loja</span>`
-        :m.status==='Resolvido'
-          ?`<span class="bstatus andamento" style="background:#1a1a08;color:#f0c050;">⏳ Aguard. conf. loja</span>`
-          :'')
-      :'';
-    let slaBadge='';
-    if(m.status!=='Resolvido'&&m._data){
-      const slaConf=SLA_CONFIG[tipo];
-      if(slaConf){
-        const diffMs=Date.now()-new Date(m._data).getTime();
-        const diffDias=Math.floor(diffMs/(1000*60*60*24));
-        if(diffDias>slaConf.critico) slaBadge=`<span class="bstatus" style="background:#3a0a0a;color:#f87171;">🚨 ${diffDias}d — CRÍTICO</span>`;
-        else if(diffDias>slaConf.normal) slaBadge=`<span class="bstatus" style="background:#2a1a0a;color:#f0a050;">⚠️ ${diffDias}d — prazo excedido</span>`;
-        else if(diffDias>0) slaBadge=`<span class="bstatus" style="background:#0a1a2a;color:#60a0c0;font-size:9px;">⏰ ${diffDias}d</span>`;
-      }
-    }
-    return `<div class="icard ${sc}">
-      <div class="ihead">
-        <div class="ibadges">
-          <span class="btipo" style="color:${ti.cor}">${ti.icon} ${esc(tipo)}</span>
-          <span class="bstatus ${sc}">${statusLabel}</span>
-          ${m.prioridade==='Urgente'?`<span class="bstatus" style="background:#3a0a0a;color:#f87171;">🔴 Urgente</span>`:''}
-          ${m._source==='oficial'?`<span class="btipo" style="color:#a78bfa">📋 Oficial</span>`:''}
-          ${confirBadge}
-          ${slaBadge}
-          ${m.resolved_at&&m.status==='Resolvido'?`<span style="font-size:9px;color:#3a5a3a;padding:2px 7px;border-radius:99px;background:#0a2010;">✓ ${new Date(m.resolved_at).toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',year:'2-digit'})}</span>`:''}
-        </div>
-        <span class="imeta">${fmtData(m._data)}</span>
-      </div>
-      <div class="ibody">
-        <div class="iloja">${esc(m._loja||'—')}</div>
-        <div class="isetor">Setor: ${esc(m.setor||'—')}</div>
-        ${m.descricao?`<div class="idesc">${esc(m.descricao)}</div>`:''}
-        ${m.contato?`<div class="icontato">📞 ${esc(m.contato)}</div>`:''}
-        ${m.fotoBase64?`<img class="foto-thumb" src="${m.fotoBase64}" onclick="abrirFoto(this)" title="Ver foto">`:''}
-      </div>
-      <div class="iactions">
-        <select class="status-sel" id="sel-${m.id}">
-          <option value="Pendente" ${m.status==='Pendente'?'selected':''}>⏳ Pendente</option>
-          <option value="Em andamento" ${m.status==='Em andamento'?'selected':''}>🔄 Em andamento</option>
-          <option value="Resolvido" ${m.status==='Resolvido'?'selected':''}>✅ Resolvido</option>
-        </select>
-        <button class="btn-save" onclick="salvarStatus(${esc(JSON.stringify(m._loja))},${esc(JSON.stringify(m._dataUltima||m._data))},${esc(JSON.stringify(String(m.id)))})">Salvar</button>
-        ${m._source==='oficial'&&!isMaster()&&m.status==='Resolvido'&&!m.confirmado_loja
-          ?`<button class="btn-save" style="background:var(--ok);font-size:11px;padding:6px 10px" onclick="confirmarResolucao(${esc(JSON.stringify(String(m.id)))},${esc(JSON.stringify(m._loja))})">✅ Confirmar</button>`
-          :''}
-      </div>
-    </div>`;
-  }).join('');
+  const pendHtml=pendentes.length
+    ? pendentes.map(_itemCardHtml).join('')
+    : `<div class="empty-state" style="padding:20px 10px"><div class="empty-icon">✅</div><div>Nada pendente neste tipo</div></div>`;
+  const resolvHtml = resolvidos.length ? `
+    <div onclick="toggleResolvidosManut()" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;padding:12px 4px;margin-top:14px;border-top:1px solid var(--card2)">
+      <span style="font-size:12px;font-weight:800;color:var(--ok)">✅ Resolvidos · ${resolvidos.length}</span>
+      <span style="font-size:11px;color:var(--mut)">${S.mostrarResolvidos?'▲ ocultar':'▼ mostrar'}</span>
+    </div>
+    ${S.mostrarResolvidos ? resolvidos.map(_itemCardHtml).join('') : ''}
+  ` : '';
+  $('lista').innerHTML=sectionHdr+`<div style="font-size:11px;font-weight:800;color:#f87171;text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">⏳ Pendentes · ${pendentes.length}</div>`+pendHtml+resolvHtml;
 }
 
 // ─── STATUS UPDATE ────────────────────────────────────────
