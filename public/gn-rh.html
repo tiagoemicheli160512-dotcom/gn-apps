@@ -84,7 +84,7 @@ header{height:var(--hdr-h);border-bottom:1px solid var(--border);background:var(
 
 /* ── BOTTOM NAV ─────────────────────────────────── */
 nav{height:var(--nav-h);border-top:1px solid var(--border);background:var(--surf);
-  display:grid;grid-template-columns:repeat(7,1fr);flex-shrink:0;position:sticky;bottom:0;z-index:10}
+  display:grid;grid-template-columns:repeat(8,1fr);flex-shrink:0;position:sticky;bottom:0;z-index:10}
 .nav-btn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
   font-size:10px;color:var(--muted);padding:6px 0;position:relative;transition:color .15s}
 .nav-btn.ativo{color:var(--accent)}
@@ -307,6 +307,10 @@ nav{height:var(--nav-h);border-top:1px solid var(--border);background:var(--surf
       <span class="nav-icon">📋</span>
       <span class="nav-label">Dossiê</span>
     </button>
+    <button class="nav-btn" data-tab="vencimentos" onclick="setTab('vencimentos')">
+      <span class="nav-icon">📅</span>
+      <span class="nav-label">Boletos</span>
+    </button>
     <button class="nav-btn" onclick="window.location.href='/gn-comissoes-mestra.html'">
       <span class="nav-icon">👑</span>
       <span class="nav-label">Mestra</span>
@@ -408,6 +412,9 @@ let S = {
   dossPeriodoMes: new Date().toISOString().slice(0, 7),
   dossPeriodoMesIni: new Date().toISOString().slice(0, 7),
   dossPeriodoMesFim: new Date().toISOString().slice(0, 7),
+  // Boletos/Vencimentos
+  vencimentosData: [],   // [{lojaChk, lojaDisplay, fornecedor, nf, dataNF, vencimento, diff, total}]
+  vencLoja: '',          // '' = todas
 };
 
 // ══════════════════════════════════════════════
@@ -1714,6 +1721,59 @@ async function carregarAvarias() {
 }
 
 // ══════════════════════════════════════════════
+// DATA — VENCIMENTOS (Boletos)
+// ══════════════════════════════════════════════
+// Mesma fonte usada pela aba "Entradas" do gn-lojas.html (gn_lojas.all_data.entradasAll,
+// preenchido ao lançar nota fiscal). Aqui só lemos e consolidamos por loja — nunca gravamos.
+// gn-lojas.html grava usando seu próprio "loja" (formato userKey, ex. "SÃO GONÇALO"), que
+// difere do comKey usado no resto do gn-rh — por isso buscamos as duas chaves por loja.
+async function carregarVencimentos() {
+  const keys = [...new Set(LOJAS.flatMap(l => [l.comKey, l.userKey]))];
+  const { data, error } = await db.from('gn_lojas')
+    .select('loja,all_data')
+    .in('loja', keys);
+  if (error) throw error;
+
+  const hojeD = new Date(); hojeD.setHours(0, 0, 0, 0);
+  const itens = [];
+  LOJAS.forEach(lojaObj => {
+    const rowsLoja = (data || []).filter(row => row.loja === lojaObj.comKey || row.loja === lojaObj.userKey);
+    if (!rowsLoja.length) return;
+    // Dedup por fornecedor+NF+vencimento (soma o valor caso a mesma NF apareça nas duas chaves)
+    const nfMap = {};
+    rowsLoja.forEach(row => {
+      const entradasAll = row.all_data?.entradasAll || {};
+      const prefix = row.loja + '|';
+      Object.entries(entradasAll).forEach(([k, entries]) => {
+        if (!k.startsWith(prefix) || !Array.isArray(entries)) return;
+        entries.forEach(e => {
+          const vencs = (e.vencimentos && e.vencimentos.length) ? e.vencimentos : (e.vencimento ? [e.vencimento] : []);
+          vencs.forEach(venc => {
+            if (!venc) return;
+            const key = (e.fornecedor || '—') + '|' + (e.nf || 'S/N') + '|' + venc;
+            if (!nfMap[key]) {
+              nfMap[key] = {
+                lojaChk: lojaObj.chkKey, lojaDisplay: lojaObj.display,
+                fornecedor: (e.fornecedor || '—').trim().toUpperCase(),
+                nf: e.nf || 'S/N', dataNF: e.dataNF || '', vencimento: venc, total: 0,
+              };
+            }
+            nfMap[key].total += (e.qtd || 0) * (e.custoUnit || 0);
+          });
+        });
+      });
+    });
+    Object.values(nfMap).forEach(it => {
+      const d = new Date(it.vencimento + 'T00:00:00');
+      it.diff = Math.ceil((d - hojeD) / 86400000);
+      itens.push(it);
+    });
+  });
+  itens.sort((a, b) => a.vencimento.localeCompare(b.vencimento));
+  S.vencimentosData = itens;
+}
+
+// ══════════════════════════════════════════════
 // RENDER — AVARIAS (Tab 5)
 // ══════════════════════════════════════════════
 function renderAvarias() {
@@ -1919,6 +1979,7 @@ function renderContent() {
       if (S.tab === 'comparativo') { await carregarComparativo(); renderComparativo();  }
       if (S.tab === 'avarias')     { await carregarAvarias();     renderAvarias();      }
       if (S.tab === 'dossie')      { await carregarDossie();      renderDossie();       }
+      if (S.tab === 'vencimentos'){ await carregarVencimentos(); renderVencimentos();  }
     } catch(e) {
       $('content').innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-text">Erro ao carregar: ${e.message}</div></div>`;
     }
@@ -3460,6 +3521,68 @@ function gerarDossPDF() {
 }
 
 // ══════════════════════════════════════════════
+// RENDER — VENCIMENTOS / BOLETOS (Tab 7)
+// ══════════════════════════════════════════════
+function filtrarVencLoja(chkKey) {
+  S.vencLoja = chkKey;
+  renderVencimentos();
+}
+
+function renderVencimentos() {
+  const lojaFiltros = [
+    `<button class="ftab${S.vencLoja===''?' ativo':''}" onclick="filtrarVencLoja('')">Todas</button>`,
+    ...LOJAS.map(l => `<button class="ftab${S.vencLoja===l.chkKey?' ativo':''}" onclick="filtrarVencLoja('${l.chkKey}')">${l.display}</button>`)
+  ].join('');
+
+  const itens = S.vencLoja ? S.vencimentosData.filter(it => it.lojaChk === S.vencLoja) : S.vencimentosData;
+
+  const grupos = { vencido: [], hoje: [], semana: [], mes: [], futuro: [] };
+  itens.forEach(it => {
+    if (it.diff < 0) grupos.vencido.push(it);
+    else if (it.diff === 0) grupos.hoje.push(it);
+    else if (it.diff <= 7) grupos.semana.push(it);
+    else if (it.diff <= 30) grupos.mes.push(it);
+    else grupos.futuro.push(it);
+  });
+  const totalVenc = grupos.vencido.reduce((s,it)=>s+it.total,0) + grupos.hoje.reduce((s,it)=>s+it.total,0);
+
+  const row = (it, cor) => `<div style="display:flex;justify-content:space-between;align-items:flex-start;padding:8px 12px;border-bottom:1px solid var(--border)">
+    <div style="flex:1;min-width:0">
+      <div style="font-size:12px;font-weight:700">${esc(it.fornecedor)}</div>
+      <div style="font-size:10px;color:var(--muted)">${esc(it.lojaDisplay)} · NF ${esc(it.nf)}${it.dataNF?' · '+fmtBRShort(it.dataNF):''}</div>
+    </div>
+    <div style="text-align:right;flex-shrink:0;margin-left:10px">
+      <div style="font-size:12px;font-weight:800;color:${cor}">${fmtBRShort(it.vencimento)}</div>
+      <div style="font-size:10px;color:${cor}">${it.diff<0?Math.abs(it.diff)+'d atraso':it.diff===0?'Hoje!':'em '+it.diff+'d'}</div>
+      ${it.total>0?`<div style="font-size:10px;color:var(--green)">${money(it.total)}</div>`:''}
+    </div>
+  </div>`;
+  const bloco = (label, cor, lista) => lista.length ? `<div class="card" style="margin-bottom:10px;padding:0;overflow:hidden">
+    <div style="font-size:10px;font-weight:800;color:${cor};text-transform:uppercase;letter-spacing:.5px;padding:8px 12px;background:${cor}18">${label} · ${lista.length}</div>
+    ${lista.map(it=>row(it,cor)).join('')}
+  </div>` : '';
+
+  const content = itens.length === 0
+    ? `<div class="empty"><div class="empty-icon">📅</div><div class="empty-text">Nenhum vencimento registrado${S.vencLoja?' para esta loja':''}.<br>Lançado ao dar entrada de nota fiscal no app Lojas.</div></div>`
+    : `${bloco('🔴 Vencido', 'var(--red)', grupos.vencido)}
+       ${bloco('🟠 Vence hoje', 'var(--amber)', grupos.hoje)}
+       ${bloco('🟡 Próximos 7 dias', 'var(--amber)', grupos.semana)}
+       ${bloco('🔵 Próximos 30 dias', 'var(--accent)', grupos.mes)}
+       ${bloco('✅ Futuros', 'var(--green)', grupos.futuro)}`;
+
+  $('content').innerHTML = `
+    <div class="sec-header">
+      <div class="sec-title">Boletos / Vencimentos</div>
+    </div>
+    <div class="filter-row">${lojaFiltros}</div>
+    <div class="stat-row" style="grid-template-columns:repeat(2,1fr)">
+      <div class="stat ${totalVenc>0?'r':''}"><div class="stat-val num" style="font-size:16px">${money(totalVenc)}</div><div class="stat-lbl">A pagar agora</div></div>
+      <div class="stat"><div class="stat-val">${itens.length}</div><div class="stat-lbl">Boleto(s)</div></div>
+    </div>
+    ${content}`;
+}
+
+// ══════════════════════════════════════════════
 // LOGIN + INIT
 // ══════════════════════════════════════════════
 // ── CONTROLE DE HORÁRIO DE ACESSO (cargo rh) ─────────────────────
@@ -3589,7 +3712,7 @@ async function iniciarApp() {
 
   // Ir para a primeira aba permitida
   const primeiraAba = S.abasPermitidas
-    ? (['operacoes','financeiro','rh','comparativo','avarias','dossie'].find(t => S.abasPermitidas.has(t)) || 'operacoes')
+    ? (['operacoes','financeiro','rh','comparativo','avarias','dossie','vencimentos'].find(t => S.abasPermitidas.has(t)) || 'operacoes')
     : 'operacoes';
   setTab(primeiraAba);
 
