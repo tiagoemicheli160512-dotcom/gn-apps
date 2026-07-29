@@ -336,17 +336,11 @@ const db = supabase.createClient(SUPA_URL, SUPA_KEY);
 // chkKey   → checklist_diario.loja / gn_caixa_fechamento.loja / gn_banco_horas.loja
 // comKey   → gn_lojas.loja (comissões)
 const LOJAS = GN_LOJAS;
+const esc = window.escapeHtml; // escapa texto livre (nomes, observações, motivos) antes de inserir em innerHTML
 
-// Mapa de comKey → slug usado em gn_trios_agenda (mesma tabela usada pelo checklist/pedidos)
-const TRIOS_LOJA_SLUG = {
-  'BANGU':'bangu','CAXIAS':'caxias','SAO_GONCALO':'sao_goncalo',
-  'NORTE':'norte','BOULEVARD':'boulevard','NOVA_AMERICA':'nova_america',
-  'CAMPO_GRANDE':'campo_grande','ITAQUERA':'itaquera','GUARULHOS':'guarulhos',
-  'NOVA_IGUACU':'nova_iguacu'
-};
+// Slug usado em gn_trios_agenda — fonte única em gn-lojas-config.js (trioLojaSlugByComKey)
 function trioLojaSlug(comKey) {
-  if (!comKey) return null;
-  return TRIOS_LOJA_SLUG[comKey] || comKey.toLowerCase().replace(/[\s_]+/g,'_');
+  return window.trioLojaSlugByComKey ? window.trioLojaSlugByComKey(comKey) : null;
 }
 // Bandas de tarde (13h) caem no turno DIA, de noite (19h) no turno NOITE
 function trioTurnoFor(horarioInicio) {
@@ -1038,11 +1032,11 @@ function renderFinanceiro() {
             const cache  = parseFloat(t.cache) || 0;
             const couver = parseFloat(t.couver_valor) || 0;
             if (t.banda_nao_veio) {
-              return `<div style="margin-top:3px;font-size:9px;background:var(--red-bg);border-radius:5px;padding:2px 6px;color:var(--red);font-weight:600">🎵 ${t.artista} — não veio${t.banda_nao_veio_motivo?': '+t.banda_nao_veio_motivo:''} · sem pagamento</div>`;
+              return `<div style="margin-top:3px;font-size:9px;background:var(--red-bg);border-radius:5px;padding:2px 6px;color:var(--red);font-weight:600">🎵 ${esc(t.artista)} — não veio${t.banda_nao_veio_motivo?': '+esc(t.banda_nao_veio_motivo):''} · sem pagamento</div>`;
             }
             const valorPagar = Math.max(0, cache - couver);
             const pendente = !t.presenca_confirmada ? ' <span style="opacity:.75">(pendente)</span>' : '';
-            return `<div style="margin-top:3px;font-size:9px;background:var(--amber-bg);border-radius:5px;padding:2px 6px;color:var(--amber);font-weight:600">🎵 ${t.artista} · ${money(valorPagar)} a pagar${pendente}</div>`;
+            return `<div style="margin-top:3px;font-size:9px;background:var(--amber-bg);border-radius:5px;padding:2px 6px;color:var(--amber);font-weight:600">🎵 ${esc(t.artista)} · ${money(valorPagar)} a pagar${pendente}</div>`;
           }).join('');
           const hasComps   = Object.keys(S.caixaComprovantes[r.id] || {}).length > 0;
           const despRow    = (S.caixaDespesas?.[r.id] || []);
@@ -1362,7 +1356,7 @@ function renderRH() {
       }).filter(Boolean).join('');
       return `<tr>
         <td class="nome-col" style="min-width:120px;padding:8px 10px">
-          <div style="font-weight:700;font-size:12px">${f.nome}</div>
+          <div style="font-weight:700;font-size:12px">${esc(f.nome)}</div>
           <div style="display:flex;gap:3px;flex-wrap:wrap;margin-top:2px;align-items:center">${f.setor ? `<span style="font-size:9px;color:var(--muted)">${f.setor}</span>` : ''}${statusBadge}${resumoBadges ? ' '+resumoBadges : ''}${docThumbsRH ? ' '+docThumbsRH : ''}</div>
           <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:2px;align-items:center">${turnoPill}${horPill}</div>
         </td>
@@ -1441,7 +1435,7 @@ function renderRH() {
         const valorColor = vh > 0 ? (totalFunc > 0 ? 'color:var(--green)' : 'color:var(--red)') : 'color:var(--muted)';
         valorCell = `<td class="num" style="text-align:center;border-left:1px solid var(--border);font-weight:700;${valorColor}">${vh > 0 ? _rhFmtR(Math.abs(totalFunc)*vh) : '—'}</td>`;
       }
-      return `<tr style="${rowBg}"><td class="nome-col">${nome}${negBadge}</td>${celulas}${totalCell}${valorCell}</tr>`;
+      return `<tr style="${rowBg}"><td class="nome-col">${esc(nome)}${negBadge}</td>${celulas}${totalCell}${valorCell}</tr>`;
     }).join('');
 
     const totHtml = meses.map(m => {
@@ -1621,31 +1615,78 @@ function navegarComp(delta) {
 
 async function marcarOkComp(lojaChkKey, ini) {
   if (!S.compOk) S.compOk = {};
-  S.compOk[`${lojaChkKey}|${ini}`] = true;
+  const key = `${lojaChkKey}|${ini}`;
+  S.compOk[key] = true;
   renderComparativo();
   const lojaObj = LOJAS.find(l => l.chkKey === lojaChkKey);
   if (!lojaObj) return;
   try {
-    const { data: rows } = await db.from('gn_lojas').select('loja,all_data').eq('loja', lojaObj.comKey);
+    const { data: rows, error: errSel } = await db.from('gn_lojas').select('loja,all_data').eq('loja', lojaObj.comKey);
+    if (errSel) throw errSel;
     const row = (rows || [])[0];
     const allData = JSON.parse(JSON.stringify(row?.all_data || {}));
     if (!allData.compOk) allData.compOk = {};
     allData.compOk[ini] = true;
-    await db.from('gn_lojas').upsert({ loja: lojaObj.comKey, all_data: allData }, { onConflict: 'loja' });
-  } catch(e) { console.error('compOk save:', e); }
+    const { error: errUpd } = await db.from('gn_lojas').upsert({ loja: lojaObj.comKey, all_data: allData }, { onConflict: 'loja' });
+    if (errUpd) throw errUpd;
+    toast('✅ Marcado como OK!', 'ok');
+  } catch(e) {
+    delete S.compOk[key];
+    renderComparativo();
+    toast('Erro ao salvar: ' + (e.message || e), 'err');
+  }
 }
 
 // ══════════════════════════════════════════════
 // NAV + RENDER
 // ══════════════════════════════════════════════
+// ══════════════════════════════════════════════
+// REALTIME — aviso não-intrusivo de atualização (aba Avarias)
+// ══════════════════════════════════════════════
+// Só avisa que há dado novo (banner clicável); nunca re-renderiza sozinho,
+// para não atrapalhar quem está no meio de uma ação. Se falhar por
+// qualquer motivo, a aba continua funcionando normalmente no modo manual
+// de sempre (recarregar ao trocar de aba/filtro).
+let _rtChannel = null;
+function _rtUnsubscribe() {
+  if (_rtChannel) {
+    try { db.removeChannel(_rtChannel); } catch(e) {}
+    _rtChannel = null;
+  }
+  const banner = $('rt-banner');
+  if (banner) banner.remove();
+}
+function _rtSubscribeAvarias() {
+  try {
+    _rtChannel = db.channel('gn-rh-avarias-rt')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'gn_lojas' }, () => {
+        if (S.tab === 'avarias') _rtShowBanner();
+      })
+      .subscribe();
+  } catch(e) { console.error('realtime avarias:', e); }
+}
+function _rtShowBanner() {
+  if ($('rt-banner') || S.tab !== 'avarias') return;
+  const content = $('content');
+  if (!content) return;
+  const el = document.createElement('div');
+  el.id = 'rt-banner';
+  el.style.cssText = 'position:sticky;top:0;z-index:50;background:var(--accent,#0969da);color:#fff;padding:9px 14px;border-radius:8px;margin-bottom:10px;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer';
+  el.innerHTML = '<span>🔄 Há atualizações nas avarias</span><span style="text-decoration:underline">Atualizar</span>';
+  el.onclick = () => { el.remove(); recarregar(); };
+  content.prepend(el);
+}
+
 function setTab(tab) {
   if (S.abasPermitidas && !S.abasPermitidas.has(tab)) return;
+  _rtUnsubscribe();
   S.tab = tab;
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('ativo', b.dataset.tab===tab));
   document.querySelectorAll('.sidebar-link').forEach(l => l.classList.remove('active'));
   const sl = document.querySelector(`.sidebar-link[data-sidebar-tab="${tab}"]`);
   if (sl) sl.classList.add('active');
   renderContent();
+  if (tab === 'avarias') _rtSubscribeAvarias();
 }
 
 // ══════════════════════════════════════════════
@@ -3191,7 +3232,7 @@ function renderDossie() {
       return `<div class="doss-card">
         <div class="doss-hdr" onclick="toggleDossExpand('${nomeSafeAttr}')">
           <div style="flex:1;min-width:0;overflow:hidden">
-            <div class="doss-nome">${nome}</div>
+            <div class="doss-nome">${esc(nome)}</div>
             ${metaLine ? `<div class="doss-meta">${metaLine}</div>` : ''}
           </div>
           <div style="display:flex;align-items:center;gap:5px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
@@ -3348,7 +3389,7 @@ function gerarDossPDF() {
     const jColor = (e.justificativas||0) > 0 ? '#ec4899' : 'inherit';
     const bg = i % 2 === 0 ? '#fff' : '#f6f8fa';
     return `<tr style="background:${bg}">
-      <td>${nome}</td>
+      <td>${esc(nome)}</td>
       <td>${e.setor || '—'}</td>
       <td>${e.turno || '—'}</td>
       <td>${e.horario || '—'}</td>
@@ -3575,7 +3616,7 @@ function verFotoDoc(funcIdx, tipo) {
   abrirModal(`
     <div class="modal-handle"></div>
     <div class="modal-title" style="font-size:14px;gap:8px">
-      <div><span style="color:${cor};font-weight:800">${tipoLabel}</span><span style="color:var(--muted);font-size:12px;font-weight:600;margin-left:6px">${nome}</span></div>
+      <div><span style="color:${cor};font-weight:800">${tipoLabel}</span><span style="color:var(--muted);font-size:12px;font-weight:600;margin-left:6px">${esc(nome)}</span></div>
       <button class="modal-close" onclick="fecharModal()">✕</button>
     </div>
     <img src="${foto}" style="width:100%;border-radius:8px;max-height:55dvh;object-fit:contain;background:var(--surf2);display:block">
@@ -3615,14 +3656,14 @@ function _pdfDocRH() {
   const loja = S.rhLoja?.display || '';
   const win = window.open('', '_blank');
   if (!win) return;
-  win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${tipoLabel} - ${nome}</title>
+  win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(tipoLabel)} - ${esc(nome)}</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,sans-serif;padding:24px;max-width:640px;margin:0 auto}
 h2{font-size:20px;font-weight:800;margin-bottom:6px}.meta{font-size:13px;color:#555;margin-bottom:16px;line-height:1.8}
 img{max-width:100%;border-radius:8px;display:block}.btn{margin-top:16px;background:#0969da;color:#fff;border:none;border-radius:6px;padding:10px 20px;font-size:13px;font-weight:700;cursor:pointer}
 @media print{.btn{display:none}}</style></head>
 <body>
-<h2>${tipoLabel}</h2>
-<div class="meta">Funcionário: <strong>${nome}</strong><br>Loja: <strong>${loja}</strong><br>Data: <strong>${new Date().toLocaleDateString('pt-BR')}</strong></div>
+<h2>${esc(tipoLabel)}</h2>
+<div class="meta">Funcionário: <strong>${esc(nome)}</strong><br>Loja: <strong>${esc(loja)}</strong><br>Data: <strong>${new Date().toLocaleDateString('pt-BR')}</strong></div>
 ${foto ? `<img src="${foto}">` : '<p style="color:#999">Sem imagem</p>'}
 <button class="btn" onclick="window.print()">📄 Imprimir / Salvar PDF</button>
 </body></html>`);
