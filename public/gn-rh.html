@@ -337,6 +337,24 @@ const db = supabase.createClient(SUPA_URL, SUPA_KEY);
 // comKey   → gn_lojas.loja (comissões)
 const LOJAS = GN_LOJAS;
 
+// Mapa de comKey → slug usado em gn_trios_agenda (mesma tabela usada pelo checklist/pedidos)
+const TRIOS_LOJA_SLUG = {
+  'BANGU':'bangu','CAXIAS':'caxias','SAO_GONCALO':'sao_goncalo',
+  'NORTE':'norte','BOULEVARD':'boulevard','NOVA_AMERICA':'nova_america',
+  'CAMPO_GRANDE':'campo_grande','ITAQUERA':'itaquera','GUARULHOS':'guarulhos',
+  'NOVA_IGUACU':'nova_iguacu'
+};
+function trioLojaSlug(comKey) {
+  if (!comKey) return null;
+  return TRIOS_LOJA_SLUG[comKey] || comKey.toLowerCase().replace(/[\s_]+/g,'_');
+}
+// Bandas de tarde (13h) caem no turno DIA, de noite (19h) no turno NOITE
+function trioTurnoFor(horarioInicio) {
+  if (!horarioInicio) return null;
+  const h = parseInt(String(horarioInicio).split(':')[0], 10);
+  return isNaN(h) ? null : (h < 18 ? 'DIA' : 'NOITE');
+}
+
 const SAIDA_LABEL = {
   'taxa_cartao':'Taxa Cartão','gorjeta_garcom':'Gorjeta Garçom',
   'manutencao':'Manutenção','material_limpeza':'Material Limpeza',
@@ -368,6 +386,7 @@ let S = {
   comissaoFotoSuportado: true,
   fotosCaixaSistema: {}, // {`${userKey}|${data}`: foto_base64}
   caixaConferencias: {}, // {fechamento_id: {conferido_em, conferido_por, tem_divergencia, itens}}
+  trioBandas: {},        // {`${userKey}|${data}`: [{artista,cache,couver_valor,presenca_confirmada,banda_nao_veio,...}]}
   // RH
   rhLoja: LOJAS[0],
   rhMes: null,           // 'YYYY-MM'
@@ -679,6 +698,27 @@ async function carregarFinanceiro() {
       });
     }
   } catch(_) {}
+
+  // Bandas do dia (gn_trios_agenda) — cachê/consumação para exibir no fechamento
+  S.trioBandas = {};
+  try {
+    const lojasEscopo = S.finLoja ? LOJAS.filter(l => l.chkKey === S.finLoja) : LOJAS;
+    const trioSlugs = [...new Set(lojasEscopo.map(l => trioLojaSlug(l.comKey)).filter(Boolean))];
+    if (trioSlugs.length > 0) {
+      const { data: trios, error: trioErr } = await db.from('gn_trios_agenda')
+        .select('loja,data,horario_inicio,artista,cache,couver_valor,presenca_confirmada,banda_nao_veio,banda_nao_veio_motivo')
+        .gte('data', ini).lte('data', fim).in('loja', trioSlugs);
+      if (!trioErr) {
+        (trios || []).forEach(t => {
+          const lojaObj = lojasEscopo.find(l => trioLojaSlug(l.comKey) === t.loja);
+          if (!lojaObj) return;
+          const key = `${lojaObj.userKey}|${t.data}`;
+          if (!S.trioBandas[key]) S.trioBandas[key] = [];
+          S.trioBandas[key].push(t);
+        });
+      }
+    }
+  } catch(_) { S.trioBandas = {}; }
 }
 
 // ══════════════════════════════════════════════
@@ -992,6 +1032,18 @@ function renderFinanceiro() {
           const statusBadge = `<span class="badge ${STATUS_CLASS[r.status]||'badge-muted'}" style="font-size:9px">${r.status}</span>`;
           const totalReal  = r.total_real != null ? parseFloat(r.total_real) : null;
           const fotoB64    = S.fotosCaixaSistema?.[`${lojaChk}|${r.data}`];
+          const bandasDia  = (S.trioBandas?.[`${lojaChk}|${r.data}`] || [])
+            .filter(t => { const tt = trioTurnoFor(t.horario_inicio); return !tt || tt === r.turno; });
+          const bandaHtml  = bandasDia.map(t => {
+            const cache  = parseFloat(t.cache) || 0;
+            const couver = parseFloat(t.couver_valor) || 0;
+            if (t.banda_nao_veio) {
+              return `<div style="margin-top:3px;font-size:9px;background:var(--red-bg);border-radius:5px;padding:2px 6px;color:var(--red);font-weight:600">🎵 ${t.artista} — não veio${t.banda_nao_veio_motivo?': '+t.banda_nao_veio_motivo:''} · sem pagamento</div>`;
+            }
+            const valorPagar = Math.max(0, cache - couver);
+            const pendente = !t.presenca_confirmada ? ' <span style="opacity:.75">(pendente)</span>' : '';
+            return `<div style="margin-top:3px;font-size:9px;background:var(--amber-bg);border-radius:5px;padding:2px 6px;color:var(--amber);font-weight:600">🎵 ${t.artista} · ${money(valorPagar)} a pagar${pendente}</div>`;
+          }).join('');
           const hasComps   = Object.keys(S.caixaComprovantes[r.id] || {}).length > 0;
           const despRow    = (S.caixaDespesas?.[r.id] || []);
           const totalDesp  = despRow.reduce((a,d) => a + (parseFloat(d.valor)||0), 0);
@@ -1010,7 +1062,7 @@ function renderFinanceiro() {
             : `<td style="text-align:center"><button onclick="verConferencia('${lojaChk}','${r.data}','${r.id}')" style="background:none;border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:12px;padding:2px 7px;color:var(--muted);opacity:${hasDetalhes?'1':'0.5'}" title="Conferir fechamento">🔍</button>${confBadge}</td>`;
 
           return `<tr>
-            <td>${fmtBRShort(r.data)}</td>
+            <td>${fmtBRShort(r.data)}${bandaHtml}</td>
             <td style="color:var(--muted)">${r.turno}</td>
             <td>${statusBadge}</td>
             <td class="num" style="text-align:right;font-weight:700">${totalCell}</td>
