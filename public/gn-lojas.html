@@ -1117,7 +1117,9 @@ function enviarAlertaWpp() {
 /* ── ALERTAS DE ENTREGA ATRASADA ───────────────────────── */
 function getEntregasAtrasadas() {
   const hoje = wkKey(new Date());
-  return provisoesEntrega.filter(p => p.data_entrega && p.data_entrega < hoje);
+  // Quando há período (data_entrega_fim), o prazo só vence no fim da janela —
+  // a entrega pode chegar validamente em qualquer dia até lá.
+  return provisoesEntrega.filter(p => p.data_entrega && (p.data_entrega_fim || p.data_entrega) < hoje);
 }
 function gerarMsgAlertaEntregasAtrasadas() {
   const at = getEntregasAtrasadas();
@@ -1127,7 +1129,9 @@ function gerarMsgAlertaEntregasAtrasadas() {
   const fR = v => Number(v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
   let msg = '🚨 *ENTREGA ATRASADA — '+loja+'*\n📅 '+dt+'\n\n⏰ *Prazo vencido sem confirmação:*\n\n';
   at.forEach(p => {
-    const dtEnt = p.data_entrega ? new Date(p.data_entrega+'T12:00:00').toLocaleDateString('pt-BR') : '—';
+    const fmtD = d => d ? new Date(d+'T12:00:00').toLocaleDateString('pt-BR') : '—';
+    const dtEnt = p.data_entrega_fim && p.data_entrega_fim !== p.data_entrega
+      ? fmtD(p.data_entrega)+' a '+fmtD(p.data_entrega_fim) : fmtD(p.data_entrega);
     msg += '▪️ *'+(p.fornecedor||'—')+'* — '+(p.gn_catalogo?.produto||'—')+'\n   Qtd: '+(p.qtd_prevista||0)+' '+(p.gn_catalogo?.und||'')+' | R$ '+fR(p.valor_previsto)+' | Previsto: '+dtEnt+'\n';
   });
   msg += '\n⚠️ Verificar com o fornecedor urgentemente!';
@@ -4985,7 +4989,7 @@ function render() {
           </div>
           ${at.slice(0,5).map(p=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid rgba(245,158,11,.15)">
             <span style="font-size:11px;color:#fcd34d;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.fornecedor||'—'} — ${p.gn_catalogo?.produto||'—'}</span>
-            <span style="font-size:10px;color:#f59e0b;flex-shrink:0;margin-left:8px;font-weight:700">📅 ${p.data_entrega}</span>
+            <span style="font-size:10px;color:#f59e0b;flex-shrink:0;margin-left:8px;font-weight:700">📅 ${p.data_entrega_fim || p.data_entrega}</span>
           </div>`).join('')}
           ${at.length>5?`<div style="font-size:10px;color:#94a3b8;margin-top:6px;text-align:center">+${at.length-5} mais → aba Entrega</div>`:''}
         </div>`;
@@ -5992,7 +5996,11 @@ function render() {
           const itensHtml=itens.map(prov=>{
             const produto=prov.gn_catalogo?.produto||'—';
             const und=prov.gn_catalogo?.und||'';
-            const dtDisplay=prov.data_entrega?new Date(prov.data_entrega+'T12:00:00').toLocaleDateString('pt-BR'):'';
+            const fmtD=d=>d?new Date(d+'T12:00:00').toLocaleDateString('pt-BR'):'';
+            const pedidoDisplay=fmtD(prov.gn_pedidos?.data_pedido);
+            const dtDisplay=prov.data_entrega_fim&&prov.data_entrega_fim!==prov.data_entrega
+              ? fmtD(prov.data_entrega)+' a '+fmtD(prov.data_entrega_fim)
+              : fmtD(prov.data_entrega);
             const qtdPrev=parseFloat(prov.qtd_prevista)||0;
             const valPrev=parseFloat(prov.valor_previsto)||0;
             const unitPrev=qtdPrev>0?valPrev/qtdPrev:0;
@@ -6000,7 +6008,8 @@ function render() {
               <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
                 <div style="flex:1;min-width:0">
                   <div style="font-size:12px;font-weight:600;color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${produto}</div>
-                  ${dtDisplay?`<div style="font-size:10px;color:#64748b;margin-top:1px">📅 ${dtDisplay}</div>`:''}
+                  ${pedidoDisplay?`<div style="font-size:10px;color:#64748b;margin-top:1px">🛒 Pedido em ${pedidoDisplay}</div>`:''}
+                  ${dtDisplay?`<div style="font-size:10px;color:#64748b;margin-top:1px">📅 Previsão: ${dtDisplay}</div>`:''}
                 </div>
                 <div style="text-align:right;flex-shrink:0;margin-left:8px">
                   <div style="font-size:13px;font-weight:800;color:#fbbf24">R$ ${valPrev.toFixed(2).replace('.',',')}</div>
@@ -7111,8 +7120,8 @@ async function carregarEntregas(silent) {
   try{
     const slug=LOJA_SLUG[loja]||loja.toLowerCase().replace(/ /g,'_');
     const [rowsPend,rowsHist]=await Promise.all([
-      sbRequest('gn_provisoes?loja_slug=eq.'+slug+'&status=eq.AGUARDANDO&select=*,gn_catalogo(produto,und)&order=data_entrega',{method:'GET'}),
-      sbRequest('gn_provisoes?loja_slug=eq.'+slug+'&status=in.(RECEBIDO_OK,DIVERGENCIA)&select=*,gn_catalogo(produto,und),gn_recebimentos(qtd_recebida,valor_recebido,validado_por,diferenca_qtd)&order=data_entrega.desc&limit=30',{method:'GET'})
+      sbRequest('gn_provisoes?loja_slug=eq.'+slug+'&status=eq.AGUARDANDO&select=*,gn_catalogo(produto,und),gn_pedidos(data_pedido)&order=data_entrega',{method:'GET'}),
+      sbRequest('gn_provisoes?loja_slug=eq.'+slug+'&status=in.(RECEBIDO_OK,DIVERGENCIA)&select=*,gn_catalogo(produto,und),gn_pedidos(data_pedido),gn_recebimentos(qtd_recebida,valor_recebido,validado_por,diferenca_qtd)&order=data_entrega.desc&limit=30',{method:'GET'})
     ]);
     provisoesEntrega=rowsPend||[];
     provisoesHistorico=rowsHist||[];
@@ -7157,7 +7166,9 @@ function gerarWppEntregas(){
     const totF=itens.reduce((a,p)=>a+(parseFloat(p.valor_previsto)||0),0);
     msg+=`\n🏭 *${forn}* — R$ ${fmtR(totF)}\n`;
     itens.forEach(p=>{
-      const dt=p.data_entrega?new Date(p.data_entrega+'T12:00:00').toLocaleDateString('pt-BR'):'';
+      const fmtD=d=>d?new Date(d+'T12:00:00').toLocaleDateString('pt-BR'):'';
+      const dt=p.data_entrega_fim&&p.data_entrega_fim!==p.data_entrega
+        ? fmtD(p.data_entrega)+' a '+fmtD(p.data_entrega_fim) : fmtD(p.data_entrega);
       const dtStr=dt?` (${dt})`:'';
       msg+=`  • ${p.gn_catalogo?.produto||'—'}: ${parseFloat(p.qtd_prevista)||0} ${p.gn_catalogo?.und||''} — R$ ${fmtR(p.valor_previsto)}${dtStr}\n`;
       total+=parseFloat(p.valor_previsto)||0;
