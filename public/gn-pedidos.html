@@ -1204,31 +1204,42 @@ async function confirmarPedido() {
 
         const forn = S.fornecedores.find(f => f.nome === prod.fornecedor);
         const diasForn = forn?.dias_entrega || [];
+        const isoDate = dt => dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
 
-        // Próxima data de entrega do fornecedor
-        let dataEntrega = null;
-        if (diasForn.length > 0) {
+        // Data (ou janela) de entrega do fornecedor: prazo em dias após o pedido tem
+        // prioridade sobre o cálculo por dia da semana, quando cadastrado.
+        let dataEntrega = null, dataEntregaFim = null;
+        if (forn?.prazo_dias_min != null) {
+          const ref = new Date();
+          const dMin = new Date(ref); dMin.setDate(ref.getDate() + forn.prazo_dias_min);
+          dataEntrega = isoDate(dMin);
+          if (forn.prazo_dias_max != null && forn.prazo_dias_max > forn.prazo_dias_min) {
+            const dMax = new Date(ref); dMax.setDate(ref.getDate() + forn.prazo_dias_max);
+            dataEntregaFim = isoDate(dMax);
+          }
+        } else if (diasForn.length > 0) {
           const ref = new Date();
           for (let d = 1; d <= 14; d++) {
             const dt = new Date(ref);
             dt.setDate(ref.getDate() + d);
             if (diasForn.includes(DIAS_SEMANA[dt.getDay()])) {
-              dataEntrega = dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
+              dataEntrega = isoDate(dt);
               break;
             }
           }
         }
 
         provisoes.push({
-          pedido_id:      S.pedidoAtual.id,
-          pedido_item_id: item.id || null,   // nullable agora
-          catalogo_id:    prod.id,
-          loja_slug:      loja.slug_pedido,
-          fornecedor:     prod.fornecedor,
-          data_entrega:   dataEntrega,
-          qtd_prevista:   item.qtd,
-          valor_previsto: item.qtd * (item.custo ?? prod.custo ?? 0),
-          status:         'AGUARDANDO'
+          pedido_id:       S.pedidoAtual.id,
+          pedido_item_id:  item.id || null,   // nullable agora
+          catalogo_id:     prod.id,
+          loja_slug:       loja.slug_pedido,
+          fornecedor:      prod.fornecedor,
+          data_entrega:    dataEntrega,
+          data_entrega_fim:dataEntregaFim,
+          qtd_prevista:    item.qtd,
+          valor_previsto:  item.qtd * (item.custo ?? prod.custo ?? 0),
+          status:          'AGUARDANDO'
         });
       });
     });
@@ -2087,12 +2098,27 @@ function renderFornecedores() {
             onclick="toggleDia('${f.id}','${d}')">${d}</button>`
         ).join('');
 
+        const pMin = f.prazo_dias_min ?? '';
+        const pMax = f.prazo_dias_max ?? '';
+        const prazoLbl = f.prazo_dias_min != null
+          ? (f.prazo_dias_max != null && f.prazo_dias_max !== f.prazo_dias_min
+              ? `${f.prazo_dias_min}–${f.prazo_dias_max} dias`
+              : `${f.prazo_dias_min} dia${f.prazo_dias_min===1?'':'s'}`)
+          : '';
+
         return `<div class="forn-item" id="forn-${f.id}">
           <div class="forn-item-header">
             <div class="forn-item-nome">${f.nome}</div>
-            <div style="font-size:11px;color:var(--muted)">${dias.length>0?dias.join(', '):'Sem dias'}</div>
+            <div style="font-size:11px;color:var(--muted)">${dias.length>0?dias.join(', '):'Sem dias'}${prazoLbl?' · '+prazoLbl:''}</div>
           </div>
           <div class="dias-grid">${diasHtml}</div>
+          <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin:8px 0 4px">Prazo de entrega (dias após o pedido)</div>
+          <div style="display:flex;gap:8px;margin-bottom:8px">
+            <input class="form-input" id="prazomin-${f.id}" type="number" min="0" step="1"
+              placeholder="Mín" value="${pMin}" style="flex:1">
+            <input class="form-input" id="prazomax-${f.id}" type="number" min="0" step="1"
+              placeholder="Máx (opcional)" value="${pMax}" style="flex:1">
+          </div>
           <input class="forn-contato" id="contato-${f.id}" type="text"
             placeholder="Contato / WhatsApp" value="${f.contato||''}">
           <textarea class="forn-contato" id="obs-${f.id}" rows="2"
@@ -2107,7 +2133,10 @@ function renderFornecedores() {
       <button class="btn-sm btn-orange" onclick="modalNovoFornecedor()">+ Novo</button>
     </div>
     <div style="font-size:11px;color:var(--muted);margin-bottom:12px">
-      Defina os dias de entrega de cada fornecedor para calcular automaticamente as datas nas provisões.
+      Defina os dias de entrega (dia da semana) e/ou o prazo em dias após o pedido de cada fornecedor
+      para calcular automaticamente as datas nas provisões. Se preencher o prazo em dias, ele tem
+      prioridade sobre os dias da semana. Preencher só o "Mín" define uma data fixa; preencher os
+      dois define um período (janela) de entrega prevista.
     </div>
     ${itensHtml}
   `;
@@ -2143,13 +2172,27 @@ async function salvarFornecedor(fornId) {
   const obs     = $(`obs-${fornId}`)?.value.trim() || null;
   const dias    = S.fornecedores.find(f=>f.id===fornId)?.dias_entrega || [];
 
+  const minRaw = $(`prazomin-${fornId}`)?.value.trim() || '';
+  const maxRaw = $(`prazomax-${fornId}`)?.value.trim() || '';
+  let prazoMin = minRaw === '' ? null : parseInt(minRaw, 10);
+  let prazoMax = maxRaw === '' ? null : parseInt(maxRaw, 10);
+  if (prazoMax != null && prazoMin == null) { prazoMin = prazoMax; }
+  if (prazoMin != null && prazoMax != null && prazoMax < prazoMin) {
+    toast('O prazo máximo não pode ser menor que o mínimo.', 'err'); return;
+  }
+
   await db.from('gn_fornecedores_pedido')
-    .update({ contato, observacao: obs, dias_entrega: dias, atualizado_em: new Date().toISOString() })
+    .update({
+      contato, observacao: obs, dias_entrega: dias,
+      prazo_dias_min: prazoMin, prazo_dias_max: prazoMax,
+      atualizado_em: new Date().toISOString()
+    })
     .eq('id', fornId);
 
   const idx = S.fornecedores.findIndex(f=>f.id===fornId);
-  if (idx>=0) Object.assign(S.fornecedores[idx], { contato, observacao: obs });
+  if (idx>=0) Object.assign(S.fornecedores[idx], { contato, observacao: obs, prazo_dias_min: prazoMin, prazo_dias_max: prazoMax });
   toast('Fornecedor salvo!','ok');
+  renderFornecedores();
 }
 
 function modalNovoFornecedor() {
@@ -2248,14 +2291,19 @@ async function renderProvisoes() {
               </div>
               <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
                 ${statusMap[p.status] || p.status}
-                ${p.status==='AGUARDANDO' ? `<button class="btn-sm btn-success" style="font-size:10px;padding:4px 10px" onclick="modalValidar('${p.id}')">Validar</button>` : ''}
+                ${p.status==='AGUARDANDO' ? `<div style="display:flex;gap:4px">
+                  <button class="btn-sm btn-outline" style="font-size:10px;padding:4px 8px" onclick="modalEditarEntrega('${p.id}')" title="Editar data/período de entrega">✏️</button>
+                  <button class="btn-sm btn-success" style="font-size:10px;padding:4px 10px" onclick="modalValidar('${p.id}')">Validar</button>
+                </div>` : ''}
               </div>
             </div>
-            ${(()=>{const und=p.gn_catalogo?.und||'un';const qtd=parseFloat(p.qtd_prevista)||0;const tot=parseFloat(p.valor_previsto)||0;const unit=qtd>0?tot/qtd:0;return`<div class="prov-detalhes">
+            ${(()=>{const und=p.gn_catalogo?.und||'un';const qtd=parseFloat(p.qtd_prevista)||0;const tot=parseFloat(p.valor_previsto)||0;const unit=qtd>0?tot/qtd:0;
+              const entregaTxt=p.data_entrega_fim&&p.data_entrega_fim!==p.data_entrega?`${p.data_entrega} a ${p.data_entrega_fim}`:p.data_entrega;
+              return`<div class="prov-detalhes">
               <div class="prov-det">Qtd: <span class="val">${fmtQtd(qtd)} ${und}</span></div>
               ${unit>0?`<div class="prov-det">Unit.: <span class="val">R$ ${fmt(unit)}/${und}</span></div>`:''}
               <div class="prov-det">Total: <span class="val">R$ ${fmt(tot)}</span></div>
-              ${p.data_entrega?`<div class="prov-det">Entrega: <span class="val">${p.data_entrega}</span></div>`:''}
+              ${entregaTxt?`<div class="prov-det">Entrega: <span class="val">${entregaTxt}</span></div>`:''}
             </div>`;})()}
             ${_isConfirmed && (_recPor||_recTs) ? `<div style="margin-top:5px;padding-top:5px;border-top:1px solid rgba(255,255,255,.06);font-size:10px;color:var(--muted);display:flex;align-items:center;gap:4px">
               <span>👤</span><span style="color:var(--text);font-weight:600">${_recPor||'—'}</span>${_recTs?`<span>·</span><span>${_recTs}</span>`:''}
@@ -2293,7 +2341,7 @@ async function renderProvisoes() {
           const lojaNome = S.lojas.find(l=>l.slug_pedido===p.loja_slug)?.nome_display || p.loja_slug;
           return `<div style="display:flex;justify-content:space-between;font-size:11px;padding:4px 0;border-bottom:1px solid rgba(239,68,68,.12)">
             <span style="color:#fca5a5;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${lojaNome} — ${p.fornecedor||'—'} — ${p.gn_catalogo?.produto||'—'}</span>
-            <span style="color:#f87171;flex-shrink:0;margin-left:8px;font-weight:700">📅 ${p.data_entrega}</span>
+            <span style="color:#f87171;flex-shrink:0;margin-left:8px;font-weight:700">📅 ${p.data_entrega_fim || p.data_entrega}</span>
           </div>`;
         }).join('')}
         ${S.provisoesAtrasadas.length>4?`<div style="font-size:10px;color:var(--muted);text-align:center;margin-top:4px">+${S.provisoesAtrasadas.length-4} mais</div>`:''}
@@ -2827,17 +2875,67 @@ function modalValidar(provisaoId) {
   `);
 }
 
+function modalEditarEntrega(provisaoId) {
+  const prov = S.provisoes.find(p => p.id === provisaoId);
+  if (!prov) return;
+
+  abrirModal(`
+    <div class="modal-titulo">
+      Editar Entrega
+      <button class="modal-close" onclick="$('modal-bg').classList.remove('ativo')">×</button>
+    </div>
+    <div style="background:var(--card2);border-radius:var(--rs);padding:12px;margin-bottom:14px;font-size:12px">
+      <div style="font-weight:600;margin-bottom:4px">${prov.gn_catalogo?.produto||'—'}</div>
+      <div style="color:var(--muted)">${prov.fornecedor||'—'}</div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">DATA (OU INÍCIO DO PERÍODO)</label>
+        <input class="form-input" id="m-ent-ini" type="date" value="${prov.data_entrega||''}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">FIM DO PERÍODO (OPCIONAL)</label>
+        <input class="form-input" id="m-ent-fim" type="date" value="${prov.data_entrega_fim||''}">
+      </div>
+    </div>
+    <div class="modal-acoes">
+      <button class="btn-sm btn-outline" onclick="$('modal-bg').classList.remove('ativo')">Cancelar</button>
+      <button class="btn-sm btn-orange" onclick="salvarEditarEntrega('${provisaoId}')">💾 Salvar</button>
+    </div>
+  `);
+}
+
+async function salvarEditarEntrega(provisaoId) {
+  const ini = $('m-ent-ini')?.value || null;
+  const fim = $('m-ent-fim')?.value || null;
+  if (fim && ini && fim < ini) { toast('O fim do período não pode ser antes do início.', 'err'); return; }
+
+  const { error } = await db.from('gn_provisoes')
+    .update({ data_entrega: ini, data_entrega_fim: fim, atualizado_em: new Date().toISOString() })
+    .eq('id', provisaoId);
+  if (error) { toast('Erro: '+error.message, 'err'); return; }
+
+  const idx = S.provisoes.findIndex(p => p.id === provisaoId);
+  if (idx >= 0) Object.assign(S.provisoes[idx], { data_entrega: ini, data_entrega_fim: fim });
+  $('modal-bg').classList.remove('ativo');
+  toast('Entrega atualizada!', 'ok');
+  renderProvisoes();
+}
+
 // ═══════════════════════════════════════════════
 // ALERTAS DE ENTREGA ATRASADA
 // ═══════════════════════════════════════════════
 async function carregarProvisoesPendentes() {
+  // Busca por data_entrega (início) < hoje — quando há período (data_entrega_fim), o
+  // prazo real só vence no fim, então filtra de novo no cliente com a data efetiva.
   const { data } = await db.from('gn_provisoes')
     .select('*, gn_catalogo(produto,und)')
     .eq('status', 'AGUARDANDO')
     .not('data_entrega', 'is', null)
     .lt('data_entrega', hoje())
     .order('data_entrega');
-  S.provisoesAtrasadas = data || [];
+  const h = hoje();
+  S.provisoesAtrasadas = (data || []).filter(p => (p.data_entrega_fim || p.data_entrega) < h);
   _atualizarBadgeAtrasadas();
 }
 
