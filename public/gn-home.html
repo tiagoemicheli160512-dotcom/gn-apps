@@ -312,6 +312,19 @@
   </div>
 </div>
 
+<!-- VISITAS POR SUPERVISOR (mestre) -->
+<div class="picker-overlay" id="visitas-sup-overlay" onclick="if(event.target===this)fecharVisitasSupervisor()">
+  <div class="picker-sheet" style="max-width:480px;margin:auto;max-height:90vh">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+      <div class="picker-title" style="margin:0">📍 Visitas por Supervisor</div>
+      <button onclick="fecharVisitasSupervisor()" style="background:none;border:none;color:rgba(255,255,255,.4);font-size:22px;cursor:pointer;line-height:1;padding:0 4px">×</button>
+    </div>
+    <div id="visitas-sup-content">
+      <div style="text-align:center;padding:30px;color:rgba(255,255,255,.35);font-size:12px">Carregando…</div>
+    </div>
+  </div>
+</div>
+
 <!-- PWA install banner for Android Chrome -->
 <div id="pwa-install-banner" style="display:none;position:fixed;bottom:80px;left:12px;right:12px;z-index:500;background:#363636;border:1px solid rgba(242,100,25,.45);border-radius:14px;padding:13px 14px;gap:10px;align-items:center;box-shadow:0 8px 32px rgba(0,0,0,.7)">
   <div style="font-size:20px;line-height:1;flex-shrink:0">📲</div>
@@ -432,6 +445,7 @@ const MODULES = [
   {id:'manutencao',name:'Manutenção',       sub:'Acompanhamento de manutenções das lojas', icon:'🔧', bg:'#e85d04', perm:'manutencao', url:'gn-manutencao.html', geralOnly:true},
   {id:'inventario',name:'Inventário',       sub:'Inventário e marketing das lojas',        icon:'📦', bg:'#0d9488', perm:'inventario', cargoBypass:['mestre','supervisor','admin','gerente'], url:'gn-inventario.html'},
   {id:'usuarios',  name:'Senhas',           sub:'Cadastro e permissões de usuários',       icon:'🔐', bg:'#7c3aed', perm:'master',     masterOnly:true, geralOnly:true, url:'gn-usuarios.html'},
+  {id:'visitas',   name:'Visitas',          sub:'Relatório de visitas por supervisor',     icon:'📍', bg:'#6366f1', free:true,          masterOnly:true, geralOnly:true, action:'abrirVisitasSupervisor'},
 ];
 
 let session = null;
@@ -500,7 +514,7 @@ function _refreshPermUI(sess) {
     .filter(m => !m.masterOnly || isMaster)
     .filter(m => !(m.geralOnly && isMaster && masterLoja))
     .filter(m => m.free || (isMaster ? permsNav[m.perm] !== false : (!!permsNav[m.perm] || (m.cargoBypass && m.cargoBypass.includes(sess.cargo)))))
-    .map(m => `<button class="sbn-mod" onclick="navTo('${m.url}')"><span class="sbn-mod-icon">${m.icon}</span>${m.name}</button>`)
+    .map(m => `<button class="sbn-mod" onclick="${m.action ? m.action+'()' : `navTo('${m.url}')`}"><span class="sbn-mod-icon">${m.icon}</span>${m.name}</button>`)
     .join('');
   // Re-render module list and reload badges (permissions may have changed)
   renderModules(sess, isMaster);
@@ -660,7 +674,7 @@ function showHome(sess) {
     .filter(m => !m.masterOnly || isMaster)
     .filter(m => !(m.geralOnly && isMaster && masterLoja))
     .filter(m => m.free || (isMaster ? permsNav[m.perm] !== false : (!!permsNav[m.perm] || (m.cargoBypass && m.cargoBypass.includes(sess.cargo)))))
-    .map(m => `<button class="sbn-mod" onclick="navTo('${m.url}')"><span class="sbn-mod-icon">${m.icon}</span>${m.name}</button>`)
+    .map(m => `<button class="sbn-mod" onclick="${m.action ? m.action+'()' : `navTo('${m.url}')`}"><span class="sbn-mod-icon">${m.icon}</span>${m.name}</button>`)
     .join('');
 
   // Hero
@@ -744,7 +758,7 @@ function renderModules(sess, isMaster) {
       const enabled = m.free || (isMaster ? perms[m.perm] !== false : (!!perms[m.perm] || cargoBypassed));
       if (!enabled) return '';
       return `
-        <div class="mod-row" onclick="navTo('${m.url}')">
+        <div class="mod-row" onclick="${m.action ? m.action+'()' : `navTo('${m.url}')`}">
           <div class="mod-icon-box" style="background:${m.bg}1a;border:1px solid ${m.bg}33">${m.icon}</div>
           <div class="mod-body">
             <div class="mod-name">${m.name}</div>
@@ -803,6 +817,7 @@ async function loadBadges(sess, isMaster) {
   if (perms.manutencao || ['gerente','mestre','admin'].includes(sess.cargo)) {
     loadManutBadge().catch(()=>setBadge('manutencao','—'));
   }
+  if (isMaster) setBadge('visitas', 'Por supervisor', 'o');
 }
 
 async function loadManutBadge() {
@@ -1167,6 +1182,196 @@ async function _renderAcessosHoje(loja) {
     el.innerHTML = '👤 Acessos hoje: ' + partes.join(' · ');
     el.style.display = '';
   } catch(e) {}
+}
+
+// ── VISITAS POR SUPERVISOR ──────────────────────────────────────────────────
+// Traz pro Painel de Gestão o mesmo relatório que já existe no app Check-list (aba
+// Visitas → Relatório), só que o mestre escolhe QUALQUER supervisor sem precisar
+// logar como ele. Fonte: gn_chk_visitas, filtrado por visitante = nome do supervisor.
+let _visSupList = [];       // [{id,nome}] cargo=supervisor
+let _visSupSelecionado = null;
+let _visSupDe  = (()=>{ const h=new Date(); return `${h.getFullYear()}-${String(h.getMonth()+1).padStart(2,'0')}-01`; })();
+let _visSupAte = (()=>{ const h=new Date(); const u=new Date(h.getFullYear(),h.getMonth()+1,0); return `${h.getFullYear()}-${String(h.getMonth()+1).padStart(2,'0')}-${String(u.getDate()).padStart(2,'0')}`; })();
+let _visSupLojaFiltro = null;
+let _visSupData = [];
+
+function _calcDuracaoMin(chegada, saida) {
+  if (!chegada || !saida || chegada === 'PLAN') return null;
+  try {
+    const [ch,cm] = chegada.split(':').map(Number);
+    const [sh,sm] = saida.split(':').map(Number);
+    let m = (sh*60+sm) - (ch*60+cm);
+    if (m < 0) m += 1440;
+    return m;
+  } catch(e) { return null; }
+}
+function _fmtDuracao(mins) {
+  if (mins === null || mins === undefined) return '';
+  const h = Math.floor(mins/60), m = mins%60;
+  return h > 0 ? (m > 0 ? `${h}h ${m}min` : `${h}h`) : `${m}min`;
+}
+
+async function abrirVisitasSupervisor() {
+  document.getElementById('visitas-sup-overlay').classList.add('open');
+  if (!_visSupList.length) await _carregarSupervisoresList();
+  _renderVisitasSupContent();
+  if (_visSupSelecionado) _carregarVisitasSupData();
+}
+function fecharVisitasSupervisor() {
+  document.getElementById('visitas-sup-overlay').classList.remove('open');
+}
+
+async function _carregarSupervisoresList() {
+  try {
+    const res = await fetch(`${SB_URL}/rest/v1/gn_usuarios?cargo=eq.supervisor&ativo=eq.true&select=id,nome&order=nome.asc`,
+      { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } });
+    _visSupList = res.ok ? await res.json() : [];
+  } catch(e) { _visSupList = []; }
+}
+
+async function _selecionarSupervisorVis(nome) {
+  _visSupSelecionado = nome;
+  _visSupLojaFiltro = null;
+  _renderVisitasSupContent();
+  await _carregarVisitasSupData();
+}
+
+async function _carregarVisitasSupData() {
+  if (!_visSupSelecionado) return;
+  try {
+    let url = `${SB_URL}/rest/v1/gn_chk_visitas?visitante=eq.${encodeURIComponent(_visSupSelecionado)}&data=gte.${_visSupDe}&data=lte.${_visSupAte}&order=data.asc,hora_chegada.asc&select=*`;
+    const res = await fetch(url, { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } });
+    _visSupData = res.ok ? await res.json() : [];
+  } catch(e) { _visSupData = []; }
+  _renderVisitasSupContent();
+}
+
+function _visSupSetLoja(loja) { _visSupLojaFiltro = loja; _renderVisitasSupContent(); }
+function _visSupNavDatas() {
+  const deInp = document.getElementById('vissup-de');
+  const ateInp = document.getElementById('vissup-ate');
+  if (deInp?.value) _visSupDe = deInp.value;
+  if (ateInp?.value) _visSupAte = ateInp.value;
+  _carregarVisitasSupData();
+}
+function _visSupMesRapido(delta) {
+  const [y,m] = _visSupDe.split('-').map(Number);
+  const d = new Date(y, m-1+delta, 1);
+  const u = new Date(d.getFullYear(), d.getMonth()+1, 0);
+  _visSupDe = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`;
+  _visSupAte = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(u.getDate()).padStart(2,'0')}`;
+  _carregarVisitasSupData();
+}
+
+function _renderVisitasSupContent() {
+  const el = document.getElementById('visitas-sup-content');
+  if (!el) return;
+
+  const chipsSupervisor = _visSupList.length
+    ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px">${_visSupList.map(u => {
+        const ativo = _visSupSelecionado === u.nome;
+        return `<button onclick="_selecionarSupervisorVis('${u.nome.replace(/'/g,"\\'")}')" style="padding:6px 12px;border-radius:20px;border:1px solid ${ativo?'#6366f1':'rgba(255,255,255,.15)'};background:${ativo?'rgba(99,102,241,.25)':'transparent'};color:${ativo?'#a5b4fc':'rgba(255,255,255,.6)'};font-size:12px;font-weight:700;cursor:pointer;font-family:inherit">${u.nome}</button>`;
+      }).join('')}</div>`
+    : `<div style="text-align:center;padding:20px;color:rgba(255,255,255,.35);font-size:12px">Nenhum usuário com cargo supervisor cadastrado.</div>`;
+
+  if (!_visSupSelecionado) {
+    el.innerHTML = chipsSupervisor;
+    return;
+  }
+
+  const reaisAll = _visSupData.filter(v => v.loja!=='FOLGA' && v.loja!=='FÉRIAS' && v.hora_chegada!=='PLAN');
+  const planosAll = _visSupData.filter(v => v.hora_chegada==='PLAN');
+  const lojasVisitadas = [...new Set(reaisAll.map(v=>v.loja))];
+  let totalMins = 0; reaisAll.forEach(v => { const m=_calcDuracaoMin(v.hora_chegada,v.hora_saida); if(m) totalMins+=m; });
+  const planosConf = planosAll.filter(p => _visSupData.some(r=>r.data===p.data&&r.loja===p.loja&&r.hora_chegada!=='PLAN'));
+  const taxaPct = planosAll.length > 0 ? Math.round(planosConf.length/planosAll.length*100) : null;
+  const taxaCor = taxaPct===null?'rgba(255,255,255,.35)':taxaPct>=80?'#22c55e':taxaPct>=50?'#f59e0b':'#ef4444';
+
+  const todasLojas = [...new Set(_visSupData.filter(v=>v.loja!=='FOLGA'&&v.loja!=='FÉRIAS').map(v=>v.loja))].sort();
+  const listaFiltrada = _visSupLojaFiltro ? reaisAll.filter(v=>v.loja===_visSupLojaFiltro) : reaisAll;
+
+  let html = chipsSupervisor;
+  html += `<div style="display:flex;gap:6px;margin-bottom:10px">
+    <input type="date" id="vissup-de" value="${_visSupDe}" onchange="_visSupNavDatas()" style="flex:1;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:7px 9px;color:#e2e8f0;font-size:12px;font-family:inherit">
+    <input type="date" id="vissup-ate" value="${_visSupAte}" onchange="_visSupNavDatas()" style="flex:1;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:7px 9px;color:#e2e8f0;font-size:12px;font-family:inherit">
+  </div>
+  <div style="display:flex;gap:5px;margin-bottom:12px">
+    <button onclick="_visSupMesRapido(-1)" style="flex:1;padding:5px 0;border-radius:8px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:rgba(255,255,255,.6);font-size:10px;font-weight:700;cursor:pointer;font-family:inherit">‹ Mês anterior</button>
+    <button onclick="_visSupMesRapido(1)" style="flex:1;padding:5px 0;border-radius:8px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:rgba(255,255,255,.6);font-size:10px;font-weight:700;cursor:pointer;font-family:inherit">Próximo mês ›</button>
+  </div>`;
+
+  if (todasLojas.length > 0) {
+    html += `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:12px">
+      <button onclick="_visSupSetLoja(null)" style="padding:4px 10px;border-radius:20px;border:1px solid ${!_visSupLojaFiltro?'#6366f1':'rgba(255,255,255,.15)'};background:${!_visSupLojaFiltro?'rgba(99,102,241,.25)':'transparent'};color:${!_visSupLojaFiltro?'#a5b4fc':'rgba(255,255,255,.4)'};font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">Todas</button>
+      ${todasLojas.map(l => {
+        const cor = COR_LOJA[_normLoja(l)] || '#888';
+        const ativo = _visSupLojaFiltro === l;
+        return `<button onclick="_visSupSetLoja('${l.replace(/'/g,"\\'")}')" style="padding:4px 10px;border-radius:20px;border:1px solid ${ativo?cor:'rgba(255,255,255,.15)'};background:${ativo?cor+'33':'transparent'};color:${ativo?cor:'rgba(255,255,255,.4)'};font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">${LOJA_DISPLAY[_normLoja(l)]||l}</button>`;
+      }).join('')}
+    </div>`;
+  }
+
+  html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:12px">
+    <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:10px;text-align:center">
+      <div style="font-size:22px;font-weight:800;color:#6366f1">${reaisAll.length}</div>
+      <div style="font-size:9px;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:.5px;margin-top:2px">Visitas realizadas</div>
+    </div>
+    <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:10px;text-align:center">
+      <div style="font-size:22px;font-weight:800;color:#22c55e">${lojasVisitadas.length}</div>
+      <div style="font-size:9px;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:.5px;margin-top:2px">Lojas visitadas</div>
+    </div>
+    <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:10px;text-align:center">
+      <div style="font-size:22px;font-weight:800;color:#f59e0b">${totalMins>0?_fmtDuracao(totalMins):'—'}</div>
+      <div style="font-size:9px;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:.5px;margin-top:2px">Tempo em campo</div>
+    </div>
+    <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:10px;text-align:center">
+      <div style="font-size:22px;font-weight:800;color:${taxaCor}">${taxaPct!==null?taxaPct+'%':'—'}</div>
+      <div style="font-size:9px;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:.5px;margin-top:2px">Planos cumpridos</div>
+    </div>
+  </div>`;
+
+  if (todasLojas.length > 0) {
+    html += `<div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:10px 12px;margin-bottom:12px">
+      <div style="font-size:9px;font-weight:700;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Plano × Realizado</div>
+      ${todasLojas.map(l => {
+        const pl = _visSupData.filter(v=>v.loja===l&&v.hora_chegada==='PLAN').length;
+        const re = _visSupData.filter(v=>v.loja===l&&v.hora_chegada!=='PLAN').length;
+        const pct = pl>0 ? Math.round(re/pl*100) : null;
+        const cor = pct===null?'rgba(255,255,255,.4)':pct>=100?'#22c55e':pct>=50?'#f59e0b':'#ef4444';
+        const barW = pl>0 ? Math.min(re/pl*100,100) : re>0?100:0;
+        return `<div style="margin-bottom:8px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px">
+            <div style="display:flex;align-items:center;gap:6px">
+              <div style="width:8px;height:8px;border-radius:50%;background:${COR_LOJA[_normLoja(l)]||'#888'};flex-shrink:0"></div>
+              <span style="font-size:11px;font-weight:700;color:#e2e8f0">${LOJA_DISPLAY[_normLoja(l)]||l}</span>
+            </div>
+            <span style="font-size:11px;color:rgba(255,255,255,.6)">${re}/${pl>0?pl:'?'} ${pct!==null?`<span style="color:${cor}">${pct}%</span>`:''}</span>
+          </div>
+          <div style="height:4px;background:rgba(255,255,255,.08);border-radius:4px;overflow:hidden">
+            <div style="width:${barW}%;height:100%;background:${cor};border-radius:4px"></div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`;
+  }
+
+  if (listaFiltrada.length > 0) {
+    html += `<div style="font-size:9px;font-weight:700;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Visitas no período</div>`;
+    html += listaFiltrada.slice().reverse().map(v => {
+      const dur = _calcDuracaoMin(v.hora_chegada, v.hora_saida);
+      return `<div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,.06);display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <div style="font-size:12px;font-weight:700;color:#e2e8f0">${LOJA_DISPLAY[_normLoja(v.loja)]||v.loja}</div>
+          <div style="font-size:10px;color:rgba(255,255,255,.4)">${v.data.split('-').reverse().join('/')} · ${v.hora_chegada}${v.hora_saida?' → '+v.hora_saida:' (em andamento)'}</div>
+        </div>
+        <div style="font-size:11px;color:rgba(255,255,255,.5)">${dur?_fmtDuracao(dur):''}</div>
+      </div>`;
+    }).join('');
+  } else if (reaisAll.length === 0 && planosAll.length === 0) {
+    html += `<div style="text-align:center;padding:20px;color:rgba(255,255,255,.35);font-size:12px">Nenhuma visita registrada nesse período.</div>`;
+  }
+
+  el.innerHTML = html;
 }
 
 // ── DASHBOARD ────────────────────────────────────────────────────────────────

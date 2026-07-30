@@ -6012,6 +6012,7 @@ function switchTab(tab,btn){
       return;
     }
     renderSupervisao();
+    loadVisitasChk().then(_renderHorariosSup); // sincroniza chegada/saída com a aba Visitas
   }
   if(tab==='dados') _preencherBandaDiaFromAgenda();
   if(tab==='historico') loadHistorico();
@@ -6560,6 +6561,8 @@ function renderSupervisao(){
   const elObs = document.getElementById('sup-obs');
   // backward compat: migrate old 'hora' field to 'hora_chegada'
   if(!s.hora_chegada && s.hora) s.hora_chegada = s.hora;
+  // Supervisor responsável já entra com quem está logado — evita digitar de novo algo que o app já sabe.
+  if(!s.supervisor && usuarioLogado?.cargo==='supervisor') s.supervisor = usuarioLogado.nome;
   if(elSup && !elSup.value) elSup.value = s.supervisor||'';
   if(elRes && !elRes.value) elRes.value = s.responsavel||'';
   if(elDat && !elDat.value) elDat.value = s.data||hojeLocal();
@@ -6680,65 +6683,44 @@ function _horaAtual(){
   return n.getHours().toString().padStart(2,'0') + ':' + n.getMinutes().toString().padStart(2,'0');
 }
 
+// Chegada/saída da visita de supervisão vêm da aba 📍 Visitas (que já registra isso com
+// GPS) — evita pedir pro supervisor registrar o mesmo horário duas vezes em lugares
+// diferentes. Aqui só espelha, de forma somente-leitura, o que foi batido lá.
+function _visitaSupervisorHoje(){
+  const nome = (state.supervisao.supervisor || usuarioLogado?.nome || '').trim();
+  if(!nome) return null;
+  return (_visitasChk||[]).find(v => v.visitante === nome) || null;
+}
+
 function _renderHorariosSup(){
   const s = state.supervisao;
-  const fechada = !!s.fechada;
+  const visita = _visitaSupervisorHoje();
+  if(visita){
+    if(visita.hora_chegada && visita.hora_chegada!=='PLAN') s.hora_chegada = visita.hora_chegada;
+    if(visita.hora_saida) s.hora_fim = visita.hora_saida;
+  }
   const chegada = s.hora_chegada || '';
   const fim     = s.hora_fim     || '';
-  const podeReset = supDesbloqueado && !fechada;
 
   const wChg = document.getElementById('sup-chegada-wrap');
   const wFim = document.getElementById('sup-fim-wrap');
   if(!wChg || !wFim) return;
 
-  if(chegada){
-    wChg.innerHTML =
-      '<div style="display:flex;align-items:center;gap:6px;padding:8px 10px;background:var(--s3);border:1px solid var(--green);border-radius:8px;">'
+  const pendente = '<div style="padding:8px 10px;background:var(--s3);border:1px solid var(--b2);border-radius:8px;font-size:11px;color:var(--t3);text-align:center;">Registre na aba 📍 Visitas</div>';
+
+  wChg.innerHTML = chegada
+    ? '<div style="display:flex;align-items:center;gap:6px;padding:8px 10px;background:var(--s3);border:1px solid var(--green);border-radius:8px;">'
       + '<span style="font-size:14px">📍</span>'
       + '<span style="font-size:15px;font-weight:800;color:var(--green)">' + chegada + '</span>'
-      + '<span style="font-size:10px;color:var(--t3);margin-left:2px">🔒</span>'
-      + (podeReset ? '<button onclick="resetarHorarioSup(\'chegada\')" style="margin-left:auto;font-size:10px;background:none;border:1px solid var(--red);color:var(--red);padding:2px 6px;border-radius:4px;cursor:pointer;">✕</button>' : '')
-      + '</div>';
-  } else {
-    wChg.innerHTML = '<button onclick="registrarChegada()" style="width:100%;background:linear-gradient(135deg,#16a34a,#15803d);border:none;border-radius:8px;padding:10px 6px;color:#fff;font-weight:800;font-size:12px;cursor:pointer;">📍 Registrar Chegada</button>';
-  }
+      + '</div>'
+    : pendente;
 
-  if(fim){
-    wFim.innerHTML =
-      '<div style="display:flex;align-items:center;gap:6px;padding:8px 10px;background:var(--s3);border:1px solid var(--red);border-radius:8px;">'
+  wFim.innerHTML = fim
+    ? '<div style="display:flex;align-items:center;gap:6px;padding:8px 10px;background:var(--s3);border:1px solid var(--red);border-radius:8px;">'
       + '<span style="font-size:14px">🚪</span>'
       + '<span style="font-size:15px;font-weight:800;color:var(--red)">' + fim + '</span>'
-      + '<span style="font-size:10px;color:var(--t3);margin-left:2px">🔒</span>'
-      + (podeReset ? '<button onclick="resetarHorarioSup(\'fim\')" style="margin-left:auto;font-size:10px;background:none;border:1px solid var(--red);color:var(--red);padding:2px 6px;border-radius:4px;cursor:pointer;">✕</button>' : '')
-      + '</div>';
-  } else if(chegada){
-    wFim.innerHTML = '<button onclick="registrarSaida()" style="width:100%;background:linear-gradient(135deg,#dc2626,#b91c1c);border:none;border-radius:8px;padding:10px 6px;color:#fff;font-weight:800;font-size:12px;cursor:pointer;">🚪 Registrar Saída</button>';
-  } else {
-    wFim.innerHTML = '<div style="padding:8px 10px;background:var(--s3);border:1px solid var(--b2);border-radius:8px;font-size:11px;color:var(--t3);text-align:center;">Registre a chegada primeiro</div>';
-  }
-}
-
-function registrarChegada(){
-  if(state.supervisao.hora_chegada){ showToast('Chegada já registrada','err'); return; }
-  state.supervisao.hora_chegada = _horaAtual();
-  autoSave(); saveAll(); _renderHorariosSup();
-  showToast('📍 Chegada registrada: ' + state.supervisao.hora_chegada, 'success');
-}
-
-function registrarSaida(){
-  if(!state.supervisao.hora_chegada){ showToast('Registre a chegada primeiro','err'); return; }
-  if(state.supervisao.hora_fim){ showToast('Saída já registrada','err'); return; }
-  state.supervisao.hora_fim = _horaAtual();
-  autoSave(); saveAll(); _renderHorariosSup();
-  showToast('🚪 Saída registrada: ' + state.supervisao.hora_fim, 'success');
-}
-
-function resetarHorarioSup(tipo){
-  if(!supDesbloqueado){ showToast('Apenas supervisores podem resetar o horário','err'); return; }
-  if(!confirm('Resetar horário de ' + (tipo==='chegada'?'chegada':'saída') + '?')) return;
-  if(tipo==='chegada'){ state.supervisao.hora_chegada=''; state.supervisao.hora_fim=''; }
-  else { state.supervisao.hora_fim=''; }
-  autoSave(); saveAll(); _renderHorariosSup();
+      + '</div>'
+    : pendente;
 }
 
 function updateSupField(){
