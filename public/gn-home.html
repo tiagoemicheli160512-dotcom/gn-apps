@@ -432,24 +432,55 @@ function _computeLojasVisiveis(sess) {
 
 // geralOnly: só aparece no Painel de Gestão (masterLoja vazio) para sessões
 // master/mestre — some do menu quando uma loja específica está aberta.
-// Não afeta usuários não-master (para eles masterLoja nunca é setado).
+// lojaOnly: o oposto — só aparece quando uma loja específica está selecionada,
+// some do Painel de Gestão (Todas as lojas).
+// Nenhuma das duas afeta usuários não-master (para eles masterLoja nunca é setado).
 const MODULES = [
-  {id:'caixa',     name:'Caixa',             sub:'Controle de turno e fechamento',     icon:'💵', bg:'#E8580A', perm:'caixa',     cargoBypass:['gerente','mestre','admin'], url:'gn-caixa.html'},
-  {id:'checklist', name:'Check-list',       sub:'Check-lists diários e pendências',   icon:'✅', bg:'#22c55e', perm:'checklist', url:'gn-checklist.html'},
-  {id:'pedidos',   name:'Pedidos',           sub:'Catálogo, pedidos e provisões',      icon:'🛒', bg:'#0e7490', perm:'pedidos',   url:'gn-pedidos.html', geralOnly:true},
-  {id:'avaliacoes',name:'Avaliações',        sub:'Desempenho da equipe',               icon:'⭐', bg:'#8b5cf6', perm:'avaliacoes',url:'gn-avaliacoes.html'},
-  {id:'comissoes', name:'Comissões',         sub:'Folha semanal de pagamentos',        icon:'💰', bg:'#f59e0b', perm:'comissoes', url:'gn-comissoes.html'},
-  {id:'lojas',     name:'Lojas',             sub:'Ficha operacional da loja',          icon:'🏪', bg:'#ec4899', perm:'lojas',     url:'gn-lojas.html'},
+  {id:'caixa',     name:'Caixa',             sub:'Controle de turno e fechamento',     icon:'💵', bg:'#E8580A', perm:'caixa',     cargoBypass:['gerente','mestre','admin'], url:'gn-caixa.html', lojaOnly:true},
+  {id:'checklist', name:'Check-list',       sub:'Check-lists diários e pendências',   icon:'✅', bg:'#22c55e', perm:'checklist', url:'gn-checklist.html', lojaOnly:true},
+  {id:'pedidos',   name:'Pedidos',           sub:'Catálogo, pedidos e provisões',      icon:'🛒', bg:'#0e7490', perm:'pedidos',   url:'gn-pedidos.html', lojaOnly:true},
+  {id:'avaliacoes',name:'Avaliações',        sub:'Desempenho da equipe',               icon:'⭐', bg:'#8b5cf6', perm:'avaliacoes',url:'gn-avaliacoes.html', geralOnly:true},
+  {id:'comissoes', name:'Comissões',         sub:'Folha semanal de pagamentos',        icon:'💰', bg:'#f59e0b', perm:'comissoes', url:'gn-comissoes.html', lojaOnly:true},
+  {id:'lojas',     name:'Lojas',             sub:'Ficha operacional da loja',          icon:'🏪', bg:'#ec4899', perm:'lojas',     url:'gn-lojas.html', lojaOnly:true},
   {id:'mestra',    name:'Comissões Mestra',  sub:'Visão consolidada — todas as lojas', icon:'🏆', bg:'#F26419', perm:'mestra',    url:'gn-comissoes-mestra.html', masterOnly:true, geralOnly:true},
   {id:'rh',        name:'RH / Financeiro',  sub:'Consolidador de RH e dados financeiros', icon:'👥', bg:'#0284c7', perm:'rh',        url:'gn-rh.html', geralOnly:true},
   {id:'manutencao',name:'Manutenção',       sub:'Acompanhamento de manutenções das lojas', icon:'🔧', bg:'#e85d04', perm:'manutencao', url:'gn-manutencao.html', geralOnly:true},
-  {id:'inventario',name:'Inventário',       sub:'Inventário e marketing das lojas',        icon:'📦', bg:'#0d9488', perm:'inventario', cargoBypass:['mestre','supervisor','admin','gerente'], url:'gn-inventario.html'},
+  {id:'inventario',name:'Inventário',       sub:'Inventário e marketing das lojas',        icon:'📦', bg:'#0d9488', perm:'inventario', cargoBypass:['mestre','supervisor','admin','gerente'], url:'gn-inventario.html', geralOnly:true},
   {id:'usuarios',  name:'Senhas',           sub:'Cadastro e permissões de usuários',       icon:'🔐', bg:'#7c3aed', perm:'master',     masterOnly:true, geralOnly:true, url:'gn-usuarios.html'},
   {id:'visitas',   name:'Visitas',          sub:'Relatório de visitas por supervisor',     icon:'📍', bg:'#6366f1', free:true,          masterOnly:true, geralOnly:true, action:'abrirVisitasSupervisor'},
 ];
 
 let session = null;
 let masterLoja = null; // loja ativa selecionada pelo mestre
+
+// Declarado aqui (não lá embaixo, perto de renderDashboard) porque showHome() já
+// lê/atribui essas variáveis na primeira chamada síncrona logo abaixo — com `let`
+// declarado só mais adiante no arquivo, essa primeira chamada caía no temporal
+// dead zone e estourava ReferenceError, abortando o resto do script silenciosamente.
+// Sintoma: no Painel de Gestão (Todas as lojas), só os cards apareciam — os gráficos
+// (que dependem do restante do script rodar) só voltavam depois de uma navegação que
+// desse tempo do script inteiro já ter executado uma vez sem cair nesse branch.
+let _dashTab  = 'fat';  // 'fat' | 'att' | 'metas'
+let _dashPer  = 'sem';  // 'sem' | 'mes'
+let _dashWoff = 0;      // week offset (0=current week)
+let _dashMoff = 0;      // month offset (0=current month)
+let _dashFat     = null; // {lojaKey: total} for selected period
+let _dashFatPrev = null; // {lojaKey: total} for previous period
+let _dashManut   = null; // {lojaKey: pendingCount}
+let _dashChk     = null; // Set of lojas that sent checklist today
+let _dashLoading = false;
+let _dashMetas   = {};   // {lojaKey: target} persisted in localStorage
+let _dashRelSel  = new Set(); // lojas selecionadas para o relatório (vazio = todas)
+let _dashManutCrit = 0;       // items from gn_manut_itens older than 5 days
+let _dashLoadedAt  = null;    // timestamp of last successful data load
+let _dashSparkData = null;    // {lojaKey: [v-3, v-2, v-1, v0]} fat per period
+let _dashViewMode  = 'cards'; // 'cards' | 'table' | 'chart'
+let _dashSortBy    = 'fat';
+let _dashSortDir   = 'desc';
+let _dashFatDia    = null;    // {YYYY-MM-DD: total} fat per day for current period
+let _dashComDia    = null;    // Array(7) of daily commission totals (Mon=0..Sun=6)
+let _dashFatDiaLoja = null;   // {lojaKey: {YYYY-MM-DD: valor}}
+let _dashComDiaLoja = null;   // {lojaKey: Array(7)}
 
 try {
   const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
@@ -513,6 +544,7 @@ function _refreshPermUI(sess) {
   if (sbMods) sbMods.innerHTML = MODULES
     .filter(m => !m.masterOnly || isMaster)
     .filter(m => !(m.geralOnly && isMaster && masterLoja))
+    .filter(m => !(m.lojaOnly && isMaster && !masterLoja))
     .filter(m => m.free || (isMaster ? permsNav[m.perm] !== false : (!!permsNav[m.perm] || (m.cargoBypass && m.cargoBypass.includes(sess.cargo)))))
     .map(m => `<button class="sbn-mod" onclick="${m.action ? m.action+'()' : `navTo('${m.url}')`}"><span class="sbn-mod-icon">${m.icon}</span>${m.name}</button>`)
     .join('');
@@ -530,17 +562,7 @@ async function forcarAtualizacao() {
   const btns = [document.getElementById('btn-atualizar'), document.getElementById('sbn-btn-atualizar')];
   btns.forEach(b => { if (b) { b.textContent = '⟳'; b.disabled = true; } });
 
-  // 1. Limpa caches e recarrega página para pegar HTML mais recente
-  try {
-    if ('caches' in window) {
-      const keys = await caches.keys();
-      await Promise.all(keys.map(k => caches.delete(k)));
-    }
-  } catch(e) {}
-  setTimeout(() => location.reload(true), 150);
-  return;
-
-  // 2. Recarrega dados conforme a vista atual — sem chamar showHome
+  // Recarrega dados conforme a vista atual — sem chamar showHome
   const isMaster = session.loja === 'GERAL' || !!(session.permissoes||{}).master;
   if (isMaster && !masterLoja) {
     // Vista "Todas as lojas": garante visibilidade do painel e recarrega dados
@@ -558,10 +580,10 @@ async function forcarAtualizacao() {
   }
   loadBadges(session, isMaster);
 
-  // 3. Reabilita botões imediatamente (dados carregam em background)
+  // Reabilita botões imediatamente (dados carregam em background)
   btns.forEach(b => { if (b) { b.textContent = b.id === 'sbn-btn-atualizar' ? '↻ Atualizar app' : '↻ Atualizar'; b.disabled = false; } });
 
-  // 4. Atualiza permissões em background (usa _refreshPermUI, nunca showHome)
+  // Atualiza permissões em background (usa _refreshPermUI, nunca showHome)
   fetch(`${SB_URL}/rest/v1/gn_usuarios?id=eq.${session.id}&ativo=eq.true&select=id,nome,loja,cargo,permissoes`,
     { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } })
   .then(r => r.json()).then(data => {
@@ -673,6 +695,7 @@ function showHome(sess) {
   document.getElementById('sb-modules').innerHTML = MODULES
     .filter(m => !m.masterOnly || isMaster)
     .filter(m => !(m.geralOnly && isMaster && masterLoja))
+    .filter(m => !(m.lojaOnly && isMaster && !masterLoja))
     .filter(m => m.free || (isMaster ? permsNav[m.perm] !== false : (!!permsNav[m.perm] || (m.cargoBypass && m.cargoBypass.includes(sess.cargo)))))
     .map(m => `<button class="sbn-mod" onclick="${m.action ? m.action+'()' : `navTo('${m.url}')`}"><span class="sbn-mod-icon">${m.icon}</span>${m.name}</button>`)
     .join('');
@@ -753,6 +776,7 @@ function renderModules(sess, isMaster) {
   list.innerHTML = MODULES
     .filter(m => !m.masterOnly || isMaster)
     .filter(m => !(m.geralOnly && isMaster && masterLoja))
+    .filter(m => !(m.lojaOnly && isMaster && !masterLoja))
     .map(m => {
       const cargoBypassed = m.cargoBypass && m.cargoBypass.includes(sess.cargo);
       const enabled = m.free || (isMaster ? perms[m.perm] !== false : (!!perms[m.perm] || cargoBypassed));
@@ -1375,27 +1399,7 @@ function _renderVisitasSupContent() {
 }
 
 // ── DASHBOARD ────────────────────────────────────────────────────────────────
-let _dashTab  = 'fat';  // 'fat' | 'att' | 'metas'
-let _dashPer  = 'sem';  // 'sem' | 'mes'
-let _dashWoff = 0;      // week offset (0=current week)
-let _dashMoff = 0;      // month offset (0=current month)
-let _dashFat     = null; // {lojaKey: total} for selected period
-let _dashFatPrev = null; // {lojaKey: total} for previous period
-let _dashManut   = null; // {lojaKey: pendingCount}
-let _dashChk     = null; // Set of lojas that sent checklist today
-let _dashLoading = false;
-let _dashMetas   = {};   // {lojaKey: target} persisted in localStorage
-let _dashRelSel  = new Set(); // lojas selecionadas para o relatório (vazio = todas)
-let _dashManutCrit = 0;       // items from gn_manut_itens older than 5 days
-let _dashLoadedAt  = null;    // timestamp of last successful data load
-let _dashSparkData = null;    // {lojaKey: [v-3, v-2, v-1, v0]} fat per period
-let _dashViewMode  = 'cards'; // 'cards' | 'table' | 'chart'
-let _dashSortBy    = 'fat';
-let _dashSortDir   = 'desc';
-let _dashFatDia    = null;    // {YYYY-MM-DD: total} fat per day for current period
-let _dashComDia    = null;    // Array(7) of daily commission totals (Mon=0..Sun=6)
-let _dashFatDiaLoja = null;   // {lojaKey: {YYYY-MM-DD: valor}}
-let _dashComDiaLoja = null;   // {lojaKey: Array(7)}
+// (variáveis _dash* declaradas lá em cima, perto de `let masterLoja` — ver comentário lá)
 
 function _p2(n){ return String(n).padStart(2,'0'); }
 
