@@ -3290,16 +3290,30 @@ function qtdPreenchidos() {
 }
 
 /* ── SINCRONIZAÇÃO COM GN-PEDIDOS ──────────────────────── */
-let _catalogoMap = null;
+let _catalogoMap = null;       // NOME_UPPER -> catalogo id (fallback, sensível a diferença de texto)
+let _catalogoPorItemId = null; // item (mesmo id de PRODUTOS_PEDIDO) -> catalogo id (principal, estável)
 
 async function _carregarCatalogo() {
   if (_catalogoMap) return _catalogoMap;
   try {
-    const rows = await sbRequest('gn_catalogo?select=id,produto&limit=2000', { method: 'GET' });
+    const rows = await sbRequest('gn_catalogo?select=id,item_id,produto&limit=2000', { method: 'GET' });
     _catalogoMap = {};
-    (rows || []).forEach(r => { _catalogoMap[r.produto.trim().toUpperCase()] = r.id; });
-  } catch(e) { _catalogoMap = {}; }
+    _catalogoPorItemId = {};
+    (rows || []).forEach(r => {
+      _catalogoMap[r.produto.trim().toUpperCase()] = r.id;
+      if (r.item_id != null) _catalogoPorItemId[r.item_id] = r.id;
+    });
+  } catch(e) { _catalogoMap = {}; _catalogoPorItemId = {}; }
   return _catalogoMap;
+}
+
+// Resolve o id do catálogo pro item do Pedido: prioriza o vínculo estável por item_id
+// (imune a diferença de acento/espaço/redação no nome do produto); cai pro nome só se
+// o item_id não existir no catálogo (produto novo ainda não migrado).
+function _resolverCatalogoId(prod) {
+  const porId = _catalogoPorItemId ? _catalogoPorItemId[prod.item] : undefined;
+  if (porId) return porId;
+  return _catalogoMap ? _catalogoMap[prod.produto.trim().toUpperCase()] : undefined;
 }
 
 async function _buscarOuCriarPedidoAtivo() {
@@ -3322,21 +3336,22 @@ async function _buscarOuCriarPedidoAtivo() {
 
 async function _sincronizarComPedidos(produtosSync) {
   // produtosSync: [{prod, cx, und, pedidoCx, pedidoUnd, fator}]
-  const catMap = await _carregarCatalogo();
+  await _carregarCatalogo();
   const pedidoDB = await _buscarOuCriarPedidoAtivo();
   const lojaSlug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
   const hoje = wkKey(new Date());
 
   const contagens = [];
   const itens = [];
+  const naoSincronizados = []; // itens com dado real que não têm vínculo no catálogo — não podem ser perdidos em silêncio
   const kAntSinc = loja + "|" + wkKey(addDays(semana, -7));
 
   produtosSync.forEach(({ prod, cx, und, pedidoCx, pedidoUnd, fator }) => {
-    const catalogoId = catMap[prod.produto.trim().toUpperCase()];
-    if (!catalogoId) return;
     const estoqueAtual = (cx * fator) + und;
     const qtdPedida = (pedidoCx * fator) + pedidoUnd;
     if (estoqueAtual === 0 && qtdPedida === 0) return;
+    const catalogoId = _resolverCatalogoId(prod);
+    if (!catalogoId) { naoSincronizados.push(prod.produto); return; }
     const destSinc = mapeamentoPedido[String(prod.item)] || prod.produto.trim().toUpperCase();
     const ulEstoque = (contAll[kAntSinc] || {})[destSinc] ?? null;
 
@@ -3374,7 +3389,7 @@ async function _sincronizarComPedidos(produtosSync) {
       });
     } catch(e) { erros++; }
   }
-  return { contagens: contagens.length, itens: itens.length, erros };
+  return { contagens: contagens.length, itens: itens.length, erros, naoSincronizados };
 }
 
 async function confirmarPedido(modo) {
@@ -3510,10 +3525,28 @@ async function confirmarPedido(modo) {
   document.querySelectorAll('[onclick*="_abrirPreviaConfirmar"],[onclick*="confirmarPedido"]').forEach(b => { b.disabled = false; b.style.opacity = ''; });
 
   // 8. Toast consolidado com status explícito da nuvem
-  const pedOk = syncResult && syncResult.erros === 0;
+  const naoSinc = (syncResult && syncResult.naoSincronizados) || [];
+  const pedOk = syncResult && syncResult.erros === 0 && naoSinc.length === 0;
   const cloudStr = cloudOk ? '☁️ Salvo na nuvem ✓' : '⚠️ Sem internet — salvo só neste celular';
-  const pedStr   = produtosParaSync.length > 0 ? (pedOk ? '\nApp Pedidos: OK ✓' : '\nApp Pedidos: sem conexão') : '';
+  const pedStr   = produtosParaSync.length > 0 ? (pedOk ? '\nApp Pedidos: OK ✓' : naoSinc.length ? '\nApp Pedidos: ' + naoSinc.length + ' item(s) não vinculado(s)' : '\nApp Pedidos: sem conexão') : '';
   showToast('⚡ ' + atualizados + ' item(s) confirmados!\n' + cloudStr + pedStr, cloudOk ? 'success' : 'warn', 6000);
+
+  // 8b. Itens sem vínculo no catálogo NÃO chegam ao app Estoque — não pode passar batido
+  // (é justamente o tipo de perda silenciosa que gera falta de mercadoria). Alerta bloqueante
+  // + registro no banco pra o mestre/RH conseguir ver mesmo se a loja não avisar.
+  if (naoSinc.length > 0) {
+    alert(
+      '⚠️ ATENÇÃO — ' + naoSinc.length + ' item(s) NÃO chegaram ao app Estoque:\n\n' +
+      naoSinc.map(n => '• ' + n).join('\n') +
+      '\n\nO item foi salvo aqui no app Lojas, mas o Estoque não vai enxergar esse pedido. ' +
+      'Avise o financeiro/TI pra cadastrar esse(s) produto(s) no catálogo — refaça a urgência depois que for corrigido.'
+    );
+    sbRequest('gn_pedido_sync_erros', {
+      method: 'POST',
+      headers: { 'Prefer': 'return=minimal' },
+      body: JSON.stringify({ loja, itens: naoSinc, modo, criado_por: usuarioAtual ? usuarioAtual.nome : '' })
+    }).catch(() => {});
+  }
 
   // 9. Gerar Excel apenas no modo final
   if (modo === 'final') {
