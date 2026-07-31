@@ -22,6 +22,22 @@ window.trioLojaSlugByComKey = function(comKey) {
   return l ? l.trioSlug : null;
 };
 
+// ── Grupos de cargo compartilhados entre apps ──────────────────────────────
+// Fonte única de quem tem quais autorizações. Antes, cada cargo elevado (ex.:
+// "administrador") precisava ser adicionado manualmente em ~15 lugares
+// espalhados por 7 arquivos — bastava esquecer um pra deixar um app com
+// permissão inconsistente. Daqui pra frente, mudar o acesso de um cargo é
+// editar só aqui.
+window.CARGOS_SUPERVISAO       = ['supervisor','administrador'];          // autorizações idênticas às do supervisor
+window.CARGOS_GESTAO           = ['gerente','sub_gerente','supervisor','administrador','compras','mestre']; // acesso amplo de gestão (app Lojas)
+window.CARGOS_MASTER_EQUIV     = ['mestre','supervisor','administrador','compras']; // bypass de restrição de horário/acesso (RH, Manutenção)
+window.CARGOS_INVENTARIO       = ['mestre','supervisor','administrador','admin','gerente']; // acesso ao GN Inventário
+window.CARGOS_REABRIR          = ['admin','administrador','gerente','sub-gerente','subgerente','sub gerente','supervisor','mestre']; // reabrir caixa fechado
+window.CARGOS_RH_LIVRE         = ['mestre','supervisor','administrador','compras','admin','gerente']; // sem restrição de horário no GN RH
+window.CARGOS_CAIXA_BYPASS     = ['gerente','mestre','admin'];            // bypass de permissão no módulo Caixa (Home)
+window.CARGOS_PUSH_TODAS_LOJAS = ['compras','supervisor','administrador','mestre']; // push notification sem filtro de loja
+window.CARGOS_ALTERNAR_LOJA    = ['compras','supervisor','administrador']; // pode alternar loja ativa no app Lojas
+
 // Escapa texto livre antes de inserir em innerHTML (nomes, observações, motivos etc.)
 // — evita que caracteres como <, >, & quebrem o layout ou injetem HTML.
 window.escapeHtml = function(str) {
