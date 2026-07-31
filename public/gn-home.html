@@ -473,7 +473,7 @@ let _dashChk     = null; // Set of lojas that sent checklist today
 let _dashLoading = false;
 let _dashMetas   = {};   // {lojaKey: target} persisted in localStorage
 let _dashRelSel  = new Set(); // lojas selecionadas para o relatório (vazio = todas)
-let _dashManutCrit = 0;       // items from gn_manut_itens older than 5 days
+let _dashManutCrit = 0;       // manutenções pendentes (checklist + oficiais) registradas há mais de 5 dias
 let _dashLoadedAt  = null;    // timestamp of last successful data load
 let _dashSparkData = null;    // {lojaKey: [v-3, v-2, v-1, v0]} fat per period
 let _dashViewMode  = 'cards'; // 'cards' | 'table' | 'chart'
@@ -1653,16 +1653,18 @@ async function _loadDashAll() {
   const H     = {apikey:SB_KEY,Authorization:'Bearer '+SB_KEY};
   try {
     const weekRange = _weekRange(_dashPer==='sem' ? _dashWoff : 0);
-    const [fatCur, fatPrv, fat2, fat3, manutRows, chkRows, manutItemsRows, fatDia, comDia] = await Promise.all([
+    const trinta = new Date(); trinta.setDate(trinta.getDate()-30);
+    const from30 = trinta.toISOString().slice(0,10);
+    const [fatCur, fatPrv, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia] = await Promise.all([
       _fetchFat(range.dates).catch(()=>({})),
       _fetchFat(prevRange.dates).catch(()=>({})),
       _fetchFat(range2.dates).catch(()=>({})),
       _fetchFat(range3.dates).catch(()=>({})),
-      fetch(`${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hoje}&select=loja,manutencao`,{headers:H})
+      fetch(`${SB_URL}/rest/v1/checklist_diario?select=data_operacao,loja,manutencao&data_operacao=gte.${from30}&order=data_operacao.desc`,{headers:H})
         .then(r=>r.ok?r.json():[]).catch(()=>[]),
       fetch(`${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hoje}&select=loja`,{headers:H})
         .then(r=>r.ok?r.json():[]).catch(()=>[]),
-      fetch(`${SB_URL}/rest/v1/gn_manut_itens?status=neq.Resolvido&select=criado_em`,{headers:H})
+      fetch(`${SB_URL}/rest/v1/gn_lojas?select=loja,all_data`,{headers:H})
         .then(r=>r.ok?r.json():[]).catch(()=>[]),
       _fetchFatByDay(_dashPer==='sem' ? range.dates : weekRange.dates).catch(()=>({byDay:{},byLojaDay:{}})),
       _fetchComDia(_dashPer==='sem' ? range.dates[0] : weekRange.dates[0]).catch(()=>({totals:Array(7).fill(0),byLoja:{}})),
@@ -1670,18 +1672,43 @@ async function _loadDashAll() {
     _dashFat = fatCur; _dashFatPrev = fatPrv;
     _dashFatDia = fatDia.byDay || {}; _dashFatDiaLoja = fatDia.byLojaDay || {};
     _dashComDia = comDia.totals || Array(7).fill(0); _dashComDiaLoja = comDia.byLoja || {};
-    // count pending maintenance from today's checklist only (dia a dia, sem acumular)
-    const byManut = {}; LOJAS_LISTA.forEach(k=>{byManut[k]=0;});
+    // Manutenção: mesma lógica de deduplicação/carry-over do app gn-manutencao.html —
+    // um item pendente aparece repetido dia após dia no checklist até ser resolvido,
+    // então contamos só a ocorrência mais recente de cada (loja,setor,tipo,descrição),
+    // preservando a data de registro original (mais antiga) para o alerta de "há X dias".
+    // Também soma os itens "oficiais" lançados direto pelo RH (gn_lojas.all_data.manut_oficial_items),
+    // que o card antigo não incluía.
+    const _newestManut=new Map(), _oldestManut=new Map();
     (manutRows||[]).forEach(row=>{
       if(!Array.isArray(row.manutencao)) return;
-      const pend = row.manutencao.filter(m=>m&&m.status!=='Resolvido').length;
       const mk=_normLoja(row.loja);
-      if(Object.prototype.hasOwnProperty.call(byManut,mk)) byManut[mk]+=pend;
+      row.manutencao.forEach(m=>{
+        if(!m) return;
+        const k=`${mk}|${m.setor}|${m.tipo}|${(m.descricao||'').trim().toLowerCase()}`;
+        const withMeta={...m, _loja:mk, _data:row.data_operacao};
+        if(!_newestManut.has(k)) _newestManut.set(k,withMeta); // rows vêm desc → primeiro = status atual
+        _oldestManut.set(k,withMeta); // sobrescrito até o fim → última = data de registro original
+      });
     });
+    const manutDedup=[..._newestManut.entries()].map(([k,newest])=>({...newest,_data:_oldestManut.get(k)._data}));
+    const manutOficiais=[];
+    (lojasOfRows||[]).forEach(lr=>{
+      const mk=_COM_KEY_TO_LOJA[lr.loja];
+      const items=lr.all_data?.manut_oficial_items;
+      if(!mk || !Array.isArray(items)) return;
+      items.forEach(m=>manutOficiais.push({...m, _loja:mk, _data:m.created_at?m.created_at.split('T')[0]:hoje}));
+    });
+    const manutTodos=[...manutDedup, ...manutOficiais].filter(m=>m.status!=='Resolvido');
+    const byManut = {}; LOJAS_LISTA.forEach(k=>{byManut[k]=0;});
+    manutTodos.forEach(m=>{ if(Object.prototype.hasOwnProperty.call(byManut,m._loja)) byManut[m._loja]++; });
     _dashManut = byManut;
     _dashChk   = new Set((chkRows||[]).map(r=>_normLoja(r.loja)).filter(l=>LOJAS_LISTA.includes(l)));
+    window._chipDetail = window._chipDetail || {};
+    window._chipDetail.dashChk = { title: '📋 Lojas sem checklist hoje',
+      lines: LOJAS_LISTA.filter(l=>!_dashChk.has(l)).map(l=>({ nome: LOJA_DISPLAY[l] || l })),
+      actionUrl: 'gn-checklist.html', actionLabel: 'Abrir Check-list' };
     const old5 = new Date(); old5.setDate(old5.getDate()-5);
-    _dashManutCrit = (manutItemsRows||[]).filter(r=>r.criado_em&&new Date(r.criado_em)<old5).length;
+    _dashManutCrit = manutTodos.filter(m=>m._data && new Date(m._data+'T00:00:00')<old5).length;
     const spark={}; LOJAS_LISTA.forEach(k=>{spark[k]=[(fat3[k]||0),(fat2[k]||0),(fatPrv[k]||0),(fatCur[k]||0)];});
     _dashSparkData=spark;
   } catch(e) {
@@ -1721,7 +1748,7 @@ function _buildKPIRow() {
   const stMN=LOJAS_LISTA.filter(k=>_dashMetas[k]>0).length;
   const chkN=_dashChk?LOJAS_LISTA.filter(l=>_dashChk.has(l)).length:null;
   const chkClr=chkN===null?'rgba(255,255,255,.3)':chkN===LOJAS_LISTA.length?'#4ade80':chkN>0?'#fbbf24':'#f87171';
-  const t=(lbl,val,sub,vc='#fff')=>`<div class="kpi-tile">
+  const t=(lbl,val,sub,vc='#fff',onclick)=>`<div class="kpi-tile"${onclick?` onclick="${onclick}" style="cursor:pointer"`:''}>
     <div class="kpi-tile-lbl">${lbl}</div>
     <div class="kpi-tile-val" style="color:${vc}">${val}</div>
     ${sub?`<div class="kpi-tile-sub">${sub}</div>`:''}
@@ -1731,7 +1758,7 @@ function _buildKPIRow() {
     ${t('Faturamento',_fmtBRLs(total)||'—',delta!==null?`<span style="color:${dClr}">${dStr}</span> vs ${totalPStr||'—'} (anterior)`:'')}
     ${t('Variação',dStr,totalPStr?`${totalPStr} no período anterior`:'vs período anterior',dClr)}
     ${avgM!==null?t('% Média Meta',avgM+'%',`${stAbove}/${stMN} acima da meta`,mClr):t('% Média Meta','—','configure em Metas')}
-    ${t('CHK Hoje',chkN!==null?chkN+'/'+LOJAS_LISTA.length:'—',chkN===LOJAS_LISTA.length?'todas em dia':chkN>0?'algumas sem checklist':'nenhum hoje',chkClr)}
+    ${t('CHK Hoje',chkN!==null?chkN+'/'+LOJAS_LISTA.length:'—',chkN===LOJAS_LISTA.length?'todas em dia':chkN>0?'algumas sem checklist · toque para ver':'nenhum hoje',chkClr,chkN!==null&&chkN<LOJAS_LISTA.length?"_openChipDetail('dashChk')":null)}
   </div>`;
 }
 
