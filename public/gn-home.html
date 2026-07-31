@@ -475,6 +475,7 @@ let _dashMetas   = {};   // {lojaKey: target} persisted in localStorage
 let _dashRelSel  = new Set(); // lojas selecionadas para o relatório (vazio = todas)
 let _dashManutCrit = 0;       // manutenções pendentes (checklist + oficiais) registradas há mais de 5 dias
 let _dashLoadedAt  = null;    // timestamp of last successful data load
+let _dashLoadHadError = false; // true se algum fetch do dashboard falhou na última carga (ver gnLogError)
 let _dashSparkData = null;    // {lojaKey: [v-3, v-2, v-1, v0]} fat per period
 let _dashViewMode  = 'cards'; // 'cards' | 'table' | 'chart'
 let _dashSortBy    = 'fat';
@@ -1148,11 +1149,11 @@ async function _renderHealthChips() {
 
   try {
     const [cxRows, clRows, fatData, visitasChkRows, visitasManutRows] = await Promise.all([
-      fetch(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=eq.${hoje}&select=loja,status`, { headers: H }).then(r => r.ok ? r.json() : []).catch(() => []),
-      fetch(`${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hoje}&select=loja,manutencao`, { headers: H }).then(r => r.ok ? r.json() : []).catch(() => []),
-      _fetchFat(weekDates).catch(() => null),
-      fetch(`${SB_URL}/rest/v1/gn_chk_visitas?data=eq.${hoje}&select=id,loja,visitante,cargo,hora_chegada,hora_saida`, { headers: H }).then(r => r.ok ? r.json() : []).catch(() => []),
-      fetch(`${SB_URL}/rest/v1/gn_manut_visitas?data=eq.${hoje}&select=id,loja,oficial,hora_chegada,hora_saida`, { headers: H }).then(r => r.ok ? r.json() : []).catch(() => []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=eq.${hoje}&select=loja,status`, H, 'chips:cxRows', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hoje}&select=loja,manutencao`, H, 'chips:clRows', []),
+      _fetchFat(weekDates).catch(e=>{ window.gnLogError('chips:fatData', e); return null; }),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_chk_visitas?data=eq.${hoje}&select=id,loja,visitante,cargo,hora_chegada,hora_saida`, H, 'chips:visitasChkRows', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_manut_visitas?data=eq.${hoje}&select=id,loja,oficial,hora_chegada,hora_saida`, H, 'chips:visitasManutRows', []),
     ]);
     // Une visitas de gn_chk_visitas (visitantes externos, app check-list) e gn_manut_visitas
     // (equipe de manutenção, app manutenção) num único feed. hora_saida nula = em andamento.
@@ -1235,6 +1236,7 @@ async function _renderHealthChips() {
       }, 30000);
     }
   } catch(e) {
+    window.gnLogError('chips:_renderHealthChips', e);
     el.innerHTML = '';
   }
 }
@@ -1250,8 +1252,8 @@ async function _loadLojaHealthChips(loja) {
 
   try {
     const [todayRows, weekFat] = await Promise.all([
-      fetch(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(LOJA_DB_KEY[loja]||loja)}&data_operacao=eq.${hoje}&select=venda_salao,venda_delivery,manutencao`, { headers: H }).then(r => r.ok ? r.json() : []).catch(() => []),
-      _fetchFat(range.dates).catch(() => ({}))
+      window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(LOJA_DB_KEY[loja]||loja)}&data_operacao=eq.${hoje}&select=venda_salao,venda_delivery,manutencao`, H, 'chips:lojaTodayRows', []),
+      _fetchFat(range.dates).catch(e=>{ window.gnLogError('chips:lojaWeekFat', e); return {}; })
     ]);
 
     const fatHoje = (todayRows||[]).reduce((t,r) => t + (parseFloat(r.venda_salao)||0) + (parseFloat(r.venda_delivery)||0), 0);
@@ -1268,6 +1270,7 @@ async function _loadLojaHealthChips(loja) {
 
     el.innerHTML = chips.join('');
   } catch(e) {
+    window.gnLogError('chips:_loadLojaHealthChips', e);
     const chip = (txt, bg, clr) => `<span style="display:inline-flex;align-items:center;gap:4px;background:${bg};border-radius:20px;padding:4px 10px;font-size:10px;font-weight:700;color:${clr}">${txt}</span>`;
     el.innerHTML = chip('💵 Hoje: —', 'rgba(255,255,255,.07)', 'rgba(255,255,255,.3)')
                  + chip('📅 Semana: —', 'rgba(255,255,255,.07)', 'rgba(255,255,255,.3)');
@@ -1626,7 +1629,7 @@ async function _fetchComDia(mondayISO) {
     `${SB_URL}/rest/v1/gn_comissoes?loja=in.(${comKeys})&select=loja,all_data`,
     { headers: {apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY} }
   );
-  if (!res.ok) return { totals: Array(7).fill(0), byLoja: {} };
+  if (!res.ok) throw new Error('HTTP '+res.status);
   const rows = await res.json();
   const totals = Array(7).fill(0);
   const byLoja = {};
@@ -1645,6 +1648,7 @@ async function _fetchComDia(mondayISO) {
 async function _loadDashAll() {
   if (_dashLoading) return;
   _dashLoading = true;
+  _dashLoadHadError = false;
   const range     = _dashPer==='sem' ? _weekRange(_dashWoff)   : _monthRange(_dashMoff);
   const prevRange = _dashPer==='sem' ? _weekRange(_dashWoff-1) : _monthRange(_dashMoff-1);
   const range2    = _dashPer==='sem' ? _weekRange(_dashWoff-2)  : _monthRange(_dashMoff-2);
@@ -1655,19 +1659,17 @@ async function _loadDashAll() {
     const weekRange = _weekRange(_dashPer==='sem' ? _dashWoff : 0);
     const trinta = new Date(); trinta.setDate(trinta.getDate()-30);
     const from30 = trinta.toISOString().slice(0,10);
+    const _errCb = label => e => { window.gnLogError('dash:'+label, e); _dashLoadHadError = true; };
     const [fatCur, fatPrv, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia] = await Promise.all([
-      _fetchFat(range.dates).catch(()=>({})),
-      _fetchFat(prevRange.dates).catch(()=>({})),
-      _fetchFat(range2.dates).catch(()=>({})),
-      _fetchFat(range3.dates).catch(()=>({})),
-      fetch(`${SB_URL}/rest/v1/checklist_diario?select=data_operacao,loja,manutencao&data_operacao=gte.${from30}&order=data_operacao.desc`,{headers:H})
-        .then(r=>r.ok?r.json():[]).catch(()=>[]),
-      fetch(`${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hoje}&select=loja`,{headers:H})
-        .then(r=>r.ok?r.json():[]).catch(()=>[]),
-      fetch(`${SB_URL}/rest/v1/gn_lojas?select=loja,all_data`,{headers:H})
-        .then(r=>r.ok?r.json():[]).catch(()=>[]),
-      _fetchFatByDay(_dashPer==='sem' ? range.dates : weekRange.dates).catch(()=>({byDay:{},byLojaDay:{}})),
-      _fetchComDia(_dashPer==='sem' ? range.dates[0] : weekRange.dates[0]).catch(()=>({totals:Array(7).fill(0),byLoja:{}})),
+      _fetchFat(range.dates).catch(e=>{ _errCb('fatCur')(e); return {}; }),
+      _fetchFat(prevRange.dates).catch(e=>{ _errCb('fatPrv')(e); return {}; }),
+      _fetchFat(range2.dates).catch(e=>{ _errCb('fat2')(e); return {}; }),
+      _fetchFat(range3.dates).catch(e=>{ _errCb('fat3')(e); return {}; }),
+      window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?select=data_operacao,loja,manutencao&data_operacao=gte.${from30}&order=data_operacao.desc`, H, 'dash:manutRows', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hoje}&select=loja`, H, 'dash:chkRows', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?select=loja,all_data`, H, 'dash:lojasOfRows', []),
+      _fetchFatByDay(_dashPer==='sem' ? range.dates : weekRange.dates).catch(e=>{ _errCb('fatDia')(e); return {byDay:{},byLojaDay:{}}; }),
+      _fetchComDia(_dashPer==='sem' ? range.dates[0] : weekRange.dates[0]).catch(e=>{ _errCb('comDia')(e); return {totals:Array(7).fill(0),byLoja:{}}; }),
     ]);
     _dashFat = fatCur; _dashFatPrev = fatPrv;
     _dashFatDia = fatDia.byDay || {}; _dashFatDiaLoja = fatDia.byLojaDay || {};
@@ -1712,6 +1714,8 @@ async function _loadDashAll() {
     const spark={}; LOJAS_LISTA.forEach(k=>{spark[k]=[(fat3[k]||0),(fat2[k]||0),(fatPrv[k]||0),(fatCur[k]||0)];});
     _dashSparkData=spark;
   } catch(e) {
+    window.gnLogError('dash:_loadDashAll', e);
+    _dashLoadHadError = true;
     _dashFat=_dashFat||{}; _dashFatPrev=_dashFatPrev||{};
     _dashManut=_dashManut||{}; _dashChk=_dashChk||new Set();
   } finally { _dashLoading=false; _dashLoadedAt=new Date(); }
@@ -2123,7 +2127,7 @@ function renderDashboard() {
         <span style="width:32px;height:32px;border-radius:10px;background:rgba(242,100,25,.12);border:1px solid rgba(242,100,25,.22);display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">📊</span>
         <div>
           <div style="font-size:11px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;color:rgba(255,255,255,.65)">Painel de Gestão</div>
-          <div style="font-size:10px;color:rgba(255,255,255,.3);margin-top:1px">Visão consolidada · todas as lojas${updTxt?` · atualizado às ${updTxt}`:''}</div>
+          <div style="font-size:10px;color:rgba(255,255,255,.3);margin-top:1px">Visão consolidada · todas as lojas${updTxt?` · atualizado às ${updTxt}`:''}${_dashLoadHadError?' · <span style="color:#fbbf24">⚠️ alguns dados podem estar desatualizados</span>':''}</div>
         </div>
       </div>
       <div class="dash-tabs">
