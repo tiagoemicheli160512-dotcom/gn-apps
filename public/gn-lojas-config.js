@@ -38,6 +38,29 @@ window.CARGOS_CAIXA_BYPASS     = ['gerente','mestre','admin'];            // byp
 window.CARGOS_PUSH_TODAS_LOJAS = ['compras','supervisor','administrador','mestre']; // push notification sem filtro de loja
 window.CARGOS_ALTERNAR_LOJA    = ['compras','supervisor','administrador']; // pode alternar loja ativa no app Lojas
 
+// ── Log de erro compartilhado para sincronizações entre apps ──────────────
+// Antes, falhas nesses pontos (fetch que retorna HTTP não-ok, ex.: tabela
+// renomeada/removida, ou exceção de rede) eram engolidas em silêncio por
+// `.catch(()=>[])`/`.catch(()=>({}))`, sem deixar rastro nenhum — foi assim
+// que o card de manutenções do Painel de Gestão ficou incorreto por tempo
+// indeterminado até alguém comparar manualmente com o app Manutenção.
+// gnFetchJson loga no console (contexto + causa) sempre que a resposta não
+// for ok ou a requisição falhar, mas mantém o mesmo fallback de antes —
+// nenhum comportamento visível muda, só passa a ficar rastreável.
+window.gnLogError = function(context, err) {
+  console.error('[GN:' + context + ']', (err && err.message) ? err.message : err);
+};
+window.gnFetchJson = async function(url, headers, context, fallback) {
+  try {
+    const r = await fetch(url, { headers });
+    if (!r.ok) { window.gnLogError(context, 'HTTP ' + r.status + ' — ' + url); return fallback; }
+    return await r.json();
+  } catch (e) {
+    window.gnLogError(context, e);
+    return fallback;
+  }
+};
+
 // Escapa texto livre antes de inserir em innerHTML (nomes, observações, motivos etc.)
 // — evita que caracteres como <, >, & quebrem o layout ou injetem HTML.
 window.escapeHtml = function(str) {
