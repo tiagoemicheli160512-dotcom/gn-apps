@@ -1815,6 +1815,23 @@ function _insumosCadastrados() {
   return [...new Set([...getTodosInsumos(), ...(SEED.bebidas_insumos||[])])];
 }
 
+// Entradas da semana lançadas com um nome que não bate com nenhum insumo cadastrado —
+// isso normalmente só acontece quando alguém com acesso elevado (ou via senha mestre)
+// contorna o bloqueio de "item não cadastrado" no formulário de Nova Nota Fiscal. A
+// quantidade continua somando em estIniAll (addEntrada não distingue), mas fica sob um
+// nome que a tela de Estoque nunca lista — daí o insumo "sumir" mesmo tendo entrada.
+function _entradasNaoReconhecidas() {
+  const cadastrados = new Set(_insumosCadastrados());
+  const porInsumo = {};
+  getEntradas().forEach(e => {
+    if (cadastrados.has(e.insumo)) return;
+    if (!porInsumo[e.insumo]) porInsumo[e.insumo] = { qtd: 0, itens: [] };
+    porInsumo[e.insumo].qtd += (e.qtd||0);
+    porInsumo[e.insumo].itens.push(e);
+  });
+  return porInsumo;
+}
+
 // Mesmo critério de acesso elevado usado em outras ações restritas do app
 // (_podeCfgMinimos etc.): gerente/sub_gerente/supervisor/compras/mestre, loja GERAL
 // ou sessão com permissoes.master — dispensa a senha mestre extra pra esses usuários.
@@ -5462,9 +5479,26 @@ function render() {
     const totalCusto = entradas.reduce((s,e) => s + ((e.qtd||0)*(e.custoUnit||0)), 0);
     const allIns = getTodosInsumos();
     const dlId = 'dlEntInsumo';
+    const naoRec = _entradasNaoReconhecidas();
+    const naoRecNomes = Object.keys(naoRec);
 
     c.innerHTML = `
     <div class="section">
+      ${naoRecNomes.length ? `
+      <div class="alert-box alert-red" style="padding:12px">
+        <div style="font-weight:800;margin-bottom:4px">⚠️ ${naoRecNomes.length} produto${naoRecNomes.length>1?'s':''} da Entrada não aparece${naoRecNomes.length>1?'m':''} no Estoque</div>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:8px">O nome lançado na nota não bate com nenhum insumo cadastrado — a quantidade fica "perdida", somada por baixo dos panos mas sem aparecer em nenhuma linha do Estoque. Vincule ao insumo certo pra corrigir.</div>
+        ${naoRecNomes.map(nome => {
+          const d = naoRec[nome];
+          return `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;background:rgba(0,0,0,.18);border-radius:10px;padding:7px 10px;margin-bottom:5px">
+            <div style="min-width:0">
+              <div style="font-size:12px;font-weight:700;color:#fbbf24;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${nome}</div>
+              <div style="font-size:10px;color:#94a3b8">+${d.qtd.toFixed(3)} em ${d.itens.length} lançamento${d.itens.length>1?'s':''}</div>
+            </div>
+            <button onclick="pedirCorrecaoEntradaPorNome('${nome.replace(/'/g,"\\'")}')" style="background:none;border:1px solid #fbbf24;border-radius:6px;color:#fbbf24;font-size:11px;padding:5px 10px;cursor:pointer;flex-shrink:0;white-space:nowrap">✏️ Corrigir</button>
+          </div>`;
+        }).join('')}
+      </div>` : ''}
       <div class="sec-row" style="margin-top:0">
         <div>
           <div class="sec-label" style="margin-bottom:1px">📦 Entradas de Mercadoria</div>
@@ -7404,9 +7438,11 @@ async function confirmarSenhaMestre() {
 }
 
 let _correcaoId = null;
+let _correcaoNome = null; // usado pela correção em lote (painel "não aparece no Estoque")
 
 function pedirCorrecaoEntrada(id) {
   _correcaoId = id;
+  _correcaoNome = null;
   pedirSenhaMestre(function(){
     const k = lojaKey();
     const ent = (entradasAll[k]||[]).find(e => e.id === _correcaoId);
@@ -7427,12 +7463,50 @@ function pedirCorrecaoEntrada(id) {
   });
 }
 
+// Mesmo modal, mas corrige de uma vez TODOS os lançamentos da semana com esse nome
+// errado — chamado a partir do painel de auditoria "não aparece no Estoque".
+function pedirCorrecaoEntradaPorNome(nomeErrado) {
+  _correcaoId = null;
+  _correcaoNome = nomeErrado;
+  pedirSenhaMestre(function(){
+    document.getElementById('correcaoAtual').textContent = nomeErrado;
+    document.getElementById('correcaoErro').textContent = '';
+    const sel = document.getElementById('correcaoSelect');
+    sel.innerHTML = '<option value="">— selecione ou busque —</option>';
+    _insumosCadastrados().sort().forEach(n => {
+      const o = document.createElement('option');
+      o.value = n; o.textContent = n;
+      sel.appendChild(o);
+    });
+    document.getElementById('correcaoBusca').value = '';
+    document.getElementById('correcaoModal').style.display = 'flex';
+  });
+}
+
 function confirmarCorrecao() {
   const k = lojaKey();
-  const ent = (entradasAll[k]||[]).find(e => e.id === _correcaoId);
-  if (!ent) { fecharCorrecaoModal(); return; }
   const novoNome = document.getElementById('correcaoSelect').value.trim().toUpperCase();
   if (!novoNome) { document.getElementById('correcaoErro').textContent = '⚠️ Selecione um item da lista.'; return; }
+
+  if (_correcaoNome) {
+    const nomeErrado = _correcaoNome;
+    _correcaoNome = null;
+    if (novoNome === nomeErrado) { fecharCorrecaoModal(); return; }
+    const afetadas = (entradasAll[k]||[]).filter(e => e.insumo === nomeErrado);
+    let totalQtd = 0;
+    afetadas.forEach(e => { e.insumo = novoNome; totalQtd += (e.qtd||0); });
+    if (estIniAll[k]) {
+      if (estIniAll[k][nomeErrado] !== undefined) estIniAll[k][nomeErrado] = Math.max(0, (estIniAll[k][nomeErrado]||0) - totalQtd);
+      estIniAll[k][novoNome] = (estIniAll[k][novoNome]||0) + totalQtd;
+    }
+    fecharCorrecaoModal();
+    autoSave(); render();
+    showToast('✅ ' + afetadas.length + ' lançamento(s) corrigido(s) para "' + novoNome + '"');
+    return;
+  }
+
+  const ent = (entradasAll[k]||[]).find(e => e.id === _correcaoId);
+  if (!ent) { fecharCorrecaoModal(); return; }
   if (novoNome === ent.insumo) { fecharCorrecaoModal(); return; }
   if (estIniAll[k]) {
     if (estIniAll[k][ent.insumo] !== undefined)
