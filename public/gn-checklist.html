@@ -4108,6 +4108,7 @@ async function onDataChange(val){
   document.getElementById('repique-valor').value='';
   document.getElementById('dinheiro-caixa').value='';
   _triosHojeRecord = null;
+  _triosHojeRecords = [];
   const _bnEl=document.getElementById('banda-nome'); if(_bnEl){ _bnEl.value=''; _bnEl.readOnly=false; _bnEl.style.cssText=''; }
   const _bvEl=document.getElementById('banda-valor'); if(_bvEl){ _bvEl.value=''; _bvEl.readOnly=false; _bvEl.style.cssText=''; }
   const _bcEl=document.getElementById('banda-consumo'); if(_bcEl) _bcEl.value='';
@@ -9567,6 +9568,7 @@ function _triosLojaSlug(){
 }
 
 let _triosHojeRecord = null;
+let _triosHojeRecords = []; // todas as apresentações de hoje (pode ter mais de uma no mesmo dia)
 
 async function _carregarBandaHoje(){
   const slug = _triosLojaSlug();
@@ -9577,10 +9579,11 @@ async function _carregarBandaHoje(){
       .select('*').eq('loja',slug).eq('data',hoje)
       .order('horario_inicio',{ascending:true});
     if(error) throw error;
-    _triosHojeRecord = (data && data.length > 0) ? data[0] : null;
+    _triosHojeRecords = data || [];
   }catch(e){
-    _triosHojeRecord = null;
+    _triosHojeRecords = [];
   }
+  _triosHojeRecord = _triosHojeRecords[0] || null;
   if(el) _renderBandaHoje();
   _preencherBandaDiaFromAgenda();
 }
@@ -9597,7 +9600,8 @@ function _preencherBandaDiaFromAgenda(){
   const readonlyStyle = 'opacity:0.55;cursor:default;background:var(--s3,#333);';
   const editableStyle = '';
 
-  if(!_triosHojeRecord){
+  const registros = _triosHojeRecords || [];
+  if(!registros.length){
     if(nomeEl){ nomeEl.readOnly=false; nomeEl.style.cssText=editableStyle; }
     if(valorEl){ valorEl.readOnly=false; valorEl.style.cssText=editableStyle; }
     if(wrapEl) wrapEl.style.display='none';
@@ -9605,32 +9609,44 @@ function _preencherBandaDiaFromAgenda(){
     return;
   }
 
-  const r = _triosHojeRecord;
-  const confirmed = r.presenca_confirmada;
+  // Com 2+ apresentações no dia, o nome/cachê aqui refletem o total (soma), e a confirmação
+  // de presença/"não veio" de cada uma é feita individualmente nos cards "Banda de Hoje" acima —
+  // esse wrap de confirmação único fica escondido pra não ficar ambíguo qual apresentação ele afeta.
+  const nomeCombinado   = registros.map(r=>r.artista).filter(Boolean).join(' + ');
+  const cacheTotal      = registros.reduce((s,r)=>s+(parseFloat(r.cache)||0),0);
+  const couvertQtdTotal = registros.reduce((s,r)=>s+(parseFloat(r.couver_qtd)||0),0);
 
   if(nomeEl){
-    nomeEl.value   = r.artista || '';
+    nomeEl.value   = nomeCombinado;
     nomeEl.readOnly = true;
     nomeEl.style.cssText = readonlyStyle;
-    state.banda.nome = r.artista || '';
+    state.banda.nome = nomeCombinado;
   }
   if(valorEl){
-    valorEl.value   = r.cache || '';
+    valorEl.value   = cacheTotal || '';
     valorEl.readOnly = true;
     valorEl.style.cssText = readonlyStyle;
-    state.banda.valor = parseFloat(r.cache) || 0;
+    state.banda.valor = cacheTotal;
   }
   if(consumoEl && !parseFloat(consumoEl.value)){
     consumoEl.value = BANDA_CONSUMO_FRANQUIA;
     state.banda.consumo = BANDA_CONSUMO_FRANQUIA;
   }
-  if(couvertEl && !parseFloat(couvertEl.value) && r.couver_qtd){
-    couvertEl.value = r.couver_qtd;
-    state.banda.qtd_couvert = parseFloat(r.couver_qtd) || 0;
+  if(couvertEl && !parseFloat(couvertEl.value) && couvertQtdTotal){
+    couvertEl.value = couvertQtdTotal;
+    state.banda.qtd_couvert = couvertQtdTotal;
   }
   if(avisoEl) avisoEl.style.display='block';
+
+  if(registros.length > 1){
+    if(wrapEl) wrapEl.style.display='none';
+    renderBandaDia();
+    return;
+  }
   if(wrapEl)  wrapEl.style.display='block';
 
+  const r = registros[0];
+  const confirmed = r.presenca_confirmada;
   const naoVeio = r.banda_nao_veio;
   const naoVeioInfo  = document.getElementById('banda-dados-naoveio-info');
   const naoVeioMotEl = document.getElementById('banda-dados-naoveio-motivo-display');
@@ -9676,6 +9692,7 @@ async function _confirmarPresencaBandaDados(){
     if(error) throw error;
     _triosHojeRecord = {..._triosHojeRecord, couver_qtd:qtd, couver_valor:valor,
       presenca_confirmada:true, presenca_confirmada_por:nome};
+    _triosHojeRecords[0] = _triosHojeRecord;
     _renderBandaHoje();
     _preencherBandaDiaFromAgenda();
     showToast('✓ Presença da banda confirmada!', 'success');
@@ -9688,28 +9705,30 @@ async function _confirmarPresencaBandaDados(){
 function _renderBandaHoje(){
   const el = document.getElementById('banda-hoje-card');
   if(!el) return;
-  if(!_triosHojeRecord){
+  const registros = _triosHojeRecords || [];
+  if(!registros.length){
     el.innerHTML = `<div style="background:#1c1c1c;border:1px solid #2a2a2a;border-radius:12px;padding:14px;text-align:center;">
       <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Banda de Hoje</div>
       <div style="font-size:12px;color:#666;">Nenhuma banda cadastrada na agenda para hoje</div>
     </div>`;
     return;
   }
-  const r = _triosHojeRecord;
+  el.innerHTML = registros.map(_bandaHojeCardHtml).join('') + _bandaHojeCouvertHtml(registros);
+}
+
+// Um card por apresentação — cada uma confirma presença / registra "não veio" independente,
+// já que num mesmo dia pode ter banda de dia e banda à noite (horários diferentes na agenda).
+function _bandaHojeCardHtml(r){
   const cache  = parseFloat(r.cache) || 0;
-  const qtd    = parseFloat(r.couver_qtd) || 0;
-  const val    = parseFloat(r.couver_valor) || 0;
   const presConf = r.presenca_confirmada;
   const naoVeio  = r.banda_nao_veio;
-  const resultado = val - cache;
-  const resOk  = resultado >= 0;
   const borderColor = naoVeio ? 'rgba(224,82,82,0.5)' : presConf ? 'rgba(34,197,94,0.4)' : 'rgba(232,88,10,0.3)';
-  el.innerHTML = `<div style="background:#1c1c1c;border:1px solid ${borderColor};border-radius:12px;padding:14px;">
-    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:10px;gap:8px;">
+  return `<div style="background:#1c1c1c;border:1px solid ${borderColor};border-radius:12px;padding:14px;margin-bottom:8px;">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px;gap:8px;">
       <div style="flex:1;min-width:0;">
-        <div style="font-size:9px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;">Banda de Hoje</div>
+        <div style="font-size:9px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;">${r.horario_inicio&&r.horario_fim?`${r.horario_inicio} – ${r.horario_fim}`:'Banda de Hoje'}</div>
         <div style="font-size:15px;font-weight:700;color:#e2e8f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${_esc(r.artista)}</div>
-        ${r.horario_inicio&&r.horario_fim?`<div style="font-size:11px;color:#888;margin-top:1px;">${r.horario_inicio} – ${r.horario_fim}</div>`:''}
+        <div style="font-size:11px;color:#F5D98A;margin-top:1px;">Cachê: R$${cache.toFixed(2).replace('.',',')}</div>
       </div>
       ${naoVeio?`<div style="flex-shrink:0;background:#2d0a0a;border:1px solid rgba(224,82,82,0.3);border-radius:8px;padding:5px 8px;text-align:center;">
         <div style="font-size:9px;color:#f87171;font-weight:700;">✗ NÃO VEIO</div>
@@ -9719,12 +9738,38 @@ function _renderBandaHoje(){
         <div style="font-size:9px;color:#4ade8099;margin-top:1px;">${_esc(r.presenca_confirmada_por||'')}</div>
       </div>`:''}
     </div>
-    ${naoVeio&&r.banda_nao_veio_motivo?`<div style="background:#2d0a0a;border-radius:8px;padding:8px 10px;font-size:11px;color:#fca5a5;margin-bottom:10px;">Motivo: ${_esc(r.banda_nao_veio_motivo)}</div>`:''}
+    ${naoVeio&&r.banda_nao_veio_motivo?`<div style="background:#2d0a0a;border-radius:8px;padding:8px 10px;font-size:11px;color:#fca5a5;margin-bottom:9px;">Motivo: ${_esc(r.banda_nao_veio_motivo)}</div>`:''}
+    <div style="display:grid;grid-template-columns:1fr auto;gap:8px;">
+      <button onclick="_confirmarPresencaBandaCard('${r.id}')" style="padding:9px;border-radius:9px;border:none;background:${presConf?'#163d24':'#E8580A'};color:#fff;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;">
+        ${presConf?'✓ Confirmada':'✓ Confirmar Presença'}
+      </button>
+      <button onclick="_toggleNaoVeioBandaCard('${r.id}')" style="padding:9px 12px;border-radius:9px;border:none;background:${naoVeio?'#450a0a':'#7f1d1d'};color:#fca5a5;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;">
+        ${naoVeio?'Alterar motivo':'✗ Não Veio'}
+      </button>
+    </div>
+    <div id="banda-naoveio-form-${r.id}" style="display:none;flex-direction:column;gap:7px;margin-top:8px;">
+      <textarea id="banda-naoveio-motivo-${r.id}" placeholder="Motivo (ex: cancelamento, problema técnico...)" rows="2" style="width:100%;background:#2a2a2a;border:1px solid #7f1d1d;border-radius:8px;padding:9px;color:#e2e8f0;font-size:13px;font-family:inherit;resize:none;box-sizing:border-box;outline:none;">${_esc(r.banda_nao_veio_motivo||'')}</textarea>
+      <button onclick="_registrarBandaNaoVeioCard('${r.id}')" style="width:100%;padding:9px;border-radius:9px;border:none;background:#7f1d1d;color:#fff;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;">
+        Salvar — Banda não veio
+      </button>
+    </div>
+  </div>`;
+}
 
+// Bloco único de couvert pro dia — mesmo com 2 apresentações, a contagem de couvert é uma
+// só (não separa por horário), então fica fora dos cards, aplicada ao dia inteiro.
+function _bandaHojeCouvertHtml(registros){
+  const cacheTotal = registros.reduce((s,r)=>s+(parseFloat(r.cache)||0),0);
+  const qtd = registros.reduce((s,r)=>s+(parseFloat(r.couver_qtd)||0),0);
+  const val = registros.reduce((s,r)=>s+(parseFloat(r.couver_valor)||0),0);
+  const resultado = val - cacheTotal;
+  const resOk = resultado >= 0;
+  return `<div style="background:#1c1c1c;border:1px solid rgba(34,197,94,0.25);border-radius:12px;padding:14px;">
+    <div style="font-size:9px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:9px;">Couvert do Dia${registros.length>1?' (vale pras '+registros.length+' apresentações)':''}</div>
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:11px;">
       <div style="background:#2a1a0a;border-radius:8px;padding:8px;text-align:center;">
-        <div style="font-size:9px;color:#888;margin-bottom:2px;">Cachê</div>
-        <div style="font-size:13px;font-weight:700;color:#F5D98A;">R$${cache.toFixed(2).replace('.',',')}</div>
+        <div style="font-size:9px;color:#888;margin-bottom:2px;">Cachê total</div>
+        <div style="font-size:13px;font-weight:700;color:#F5D98A;">R$${cacheTotal.toFixed(2).replace('.',',')}</div>
       </div>
       <div style="background:#0d1a0d;border-radius:8px;padding:8px;text-align:center;">
         <div style="font-size:9px;color:#888;margin-bottom:2px;">Couvert</div>
@@ -9745,8 +9790,8 @@ function _renderBandaHoje(){
         <input type="number" id="banda-hoje-valor" value="${val||''}" placeholder="0,00" min="0" step="0.01" style="width:100%;background:#2a2a2a;border:1px solid #404040;border-radius:8px;padding:8px;color:#e2e8f0;font-size:13px;outline:none;box-sizing:border-box;">
       </div>
     </div>
-    <button id="banda-hoje-btn" onclick="_confirmarPresencaBanda()" style="width:100%;padding:11px;border-radius:10px;border:none;background:${presConf?'#163d24':'#E8580A'};color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;transition:.15s;">
-      ${presConf?'✓ Presença confirmada — atualizar couvert':'✓ Confirmar Presença da Banda'}
+    <button id="banda-hoje-btn" onclick="_salvarCouvertBandaHoje()" style="width:100%;padding:11px;border-radius:10px;border:none;background:#E8580A;color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;transition:.15s;">
+      💾 Salvar Couvert
     </button>
   </div>`;
 }
@@ -9760,27 +9805,92 @@ function _bandaHojeCalcVal(){
   if(recEl) recEl.textContent = 'R$' + val.toFixed(2).replace('.',',');
 }
 
-async function _confirmarPresencaBanda(){
-  if(!_triosHojeRecord) return;
+// Couvert é lançado uma vez só pro dia (não separa por apresentação) — grava no primeiro
+// registro do dia e zera os demais, pra somas em outros relatórios (ex.: Trios/Bandas do
+// app Estoque e Pedidos) não contarem o mesmo couvert duas vezes.
+async function _salvarCouvertBandaHoje(){
+  const registros = _triosHojeRecords || [];
+  if(!registros.length) return;
   const qtd   = parseFloat(document.getElementById('banda-hoje-qtd')?.value) || 0;
   const valor = parseFloat(document.getElementById('banda-hoje-valor')?.value) || 0;
-  const nome  = (usuarioLogado && usuarioLogado.nome) || LOJA;
   const btn   = document.getElementById('banda-hoje-btn');
   if(btn){ btn.disabled=true; btn.textContent='Salvando...'; }
   try{
+    const [principal, ...resto] = registros;
+    const {error} = await sb.from('gn_trios_agenda')
+      .update({ couver_qtd: qtd, couver_valor: valor }).eq('id', principal.id);
+    if(error) throw error;
+    for(const r of resto){
+      await sb.from('gn_trios_agenda').update({ couver_qtd: 0, couver_valor: 0 }).eq('id', r.id);
+    }
+    _triosHojeRecords = [
+      {...principal, couver_qtd:qtd, couver_valor:valor},
+      ...resto.map(r => ({...r, couver_qtd:0, couver_valor:0})),
+    ];
+    _triosHojeRecord = _triosHojeRecords[0];
+    _renderBandaHoje();
+    _preencherBandaDiaFromAgenda();
+    showToast('✓ Couvert salvo!', 'success');
+  }catch(e){
+    if(btn){ btn.disabled=false; btn.textContent='💾 Salvar Couvert'; }
+    alert('Erro ao salvar couvert: '+(e.message||e));
+  }
+}
+
+function _achaBandaHojeIdx(id){
+  return (_triosHojeRecords||[]).findIndex(r => String(r.id) === String(id));
+}
+
+async function _confirmarPresencaBandaCard(id){
+  const idx = _achaBandaHojeIdx(id);
+  if(idx < 0) return;
+  const nome = (usuarioLogado && usuarioLogado.nome) || LOJA;
+  try{
     const {error} = await sb.from('gn_trios_agenda').update({
-      couver_qtd: qtd,
-      couver_valor: valor,
       presenca_confirmada: true,
       presenca_confirmada_por: nome,
-      presenca_confirmada_em: new Date().toISOString()
-    }).eq('id', _triosHojeRecord.id);
+      presenca_confirmada_em: new Date().toISOString(),
+      banda_nao_veio: false
+    }).eq('id', id);
     if(error) throw error;
-    _triosHojeRecord = {..._triosHojeRecord, couver_qtd:qtd, couver_valor:valor, presenca_confirmada:true, presenca_confirmada_por:nome};
+    _triosHojeRecords[idx] = {..._triosHojeRecords[idx], presenca_confirmada:true, presenca_confirmada_por:nome, banda_nao_veio:false};
+    _triosHojeRecord = _triosHojeRecords[0];
     _renderBandaHoje();
+    _preencherBandaDiaFromAgenda();
+    showToast('✓ Presença confirmada!', 'success');
   }catch(e){
-    if(btn){ btn.disabled=false; btn.textContent='✓ Confirmar Presença da Banda'; }
     alert('Erro ao confirmar: '+(e.message||e));
+  }
+}
+
+function _toggleNaoVeioBandaCard(id){
+  const form = document.getElementById('banda-naoveio-form-'+id);
+  if(!form) return;
+  form.style.display = form.style.display === 'flex' ? 'none' : 'flex';
+}
+
+async function _registrarBandaNaoVeioCard(id){
+  const idx = _achaBandaHojeIdx(id);
+  if(idx < 0) return;
+  const motivo = (document.getElementById('banda-naoveio-motivo-'+id)?.value || '').trim();
+  if(!motivo){ alert('Informe o motivo.'); return; }
+  const nome = (usuarioLogado && usuarioLogado.nome) || LOJA;
+  try{
+    const {error} = await sb.from('gn_trios_agenda').update({
+      banda_nao_veio: true,
+      banda_nao_veio_motivo: motivo,
+      banda_nao_veio_por: nome,
+      banda_nao_veio_em: new Date().toISOString(),
+      presenca_confirmada: false
+    }).eq('id', id);
+    if(error) throw error;
+    _triosHojeRecords[idx] = {..._triosHojeRecords[idx], banda_nao_veio:true, banda_nao_veio_motivo:motivo, banda_nao_veio_por:nome, presenca_confirmada:false};
+    _triosHojeRecord = _triosHojeRecords[0];
+    _renderBandaHoje();
+    _preencherBandaDiaFromAgenda();
+    showToast('Registrado: banda não veio.', 'error');
+  }catch(e){
+    alert('Erro ao registrar: '+(e.message||e));
   }
 }
 
@@ -9809,6 +9919,7 @@ async function _registrarBandaNaoVeioDados(){
     if(error) throw error;
     _triosHojeRecord = {..._triosHojeRecord, banda_nao_veio:true,
       banda_nao_veio_motivo:motivo, banda_nao_veio_por:nome, presenca_confirmada:false};
+    _triosHojeRecords[0] = _triosHojeRecord;
     _renderBandaHoje();
     _preencherBandaDiaFromAgenda();
     showToast('Registrado: banda não veio.', 'error');
