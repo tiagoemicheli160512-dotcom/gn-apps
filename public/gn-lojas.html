@@ -1555,7 +1555,12 @@ function abrirImportXMLNF() {
 }
 
 function abrirModalMatchNF(itens, nfNum, fornecedor, dataNF, vencBoletoArr) {
-  const linhas = itens.map((it, idx) => ({ it, idx, mapeado: nfMapeamentos[it.xProd] || '' }));
+  const linhas = itens.map((it, idx) => {
+    const mapeado = nfMapeamentos[it.xProd] || '';
+    const insumo = mapeado || it.xProd.trim().toUpperCase();
+    const fator = getFator(insumo);
+    return { it, idx, mapeado, fator };
+  });
   const vencsIni = (Array.isArray(vencBoletoArr) && vencBoletoArr.length) ? vencBoletoArr : [''];
 
   const overlay = document.createElement('div');
@@ -1564,16 +1569,16 @@ function abrirModalMatchNF(itens, nfNum, fornecedor, dataNF, vencBoletoArr) {
   overlay.innerHTML = `
     <div style="max-width:500px;margin:0 auto;padding-bottom:24px">
       <div style="font-size:13px;font-weight:800;color:#fff;margin-bottom:3px">📄 Itens da NF-e${nfNum ? ' nº ' + nfNum : ''}</div>
-      <div style="font-size:11px;color:#64748b;margin-bottom:10px">${fornecedor || 'Fornecedor'}${dataNF ? ' · ' + dataNF : ''} — os itens entram no estoque exatamente como estão na nota</div>
+      <div style="font-size:11px;color:#64748b;margin-bottom:10px">${fornecedor || 'Fornecedor'}${dataNF ? ' · ' + dataNF : ''} — itens com fator de conversão cadastrado (ex.: caixa com várias unidades) entram no estoque já na quantidade real</div>
       <input type="text" placeholder="🔍 Filtrar itens desta NF..." oninput="filtrarItensNFModal(this)"
         style="width:100%;box-sizing:border-box;background:#363636;border:1px solid rgba(99,102,241,.4);border-radius:10px;padding:9px 12px;color:#e2e8f0;font-size:12px;margin-bottom:12px"/>
-      ${linhas.map(({ it, idx, mapeado }) => `
+      ${linhas.map(({ it, idx, mapeado, fator }) => `
         <div data-nf-idx="${idx}" data-xprod="${(it.xProd||'').toLowerCase()}" style="background:rgba(255,255,255,.05);border-radius:12px;padding:11px 13px;margin-bottom:8px;border:1px solid ${mapeado?'rgba(99,102,241,.3)':'rgba(245,158,11,.25)'}">
           <div style="display:flex;align-items:flex-start;gap:10px">
             <input type="checkbox" id="nfChk_${idx}" checked style="margin-top:3px;width:18px;height:18px;flex-shrink:0;accent-color:#6366f1"/>
             <div style="flex:1;min-width:0">
               <div style="font-size:11px;color:#e2e8f0;font-weight:700;word-break:break-word;margin-bottom:2px">${it.xProd}</div>
-              <div style="font-size:10px;color:#64748b;margin-bottom:5px">${it.qCom} ${it.uCom}${it.vUnCom > 0 ? ' · R$ ' + it.vUnCom.toFixed(4) + '/un' : ''}</div>
+              <div style="font-size:10px;color:#64748b;margin-bottom:5px">${it.qCom} ${it.uCom}${it.vUnCom > 0 ? ' · R$ ' + it.vUnCom.toFixed(4) + '/' + (it.uCom||'un') : ''}${fator > 1 ? ' → <b style="color:#34d399">' + (+(it.qCom * fator).toFixed(3)) + ' UN</b> (fator ×' + fator + ' já cadastrado' + (it.vUnCom > 0 ? ' · R$ ' + (it.vUnCom / fator).toFixed(2) + '/UN' : '') + ')' : ''}</div>
               ${mapeado
                 ? '<div style="font-size:10px;color:#818cf8;font-weight:700">⇄ Vinculado a: ' + mapeado + '</div>'
                 : '<div style="font-size:10px;color:#f59e0b;font-weight:700">⚠️ Ainda não vinculado — entra como "' + it.xProd + '" até um responsável vincular na aba Vínculos ou corrigir com senha mestre</div>'}
@@ -1649,14 +1654,23 @@ function confirmarMatchNF() {
     if (!chk || !chk.checked) return;
     const nfDesc = it.xProd; // chave original da nota, usada pra criar o vínculo depois
     const insumo = nfMapeamentos[nfDesc] || nfDesc.trim().toUpperCase();
-    estIniAll[k][insumo] = (estIniAll[k][insumo] || 0) + it.qCom;
-    entradasAll[k].push({
+    // a NF declara a quantidade na unidade comercial (ex.: 1 "UND" que na verdade é
+    // 1 caixa com 12 latas) — aplicamos o fator de conversão já cadastrado pra esse
+    // insumo (o mesmo usado no lançamento manual) pra entrar no estoque na quantidade
+    // real, não na quantidade comercial da nota
+    const fator = getFator(insumo);
+    const qtdTotal = it.qCom * fator;
+    const custoUnitReal = fator > 1 ? it.vUnCom / fator : it.vUnCom;
+    estIniAll[k][insumo] = (estIniAll[k][insumo] || 0) + qtdTotal;
+    const entry = {
       id: Date.now() + '_' + idx + '_' + Math.random().toString(36).slice(2, 5),
       insumo, nfDesc, dataNF: dataFinal, nf: nfNumFinal, fornecedor: fornFinal,
-      qtd: it.qCom, custoUnit: it.vUnCom, fotoBase64: '', fotoName: '',
+      qtd: qtdTotal, custoUnit: custoUnitReal, fotoBase64: '', fotoName: '',
       vencimento: vencimentos[0],
       vencimentos
-    });
+    };
+    if (fator > 1) entry.fator = fator;
+    entradasAll[k].push(entry);
     adicionados++;
   });
 
