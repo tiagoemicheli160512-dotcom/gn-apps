@@ -135,6 +135,9 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .diverg-btn{width:26px;height:26px;background:transparent;border:1.5px solid rgba(239,68,68,.35);border-radius:6px;color:rgba(239,68,68,.45);font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:.15s;margin-left:4px;line-height:1}
 .diverg-btn:hover{border-color:#ef4444;color:#ef4444;background:rgba(239,68,68,.1)}
 .diverg-btn.ativo{background:rgba(239,68,68,.18);border-color:#ef4444;color:#ef4444}
+.urg-btn{width:26px;height:26px;background:transparent;border:1.5px solid rgba(245,158,11,.35);border-radius:6px;color:rgba(245,158,11,.5);font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:.15s;margin-left:4px;line-height:1}
+.urg-btn:hover{border-color:#f59e0b;color:#f59e0b;background:rgba(245,158,11,.1)}
+.urg-btn.ativo{background:rgba(180,83,9,.3);border-color:#b45309;color:#fbbf24}
 .prod-row.diverg-ativo{border-left:3px solid #ef4444 !important;background:rgba(239,68,68,.04) !important}
 .prod-row.ja-pedido{border-left:3px solid #22c55e;background:rgba(34,197,94,.15)}
 .todos-loja-row.ja-pedido{border-left:3px solid #22c55e;background:rgba(34,197,94,.15);padding-left:5px}
@@ -472,6 +475,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 <div id="toast"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="gn-lojas-config.js"></script>
 <script>
 // ═══════════════════════════════════════════════
 // CONFIG
@@ -610,6 +614,8 @@ let S = {
   grupoFiltro: '',
   fornFiltro: '',
   eduAtivo: false, // aba "Edu" — espelho do Pedido, só com itens de EDU_FORNECEDORES
+  pedFiltro: '',    // '' | 'urgencia' | 'vazios' | 'preenchidos'
+  urgenciaTemplate: {}, // userKey (mesma chave de gn_lojas.loja) -> [item_id_string, ...]
   gruposAbertos: new Set(['BEBIDAS','PROTEÍNA','PRODUÇÃO']),
 
   // Filtros catálogo
@@ -1451,6 +1457,65 @@ function _datasEspeciaisCardHtml() {
 // "Confirmar" gera provisões/pedidos pelas lojas do jeito de sempre (mesma função/estado).
 const EDU_FORNECEDORES = ['AMBEV', 'JBS', 'FAFS /VILLA PESCADOS'];
 
+// ── URGÊNCIA (raio) — compartilhada com o app Lojas ────────────────────────
+// gn_lojas_pedido usa slug_pedido (ex.: 'boulevard'); o app Lojas guarda a urgência em
+// gn_lojas.all_data.urgenciaTemplate, chaveado pelo "loja" dele (ex.: 'BOULEVARD', o
+// mesmo userKey de GN_LOJAS). Esse mapa traduz um pro outro pra marcar/ler no lugar certo.
+const LOJA_USERKEY_BY_SLUG = Object.fromEntries((window.GN_LOJAS || []).map(l => [l.lojaSlug, l.userKey]));
+
+async function carregarUrgenciaTemplate() {
+  const userKeys = [...new Set(Object.values(LOJA_USERKEY_BY_SLUG))];
+  if (!userKeys.length) return;
+  try {
+    const { data } = await db.from('gn_lojas').select('loja,all_data').in('loja', userKeys);
+    (data || []).forEach(row => {
+      S.urgenciaTemplate[row.loja] = (row.all_data && row.all_data.urgenciaTemplate && row.all_data.urgenciaTemplate[row.loja]) || [];
+    });
+  } catch (e) {}
+}
+
+// Marca/desmarca manualmente um item como urgência pra uma loja — grava direto na mesma
+// gn_lojas.all_data.urgenciaTemplate que o app Lojas lê, então aparece de lá também.
+async function toggleUrgenciaPedido(itemId, lojaSlug) {
+  const userKey = LOJA_USERKEY_BY_SLUG[lojaSlug];
+  if (!userKey) { toast('Esta loja não tem urgência configurada.', 'err'); return; }
+  const idStr = String(itemId);
+  const atual = S.urgenciaTemplate[userKey] ? [...S.urgenciaTemplate[userKey]] : [];
+  const idx = atual.indexOf(idStr);
+  if (idx >= 0) atual.splice(idx, 1); else atual.push(idStr);
+  S.urgenciaTemplate[userKey] = atual;
+  renderPedido();
+  try {
+    const { data } = await db.from('gn_lojas').select('all_data').eq('loja', userKey);
+    const allData = (data && data[0] && data[0].all_data) || {};
+    allData.urgenciaTemplate = { [userKey]: atual };
+    if (data && data.length) {
+      await db.from('gn_lojas').update({ all_data: allData }).eq('loja', userKey);
+    } else {
+      await db.from('gn_lojas').insert({ loja: userKey, all_data: allData });
+    }
+  } catch (e) {
+    toast('Erro ao salvar urgência.', 'err');
+  }
+}
+
+function _pedidoItemUrgente(prod, lojaSlug) {
+  const idStr = String(prod.item_id);
+  if (lojaSlug) {
+    const uk = LOJA_USERKEY_BY_SLUG[lojaSlug];
+    return !!uk && (S.urgenciaTemplate[uk] || []).includes(idStr);
+  }
+  return S.lojas.some(l => {
+    const uk = LOJA_USERKEY_BY_SLUG[l.slug_pedido];
+    return uk && (S.urgenciaTemplate[uk] || []).includes(idStr);
+  });
+}
+
+function _pedidoItemPreenchido(prod, lojaSlug) {
+  if (lojaSlug) return (S.pedidoItens[prod.id]?.[lojaSlug]?.qtd || 0) > 0;
+  return S.lojas.some(l => (S.pedidoItens[prod.id]?.[l.slug_pedido]?.qtd || 0) > 0);
+}
+
 // ═══════════════════════════════════════════════
 // RENDER: PEDIDO
 // ═══════════════════════════════════════════════
@@ -1518,13 +1583,18 @@ function renderPedido() {
 
   // ── Produtos filtrados ──
   function prodsFiltrados(grupo) {
-    return S.catalogo.filter(p =>
+    let lista = S.catalogo.filter(p =>
       p.ativo && p.grupo === grupo &&
       (!S.eduAtivo    || EDU_FORNECEDORES.includes(p.fornecedor)) &&
       (!S.grupoFiltro || p.grupo === S.grupoFiltro) &&
       (!S.fornFiltro  || p.fornecedor === S.fornFiltro) &&
       (!busca || p.produto.toLowerCase().includes(busca) || p.fornecedor.toLowerCase().includes(busca))
     );
+    const lojaFiltro = S.todosModo ? null : lojaAtiva;
+    if (S.pedFiltro === 'vazios') lista = lista.filter(p => !_pedidoItemPreenchido(p, lojaFiltro));
+    else if (S.pedFiltro === 'preenchidos') lista = lista.filter(p => _pedidoItemPreenchido(p, lojaFiltro));
+    else if (S.pedFiltro === 'urgencia') lista = lista.filter(p => _pedidoItemUrgente(p, lojaFiltro));
+    return lista;
   }
 
   // ── MODO: POR LOJA ──
@@ -1550,6 +1620,7 @@ function renderPedido() {
             ? `<span class="val">${fmtQtd(contagem.ul_pedido)}</span>` : dash;
           const estVigDisp = contagem?.atual != null
             ? `<span class="val">${fmtQtd(contagem.atual)}</span>` : dash;
+          const isUrgente = _pedidoItemUrgente(prod, lojaAtiva);
           return `<div class="prod-row${divAtual?' diverg-ativo':jaPedido?' ja-pedido':''}" data-cid="${prod.id}" data-loja="${lojaAtiva}">
             <div class="prod-info">
               <div class="prod-nome" title="${prod.produto}">${prod.produto}</div>
@@ -1573,6 +1644,7 @@ function renderPedido() {
                 <button class="qty-btn" onclick="ajustarQtd('${prod.id}','${lojaAtiva}',${prod.custo||0},1)" ${pedConfirmado?'disabled':''}>+</button>
               </div>
               <button class="diverg-btn${divAtual?' ativo':''}" title="Marcar divergência na contagem" onclick="toggleDiverg('${prod.id}','${lojaAtiva}')">⚑</button>
+              <button class="urg-btn${isUrgente?' ativo':''}" title="${isUrgente?'Remover da urgência':'Marcar como urgência'}" onclick="toggleUrgenciaPedido('${prod.item_id}','${lojaAtiva}')">⚡</button>
             </div>
           </div>`;
         }).join('');
@@ -1621,6 +1693,7 @@ function renderPedido() {
             const ulPedV = contagem?.ul_pedido  != null ? `<span class="v">${fmtQtd(contagem.ul_pedido)}</span>`  : dsh;
             const vigV   = contagem?.atual      != null ? `<span class="v">${fmtQtd(contagem.atual)}</span>`      : dsh;
             const subT = qtdL > 0 ? `<span class="v">R$${fmt(qtdL*(prod.custo||0))}</span>` : '';
+            const isUrgenteL = _pedidoItemUrgente(prod, loja.slug_pedido);
             return `<div class="todos-loja-row${divL?' diverg-ativo':ulPedQtd>0?' ja-pedido':''}">
               <span class="todos-loja-nome">${loja.nome_display}</span>
               <span class="todos-loja-est">Est.ant:${ulEstV}</span>
@@ -1638,6 +1711,7 @@ function renderPedido() {
                   <button class="qty-btn-sm" onclick="ajustarQtd('${prod.id}','${loja.slug_pedido}',${prod.custo||0},1)" ${pedConfirmado?'disabled':''}>+</button>
                 </div>
                 <button class="diverg-btn${divL?' ativo':''}" style="width:22px;height:22px;font-size:10px" title="Marcar divergência" onclick="toggleDiverg('${prod.id}','${loja.slug_pedido}')">⚑</button>
+                <button class="urg-btn${isUrgenteL?' ativo':''}" style="width:22px;height:22px;font-size:10px" title="${isUrgenteL?'Remover da urgência':'Marcar como urgência'}" onclick="toggleUrgenciaPedido('${prod.item_id}','${loja.slug_pedido}')">⚡</button>
               </div>
               ${subT?`<span class="todos-loja-total">${subT}</span>`:''}
             </div>`;
@@ -1694,6 +1768,11 @@ function renderPedido() {
     ).map(p=>p.fornecedor)
   )].sort();
 
+  const _lojaFiltroUrg = S.todosModo ? null : lojaAtiva;
+  const urgTotal = _lojaFiltroUrg
+    ? (S.urgenciaTemplate[LOJA_USERKEY_BY_SLUG[_lojaFiltroUrg]] || []).length
+    : S.lojas.reduce((sum,l)=>sum+((S.urgenciaTemplate[LOJA_USERKEY_BY_SLUG[l.slug_pedido]]||[]).length),0);
+
   $('content').innerHTML = semNavHtml + _datasEspeciaisCardHtml() + `
     <div class="pedido-bar">
       <div class="pedido-info">
@@ -1727,6 +1806,22 @@ function renderPedido() {
         <option value="">Todos fornec.</option>
         ${[...new Set(S.catalogo.filter(p=>p.ativo && (!S.eduAtivo || EDU_FORNECEDORES.includes(p.fornecedor))).map(p=>p.fornecedor))].sort().map(f=>`<option value="${esc(f)}"${S.fornFiltro===f?' selected':''}>${esc(f)}</option>`).join('')}
       </select>
+    </div>
+
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">
+      ${urgTotal>0 ? `
+      <button onclick="S.pedFiltro=(S.pedFiltro==='urgencia'?'':'urgencia');renderPedido()"
+        style="background:${S.pedFiltro==='urgencia'?'#b45309':'var(--card2)'};border:none;border-radius:10px;padding:5px 10px;color:${S.pedFiltro==='urgencia'?'#fff':'var(--muted)'};font-size:11px;font-weight:700;cursor:pointer">
+        ⚡ Urg (${urgTotal})
+      </button>` : ''}
+      <button onclick="S.pedFiltro=(S.pedFiltro==='vazios'?'':'vazios');renderPedido()"
+        style="background:${S.pedFiltro==='vazios'?'#6366f1':'var(--card2)'};border:none;border-radius:10px;padding:5px 10px;color:${S.pedFiltro==='vazios'?'#fff':'var(--muted)'};font-size:11px;font-weight:700;cursor:pointer">
+        ⬜ Vazios
+      </button>
+      <button onclick="S.pedFiltro=(S.pedFiltro==='preenchidos'?'':'preenchidos');renderPedido()"
+        style="background:${S.pedFiltro==='preenchidos'?'#34d399':'var(--card2)'};border:none;border-radius:10px;padding:5px 10px;color:${S.pedFiltro==='preenchidos'?'#1e293b':'var(--muted)'};font-size:11px;font-weight:700;cursor:pointer">
+        ✓ Preench
+      </button>
     </div>
 
     <div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:6px">
@@ -3514,6 +3609,7 @@ async function iniciarApp() {
     carregarLojas(),
     carregarContagens(),
     carregarMasterConfig(),
+    carregarUrgenciaTemplate(),
   ]);
   // Load devoluções after lojas (needs S.lojas for display names)
   carregarDevolucoesLojas().catch(() => {});
