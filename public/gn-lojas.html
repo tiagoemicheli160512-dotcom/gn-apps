@@ -761,6 +761,14 @@ function filterByLoja(obj, lojaNome) {
 }
 
 /* Envia (upsert) os dados desta loja para a nuvem */
+// Busca o all_data mais recente de uma loja direto da nuvem. Usado por sbPush/sbPushLoja
+// pra mesclar antes de gravar — ver comentário em sbPush(). Lança erro se falhar (quem
+// chama deve abortar o push nesse caso, nunca gravar por cima com uma base vazia).
+async function _fetchAllDataAtual(lojaKey) {
+  const rows = await sbRequest("gn_lojas?loja=eq." + encodeURIComponent(lojaKey) + "&select=all_data", { method: "GET" });
+  return (rows && rows[0] && rows[0].all_data) || {};
+}
+
 async function sbPush() {
   try {
     sbStatus = "conectando"; updateSyncIndicator();
@@ -782,10 +790,17 @@ async function sbPush() {
       // de volta um toggle feito minutos antes no outro app. toggleUrgenciaManual() já grava
       // essa chave isolada, com leitura fresca na hora (mesmo padrão do app Pedido).
     };
+    // Mescla com o all_data mais recente da nuvem antes de gravar — outros apps (Home,
+    // Caixa, RH) escrevem campos próprios direto nessa mesma linha (xml_enviado_mes,
+    // caixa_conferencias, fotos_caixa_sistema etc.), fora do payload conhecido aqui.
+    // Sobrescrever sem mesclar apagava esses campos silenciosamente a cada autosave —
+    // era o motivo do card "Enviar XML do mês" no painel voltar mesmo já confirmado.
+    const baseAllData = await _fetchAllDataAtual(loja);
+    const mergedAllData = { ...baseAllData, ...payload };
     await sbRequest("gn_lojas?loja=eq." + encodeURIComponent(loja), {
       method: "PATCH",
       headers: { "Prefer": "return=minimal" },
-      body: JSON.stringify({ all_data: payload, updated_at: new Date().toISOString(), updated_by: loja + (usuarioAtual ? '/' + usuarioAtual.nome : '') })
+      body: JSON.stringify({ all_data: mergedAllData, updated_at: new Date().toISOString(), updated_by: loja + (usuarioAtual ? '/' + usuarioAtual.nome : '') })
     });
     sbStatus = "online"; sbLastError = "";
     updateSyncIndicator();
@@ -809,10 +824,15 @@ async function sbPushLoja(lojaAlvo) {
     fatoresConversao, mapeamentoPedido,
     pedidoCustom, pedidoRemovidos, pedidoConfs: filterByLoja(pedidoConfs, lojaAlvo),
   };
+  // Mesma mesclagem de sbPush() — essa função grava na linha de OUTRA loja (destino da
+  // transferência), que pode ter campos próprios (xml_enviado_mes etc.) gravados por
+  // outros apps.
+  const baseAllData = await _fetchAllDataAtual(lojaAlvo);
+  const mergedAllData = { ...baseAllData, ...payload };
   await sbRequest("gn_lojas?loja=eq." + encodeURIComponent(lojaAlvo), {
     method: "PATCH",
     headers: { "Prefer": "return=minimal" },
-    body: JSON.stringify({ all_data: payload, updated_at: new Date().toISOString(), updated_by: loja + "→" + lojaAlvo })
+    body: JSON.stringify({ all_data: mergedAllData, updated_at: new Date().toISOString(), updated_by: loja + "→" + lojaAlvo })
   });
 }
 
