@@ -776,7 +776,11 @@ async function sbPush() {
       pedidoCustom, pedidoRemovidos, pedidoConfs: filterByLoja(pedidoConfs, loja),
       avariasAll: { [loja]: avariasAll[loja] || [] },
       devolucoesAll: { [loja]: devolucoesAll[loja] || [] },
-      urgenciaTemplate: { [loja]: urgenciaTemplate[loja] || [] },
+      // urgenciaTemplate NÃO entra aqui de propósito — também é escrito pelo app Estoque e
+      // Pedido, direto na mesma linha. Se o autosave normal (a cada edição, debounced)
+      // reenviasse o valor local — que só atualiza a cada sbPull (20s) — ele podia sobrescrever
+      // de volta um toggle feito minutos antes no outro app. toggleUrgenciaManual() já grava
+      // essa chave isolada, com leitura fresca na hora (mesmo padrão do app Pedido).
     };
     await sbRequest("gn_lojas?loja=eq." + encodeURIComponent(loja), {
       method: "PATCH",
@@ -3269,17 +3273,44 @@ function removerItemPedido(id) {
   render();
 }
 
+// Grava urgenciaTemplate[loja] isolado (não via sbPush/autoSave geral), porque o app
+// Estoque e Pedido escreve na mesma chave — um autosave normal aqui reenviaria o valor
+// local (só atualizado a cada sbPull, 20s) e podia sobrescrever de volta um toggle feito
+// no outro app. Usado tanto pelo toggle manual quanto pelo preenchimento em confirmarPedido.
+async function _persistUrgenciaTemplate(atual) {
+  try {
+    const rows = await sbRequest("gn_lojas?loja=eq." + encodeURIComponent(loja) + "&select=all_data", { method: "GET" });
+    const allData = (rows && rows[0] && rows[0].all_data) || {};
+    allData.urgenciaTemplate = { [loja]: atual };
+    if (rows && rows.length) {
+      await sbRequest("gn_lojas?loja=eq." + encodeURIComponent(loja), {
+        method: "PATCH", headers: { "Prefer": "return=minimal" },
+        body: JSON.stringify({ all_data: allData })
+      });
+    } else {
+      await sbRequest("gn_lojas", {
+        method: "POST", headers: { "Prefer": "return=minimal" },
+        body: JSON.stringify({ loja, all_data: allData })
+      });
+    }
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 // Marca/desmarca manualmente um item como urgência — além do preenchimento automático
 // que acontece ao gerar uma Urgência (confirmarPedido('urgencia')), que já usa esta mesma lista.
-function toggleUrgenciaManual(id) {
+async function toggleUrgenciaManual(id) {
   const idStr = String(id);
   const atual = urgenciaTemplate[loja] ? [...urgenciaTemplate[loja]] : [];
   const idx = atual.indexOf(idStr);
   if (idx >= 0) { atual.splice(idx, 1); showToast("⚡ Item removido da urgência."); }
   else { atual.push(idStr); showToast("⚡ Item marcado como urgência."); }
   urgenciaTemplate[loja] = atual;
-  autoSave();
   render();
+  const ok = await _persistUrgenciaTemplate(atual);
+  if (!ok) showToast("⚠️ Urgência salva localmente, mas falhou ao sincronizar.");
 }
 
 function abrirModalNovoProdutoPedido() {
@@ -3590,9 +3621,11 @@ async function confirmarPedido(modo) {
     }
   });
 
-  // Salvar template de urgência para reutilização nas próximas semanas
+  // Salvar template de urgência para reutilização nas próximas semanas — isolado (ver
+  // _persistUrgenciaTemplate), mesmo motivo do toggle manual.
   if (modo === 'urgencia' && produtosParaSync.length > 0) {
     urgenciaTemplate[loja] = produtosParaSync.map(p => String(p.prod.item));
+    _persistUrgenciaTemplate(urgenciaTemplate[loja]);
   }
 
   // Registrar confirmação
