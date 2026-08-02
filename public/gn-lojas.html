@@ -829,6 +829,11 @@ async function sbPushLoja(lojaAlvo) {
     minAll: { [lojaAlvo]: minAll[lojaAlvo] || {} },
     fatoresConversao, mapeamentoPedido,
     pedidoCustom, pedidoRemovidos, pedidoConfs: filterByLoja(pedidoConfs, lojaAlvo),
+    // Necessário pro pagamento de transferência em dinheiro: quando a loja que NÃO é a
+    // sessão atual recebe o registro de avaria (pagamento pro Financeiro validar), ele só
+    // existe em memória local — sem isso aqui, sbPushLoja nunca levava esse registro pro
+    // Supabase e o Financeiro nunca via a pendência.
+    avariasAll: { [lojaAlvo]: avariasAll[lojaAlvo] || [] },
   };
   // Mesma mesclagem de sbPush() — essa função grava na linha de OUTRA loja (destino da
   // transferência), que pode ter campos próprios (xml_enviado_mes etc.) gravados por
@@ -4630,11 +4635,98 @@ function quitarEmprestimo(id) {
   render();
 }
 
+/* Alternativa à devolução física: a loja devedora paga em dinheiro/PIX em vez de devolver
+   a mercadoria. Confirmação DUPLA igual quitarEmprestimo — só que, em vez de reverter o
+   estoque, quando as duas lojas confirmam é criado um registro no fluxo de Avarias (mesmo
+   usado pelo RH/Financeiro pra validar pagamentos) na loja DESTINO, pra o Financeiro validar
+   o valor combinado. O estoque NÃO muda aqui: a saída já ficou valendo na origem e a entrada
+   já ficou valendo no destino desde o empréstimo — só o Financeiro finaliza a pendência. */
+function marcarPagamentoDinheiro(id) {
+  let found = null;
+  Object.values(transferAll).forEach(lista => {
+    (lista||[]).forEach(t => { if (t.id === id) found = t; });
+  });
+  if (!found) { showToast("⚠️ Empréstimo não encontrado."); return; }
+  if (found.quitado) { showToast("⚠️ Já quitado."); return; }
+  if (found.pagDinheiroAvariaId) { showToast("⚠️ Já enviado pro Financeiro validar."); return; }
+
+  const isOrigem  = found.origem  === loja;
+  const isDestino = found.destino === loja;
+  if (!isOrigem && !isDestino) { showToast("⚠️ Esta loja não é parte deste empréstimo."); return; }
+
+  const jaConfirmei = isDestino ? found.pagDinheiroDestino : found.pagDinheiroOrigem;
+  if (jaConfirmei) { showToast("⚠️ Você já confirmou o pagamento em dinheiro."); return; }
+  const outroJaConfirmou = isDestino ? found.pagDinheiroOrigem : found.pagDinheiroDestino;
+
+  if (!confirm(isDestino
+    ? 'Confirmar que "' + found.insumo + '" (' + found.qtd.toFixed(3) + ' UN) será pago em dinheiro/PIX pra ' + found.origem + ', em vez de devolvido fisicamente?'
+    : 'Confirmar que aceita receber "' + found.insumo + '" (' + found.qtd.toFixed(3) + ' UN) em dinheiro/PIX de ' + found.destino + ', em vez de devolução física?')) return;
+
+  let valorCombinado = found.valorPagDinheiro || 0;
+  if (outroJaConfirmou) {
+    // Segunda confirmação — fecha o acordo entre as lojas, precisa do valor combinado
+    // pra mandar ao Financeiro validar.
+    const sugestao = (getUltimoCusto(found.insumo) || 0) * found.qtd;
+    const resp = prompt('Valor combinado a pagar via PIX/dinheiro por "' + found.insumo + '" (R$):', sugestao > 0 ? sugestao.toFixed(2) : '');
+    if (resp === null) { showToast('Cancelado.'); return; }
+    valorCombinado = parseFloat(resp.replace(',', '.')) || 0;
+    if (valorCombinado <= 0) { showToast('⚠️ Informe um valor válido.'); return; }
+  }
+
+  Object.values(transferAll).forEach(lista => {
+    (lista||[]).forEach(t => {
+      if (t.id !== id) return;
+      if (isDestino) t.pagDinheiroDestino = true;
+      if (isOrigem)  t.pagDinheiroOrigem  = true;
+      if (valorCombinado > 0) t.valorPagDinheiro = valorCombinado;
+    });
+  });
+
+  const ambosConfirmaram = found.pagDinheiroDestino && found.pagDinheiroOrigem;
+
+  if (ambosConfirmaram) {
+    if (!avariasAll[found.destino]) avariasAll[found.destino] = [];
+    const avId = Date.now() + '_' + Math.random().toString(36).slice(2,6);
+    avariasAll[found.destino].push({
+      id: avId, ts: new Date().toISOString(), semana: wkKey(semana),
+      insumo: found.insumo, qtd: found.qtd,
+      custoUnit: +(valorCombinado / found.qtd).toFixed(4), valorTotal: valorCombinado,
+      status: 'loja_confirmou',
+      loja_conf_por: found.origem + ' + ' + found.destino, loja_conf_ts: new Date().toISOString(),
+      rh_conf_por: null, rh_conf_ts: null,
+      tipo: 'transferencia_dinheiro',
+      transferId: found.id, transferOrigemLoja: found.origem, transferDestinoLoja: found.destino
+    });
+    Object.values(transferAll).forEach(lista => {
+      (lista||[]).forEach(t => { if (t.id === id) t.pagDinheiroAvariaId = avId; });
+    });
+    autoSave();
+    Promise.all([sbPush(), sbPushLoja(isOrigem ? found.destino : found.origem)]).then(() => {
+      showToast("✅ Combinado! Enviado pro Financeiro validar o pagamento em dinheiro.");
+    }).catch(() => {
+      showToast("✅ Registrado localmente — sincronize para atualizar a outra loja.");
+    });
+  } else {
+    autoSave();
+    const outraLoja = isOrigem ? found.destino : found.origem;
+    sbPushLoja(outraLoja).then(() => {
+      const msg = isDestino
+        ? "✅ Você confirmou que vai pagar em dinheiro. Aguardando " + found.origem + " aceitar."
+        : "✅ Você aceitou receber em dinheiro. Aguardando " + found.destino + " confirmar o valor.";
+      showToast(msg);
+    }).catch(() => {
+      showToast("✅ Registrado localmente — sincronize para atualizar a outra loja.");
+    });
+  }
+  render();
+}
+
 function delTransferencia(id) {
   let found = null;
   Object.values(transferAll).forEach(lista => { (lista||[]).forEach(t => { if (t.id === id) found = t; }); });
   if (!found) return;
   if (found.origem !== loja) { showToast("⚠️ Só a loja de origem pode cancelar."); return; }
+  if (found.pagDinheiroAvariaId) { showToast("⚠️ Já enviado pro Financeiro validar o pagamento em dinheiro — não pode mais cancelar por aqui."); return; }
   if (!confirm('Cancelar esta transferência? O estoque será estornado.')) return;
   if (!found.quitado) {
     const k = lojaKey();
@@ -5254,20 +5346,6 @@ function render() {
           }).join("")}
         </div>
       </div>` : ''}
-
-      <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
-        <div style="display:flex;align-items:center;gap:10px">
-          <span style="font-size:20px">🛠️</span>
-          <div>
-            <div style="font-size:12px;font-weight:700;color:#e2e8f0">Suporte Técnico</div>
-            <div style="font-size:10px;color:#64748b;margin-top:1px">Tiago · (21) 97919-7671</div>
-          </div>
-        </div>
-        <div style="display:flex;gap:6px">
-          <a href="https://wa.me/5521979197671" target="_blank" style="text-decoration:none;background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);border-radius:10px;padding:7px 12px;color:#4ade80;font-size:11px;font-weight:800;white-space:nowrap">📲 WhatsApp</a>
-          <a href="tel:+5521979197671" style="text-decoration:none;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.15);border-radius:10px;padding:7px 12px;color:#94a3b8;font-size:11px;font-weight:800;white-space:nowrap">📞 Ligar</a>
-        </div>
-      </div>
 
       <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
         <div style="display:flex;align-items:center;gap:10px">
@@ -5937,11 +6015,21 @@ function render() {
                 const meuOk  = isDestino ? t.confirmadoDestino : t.confirmadoOrigem;
                 const outroOk = isDestino ? t.confirmadoOrigem  : t.confirmadoDestino;
                 const outraLoja = isDestino ? t.origem : t.destino;
+                const meuPagOk = isDestino ? t.pagDinheiroDestino : t.pagDinheiroOrigem;
+                if (t.pagDinheiroAvariaId) {
+                  return '<div style="font-size:10px;color:#c4b5fd;font-weight:700;flex-shrink:0;text-align:right">⏳ Aguardando Financeiro<br><span style=\'color:#64748b\'>validar pagamento em dinheiro</span></div>';
+                }
                 if (meuOk) {
                   return '<div style="font-size:10px;color:#34d399;font-weight:700;flex-shrink:0">✅ Você confirmou<br><span style=\'color:#64748b\'>Aguard. '+outraLoja+'</span></div>';
                 }
+                if (meuPagOk) {
+                  return '<div style="font-size:10px;color:#c4b5fd;font-weight:700;flex-shrink:0">💵 Você confirmou dinheiro<br><span style=\'color:#64748b\'>Aguard. '+outraLoja+'</span></div>';
+                }
                 const label = isDestino ? '✅ Devolvi' : '✅ Recebi de volta';
-                return '<button onclick="quitarEmprestimo(\'' + t.id + '\')" style="background:#16a34a;border:none;border-radius:10px;padding:6px 10px;color:#fff;font-size:11px;font-weight:700;flex-shrink:0">' + label + '</button>';
+                return '<div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">' +
+                  '<button onclick="quitarEmprestimo(\'' + t.id + '\')" style="background:#16a34a;border:none;border-radius:10px;padding:6px 10px;color:#fff;font-size:11px;font-weight:700">' + label + '</button>' +
+                  '<button onclick="marcarPagamentoDinheiro(\'' + t.id + '\')" style="background:rgba(167,139,250,.15);border:1px solid rgba(167,139,250,.4);border-radius:10px;padding:6px 10px;color:#c4b5fd;font-size:11px;font-weight:700">💵 Pagar em Dinheiro</button>' +
+                '</div>';
               })()}
             </div>
           </div>`).join("")}
@@ -5953,22 +6041,31 @@ function render() {
         ${abertosEnv.map(t=>{
           const meuOk   = t.confirmadoOrigem;
           const outroOk = t.confirmadoDestino;
-          const ambos   = meuOk && outroOk;
+          const meuPagOk = t.pagDinheiroOrigem;
+          const outroPagOk = t.pagDinheiroDestino;
           return `
           <div style="background:rgba(0,0,0,.2);border-radius:10px;padding:8px 10px;margin-bottom:6px">
             <div style="display:flex;align-items:center;gap:8px">
               <div style="flex:1;min-width:0">
                 <span style="font-weight:700;font-size:12px;color:#fff">${t.insumo}</span>
                 <div style="font-size:10px;color:#94a3b8">→ ${t.destino} · <span style="color:#f87171">-${t.qtd.toFixed(0)} UN</span>${t.motivo?" · "+t.motivo:""}</div>
-                ${outroOk&&!meuOk?`<div style="font-size:10px;color:#fbbf24;font-weight:700">⚡ ${t.destino} confirmou! Confirme o recebimento.</div>`:""}
-                ${meuOk&&!outroOk?`<div style="font-size:10px;color:#94a3b8">Aguardando ${t.destino} confirmar devolução...</div>`:""}
+                ${t.pagDinheiroAvariaId?`<div style="font-size:10px;color:#c4b5fd;font-weight:700">⏳ Aguardando Financeiro validar pagamento em dinheiro</div>`
+                  :outroOk&&!meuOk?`<div style="font-size:10px;color:#fbbf24;font-weight:700">⚡ ${t.destino} confirmou! Confirme o recebimento.</div>`
+                  :meuOk&&!outroOk?`<div style="font-size:10px;color:#94a3b8">Aguardando ${t.destino} confirmar devolução...</div>`
+                  :outroPagOk&&!meuPagOk?`<div style="font-size:10px;color:#a78bfa;font-weight:700">💵 ${t.destino} quer pagar em dinheiro! Confirme.</div>`
+                  :meuPagOk&&!outroPagOk?`<div style="font-size:10px;color:#94a3b8">Aguardando ${t.destino} confirmar valor em dinheiro...</div>`
+                  :""}
               </div>
               <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
-                ${meuOk
+                ${t.pagDinheiroAvariaId ? ''
+                  : meuOk
                   ? `<div style="font-size:10px;color:#34d399;font-weight:700">✅ Você confirmou</div>`
-                  : `<button onclick="quitarEmprestimo('${t.id}')" style="background:${outroOk?'#f59e0b':'#374151'};border:none;border-radius:10px;padding:6px 10px;color:${outroOk?'#000':'#fff'};font-size:11px;font-weight:800">✅ Recebi de volta</button>`
+                  : meuPagOk
+                  ? `<div style="font-size:10px;color:#c4b5fd;font-weight:700">💵 Você confirmou dinheiro</div>`
+                  : `<button onclick="quitarEmprestimo('${t.id}')" style="background:${outroOk?'#f59e0b':'#374151'};border:none;border-radius:10px;padding:6px 10px;color:${outroOk?'#000':'#fff'};font-size:11px;font-weight:800">✅ Recebi de volta</button>
+                     <button onclick="marcarPagamentoDinheiro('${t.id}')" style="background:${outroPagOk?'#7c3aed':'rgba(167,139,250,.15)'};border:1px solid rgba(167,139,250,.4);border-radius:10px;padding:6px 10px;color:${outroPagOk?'#fff':'#c4b5fd'};font-size:11px;font-weight:700">💵 Pagar em Dinheiro</button>`
                 }
-                <button onclick="delTransferencia('${t.id}')" style="background:rgba(239,68,68,.15);border:none;border-radius:8px;padding:4px 8px;color:#fca5a5;font-size:10px;font-weight:700">✖ Cancelar</button>
+                ${!t.pagDinheiroAvariaId?`<button onclick="delTransferencia('${t.id}')" style="background:rgba(239,68,68,.15);border:none;border-radius:8px;padding:4px 8px;color:#fca5a5;font-size:10px;font-weight:700">✖ Cancelar</button>`:''}
               </div>
             </div>
           </div>`;
@@ -6050,7 +6147,7 @@ function render() {
             <div class="row-item" style="flex-direction:column;align-items:flex-start;gap:2px">
               <div style="display:flex;width:100%;align-items:center">
                 <span class="item-name">${t.insumo} (${t.qtd.toFixed(3)})</span>
-                <span style="font-size:10px;color:#34d399;flex-shrink:0">✅ devolvido</span>
+                <span style="font-size:10px;color:${t.formaQuitacao==='dinheiro'?'#c4b5fd':'#34d399'};flex-shrink:0">${t.formaQuitacao==='dinheiro'?'💵 pago em dinheiro (R$ '+(t.valorPagDinheiro||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})+')':'✅ devolvido'}</span>
               </div>
               <div style="font-size:10px;color:#64748b">${t.origem} → ${t.destino} · ${new Date(t.dataQuitacao||t.data).toLocaleDateString("pt-BR")}</div>
             </div>`).join("")}
@@ -6701,12 +6798,13 @@ function render() {
                 <span style="font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;background:${st.bg};color:${st.clr}">${st.lbl}</span>
                 <div style="display:flex;gap:6px">
                   ${av.status==='pendente' ? `<button onclick="confirmarAvaria('${av.id}','loja')" style="background:rgba(96,165,250,.15);border:1px solid rgba(96,165,250,.4);border-radius:10px;padding:5px 11px;color:#93c5fd;font-size:11px;font-weight:800">🏪 Pago pela Loja</button>` : ''}
-                  ${av.status==='loja_confirmou' && isMestre ? `<button onclick="confirmarAvaria('${av.id}','rh')" style="background:rgba(52,211,153,.15);border:1px solid rgba(52,211,153,.4);border-radius:10px;padding:5px 11px;color:#6ee7b7;font-size:11px;font-weight:800">✅ Confirmar RH/Fin.</button>` : ''}
-                  ${av.status==='loja_confirmou' && !isMestre ? `<span style="font-size:10px;color:#94a3b8;font-style:italic">Aguard. RH/Financeiro</span>` : ''}
+                  ${av.status==='loja_confirmou' && isMestre && av.tipo!=='transferencia_dinheiro' ? `<button onclick="confirmarAvaria('${av.id}','rh')" style="background:rgba(52,211,153,.15);border:1px solid rgba(52,211,153,.4);border-radius:10px;padding:5px 11px;color:#6ee7b7;font-size:11px;font-weight:800">✅ Confirmar RH/Fin.</button>` : ''}
+                  ${av.status==='loja_confirmou' && (!isMestre || av.tipo==='transferencia_dinheiro') ? `<span style="font-size:10px;color:#94a3b8;font-style:italic">Aguard. RH/Financeiro</span>` : ''}
                   ${av.status==='finalizado' ? `<span style="font-size:10px;color:#34d399">Conf. por: ${av.rh_conf_por||'—'}</span>` : ''}
                   ${av.status==='pendente' ? `<button onclick="cancelarAvaria('${av.id}')" style="background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:5px 8px;color:#64748b;font-size:11px">🗑️</button>` : ''}
                 </div>
               </div>
+              ${av.tipo==='transferencia_dinheiro' ? `<div style="font-size:10px;color:#c4b5fd;font-weight:700">💵 Pagamento de transferência: ${av.transferOrigemLoja||'?'} → ${av.transferDestinoLoja||'?'} — validar pelo app RH/Financeiro</div>` : ''}
               ${av.loja_conf_por ? `<div style="font-size:10px;color:#64748b">Loja: ${av.loja_conf_por}${av.loja_conf_ts?' · '+new Date(av.loja_conf_ts).toLocaleDateString('pt-BR'):''}</div>` : ''}
             </div>`;
           }).join('')
