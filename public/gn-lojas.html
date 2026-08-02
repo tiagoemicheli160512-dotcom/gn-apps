@@ -652,6 +652,12 @@ let _entregaItensMap = {}; // id -> itens (para recalc sem JSON no onclick)
 let pedidoCustom = [];  // itens novos criados no app [{item, fornecedor, grupo, subgrupo, produto, und, custo, posIndex}]
 let pedidoRemovidos = []; // IDs (string) de itens removidos da lista
 let pedidoConfs  = {};  // lojaKey -> [{id,ts,usuario,cargo,itens:[{produto,fornecedor,cx,und,pedidoCx,pedidoUnd}]}]
+// item (PRODUTOS_PEDIDO.item) -> qtd_pedida oficial já sincronizada em gn_pedido_itens
+// (app Estoque e Pedido) pra essa loja, na semana ativa. Uma vez que um item tem valor
+// aqui, a tela do Pedido para de deixar editar cx/und localmente e passa a mostrar esse
+// número — evita a loja mostrar uma quantidade antiga enquanto o comprador já ajustou
+// no app Estoque e Pedido (ex.: pra bater com fechamento de caixa do fornecedor).
+let pedidoOficialAtual = {};
 let avariasAll   = {};  // loja -> [{id,ts,semana,insumo,qtd,custoUnit,valorTotal,status,loja_conf_por,loja_conf_ts,rh_conf_por,rh_conf_ts}]
 let devolucoesAll = {}; // loja -> [{id,ts,semana,fornecedor,insumo,qtd,motivo,obs,status,loja_conf_por,loja_conf_ts,pedidos_conf_por,pedidos_conf_ts}]
 let urgenciaTemplate = {}; // loja -> [item_id_string, ...] — itens usados na última urgência
@@ -948,6 +954,9 @@ function sbStartPolling() {
   if (sbPollTimer) clearInterval(sbPollTimer);
   sbPollTimer = setInterval(() => sbPull(true), 20000);
 }
+// Atualiza o valor oficial do Pedido (gn_pedido_itens) enquanto a aba estiver aberta —
+// se o comprador ajustar algo no app Estoque e Pedido, aparece aqui sem precisar recarregar.
+setInterval(() => { if (tab === 'pedido') carregarPedidoOficial(); }, 30000);
 
 function updateSyncIndicator() {
   const el = document.getElementById("syncDot");
@@ -2213,7 +2222,7 @@ function goTab(t) {
   const sl = document.querySelector(`.sidebar-link[data-sidebar-tab="${t}"]`);
   if (sl) sl.classList.add('active');
   busca = "";   // limpa busca ao trocar de aba
-  if (t === "pedido") { window._divergLojaSet = new Set(); carregarDivergencias().then(() => render()); }
+  if (t === "pedido") { window._divergLojaSet = new Set(); carregarDivergencias().then(() => render()); carregarPedidoOficial(); }
   if (t === "vendas" && checklistFat === null) { loadChecklistFat(); } // só carrega se ainda não foi carregado (reset ocorre ao trocar loja/semana)
   render();
   if (t === 'entrega') carregarEntregas(true);
@@ -3496,6 +3505,44 @@ async function _buscarOuCriarPedidoAtivo() {
   } catch(e) { return null; }
 }
 
+// Igual a _buscarOuCriarPedidoAtivo(), mas sem criar rascunho — usado só pra leitura
+// (carregarPedidoOficial), pra não sujar o banco com pedidos vazios só de olhar a tela.
+async function _buscarPedidoAtivoSomenteLeitura() {
+  const semIso = wkKey(semana);
+  try {
+    const rows = await sbRequest(
+      'gn_pedidos?semana_inicio=eq.' + semIso + '&regiao=eq.RJ&status=in.(RASCUNHO,CONFIRMADO)&order=criado_em.desc&limit=1',
+      { method: 'GET' }
+    );
+    return (rows && rows[0]) || null;
+  } catch(e) { return null; }
+}
+
+// Busca o valor oficial do pedido dessa loja pra semana ativa, direto de gn_pedido_itens
+// (app Estoque e Pedido) — ver comentário em pedidoOficialAtual.
+async function carregarPedidoOficial() {
+  try {
+    await _carregarCatalogo();
+    const pedidoDB = await _buscarPedidoAtivoSomenteLeitura();
+    const novoOficial = {};
+    if (pedidoDB) {
+      const lojaSlug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+      const rows = await sbRequest(
+        'gn_pedido_itens?pedido_id=eq.' + pedidoDB.id + '&loja_slug=eq.' + encodeURIComponent(lojaSlug) + '&select=catalogo_id,qtd_pedida',
+        { method: 'GET' }
+      );
+      const itemPorCatalogoId = {};
+      Object.entries(_catalogoPorItemId || {}).forEach(([itemId, catId]) => { itemPorCatalogoId[catId] = itemId; });
+      (rows || []).forEach(r => {
+        const itemId = itemPorCatalogoId[r.catalogo_id];
+        if (itemId != null) novoOficial[itemId] = parseFloat(r.qtd_pedida) || 0;
+      });
+    }
+    pedidoOficialAtual = novoOficial;
+    if (tab === 'pedido') render();
+  } catch(e) {}
+}
+
 async function _sincronizarComPedidos(produtosSync) {
   // produtosSync: [{prod, cx, und, pedidoCx, pedidoUnd, fator}]
   await _carregarCatalogo();
@@ -3515,11 +3562,19 @@ async function _sincronizarComPedidos(produtosSync) {
     const catalogoId = _resolverCatalogoId(prod);
     if (!catalogoId) { naoSincronizados.push(prod.produto); return; }
     const destSinc = mapeamentoPedido[String(prod.item)] || prod.produto.trim().toUpperCase();
-    const ulEstoque = (contAll[kAntSinc] || {})[destSinc] ?? null;
+    // Est. Ant = estoque INICIAL (já contado) da semana anterior — não a contagem de
+    // fechamento (contAll[kAntSinc]), que este mesmo confirmar acabou de atualizar logo
+    // acima, o que fazia "Est. Ant" sair idêntico a "Est. Vig".
+    const ulEstoque = (estIniAll[kAntSinc] || {})[destSinc] ?? null;
+    // Ped. Ant = entradas de mercadoria (NF) recebidas na semana anterior pra esse item —
+    // não a quantidade sendo pedida agora (isso é o pedido da semana ATUAL, não "anterior").
+    const entradasSemanaAnt = (entradasAll[kAntSinc] || [])
+      .filter(e => (e.insumo || '').trim().toUpperCase() === destSinc)
+      .reduce((s, e) => s + (parseFloat(e.qtd) || 0), 0);
 
     contagens.push({
       catalogo_id: catalogoId, loja_slug: lojaSlug,
-      atual: estoqueAtual, ul_estoque: ulEstoque, ul_pedido: qtdPedida,
+      atual: estoqueAtual, ul_estoque: ulEstoque, ul_pedido: entradasSemanaAnt,
       data_contagem: hoje,
       criado_por: usuarioAtual ? usuarioAtual.nome : ''
     });
@@ -6152,7 +6207,17 @@ function render() {
                 </div>
                 ${getTotalUn(prod.item, prod.produto)>0?`<div style="flex-shrink:0;align-self:flex-end;padding-bottom:5px;font-size:11px;font-weight:800;color:#34d399">= ${getTotalUn(prod.item,prod.produto).toFixed(0)} UN</div>`:''}
               </div>
-              ${(usuarioAtual && usuarioAtual.cargo === 'compras') ? `<div style="display:flex;gap:6px">
+              ${(usuarioAtual && usuarioAtual.cargo === 'compras') ? (
+                pedidoOficialAtual[prod.item] != null
+                ? `<div style="display:flex;align-items:center;gap:8px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.25);border-radius:10px;padding:8px 10px">
+                    <span style="font-size:14px">🔒</span>
+                    <div style="flex:1;min-width:0">
+                      <div style="font-size:9px;color:#93c5fd;font-weight:700;text-transform:uppercase">Pedido confirmado (app Estoque e Pedido)</div>
+                      <div style="font-size:13px;font-weight:800;color:#e2e8f0">${Number(pedidoOficialAtual[prod.item]).toLocaleString('pt-BR',{maximumFractionDigits:3})} UN</div>
+                    </div>
+                    <div style="font-size:9px;color:#64748b;text-align:right;line-height:1.3">Ajuste pelo<br>app Estoque<br>e Pedido</div>
+                  </div>`
+                : `<div style="display:flex;gap:6px">
                 <div style="flex:1">
                   <label style="font-size:9px;color:#64748b;font-weight:700;text-transform:uppercase">Pedido (${prod.und||'CX'})</label>
                   <input class="inp-full" type="number" step="0.001" min="0"
@@ -6174,7 +6239,8 @@ function render() {
                     oninput="setPedidoVal('${prod.item}','obs',this.value)"
                     style="font-size:12px;padding:5px 8px"/>
                 </div>
-              </div>` : ''}
+              </div>`
+              ) : ''}
             </div>
           </div>`;
         }).join('')}
