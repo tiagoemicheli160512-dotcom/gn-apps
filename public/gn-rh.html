@@ -1877,16 +1877,19 @@ function renderAvarias() {
     html += `<div style="font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--amber);margin-bottom:8px">
       Aguardando confirmação RH (${pendentes.length})
     </div>`;
-    html += pendentes.map(av => `
-      <div class="card" style="margin-bottom:8px;border-left:3px solid var(--amber)">
+    html += pendentes.map(av => {
+      const isTransf = av.tipo === 'transferencia_dinheiro';
+      return `
+      <div class="card" style="margin-bottom:8px;border-left:3px solid ${isTransf?'#a78bfa':'var(--amber)'}">
         <div class="card-body">
           <div style="display:flex;justify-content:space-between;align-items:start;gap:8px;margin-bottom:8px">
             <div>
-              <div style="font-size:12px;font-weight:800">${av.display}</div>
+              <div style="font-size:12px;font-weight:800">${isTransf ? (av.transferOrigemLoja||'?')+' → '+(av.transferDestinoLoja||'?') : av.display}</div>
               <div style="font-size:10px;color:var(--muted)">${fmtTs(av.ts)}</div>
             </div>
-            <span class="badge badge-warn">Aguard. RH</span>
+            <span class="badge${isTransf?'':' badge-warn'}" style="${isTransf?'background:rgba(167,139,250,.15);color:#a78bfa;border:1px solid rgba(167,139,250,.4)':''}">${isTransf?'💵 Transferência':'Aguard. RH'}</span>
           </div>
+          ${isTransf?`<div style="font-size:10px;color:var(--muted);margin-bottom:4px">Pagamento em dinheiro/PIX em vez de devolução física — ${av.display}</div>`:''}
           <div style="font-size:14px;font-weight:700;margin-bottom:6px">${av.insumo}</div>
           <div style="display:flex;gap:16px;font-size:12px;color:var(--muted);margin-bottom:6px;flex-wrap:wrap">
             <span>Qtd: <b style="color:var(--text)">${(parseFloat(av.qtd) || 0).toFixed(3)}</b></span>
@@ -1894,7 +1897,7 @@ function renderAvarias() {
             <span>Total: <b style="color:var(--red)">${fmtR(av.valorTotal)}</b></span>
           </div>
           <div style="font-size:10px;color:var(--muted);margin-bottom:10px;padding:6px 8px;background:var(--surf2);border-radius:var(--rs)">
-            🏪 Confirmado pela loja: <b>${av.loja_conf_por || '—'}</b>
+            🏪 Confirmado pela${isTransf?'s lojas':' loja'}: <b>${av.loja_conf_por || '—'}</b>
             ${av.loja_conf_ts ? ' · ' + fmtTs(av.loja_conf_ts) : ''}
           </div>
           <button onclick="confirmarAvariaRH('${av.lojaKey}','${av.id}')"
@@ -1902,7 +1905,8 @@ function renderAvarias() {
             ✅ Confirmar Pagamento — RH/Financeiro
           </button>
         </div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
   } else {
     html += `<div class="card" style="margin-bottom:12px">
       <div class="card-body" style="text-align:center;padding:20px">
@@ -1953,7 +1957,7 @@ function renderAvarias() {
     html += finalizados.slice(0, 20).map(av => `
       <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);gap:8px">
         <div style="min-width:0;flex:1">
-          <div style="font-size:11px;font-weight:700;color:var(--muted)">${av.display}</div>
+          <div style="font-size:11px;font-weight:700;color:var(--muted)">${av.tipo==='transferencia_dinheiro' ? '💵 '+(av.transferOrigemLoja||'?')+' → '+(av.transferDestinoLoja||'?') : av.display}</div>
           <div style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${av.insumo}</div>
           <div style="font-size:10px;color:var(--muted)">RH: ${av.rh_conf_por || '—'} · ${fmtTs(av.rh_conf_ts)}</div>
         </div>
@@ -1986,11 +1990,46 @@ async function confirmarAvariaRH(lojaKey, avId) {
     if (idx < 0) throw new Error('Avaria não encontrada');
     if (avarias[idx].status !== 'loja_confirmou') { toast('Loja precisa confirmar antes', 'err'); return; }
 
-    avarias[idx].status = 'finalizado';
-    avarias[idx].rh_conf_por = S.usuario?.nome || 'RH';
-    avarias[idx].rh_conf_ts = new Date().toISOString();
+    const av = avarias[idx];
+    av.status = 'finalizado';
+    av.rh_conf_por = S.usuario?.nome || 'RH';
+    av.rh_conf_ts = new Date().toISOString();
     if (!allData.avariasAll) allData.avariasAll = {};
     allData.avariasAll[lojaKey] = avarias;
+
+    // Pagamento em dinheiro de transferência entre lojas (app Lojas, aba Transferência) —
+    // substitui a devolução física de um empréstimo. Além de finalizar esta avaria, precisa
+    // fechar o empréstimo original (transferAll) nas DUAS lojas — sem mexer no estoque, já
+    // que a saída/entrada de mercadoria já ficou valendo desde o empréstimo em si.
+    if (av.tipo === 'transferencia_dinheiro' && av.transferId) {
+      const fecharTransfer = allDataAlvo => {
+        Object.values(allDataAlvo.transferAll || {}).forEach(lista => {
+          (lista || []).forEach(t => {
+            if (t.id === av.transferId) {
+              t.quitado = true;
+              t.formaQuitacao = 'dinheiro';
+              t.dataQuitacao = new Date().toISOString();
+            }
+          });
+        });
+      };
+      fecharTransfer(allData); // cópia da própria loja (destino), gravada junto abaixo
+
+      if (av.transferOrigemLoja && av.transferOrigemLoja !== lojaKey) {
+        const { data: rowsOrig, error: errOrig } = await db.from('gn_lojas')
+          .select('loja,all_data').eq('loja', av.transferOrigemLoja);
+        if (errOrig) throw errOrig;
+        const rowOrig = (rowsOrig || [])[0];
+        if (rowOrig) {
+          const allDataOrig = JSON.parse(JSON.stringify(rowOrig.all_data || {}));
+          fecharTransfer(allDataOrig);
+          const { error: e3 } = await db.from('gn_lojas')
+            .update({ all_data: allDataOrig, updated_at: new Date().toISOString(), updated_by: S.usuario?.nome || 'RH' })
+            .eq('loja', av.transferOrigemLoja);
+          if (e3) throw e3;
+        }
+      }
+    }
 
     const { error: e2 } = await db.from('gn_lojas')
       .update({ all_data: allData, updated_at: new Date().toISOString(), updated_by: S.usuario?.nome || 'RH' })
