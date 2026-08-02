@@ -615,6 +615,7 @@ let S = {
   // Filtros pedido
   lojaAtiva: null,
   todosModo: false,
+  vendaAntCache: {}, // `${lojaSlug}|${isoSegundaAnterior}` -> {loading, dias:[7], total, erro}
   busca: '',
   grupoFiltro: '',
   fornFiltro: '',
@@ -1460,6 +1461,97 @@ function _datasEspeciaisCardHtml() {
   </div>`;
 }
 
+// ── VENDA DA SEMANA ANTERIOR (por loja) ─────────────────────────────────────
+// Card auxiliar pra conferir, na hora de fazer o pedido/contagem da semana atual,
+// se o volume de venda da semana anterior condiz com o estoque contado — mesma
+// grade "dia a dia" (Fat) que já existe nos cards de loja do Painel de Gestão
+// (gn-home.html), só que aqui já vem direto na semana anterior à ativa, sem
+// precisar abrir outro app pra comparar.
+// checklist_diario.loja usa o "chkKey" de GN_LOJAS (ex.: "Rancho"), não o
+// lojaSlug/userKey usados no resto do app Pedidos.
+const LOJA_CHKKEY_BY_SLUG = Object.fromEntries((window.GN_LOJAS || []).map(l => [l.lojaSlug, l.chkKey]));
+
+// Normaliza pra comparar com checklist_diario.loja — cobre as mesmas exceções
+// legadas já tratadas em gn-home.html (_normLoja), mais "NORTE" (comKey antigo
+// que também aparece nessa coluna pra Norte Shopping).
+function _normLojaPed(n) {
+  if (n === 'SAO_GONCALO') return 'SÃO GONÇALO';
+  if (n === 'NORTE') return 'NORTE SHOPPING';
+  return (n || '').toUpperCase().replace('AMÉRICA', 'AMERICA');
+}
+
+async function _carregarVendaSemanaAnterior(lojaSlug, semanaAtivaDate) {
+  const chkKey = LOJA_CHKKEY_BY_SLUG[lojaSlug];
+  if (!chkKey) return;
+  const segAnt = datePlusWeeks(semanaAtivaDate, -1);
+  const domAnt = new Date(segAnt); domAnt.setDate(domAnt.getDate() + 6);
+  const isoSeg = segAnt.toISOString().split('T')[0];
+  const isoDom = domAnt.toISOString().split('T')[0];
+  const cacheKey = lojaSlug + '|' + isoSeg;
+  if (S.vendaAntCache[cacheKey]) return; // já carregado ou carregando
+  S.vendaAntCache[cacheKey] = { loading: true };
+  try {
+    const { data, error } = await db.from('checklist_diario')
+      .select('data_operacao,loja,venda_salao,venda_delivery')
+      .gte('data_operacao', isoSeg).lte('data_operacao', isoDom);
+    if (error) throw error;
+    const alvo = _normLojaPed(chkKey);
+    const dias = Array(7).fill(0);
+    (data || []).forEach(r => {
+      if (_normLojaPed(r.loja) !== alvo) return;
+      const idx = Math.round((new Date(r.data_operacao + 'T12:00:00') - new Date(isoSeg + 'T12:00:00')) / 86400000);
+      if (idx < 0 || idx > 6) return;
+      dias[idx] += (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0);
+    });
+    S.vendaAntCache[cacheKey] = { loading: false, dias, total: dias.reduce((a, b) => a + b, 0) };
+  } catch (e) {
+    S.vendaAntCache[cacheKey] = { loading: false, erro: true };
+  }
+  const aindaNaMesmaTela = S.lojaAtiva === lojaSlug && S.semanaAtiva &&
+    S.semanaAtiva.toISOString().split('T')[0] === semanaAtivaDate.toISOString().split('T')[0] &&
+    (S.tab === 'pedido' || S.tab === 'edu' || S.tab === 'oseas');
+  if (aindaNaMesmaTela) renderPedido();
+}
+
+function _vendaSemanaAntCardHtml() {
+  if (S.todosModo || !S.lojaAtiva) return '';
+  const chkKey = LOJA_CHKKEY_BY_SLUG[S.lojaAtiva];
+  if (!chkKey) return '';
+  const segAnt = datePlusWeeks(S.semanaAtiva, -1);
+  const domAnt = new Date(segAnt); domAnt.setDate(domAnt.getDate() + 6);
+  const isoSeg = segAnt.toISOString().split('T')[0];
+  const cacheKey = S.lojaAtiva + '|' + isoSeg;
+  const cache = S.vendaAntCache[cacheKey];
+  if (!cache) _carregarVendaSemanaAnterior(S.lojaAtiva, S.semanaAtiva);
+
+  const lojaNome = S.lojas.find(l => l.slug_pedido === S.lojaAtiva)?.nome_display || chkKey;
+  const fmtD = d => d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+  const DSEM = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
+
+  let corpo;
+  if (!cache || cache.loading) {
+    corpo = `<div style="font-size:11px;color:var(--muted);padding:4px 0">Carregando…</div>`;
+  } else if (cache.erro) {
+    corpo = `<div style="font-size:11px;color:var(--muted);padding:4px 0">Não foi possível carregar a venda dessa semana.</div>`;
+  } else if (!cache.total) {
+    corpo = `<div style="font-size:11px;color:var(--muted);padding:4px 0">Sem venda lançada no Check-list nessa semana.</div>`;
+  } else {
+    const fmtV = v => v > 0 ? (v >= 1000 ? 'R$' + (v / 1000).toFixed(1).replace('.', ',') + 'k' : 'R$' + Math.round(v)) : '—';
+    corpo = `
+      <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:6px">
+        <thead><tr>${DSEM.map(d => `<th style="font-size:9px;font-weight:700;color:var(--muted);text-align:center;padding:2px 0">${d}</th>`).join('')}</tr></thead>
+        <tbody><tr>${cache.dias.map(v => `<td style="font-size:10px;font-weight:800;color:${v > 0 ? 'var(--text)' : 'var(--muted)'};text-align:center;padding:2px 0">${fmtV(v)}</td>`).join('')}</tr></tbody>
+      </table>
+      <div style="text-align:right;font-size:11px;font-weight:800;color:#22c55e;margin-top:6px">Total: R$ ${cache.total.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</div>`;
+  }
+
+  return `<div style="background:var(--card2);border:1px solid var(--border);border-left:3px solid #22c55e;border-radius:var(--r);padding:12px 14px;margin-bottom:10px">
+    <div style="font-size:12px;font-weight:700;margin-bottom:3px">📊 Venda da Semana Anterior · ${lojaNome}</div>
+    <div style="font-size:10px;color:var(--muted);margin-bottom:2px">${fmtD(segAnt)} – ${fmtD(domAnt)} · confira se bate com o estoque contado nesta semana.</div>
+    ${corpo}
+  </div>`;
+}
+
 // Fornecedores da aba "Edu" — espelho do Pedido restrito a esses fornecedores. Tudo que é
 // digitado aqui grava direto em S.pedidoItens, então aparece na aba Pedido normalmente e
 // "Confirmar" gera provisões/pedidos pelas lojas do jeito de sempre (mesma função/estado).
@@ -1558,7 +1650,7 @@ function renderPedido() {
     ${!sem.ehAtual?`<div style="text-align:center;margin-bottom:6px"><button onclick="irParaSemanaAtual()" style="padding:5px 16px;border-radius:20px;border:1px solid var(--primary);background:rgba(232,88,10,.1);color:var(--primary);font-size:11px;font-weight:700;cursor:pointer">▶ Ir para semana atual</button></div>`:''}`;
 
   if (!S.pedidoAtual) {
-    $('content').innerHTML = semNavHtml + _datasEspeciaisCardHtml() + `
+    $('content').innerHTML = semNavHtml + _datasEspeciaisCardHtml() + _vendaSemanaAntCardHtml() + `
       <div class="empty" style="margin-top:20px">
         <div class="empty-icon">📋</div>
         <div class="empty-texto">Nenhum pedido nesta semana</div>
@@ -1792,7 +1884,7 @@ function renderPedido() {
     ? (S.urgenciaTemplate[LOJA_USERKEY_BY_SLUG[_lojaFiltroUrg]] || []).length
     : S.lojas.reduce((sum,l)=>sum+((S.urgenciaTemplate[LOJA_USERKEY_BY_SLUG[l.slug_pedido]]||[]).length),0);
 
-  $('content').innerHTML = semNavHtml + _datasEspeciaisCardHtml() + `
+  $('content').innerHTML = semNavHtml + _datasEspeciaisCardHtml() + _vendaSemanaAntCardHtml() + `
     <div class="pedido-bar">
       <div class="pedido-info">
         <div class="pedido-label">PEDIDO${S.eduAtivo?' · 👤 EDU ('+EDU_FORNECEDORES.join('/')+')':''}${S.oseasAtivo?' · 👤 OSEAS ('+OSEAS_FORNECEDORES.join('/')+')':''}</div>
