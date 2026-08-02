@@ -391,6 +391,7 @@ let S = {
   fotosCaixaSistema: {}, // {`${userKey}|${data}`: foto_base64}
   caixaConferencias: {}, // {fechamento_id: {conferido_em, conferido_por, tem_divergencia, itens}}
   trioBandas: {},        // {`${userKey}|${data}`: [{artista,cache,couver_valor,presenca_confirmada,banda_nao_veio,...}]}
+  bandaChecklist: {},    // {`${userKey}|${data}`: {nome,valor,consumo,qtd_couvert} lançado no fechamento (Check-list)}
   // RH
   rhLoja: LOJAS[0],
   rhMes: null,           // 'YYYY-MM'
@@ -511,6 +512,11 @@ const STATUS_LABEL = {
 const STATUS_CLASS = {
   FECHADO:'badge-ok', ABERTO:'badge-info', PENDENTE:'badge-warn', RASCUNHO:'badge-muted'
 };
+
+// Franquia de consumação da banda — mesma constante do app Check-list (BANDA_CONSUMO_FRANQUIA),
+// onde o valor de "consumo" é lançado no fechamento do caixa. Só o que exceder esse valor é
+// descontado do cachê.
+const BANDA_CONSUMO_FRANQUIA = 150.00;
 
 // Status da presença → classe CSS
 const PRES_ABREV = {
@@ -714,6 +720,24 @@ async function carregarFinanceiro() {
       }
     }
   } catch(_) { S.trioBandas = {}; }
+
+  // Consumação da banda (checklist_diario.banda) — lançada no fechamento do caixa
+  // (app Check-list), já com a franquia de consumação aplicada (mesma constante/lógica
+  // de lá). Importante: gn_trios_agenda.couver_valor é receita de ingresso vendido na
+  // porta (não tem relação com o que a banda consumiu de graça) — não pode ser usado
+  // como "consumação" pro cálculo do cachê líquido.
+  S.bandaChecklist = {};
+  try {
+    const lojasEscopo = S.finLoja ? LOJAS.filter(l => l.chkKey === S.finLoja) : LOJAS;
+    const { data: bandaRows } = await db.from('checklist_diario').select('loja,data_operacao,banda')
+      .gte('data_operacao', ini).lte('data_operacao', fim)
+      .in('loja', lojasEscopo.map(l => l.chkKey));
+    (bandaRows || []).forEach(r => {
+      if (!r.banda || !r.banda.nome || !r.banda.nome.trim()) return;
+      const lojaObj = lojasEscopo.find(l => l.chkKey === r.loja);
+      if (lojaObj) S.bandaChecklist[`${lojaObj.userKey}|${r.data_operacao}`] = r.banda;
+    });
+  } catch(_) { S.bandaChecklist = {}; }
 }
 
 // ══════════════════════════════════════════════
@@ -1029,16 +1053,34 @@ function renderFinanceiro() {
           const fotoB64    = r.foto_sistema || S.fotosCaixaSistema?.[`${lojaChk}|${r.data}`];
           const bandasDia  = (S.trioBandas?.[`${lojaChk}|${r.data}`] || [])
             .filter(t => { const tt = trioTurnoFor(t.horario_inicio); return !tt || tt === r.turno; });
-          const bandaHtml  = bandasDia.map(t => {
-            const cache  = parseFloat(t.cache) || 0;
-            const couver = parseFloat(t.couver_valor) || 0;
-            if (t.banda_nao_veio) {
-              return `<div style="margin-top:3px;font-size:9px;background:var(--red-bg);border-radius:5px;padding:2px 6px;color:var(--red);font-weight:600">🎵 ${esc(t.artista)} — não veio${t.banda_nao_veio_motivo?': '+esc(t.banda_nao_veio_motivo):''} · sem pagamento</div>`;
+          // Cachê líquido = cachê total do dia menos só o que exceder a franquia de
+          // consumação (BANDA_CONSUMO_FRANQUIA) — mesma regra e mesmo valor de "consumo"
+          // lançados no fechamento (Check-list), não o couver_valor (receita de ingresso,
+          // sem relação com o que a banda consumiu). Com 2+ bandas no mesmo dia, o
+          // Check-list lança um único valor de consumação combinado — por isso o desconto
+          // aparece agrupado, não dividido por artista.
+          const bandaNaoVeio = bandasDia.filter(t => t.banda_nao_veio);
+          const bandaVeio    = bandasDia.filter(t => !t.banda_nao_veio);
+          const naoVeioHtml  = bandaNaoVeio.map(t =>
+            `<div style="margin-top:3px;font-size:9px;background:var(--red-bg);border-radius:5px;padding:2px 6px;color:var(--red);font-weight:600">🎵 ${esc(t.artista)} — não veio${t.banda_nao_veio_motivo?': '+esc(t.banda_nao_veio_motivo):''} · sem pagamento</div>`
+          ).join('');
+          let veioHtml = '';
+          if (bandaVeio.length) {
+            const nomes      = bandaVeio.map(t => t.artista).filter(Boolean).join(' + ');
+            const cacheTotal = bandaVeio.reduce((s,t) => s + (parseFloat(t.cache) || 0), 0);
+            const pendente   = bandaVeio.some(t => !t.presenca_confirmada) ? ' <span style="opacity:.75">(pendente)</span>' : '';
+            const bandaChk   = S.bandaChecklist?.[`${lojaChk}|${r.data}`];
+            if (bandaChk) {
+              const consumo   = parseFloat(bandaChk.consumo) || 0;
+              const desconto  = Math.max(0, consumo - BANDA_CONSUMO_FRANQUIA);
+              const valorPagar= Math.max(0, cacheTotal - desconto);
+              const descInfo  = desconto > 0 ? ` · <span style="color:var(--red)">-${money(desconto)} consumação excedida</span>` : '';
+              veioHtml = `<div style="margin-top:3px;font-size:9px;background:var(--amber-bg);border-radius:5px;padding:2px 6px;color:var(--amber);font-weight:600">🎵 ${esc(nomes)} · ${money(valorPagar)} a pagar${descInfo}${pendente}</div>`;
+            } else {
+              veioHtml = `<div style="margin-top:3px;font-size:9px;background:var(--amber-bg);border-radius:5px;padding:2px 6px;color:var(--amber);font-weight:600">🎵 ${esc(nomes)} · ${money(cacheTotal)} cachê${pendente} <span style="opacity:.7">(aguardando fechamento p/ consumação)</span></div>`;
             }
-            const valorPagar = Math.max(0, cache - couver);
-            const pendente = !t.presenca_confirmada ? ' <span style="opacity:.75">(pendente)</span>' : '';
-            return `<div style="margin-top:3px;font-size:9px;background:var(--amber-bg);border-radius:5px;padding:2px 6px;color:var(--amber);font-weight:600">🎵 ${esc(t.artista)} · ${money(valorPagar)} a pagar${pendente}</div>`;
-          }).join('');
+          }
+          const bandaHtml = naoVeioHtml + veioHtml;
           const hasComps   = Object.keys(S.caixaComprovantes[r.id] || {}).length > 0;
           const despRow    = (S.caixaDespesas?.[r.id] || []);
           const totalDesp  = despRow.reduce((a,d) => a + (parseFloat(d.valor)||0), 0);
