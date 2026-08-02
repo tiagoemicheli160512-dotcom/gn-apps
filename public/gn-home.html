@@ -507,6 +507,7 @@ let _dashSortDir   = 'desc';
 let _dashFatDia    = null;    // {YYYY-MM-DD: total} fat per day for current period
 let _dashComDia    = null;    // Array(7) of daily commission totals (Mon=0..Sun=6)
 let _dashFatDiaLoja = null;   // {lojaKey: {YYYY-MM-DD: valor}}
+let _dashFatDiaLojaRep = null; // {lojaKey: {YYYY-MM-DD: valor}} — repique (10% serviço), separado do Faturamento de propósito
 let _dashComDiaLoja = null;   // {lojaKey: Array(7)}
 
 // Mesma lista usada no app Check-list (aba Dados) — duplicada aqui porque cada app
@@ -1696,15 +1697,15 @@ function _comSemIdx(mondayISO) {
 const _COM_KEY_TO_LOJA = Object.fromEntries(Object.entries(LOJA_COM_KEY).map(([k,v])=>[v,k]));
 
 async function _fetchFatByDay(dates) {
-  if (!dates || !dates.length) return { byDay: {}, byLojaDay: {} };
+  if (!dates || !dates.length) return { byDay: {}, byLojaDay: {}, byLojaDayRep: {} };
   const from = dates[0], to = dates[dates.length - 1];
   const res = await fetch(
-    `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${from}&data_operacao=lte.${to}&select=loja,data_operacao,venda_salao,venda_delivery`,
+    `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${from}&data_operacao=lte.${to}&select=loja,data_operacao,venda_salao,venda_delivery,repique`,
     { headers: {apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY} }
   );
   if (!res.ok) throw new Error('HTTP ' + res.status);
   const rows = await res.json();
-  const byDay = {}, byLojaDay = {};
+  const byDay = {}, byLojaDay = {}, byLojaDayRep = {};
   (rows || []).forEach(r => {
     const v = (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0);
     byDay[r.data_operacao] = (byDay[r.data_operacao] || 0) + v;
@@ -1712,9 +1713,14 @@ async function _fetchFatByDay(dates) {
     if (LOJAS_LISTA.includes(lk)) {
       if (!byLojaDay[lk]) byLojaDay[lk] = {};
       byLojaDay[lk][r.data_operacao] = (byLojaDay[lk][r.data_operacao] || 0) + v;
+      // Repique (10% de serviço) — separado do Faturamento de propósito, não soma no
+      // total. É a base de cálculo da comissão (app Comissões), não receita da loja.
+      const rep = parseFloat(r.repique) || 0;
+      if (!byLojaDayRep[lk]) byLojaDayRep[lk] = {};
+      byLojaDayRep[lk][r.data_operacao] = (byLojaDayRep[lk][r.data_operacao] || 0) + rep;
     }
   });
-  return { byDay, byLojaDay };
+  return { byDay, byLojaDay, byLojaDayRep };
 }
 
 async function _fetchComDia(mondayISO) {
@@ -1763,11 +1769,11 @@ async function _loadDashAll() {
       window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?select=data_operacao,loja,manutencao&data_operacao=gte.${from30}&order=data_operacao.desc`, H, 'dash:manutRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hoje}&select=loja`, H, 'dash:chkRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?select=loja,all_data`, H, 'dash:lojasOfRows', []),
-      _fetchFatByDay(_dashPer==='sem' ? range.dates : weekRange.dates).catch(e=>{ _errCb('fatDia')(e); return {byDay:{},byLojaDay:{}}; }),
+      _fetchFatByDay(_dashPer==='sem' ? range.dates : weekRange.dates).catch(e=>{ _errCb('fatDia')(e); return {byDay:{},byLojaDay:{},byLojaDayRep:{}}; }),
       _fetchComDia(_dashPer==='sem' ? range.dates[0] : weekRange.dates[0]).catch(e=>{ _errCb('comDia')(e); return {totals:Array(7).fill(0),byLoja:{}}; }),
     ]);
     _dashFat = fatCur; _dashFatPrev = fatPrv;
-    _dashFatDia = fatDia.byDay || {}; _dashFatDiaLoja = fatDia.byLojaDay || {};
+    _dashFatDia = fatDia.byDay || {}; _dashFatDiaLoja = fatDia.byLojaDay || {}; _dashFatDiaLojaRep = fatDia.byLojaDayRep || {};
     _dashComDia = comDia.totals || Array(7).fill(0); _dashComDiaLoja = comDia.byLoja || {};
     // Manutenção: mesma lógica de deduplicação/carry-over do app gn-manutencao.html —
     // um item pendente aparece repetido dia após dia no checklist até ser resolvido,
@@ -2150,14 +2156,19 @@ function renderDashboard() {
           const dAbr=['S','T','Q','Q','S','S','D'];
           const fatDL=_dashFatDiaLoja?(_dashFatDiaLoja[k]||{}):null;
           const comDL=_dashComDiaLoja?(_dashComDiaLoja[k]||null):null;
+          // Repique (10% de serviço) — linha própria, separada do Faturamento de propósito:
+          // é a base de cálculo da comissão (app Comissões), não soma na receita da loja.
+          const repDL=_dashFatDiaLojaRep?(_dashFatDiaLojaRep[k]||{}):null;
           const hasFD=fatDL&&wr.dates.some(dt=>fatDL[dt]>0);
           const hasCom=comDL&&comDL.some(v=>v>0);
-          if(hasFD||hasCom){
+          const hasRep=repDL&&wr.dates.some(dt=>repDL[dt]>0);
+          if(hasFD||hasCom||hasRep){
             const fmtV=v=>v>=1000?(v/1000).toFixed(1).replace('.',',')+'k':v>0?Math.round(v)+'':'—';
             const hdrs=wr.dates.map((dt,i)=>`<th style="text-align:center;font-size:7px;font-weight:700;color:${dt===_hoje?'#f97316':'rgba(255,255,255,.25)'};padding:0 1px">${dAbr[i]}</th>`).join('');
             const fatCells=wr.dates.map((dt,i)=>{const fv=(fatDL&&fatDL[dt])||0;const isH=dt===_hoje;const fut=dt>_hoje;return `<td style="text-align:center;padding:1px 1px;font-size:7px;font-weight:700;color:${fv?'#e2e8f0':'rgba(255,255,255,.15)'};${isH?'background:rgba(242,100,25,.09);':''}${fut?'opacity:.3;':''}">${fmtV(fv)}</td>`;}).join('');
             const comCells=hasCom?wr.dates.map((dt,i)=>{const cv=(comDL&&comDL[i])||0;const isH=dt===_hoje;const fut=dt>_hoje;return `<td style="text-align:center;padding:1px 1px;font-size:7px;font-weight:700;color:${cv?'#60a5fa':'rgba(255,255,255,.15)'};${isH?'background:rgba(242,100,25,.09);':''}${fut?'opacity:.3;':''}">${fmtV(cv)}</td>`;}).join(''):'';
-            diaGrid=`<div style="margin-top:6px;border-top:1px solid rgba(255,255,255,.06);padding-top:5px"><table style="width:100%;border-collapse:collapse;table-layout:fixed"><thead><tr><th style="width:16px;font-size:6px;color:rgba(255,255,255,.18);text-align:left;padding:0 1px"></th>${hdrs}</tr></thead><tbody><tr><td style="font-size:6px;color:rgba(255,255,255,.2);padding:0 1px">Fat</td>${fatCells}</tr>${hasCom?`<tr><td style="font-size:6px;color:rgba(255,255,255,.2);padding:0 1px">Com</td>${comCells}</tr>`:''}</tbody></table></div>`;
+            const repCells=hasRep?wr.dates.map((dt,i)=>{const rv=(repDL&&repDL[dt])||0;const isH=dt===_hoje;const fut=dt>_hoje;return `<td style="text-align:center;padding:1px 1px;font-size:7px;font-weight:700;color:${rv?'#a78bfa':'rgba(255,255,255,.15)'};${isH?'background:rgba(242,100,25,.09);':''}${fut?'opacity:.3;':''}">${fmtV(rv)}</td>`;}).join(''):'';
+            diaGrid=`<div style="margin-top:6px;border-top:1px solid rgba(255,255,255,.06);padding-top:5px"><table style="width:100%;border-collapse:collapse;table-layout:fixed"><thead><tr><th style="width:16px;font-size:6px;color:rgba(255,255,255,.18);text-align:left;padding:0 1px"></th>${hdrs}</tr></thead><tbody><tr><td style="font-size:6px;color:rgba(255,255,255,.2);padding:0 1px">Fat</td>${fatCells}</tr>${hasCom?`<tr><td style="font-size:6px;color:rgba(255,255,255,.2);padding:0 1px">Com</td>${comCells}</tr>`:''}${hasRep?`<tr><td style="font-size:6px;color:rgba(255,255,255,.2);padding:0 1px">Rep</td>${repCells}</tr>`:''}</tbody></table></div>`;
           }
         }
         // status badges
@@ -2237,12 +2248,12 @@ function renderDashboard() {
 
 function _setDashTab(t){ _dashTab=t; renderDashboard(); }
 function _navToAtt(){ const el=document.getElementById('dash-section'); if(el)el.scrollIntoView({behavior:'smooth'}); _setDashTab('att'); }
-function _setPer(p){ _dashPer=p; _dashFat=null; _dashFatPrev=null; _dashFatDia=null; _dashComDia=null; _dashFatDiaLoja=null; _dashComDiaLoja=null; _dashRelSel.clear(); renderDashboard(); _loadDashAll(); }
+function _setPer(p){ _dashPer=p; _dashFat=null; _dashFatPrev=null; _dashFatDia=null; _dashComDia=null; _dashFatDiaLoja=null; _dashFatDiaLojaRep=null; _dashComDiaLoja=null; _dashRelSel.clear(); renderDashboard(); _loadDashAll(); }
 function _toggleDashSel(k){ if(_dashRelSel.has(k)) _dashRelSel.delete(k); else _dashRelSel.add(k); renderDashboard(); }
 function _dashNav(dir){
   if(_dashPer==='sem') _dashWoff=Math.min(0,_dashWoff+dir);
   else                 _dashMoff=Math.min(0,_dashMoff+dir);
-  _dashFat=null; _dashFatPrev=null; _dashFatDia=null; _dashComDia=null; _dashFatDiaLoja=null; _dashComDiaLoja=null;
+  _dashFat=null; _dashFatPrev=null; _dashFatDia=null; _dashComDia=null; _dashFatDiaLoja=null; _dashFatDiaLojaRep=null; _dashComDiaLoja=null;
   renderDashboard(); _loadDashAll();
 }
 
