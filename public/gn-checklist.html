@@ -10756,8 +10756,8 @@ function _renderDatasEspeciaisReminder(elId, maxItems) {
 let _gestaoMes = null, _gestaoAno = null;
 let _gestaoView = 'mensal'; // 'diario' | 'semanal' | 'mensal'
 let _gestaoSemIni = null, _gestaoDataDia = null;
-let _gestaoFatAtual = {}, _gestaoFatAnt = {}, _gestaoCMV = {}, _gestaoFuncCount = {};
-let _gestaoWeekData = null, _gestaoDayRow = null, _gestaoDayCMV = 0;
+let _gestaoFatAtual = {}, _gestaoFatAnt = {}, _gestaoCMV = {}, _gestaoCMVTeorico = {}, _gestaoFuncCount = {};
+let _gestaoWeekData = null, _gestaoDayRow = null, _gestaoDayCMV = 0, _gestaoDayCMVTeorico = 0;
 let _gestaoLoja = null;        // null = usa LOJA logado
 let _gestaoRelSelFat = true;   // seção faturamento incluída no relatório
 let _gestaoRelSelCarnes = {};  // carne.key → bool (true por padrão)
@@ -10785,6 +10785,49 @@ function _gestaoHeaderHtml(label, prevFn, nextFn, atEnd=false){
     </div>`;
 }
 
+// CMV teórico (ficha técnica) — complementa o CMV de compras: em vez de olhar quanto
+// entrou de NF no período, olha os pratos efetivamente vendidos (checklist_diario.vendas)
+// e soma o custo dos insumos de cada um, pela ficha técnica. A diferença entre os dois
+// ajuda a identificar quebra/desperdício/erro de estoque que o CMV de compras sozinho não mostra.
+async function _fichasMapCMV(){
+  if(!_fichasCache) await carregarFichas(true);
+  const map = {};
+  (_fichasCache||[]).forEach(f=>{ map[f.codigo]=f; });
+  return map;
+}
+function _custoUltimoInsumoCMV(nome, entradasFlat){
+  const alvo=(nome||'').trim().toUpperCase();
+  const achados=entradasFlat
+    .filter(e=>(e.insumo||'').trim().toUpperCase()===alvo && parseFloat(e.custoUnit)>0)
+    .sort((a,b)=>(b.dataNF||'').localeCompare(a.dataNF||''));
+  return achados.length ? (parseFloat(achados[0].custoUnit)||0) : 0;
+}
+function _custoPratoTeoricoCMV(ficha, entradasFlat){
+  if(!ficha || !Array.isArray(ficha.insumos)) return 0;
+  return ficha.insumos.reduce((sum,it)=>{
+    const custo=_custoUltimoInsumoCMV(it.insumo, entradasFlat);
+    const qtd=it.qtd_kg!=null ? it.qtd_kg : (it.qtd||0);
+    return sum + qtd*custo;
+  }, 0);
+}
+// Soma, por data (map data→R$), o custo teórico dos pratos vendidos nas linhas do checklist_diario.
+async function _somarCMVTeoricoPorDia(rows, entradasFlat){
+  const out={};
+  if(!rows || !rows.length) return out;
+  const fichasMap = await _fichasMapCMV();
+  rows.forEach(r=>{
+    if(!r.vendas) return;
+    const dia=(r.data_operacao||'').slice(0,10);
+    Object.entries(r.vendas).forEach(([cod,qtd])=>{
+      const q=parseInt(qtd)||0; if(q<=0) return;
+      const ficha=fichasMap[cod]; if(!ficha) return;
+      const custo=_custoPratoTeoricoCMV(ficha, entradasFlat);
+      if(custo>0) out[dia]=(out[dia]||0)+custo*q;
+    });
+  });
+  return out;
+}
+
 async function renderGestao() {
   const el = document.getElementById('tab-gestao');
   if (!el) return;
@@ -10805,11 +10848,11 @@ async function _loadGestaoData() {
   const to    = `${a}-${pad(m+1)}-${pad(new Date(a,m+1,0).getDate())}`;
   const fromA = `${a-1}-${pad(m+1)}-01`;
   const toA   = `${a-1}-${pad(m+1)}-${pad(new Date(a-1,m+1,0).getDate())}`;
-  _gestaoFatAtual = {}; _gestaoFatAnt = {}; _gestaoCMV = {}; _gestaoFuncCount = {};
+  _gestaoFatAtual = {}; _gestaoFatAnt = {}; _gestaoCMV = {}; _gestaoCMVTeorico = {}; _gestaoFuncCount = {};
   if (!sb || !LOJA) return;
   try {
     const [r1, r2, lojaRow, comissoesDt] = await Promise.all([
-      sb.from('checklist_diario').select('data_operacao,venda_salao,venda_delivery').eq('loja',LOJA).gte('data_operacao',from).lte('data_operacao',to),
+      sb.from('checklist_diario').select('data_operacao,venda_salao,venda_delivery,vendas').eq('loja',LOJA).gte('data_operacao',from).lte('data_operacao',to),
       sb.from('checklist_diario').select('data_operacao,venda_salao,venda_delivery').eq('loja',LOJA).gte('data_operacao',fromA).lte('data_operacao',toA),
       sb.from('gn_lojas').select('all_data').eq('loja',LOJA_MAP[LOJA]||LOJA).maybeSingle(),
       fetchComissoesAllData(comissoesLojaKey()).catch(()=>({}))
@@ -10817,15 +10860,18 @@ async function _loadGestaoData() {
     if (r1.error) return;
     (r1.data||[]).forEach(r => { const v=(parseFloat(r.venda_salao)||0)+(parseFloat(r.venda_delivery)||0); const k=(r.data_operacao||'').slice(0,10); _gestaoFatAtual[k]=(_gestaoFatAtual[k]||0)+v; });
     (r2.data||[]).forEach(r => { const v=(parseFloat(r.venda_salao)||0)+(parseFloat(r.venda_delivery)||0); const k=(r.data_operacao||'').slice(0,10); _gestaoFatAnt[k]=(_gestaoFatAnt[k]||0)+v; });
-    // CMV: custo das entradas de NF registradas no app Lojas, filtradas por data da nota
+    // CMV de compras: custo das entradas de NF registradas no app Lojas, filtradas por data da nota
     const entradasAll = (lojaRow?.data?.all_data?.entradasAll) || {};
-    Object.values(entradasAll).flat().forEach(e => {
+    const entradasFlat = Object.values(entradasAll).flat();
+    entradasFlat.forEach(e => {
       const dia = (e.dataNF||'').slice(0,10);
       if(dia >= from && dia <= to) {
         const custo = (parseFloat(e.qtd)||0) * (parseFloat(e.custoUnit)||0);
         if(custo > 0) _gestaoCMV[dia] = (_gestaoCMV[dia]||0) + custo;
       }
     });
+    // CMV teórico: pratos vendidos no dia × custo da ficha técnica de cada um
+    _gestaoCMVTeorico = await _somarCMVTeoricoPorDia(r1.data||[], entradasFlat);
     const lastDayN = new Date(a,m+1,0).getDate();
     for (let d=1; d<=lastDayN; d++) {
       const ds=`${a}-${pad(m+1)}-${pad(d)}`;
@@ -10850,7 +10896,7 @@ function _renderGestaoContent(el) {
   const datasEsp = _getDatasEspeciais(a);
   const tipoIcon = {nacional:'🏛️', comercial:'🛍️', 'municipal-rj':'🌊', 'municipal-sp':'🏙️'};
 
-  let totAtual=0, totAnt=0, totCMV=0;
+  let totAtual=0, totAnt=0, totCMV=0, totCMVTeorico=0;
   const dias = [];
   for (let d=1; d<=lastDay; d++) {
     const ds = `${a}-${pad(m+1)}-${pad(d)}`;
@@ -10859,16 +10905,20 @@ function _renderGestaoContent(el) {
     const fat = _gestaoFatAtual[ds]||0;
     const fatA= _gestaoFatAnt[dsA]||0;
     const cmv = _gestaoCMV[ds]||0;
+    const cmvT = _gestaoCMVTeorico[ds]||0;
     const func= _gestaoFuncCount[ds]||0;
     const feriado = datasEsp.find(f=>f.data===ds);
-    totAtual+=fat; totAnt+=fatA; totCMV+=cmv;
-    dias.push({d,ds,dsA,fw,fat,fatA,cmv,func,feriado,isFuture:ds>hojeStr,isHoje:ds===hojeStr});
+    totAtual+=fat; totAnt+=fatA; totCMV+=cmv; totCMVTeorico+=cmvT;
+    dias.push({d,ds,dsA,fw,fat,fatA,cmv,cmvT,func,feriado,isFuture:ds>hojeStr,isHoje:ds===hojeStr});
   }
 
   const delta = totAtual - totAnt;
   const deltaPct = totAnt>0 ? ((delta/totAnt)*100).toFixed(1) : null;
   const cmvPct = totAtual>0 ? (totCMV/totAtual*100).toFixed(1) : null;
   const cmvColor = !cmvPct?'#888':parseFloat(cmvPct)>35?'#f87171':parseFloat(cmvPct)>28?'#fbbf24':'#4ade80';
+  const cmvTPct = totAtual>0 ? (totCMVTeorico/totAtual*100).toFixed(1) : null;
+  const cmvTColor = !cmvTPct?'#888':parseFloat(cmvTPct)>35?'#f87171':parseFloat(cmvTPct)>28?'#fbbf24':'#4ade80';
+  const cmvDiffPct = (cmvPct!==null && cmvTPct!==null) ? (parseFloat(cmvPct)-parseFloat(cmvTPct)).toFixed(1) : null;
   const maxFat = Math.max(...dias.map(d=>Math.max(d.fat,d.fatA,1)));
 
   let funcDias=0, funcSoma=0;
@@ -10894,18 +10944,30 @@ function _renderGestaoContent(el) {
     </div>
   </div>`;
 
-  // CMV bar
+  // CMV bar — compras (o que entrou de NF) vs teórico (ficha técnica dos pratos vendidos).
+  // A diferença entre os dois é o principal sinal de quebra/desperdício/erro de estoque.
   const cmvHtml = `<div style="background:#363636;border:1px solid #505050;border-radius:10px;padding:12px;margin-bottom:12px">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-      <div>
-        <div style="font-size:10px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:.4px">CMV — Custo de Mercadoria Vendida</div>
-        <div style="font-size:9px;color:#666;margin-top:2px">Compras: ${_fmtBRL(totCMV)} / Vendas: ${_fmtBRL(totAtual)}</div>
+    <div style="font-size:10px;font-weight:700;color:#aaa;text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px">CMV — Custo de Mercadoria Vendida</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+      <div style="background:#1a2235;border-radius:8px;padding:9px;text-align:center">
+        <div style="font-size:8px;color:#888;text-transform:uppercase;letter-spacing:.3px;margin-bottom:3px">🧾 Compras</div>
+        <div style="font-size:18px;font-weight:700;color:${cmvColor};font-family:Consolas,monospace">${cmvPct?cmvPct+'%':'—'}</div>
+        <div style="font-size:8px;color:#666;margin-top:2px">${_fmtBRL(totCMV)}</div>
       </div>
-      <div style="font-size:22px;font-weight:700;color:${cmvColor};font-family:Consolas,monospace">${cmvPct?cmvPct+'%':'—'}</div>
+      <div style="background:#1a2235;border-radius:8px;padding:9px;text-align:center">
+        <div style="font-size:8px;color:#888;text-transform:uppercase;letter-spacing:.3px;margin-bottom:3px">📋 Teórico (fichas)</div>
+        <div style="font-size:18px;font-weight:700;color:${cmvTColor};font-family:Consolas,monospace">${cmvTPct?cmvTPct+'%':'—'}</div>
+        <div style="font-size:8px;color:#666;margin-top:2px">${_fmtBRL(totCMVTeorico)}</div>
+      </div>
     </div>
-    <div style="height:6px;background:#1c1c3a;border-radius:3px;overflow:hidden">
+    <div style="height:6px;background:#1c1c3a;border-radius:3px;overflow:hidden;margin-bottom:${cmvDiffPct!==null && Math.abs(parseFloat(cmvDiffPct))>=3 ? '6px':'0'}">
       <div style="height:100%;width:${cmvPct?Math.min(100,parseFloat(cmvPct)/50*100):0}%;background:${cmvColor};border-radius:3px"></div>
     </div>
+    ${cmvDiffPct!==null && Math.abs(parseFloat(cmvDiffPct))>=3 ? `<div style="font-size:9px;color:${parseFloat(cmvDiffPct)>0?'#f87171':'#fbbf24'};font-weight:600">
+      ${parseFloat(cmvDiffPct)>0
+        ? '⚠️ Compras '+cmvDiffPct+'pp acima do teórico — possível quebra, desperdício ou compra não consumida no período.'
+        : '⚠️ Compras '+Math.abs(parseFloat(cmvDiffPct))+'pp abaixo do teórico — conferir estoque/lançamentos de entrada.'}
+    </div>` : ''}
   </div>`;
 
   // Quadro card
@@ -11250,20 +11312,24 @@ function _gestaoCarnesResumoHtml(carnes){
 // ——— DIÁRIO ———
 
 async function _loadGestaoDayData(){
-  _gestaoDayRow=null; _gestaoDayCMV=0;
+  _gestaoDayRow=null; _gestaoDayCMV=0; _gestaoDayCMVTeorico=0;
   if(!sb||!LOJA||!_gestaoDataDia) return;
   try{
     const [{data}, lojaRow] = await Promise.all([
-      sb.from('checklist_diario').select('venda_salao,venda_delivery,repique,dinheiro_caixa,despesas,checklist_pct').eq('loja',LOJA).eq('data_operacao',_gestaoDataDia).maybeSingle(),
+      sb.from('checklist_diario').select('data_operacao,venda_salao,venda_delivery,repique,dinheiro_caixa,despesas,checklist_pct,vendas').eq('loja',LOJA).eq('data_operacao',_gestaoDataDia).maybeSingle(),
       sb.from('gn_lojas').select('all_data').eq('loja',LOJA_MAP[LOJA]||LOJA).maybeSingle()
     ]);
     _gestaoDayRow=data||null;
     const entradasAll=(lojaRow?.data?.all_data?.entradasAll)||{};
-    Object.values(entradasAll).flat().forEach(e=>{
+    const entradasFlat=Object.values(entradasAll).flat();
+    entradasFlat.forEach(e=>{
       if((e.dataNF||'').slice(0,10)===_gestaoDataDia){
         _gestaoDayCMV+=(parseFloat(e.qtd)||0)*(parseFloat(e.custoUnit)||0);
       }
     });
+    // CMV teórico do dia: pratos vendidos × custo da ficha técnica de cada um
+    const cmvTPorDia = await _somarCMVTeoricoPorDia(data ? [data] : [], entradasFlat);
+    _gestaoDayCMVTeorico = cmvTPorDia[_gestaoDataDia] || 0;
   }catch(e){}
 }
 
@@ -11300,11 +11366,18 @@ function _renderGestaoDay(el){
       </div>
       ${desp>0?_card('📦 Despesas do Caixa',_fmtBRL(desp),'#f87171'):''}
       ${_gestaoDayCMV>0?_card('🧾 Compras (NFs)',_fmtBRL(_gestaoDayCMV),'#fb923c'):''}
+      ${_gestaoDayCMVTeorico>0?_card('📋 Consumo Teórico (fichas)',_fmtBRL(_gestaoDayCMVTeorico),'#60a5fa'):''}
       ${(()=>{
         if(!_gestaoDayCMV||!fat) return '';
         const cmvD=(_gestaoDayCMV/fat*100).toFixed(1);
         const cmvDC=parseFloat(cmvD)>35?'#f87171':parseFloat(cmvD)>28?'#fbbf24':'#4ade80';
-        return _card('📊 CMV do Dia',cmvD+'%',cmvDC);
+        return _card('📊 CMV do Dia (compras)',cmvD+'%',cmvDC);
+      })()}
+      ${(()=>{
+        if(!_gestaoDayCMVTeorico||!fat) return '';
+        const cmvDT=(_gestaoDayCMVTeorico/fat*100).toFixed(1);
+        const cmvDTC=parseFloat(cmvDT)>35?'#f87171':parseFloat(cmvDT)>28?'#fbbf24':'#4ade80';
+        return _card('📊 CMV do Dia (teórico)',cmvDT+'%',cmvDTC);
       })()}
       ${caixa>0?_card('💵 Dinheiro em Caixa',_fmtBRL(caixa)):''}
       ${chk>0?_card('✅ Check-list',chk.toFixed(0)+'%',chkCol):''}
