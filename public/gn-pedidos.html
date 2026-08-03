@@ -604,6 +604,7 @@ let S = {
   contagens:   {},     // { catalogoId: { lojaSlug: { atual, ul_estoque, ul_pedido } } }
   ultimoPedido:{},     // { catalogoId: { lojaSlug: qtd } } — semana anterior
   pedidosConfirmados:{},// { catalogoId: { lojaSlug: qtd } } — confirmados desta semana
+  fornecedoresConfirmados: new Set(), // fornecedores do pedidoAtual já com provisões geradas
 
   // Carnes
   carnesLoja: null,
@@ -913,6 +914,18 @@ async function carregarPedidoAtual() {
   await carregarItensPedido();
   await carregarUltimoPedido();
   await carregarConfirmadosSemana();
+  await carregarFornecedoresConfirmados();
+}
+
+// Fornecedores do pedido atual que já tiveram provisões geradas (confirmarFornecedores) —
+// usado pra travar a edição só daqueles itens e permitir confirmar o resto depois.
+async function carregarFornecedoresConfirmados() {
+  S.fornecedoresConfirmados = new Set();
+  if (!S.pedidoAtual?.id) return;
+  const { data } = await db.from('gn_provisoes')
+    .select('fornecedor')
+    .eq('pedido_id', S.pedidoAtual.id);
+  (data || []).forEach(p => { if (p.fornecedor) S.fornecedoresConfirmados.add(p.fornecedor); });
 }
 
 async function carregarItensPedido() {
@@ -1305,37 +1318,72 @@ async function salvarItem(catalogoId, lojaSlug, qtd, custo) {
   }
 }
 
+// Fornecedores com pelo menos um item com qtd > 0 em qualquer loja, no pedido atual.
+function _fornecedoresComItensPedido() {
+  return [...new Set(
+    S.catalogo.filter(p => p.ativo).filter(prod =>
+      S.lojas.some(l => (S.pedidoItens[prod.id]?.[l.slug_pedido]?.qtd || 0) > 0)
+    ).map(p => p.fornecedor)
+  )].sort();
+}
+
 async function confirmarPedido() {
   if (!S.pedidoAtual) return;
-  if (S.pedidoAtual.status === 'CONFIRMADO') {
-    toast('Este pedido já foi confirmado.', 'err'); return;
+
+  const pendentes = _fornecedoresComItensPedido().filter(f => !S.fornecedoresConfirmados.has(f));
+
+  if (pendentes.length === 0) {
+    toast(S.fornecedoresConfirmados.size > 0
+      ? 'Todos os fornecedores deste pedido já foram confirmados.'
+      : 'Nenhum item com quantidade para confirmar.', 'err');
+    return;
   }
 
-  const totalItens = Object.values(S.pedidoItens)
-    .flatMap(l => Object.values(l))
-    .filter(i => i.qtd > 0).length;
+  abrirModal(`
+    <div class="modal-titulo">✓ Confirmar Pedido
+      <button class="modal-close" onclick="$('modal-bg').classList.remove('ativo')">×</button>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Selecione os fornecedores pra gerar as provisões agora. Os demais continuam em aberto pra confirmar depois.</div>
+    <div style="display:flex;justify-content:flex-end;margin-bottom:6px">
+      <button class="btn-sm btn-outline" onclick="_toggleTodosFornConfirm(this)" data-marcados="1">Desmarcar todos</button>
+    </div>
+    <div id="confirmForn-lista" style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px;max-height:40vh;overflow-y:auto">
+      ${pendentes.map(f => `
+        <label style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:rgba(255,255,255,.04);border-radius:8px;cursor:pointer">
+          <input type="checkbox" class="confirmForn-chk" value="${f.replace(/"/g,'&quot;')}" checked style="width:16px;height:16px">
+          <span>${f}</span>
+        </label>`).join('')}
+    </div>
+    <div class="modal-acoes">
+      <button class="btn-sm btn-success" onclick="_confirmarFornecedoresSelecionados()">✓ Confirmar Selecionados</button>
+    </div>
+  `);
+}
 
-  if (totalItens === 0) {
-    toast('Nenhum item com quantidade para confirmar.', 'err'); return;
+function _toggleTodosFornConfirm(btn) {
+  const marcado = btn.getAttribute('data-marcados') === '1';
+  document.querySelectorAll('.confirmForn-chk').forEach(chk => { chk.checked = !marcado; });
+  btn.setAttribute('data-marcados', marcado ? '0' : '1');
+  btn.textContent = marcado ? 'Marcar todos' : 'Desmarcar todos';
+}
+
+async function _confirmarFornecedoresSelecionados() {
+  const selecionados = [...document.querySelectorAll('.confirmForn-chk:checked')].map(chk => chk.value);
+  if (selecionados.length === 0) {
+    toast('Selecione ao menos um fornecedor.', 'err'); return;
   }
-
-  if (!confirm('Confirmar pedido e gerar provisões para todas as lojas?')) return;
+  $('modal-bg').classList.remove('ativo');
 
   try {
     // 1. Recarregar itens do banco para garantir que todos têm id
     await carregarItensPedido();
 
-    // 2. Confirmar pedido
-    const semIsoStr = S.semanaAtiva.toISOString().split('T')[0];
-    const { error: errPed } = await db.from('gn_pedidos')
-      .update({ status: 'CONFIRMADO', semana_inicio: semIsoStr, atualizado_em: new Date().toISOString() })
-      .eq('id', S.pedidoAtual.id);
-    if (errPed) throw errPed;
-    S.pedidoAtual.status = 'CONFIRMADO';
+    const fornsSet = new Set(selecionados);
 
-    // 3. Gerar provisões — uma por produto×loja com qtd > 0
+    // 2. Gerar provisões — uma por produto×loja com qtd > 0, só dos fornecedores selecionados
     const provisoes = [];
     S.catalogo.forEach(prod => {
+      if (!fornsSet.has(prod.fornecedor)) return;
       const itensLoja = S.pedidoItens[prod.id];
       if (!itensLoja) return;
       S.lojas.forEach(loja => {
@@ -1384,20 +1432,34 @@ async function confirmarPedido() {
       });
     });
 
-    // 4. Inserir provisões em batches
+    // 3. Inserir provisões em batches
     let erros = 0;
     for (let i = 0; i < provisoes.length; i += 50) {
       const { error } = await db.from('gn_provisoes').insert(provisoes.slice(i, i + 50));
       if (error) { console.error('Erro provisão batch:', error.message); erros++; }
     }
 
-    if (erros > 0) {
-      toast(`Pedido confirmado com ${erros} erro(s) nas provisões. Verifique o console.`, 'err');
-    } else {
-      toast(`✓ Pedido confirmado! ${provisoes.length} provisões geradas.`, 'ok');
+    // 4. Marca os fornecedores selecionados como confirmados localmente
+    fornsSet.forEach(f => S.fornecedoresConfirmados.add(f));
+
+    // 5. Se todos os fornecedores com itens já estão confirmados, finaliza o pedido
+    const aindaPendentes = _fornecedoresComItensPedido().filter(f => !S.fornecedoresConfirmados.has(f));
+    if (aindaPendentes.length === 0) {
+      const semIsoStr = S.semanaAtiva.toISOString().split('T')[0];
+      const { error: errPed } = await db.from('gn_pedidos')
+        .update({ status: 'CONFIRMADO', semana_inicio: semIsoStr, atualizado_em: new Date().toISOString() })
+        .eq('id', S.pedidoAtual.id);
+      if (errPed) throw errPed;
+      S.pedidoAtual.status = 'CONFIRMADO';
     }
 
-    // 5. Atualizar estado local e re-renderizar
+    if (erros > 0) {
+      toast(`Fornecedores confirmados com ${erros} erro(s) nas provisões. Verifique o console.`, 'err');
+    } else {
+      toast(`✓ ${selecionados.length} fornecedor${selecionados.length>1?'es':''} confirmado${selecionados.length>1?'s':''}! ${provisoes.length} provisões geradas.${aindaPendentes.length>0?' '+aindaPendentes.length+' fornecedor(es) ainda em aberto.':''}`, 'ok');
+    }
+
+    // 6. Atualizar estado local e re-renderizar
     calcularTotais();
     renderPedido();
 
@@ -1788,7 +1850,6 @@ function renderPedido() {
   }[S.pedidoAtual.status] || '';
 
   const totalGeral = totalPedidoGeral();
-  const pedConfirmado = S.pedidoAtual.status === 'CONFIRMADO';
   const totalItensGeral = S.todosModo
     ? S.lojas.reduce((sum,l)=>sum+contarItensLoja(l.slug_pedido),0)
     : contarItensLoja(S.lojaAtiva);
@@ -1860,6 +1921,7 @@ function renderPedido() {
             ? `<span onclick="event.stopPropagation();mostrarInfoContagem('${prod.id}','${lojaAtiva}')" title="${contInfoTxt.replace(/"/g,'&quot;')}" style="cursor:pointer;opacity:.7">🕒</span>` : '';
           const corrigirBtn = `<span onclick="event.stopPropagation();corrigirEstVig('${prod.id}','${lojaAtiva}','${prod.produto.replace(/'/g,"\\'")}')" title="Corrigir Est.vig" style="cursor:pointer;opacity:.7">✏️</span>`;
           const isUrgente = _pedidoItemUrgente(prod, lojaAtiva);
+          const prodConfirmado = S.fornecedoresConfirmados.has(prod.fornecedor);
           return `<div class="prod-row${divAtual?' diverg-ativo':jaPedido?' ja-pedido':''}" data-cid="${prod.id}" data-loja="${lojaAtiva}">
             <div class="prod-info">
               <div class="prod-nome" title="${prod.produto}">${prod.produto}</div>
@@ -1873,21 +1935,22 @@ function renderPedido() {
             </div>
             <div style="display:flex;align-items:center;gap:0">
               <div class="qty-ctrl">
-                <button class="qty-btn" onclick="ajustarQtd('${prod.id}','${lojaAtiva}',${prod.custo||0},-1)" ${pedConfirmado?'disabled':''}>−</button>
+                <button class="qty-btn" onclick="ajustarQtd('${prod.id}','${lojaAtiva}',${prod.custo||0},-1)" ${prodConfirmado?'disabled':''}>−</button>
                 <input class="qty-input" type="text" inputmode="decimal" min="0"
-                  value="${qtdAtual||''}" placeholder="0" ${pedConfirmado?'disabled':''}
+                  value="${qtdAtual||''}" placeholder="0" ${prodConfirmado?'disabled':''}
                   oninput="qtdChanged('${prod.id}','${lojaAtiva}',${prod.custo||0},this.value)"
                   onchange="qtdChanged('${prod.id}','${lojaAtiva}',${prod.custo||0},this.value,true)"
                   onblur="qtdChanged('${prod.id}','${lojaAtiva}',${prod.custo||0},this.value,true)"
                   onkeydown="nextInput(event,this)">
-                <button class="qty-btn" onclick="ajustarQtd('${prod.id}','${lojaAtiva}',${prod.custo||0},1)" ${pedConfirmado?'disabled':''}>+</button>
+                <button class="qty-btn" onclick="ajustarQtd('${prod.id}','${lojaAtiva}',${prod.custo||0},1)" ${prodConfirmado?'disabled':''}>+</button>
               </div>
               <button class="diverg-btn${divAtual?' ativo':''}" title="Marcar divergência na contagem" onclick="toggleDiverg('${prod.id}','${lojaAtiva}')">⚑</button>
-              <button class="urg-btn${isUrgente?' ativo':''}${isUrgente&&pedConfirmado?' finalizada':''}" title="${isUrgente?(pedConfirmado?'Urgência — pedido finalizado':'Urgência — remover'):'Marcar como urgência'}" onclick="toggleUrgenciaPedido('${prod.item_id}','${lojaAtiva}')">⚡</button>
+              <button class="urg-btn${isUrgente?' ativo':''}${isUrgente&&prodConfirmado?' finalizada':''}" title="${isUrgente?(prodConfirmado?'Urgência — fornecedor já confirmado':'Urgência — remover'):'Marcar como urgência'}" onclick="toggleUrgenciaPedido('${prod.item_id}','${lojaAtiva}')">⚡</button>
             </div>
           </div>`;
         }).join('');
-        return `<div><div class="forn-header">${forn}</div>${rowsHtml}</div>`;
+        const fornConfirmadoBadge = S.fornecedoresConfirmados.has(forn) ? ' <span style="color:#22c55e;font-weight:700">✓ confirmado</span>' : '';
+        return `<div><div class="forn-header">${forn}${fornConfirmadoBadge}</div>${rowsHtml}</div>`;
       }).join('');
 
       const totalItens = prods.reduce((n,p)=>n+(S.pedidoItens[p.id]?.[lojaAtiva]?.qtd>0?1:0),0);
@@ -1915,6 +1978,7 @@ function renderPedido() {
       const fornsHtml = fors.map(forn => {
         const pp = prods.filter(p => p.fornecedor === forn);
         const cardsHtml = pp.map(prod => {
+          const prodConfirmado = S.fornecedoresConfirmados.has(prod.fornecedor);
           const totalProd = S.lojas.reduce((sum, l) => {
             const qtd = S.pedidoItens[prod.id]?.[l.slug_pedido]?.qtd || 0;
             return sum + qtd * (prod.custo || 0);
@@ -1945,17 +2009,17 @@ function renderPedido() {
               <span class="todos-loja-vig">Est.vig:${vigV}${contInfoBtnL}${corrigirBtnL}</span>
               <div style="display:flex;align-items:center;gap:0">
                 <div class="qty-ctrl-sm">
-                  <button class="qty-btn-sm" onclick="ajustarQtd('${prod.id}','${loja.slug_pedido}',${prod.custo||0},-1)" ${pedConfirmado?'disabled':''}>−</button>
+                  <button class="qty-btn-sm" onclick="ajustarQtd('${prod.id}','${loja.slug_pedido}',${prod.custo||0},-1)" ${prodConfirmado?'disabled':''}>−</button>
                   <input class="qty-input-sm" type="text" inputmode="decimal" min="0"
-                    value="${qtdL||''}" placeholder="0" ${pedConfirmado?'disabled':''}
+                    value="${qtdL||''}" placeholder="0" ${prodConfirmado?'disabled':''}
                     oninput="qtdChanged('${prod.id}','${loja.slug_pedido}',${prod.custo||0},this.value)"
                     onchange="qtdChanged('${prod.id}','${loja.slug_pedido}',${prod.custo||0},this.value,true)"
                     onblur="qtdChanged('${prod.id}','${loja.slug_pedido}',${prod.custo||0},this.value,true)"
                     onkeydown="nextInput(event,this)">
-                  <button class="qty-btn-sm" onclick="ajustarQtd('${prod.id}','${loja.slug_pedido}',${prod.custo||0},1)" ${pedConfirmado?'disabled':''}>+</button>
+                  <button class="qty-btn-sm" onclick="ajustarQtd('${prod.id}','${loja.slug_pedido}',${prod.custo||0},1)" ${prodConfirmado?'disabled':''}>+</button>
                 </div>
                 <button class="diverg-btn${divL?' ativo':''}" style="width:22px;height:22px;font-size:10px" title="Marcar divergência" onclick="toggleDiverg('${prod.id}','${loja.slug_pedido}')">⚑</button>
-                <button class="urg-btn${isUrgenteL?' ativo':''}${isUrgenteL&&pedConfirmado?' finalizada':''}" style="width:22px;height:22px;font-size:10px" title="${isUrgenteL?(pedConfirmado?'Urgência — pedido finalizado':'Urgência — remover'):'Marcar como urgência'}" onclick="toggleUrgenciaPedido('${prod.item_id}','${loja.slug_pedido}')">⚡</button>
+                <button class="urg-btn${isUrgenteL?' ativo':''}${isUrgenteL&&prodConfirmado?' finalizada':''}" style="width:22px;height:22px;font-size:10px" title="${isUrgenteL?(prodConfirmado?'Urgência — fornecedor já confirmado':'Urgência — remover'):'Marcar como urgência'}" onclick="toggleUrgenciaPedido('${prod.item_id}','${loja.slug_pedido}')">⚡</button>
               </div>
               ${subT?`<span class="todos-loja-total">${subT}</span>`:''}
             </div>`;
@@ -1974,7 +2038,8 @@ function renderPedido() {
           </div>`;
         }).join('');
 
-        return `<div><div class="forn-header">${forn}</div>${cardsHtml}</div>`;
+        const fornConfirmadoBadgeT = S.fornecedoresConfirmados.has(forn) ? ' <span style="color:#22c55e;font-weight:700">✓ confirmado</span>' : '';
+        return `<div><div class="forn-header">${forn}${fornConfirmadoBadgeT}</div>${cardsHtml}</div>`;
       }).join('');
 
       const totalItensGrupo = prods.reduce((n,p) => {
@@ -2017,6 +2082,8 @@ function renderPedido() {
     ? (S.urgenciaTemplate[LOJA_USERKEY_BY_SLUG[_lojaFiltroUrg]] || []).length
     : S.lojas.reduce((sum,l)=>sum+((S.urgenciaTemplate[LOJA_USERKEY_BY_SLUG[l.slug_pedido]]||[]).length),0);
 
+  const fornsPendentes = fornsTodasLojas.filter(f => !S.fornecedoresConfirmados.has(f));
+
   $('content').innerHTML = semNavHtml + _datasEspeciaisCardHtml() + _vendaSemanaAntCardHtml() + `
     <div class="pedido-bar">
       <div class="pedido-info">
@@ -2030,11 +2097,12 @@ function renderPedido() {
         <button class="btn-sm" onclick="gerarWppPedido()" style="background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);color:#22c55e">📲</button>
         <button class="btn-sm" onclick="gerarPDFPedido()" style="background:rgba(192,57,43,.15);border:1px solid rgba(192,57,43,.4);color:#e74c3c">📄</button>
         <button class="btn-sm" onclick="enviarPDFPedidoWpp()" title="Enviar PDF pelo WhatsApp" style="background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);color:#22c55e">📄📲</button>
-        ${!pedConfirmado ? `
-          <button class="btn-sm btn-success" onclick="confirmarPedido()">✓ Confirmar</button>
-        ` : `
+        ${fornsPendentes.length > 0 ? `
+          <button class="btn-sm btn-success" onclick="confirmarPedido()">✓ Confirmar${S.fornecedoresConfirmados.size>0?` (${fornsPendentes.length} pend.)`:''}</button>
+        ` : ''}
+        ${S.fornecedoresConfirmados.size > 0 ? `
           <button class="btn-sm btn-orange" onclick="verProvisoes()">Ver Provisões</button>
-        `}
+        ` : ''}
       </div>
     </div>
 
