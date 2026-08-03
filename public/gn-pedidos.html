@@ -2155,7 +2155,10 @@ function toggleGrupo(grupo) {
 // Debounce por campo (catalogoId+lojaSlug): oninput dispara a cada tecla digitada,
 // então sem coalescer as gravações viravam upserts concorrentes que podiam chegar
 // fora de ordem no servidor e sobrescrever o valor final com um dígito intermediário
-// (relato: "as atualizações não estão ficando").
+// (relato: "as atualizações não estão ficando"). Cada entrada guarda também os dados
+// da gravação pendente (não só o timer) pra poder forçar o disparo imediato
+// (_flushQtdTimersPendentes) se a aba/app for pra segundo plano ou fechar antes dos
+// 500ms do debounce — senão a última digitação era perdida sem nunca ser gravada.
 const _qtdSaveTimers = {};
 
 function _qtdSaveKey(catalogoId, lojaSlug) { return catalogoId + '|' + lojaSlug; }
@@ -2179,17 +2182,30 @@ async function _executarSalvarQtd(catalogoId, lojaSlug, custo, valor) {
 
 function qtdChanged(catalogoId, lojaSlug, custo, valor, imediato) {
   const key = _qtdSaveKey(catalogoId, lojaSlug);
-  clearTimeout(_qtdSaveTimers[key]);
+  if (_qtdSaveTimers[key]) clearTimeout(_qtdSaveTimers[key].timer);
   delete _qtdSaveTimers[key];
   if (imediato) {
     _executarSalvarQtd(catalogoId, lojaSlug, custo, valor);
   } else {
-    _qtdSaveTimers[key] = setTimeout(() => {
+    const timer = setTimeout(() => {
       delete _qtdSaveTimers[key];
       _executarSalvarQtd(catalogoId, lojaSlug, custo, valor);
     }, 500);
+    _qtdSaveTimers[key] = { timer, catalogoId, lojaSlug, custo, valor };
   }
 }
+
+function _flushQtdTimersPendentes() {
+  Object.keys(_qtdSaveTimers).forEach(key => {
+    const pend = _qtdSaveTimers[key];
+    clearTimeout(pend.timer);
+    delete _qtdSaveTimers[key];
+    _executarSalvarQtd(pend.catalogoId, pend.lojaSlug, pend.custo, pend.valor);
+  });
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden) _flushQtdTimersPendentes(); });
+window.addEventListener('pagehide', _flushQtdTimersPendentes);
+window.addEventListener('blur', _flushQtdTimersPendentes);
 
 async function ajustarQtd(catalogoId, lojaSlug, custo, delta) {
   const key = _qtdSaveKey(catalogoId, lojaSlug);
