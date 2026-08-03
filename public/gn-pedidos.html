@@ -481,6 +481,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 <div id="toast"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 <script src="gn-lojas-config.js"></script>
 <script>
 // ═══════════════════════════════════════════════
@@ -2007,6 +2008,7 @@ function renderPedido() {
         <button class="btn-sm btn-outline" onclick="novoPedido()">Novo</button>
         <button class="btn-sm" onclick="gerarWppPedido()" style="background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);color:#22c55e">📲</button>
         <button class="btn-sm" onclick="gerarPDFPedido()" style="background:rgba(192,57,43,.15);border:1px solid rgba(192,57,43,.4);color:#e74c3c">📄</button>
+        <button class="btn-sm" onclick="enviarPDFPedidoWpp()" title="Enviar PDF pelo WhatsApp" style="background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);color:#22c55e">📄📲</button>
         ${!pedConfirmado ? `
           <button class="btn-sm btn-success" onclick="confirmarPedido()">✓ Confirmar</button>
         ` : `
@@ -2076,6 +2078,7 @@ function renderPedido() {
       <div style="display:flex;flex-wrap:wrap;gap:7px">
         <button onclick="gerarWppPedido()" style="background:rgba(37,211,102,.2);border:1px solid rgba(37,211,102,.5);border-radius:11px;padding:10px 16px;color:#22c55e;font-weight:800;font-size:13px;display:flex;align-items:center;gap:6px">📲 Geral</button>
         <button onclick="gerarPDFPedido()" style="background:rgba(192,57,43,.15);border:1px solid rgba(192,57,43,.4);border-radius:11px;padding:10px 16px;color:#e74c3c;font-weight:800;font-size:13px;display:flex;align-items:center;gap:6px">📄 PDF</button>
+        <button onclick="enviarPDFPedidoWpp()" style="background:rgba(37,211,102,.2);border:1px solid rgba(37,211,102,.5);border-radius:11px;padding:10px 16px;color:#22c55e;font-weight:800;font-size:13px;display:flex;align-items:center;gap:6px">📄📲 PDF no Whats</button>
         ${fornsComItens.map(f=>`<button onclick="gerarWppPedidoForn('${f.replace(/'/g,"\\'")}')" style="background:rgba(37,211,102,.08);border:1px solid rgba(37,211,102,.3);border-radius:11px;padding:10px 13px;color:#4ade80;font-weight:700;font-size:11px;display:flex;align-items:center;gap:5px">📦 ${f}</button>`).join('')}
       </div>
     </div>` : ''}
@@ -3239,8 +3242,10 @@ function gerarPDF(texto,titulo){
   const w=window.open('','_blank');
   if(w){w.document.write(html);w.document.close();}
 }
-function gerarPDFPedido(){
-  if(!S.pedidoAtual){toast('Nenhum pedido ativo.','err');return;}
+// Monta o texto do pedido (mesmo conteúdo usado tanto pro PDF impresso quanto pro PDF
+// anexado no WhatsApp) — extraído de gerarPDFPedido() pra não duplicar essa lógica.
+function _pedidoMsgETitulo(){
+  if(!S.pedidoAtual) return null;
   const sem=formatarSemana(S.semanaAtiva);
   const porForn={};
   S.catalogo.filter(p=>p.ativo).forEach(prod=>{
@@ -3258,7 +3263,7 @@ function gerarPDFPedido(){
     }
   });
   const fns=Object.keys(porForn).sort();
-  if(!fns.length){toast('Nenhum item com pedido.','err');return;}
+  if(!fns.length) return null;
   const titulo=S.todosModo?'TODAS AS LOJAS':(S.lojas.find(l=>l.slug_pedido===S.lojaAtiva)?.nome_display||S.lojaAtiva);
   let msg=`PEDIDO — Semana ${sem.num}/${sem.ano} (${sem.periodo})\n${titulo}\n`;
   let totalGeral=0;
@@ -3277,7 +3282,64 @@ function gerarPDFPedido(){
     }
   });
   if(totalGeral>0) msg+=`\nTotal Geral: R$ ${fmt(totalGeral)}`;
-  gerarPDF(msg,`Pedido Semana ${sem.num}/${sem.ano}`);
+  return { msg, titulo: `Pedido Semana ${sem.num}/${sem.ano}` };
+}
+
+function gerarPDFPedido(){
+  if(!S.pedidoAtual){toast('Nenhum pedido ativo.','err');return;}
+  const r=_pedidoMsgETitulo();
+  if(!r){toast('Nenhum item com pedido.','err');return;}
+  gerarPDF(r.msg, r.titulo);
+}
+
+// Converte um texto simples num PDF de verdade (multi-página, fonte monoespaçada),
+// usando jsPDF — necessário pra ter um arquivo real pra anexar no WhatsApp (o botão
+// de PDF "normal" só abre a janela de impressão do navegador, sem gerar um Blob).
+function _textoParaPdfBlob(texto, titulo){
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit:'pt', format:'a4' });
+  const marginX=40, topo=56, lineHeight=13;
+  const pageHeight=doc.internal.pageSize.getHeight();
+  const maxWidth=doc.internal.pageSize.getWidth()-marginX*2;
+  doc.setFont('helvetica','bold'); doc.setFontSize(13);
+  doc.text(titulo, marginX, 36);
+  doc.setFont('courier','normal'); doc.setFontSize(9);
+  let y=topo;
+  texto.split('\n').forEach(linha=>{
+    const partes=doc.splitTextToSize(linha||' ', maxWidth);
+    partes.forEach(p=>{
+      if(y>pageHeight-40){ doc.addPage(); y=40; }
+      doc.text(p, marginX, y);
+      y+=lineHeight;
+    });
+  });
+  return doc.output('blob');
+}
+
+// Gera o PDF do pedido como arquivo e abre o compartilhamento nativo do dispositivo
+// pra enviar direto pelo WhatsApp. Sem suporte a compartilhar arquivo (ex.: desktop),
+// baixa o PDF e abre o WhatsApp com um texto pra anexar manualmente.
+async function enviarPDFPedidoWpp(){
+  if(!S.pedidoAtual){toast('Nenhum pedido ativo.','err');return;}
+  const r=_pedidoMsgETitulo();
+  if(!r){toast('Nenhum item com pedido.','err');return;}
+  try{
+    const blob=_textoParaPdfBlob(r.msg, r.titulo);
+    const file=new File([blob], r.titulo.replace(/\s+/g,'_')+'.pdf', { type:'application/pdf' });
+    if(navigator.canShare && navigator.canShare({ files:[file] })){
+      await navigator.share({ files:[file], title:r.titulo, text:r.titulo });
+      return;
+    }
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url; a.download=file.name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 10000);
+    toast('📄 PDF baixado — anexe no WhatsApp manualmente.');
+    window.open('https://wa.me/?text='+encodeURIComponent(r.titulo));
+  }catch(e){
+    if(e && e.name==='AbortError') return; // usuário cancelou o share sheet
+    toast('⚠️ Erro ao gerar PDF: '+(e.message||e), 'err');
+  }
 }
 function gerarPDFProvisoes(){
   if(!S.provisoes.length){toast('Nenhuma provisão.','err');return;}
