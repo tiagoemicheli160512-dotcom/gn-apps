@@ -720,18 +720,13 @@ function datePlusWeeks(date, n) {
   return d;
 }
 
-function zerarSaldosSemana() {
-  Object.values(S.contagens).forEach(porLoja => {
-    Object.values(porLoja).forEach(c => { c.atual = null; });
-  });
-}
-
 async function navegarSemana(delta) {
   const nova = datePlusWeeks(S.semanaAtiva, delta);
   const mondayHoje = getMondayOfWeek();
   if (nova > mondayHoje) return; // não avança além da semana atual
   S.semanaAtiva = nova;
-  zerarSaldosSemana(); // limpa saldo vigente ao trocar de semana
+  // Est.ant/Est.vig se recalculam sozinhos em renderPedido() com base na data real da
+  // última contagem (_estAntVigEfetivo) — não precisa mais zerar nada aqui na mão.
   $('content').innerHTML = '<div style="padding:20px;text-align:center"><div class="spin" style="margin:0 auto"></div></div>';
   await carregarPedidoAtual();
   renderPedido();
@@ -749,7 +744,6 @@ function fecharTodos() {
 
 async function irParaSemanaAtual() {
   S.semanaAtiva = getMondayOfWeek();
-  zerarSaldosSemana();
   $('content').innerHTML = '<div style="padding:20px;text-align:center"><div class="spin" style="margin:0 auto"></div></div>';
   await carregarPedidoAtual();
   renderPedido();
@@ -1046,6 +1040,20 @@ function _contagemNaSemana(c, monISO, sunISO) {
   const dataISO = c.data_contagem || (c.criado_em ? String(c.criado_em).slice(0,10) : null);
   if (!dataISO) return false;
   return dataISO >= monISO && dataISO <= sunISO;
+}
+
+// Est.ant/Est.vig "efetivos" pra exibição: a última contagem salva (S.contagens) é
+// sempre a mais recente já feita, não importa a semana. Ao virar a semana sem a loja
+// ainda ter recontado, ela continua sendo a mais recente — mas mostrá-la como "Est.vig"
+// (estoque vigente) confunde, porque na verdade é o estoque ANTIGO (da semana passada)
+// esperando a nova contagem. Se não é fresca (não é dessa semana), ela vira o Est.ant
+// exibido e o Est.vig some até a loja contar de novo.
+function _estAntVigEfetivo(contagem, monISO, sunISO) {
+  if (!contagem) return { estAnt: null, estVig: null, fresh: false };
+  const fresh = _contagemNaSemana(contagem, monISO, sunISO);
+  return fresh
+    ? { estAnt: contagem.ul_estoque, estVig: contagem.atual, fresh: true }
+    : { estAnt: contagem.atual, estVig: null, fresh: false };
 }
 
 function mostrarInfoContagem(catalogoId, lojaSlug) {
@@ -1765,13 +1773,13 @@ function renderPedido() {
           const divAtual  = itemAtual?.diverg ?? false;
           const jaPedido  = (S.pedidosConfirmados[prod.id]?.[lojaAtiva] ?? 0) > 0;
           const dash = '<span style="color:var(--muted)">—</span>';
-          const ulEstDisp = contagem?.ul_estoque != null
-            ? `<span class="val">${fmtQtd(contagem.ul_estoque)}</span>` : dash;
+          const { estAnt, estVig } = _estAntVigEfetivo(contagem, _semAtivaMonISO, _semAtivaSunISO);
+          const ulEstDisp = estAnt != null
+            ? `<span class="val">${fmtQtd(estAnt)}</span>` : dash;
           const ulPedDisp = contagem?.ul_pedido != null
             ? `<span class="val">${fmtQtd(contagem.ul_pedido)}</span>` : dash;
-          const contNaSemana = _contagemNaSemana(contagem, _semAtivaMonISO, _semAtivaSunISO);
-          const estVigDisp = contagem?.atual != null
-            ? `<span class="val"${contNaSemana?' style="color:#22c55e;font-weight:700"':''}>${contNaSemana?'✓ ':''}${fmtQtd(contagem.atual)}</span>` : dash;
+          const estVigDisp = estVig != null
+            ? `<span class="val" style="color:#22c55e;font-weight:700">✓ ${fmtQtd(estVig)}</span>` : dash;
           const contInfoTxt = _contagemInfoTxt(contagem);
           const contInfoBtn = contInfoTxt
             ? `<span onclick="event.stopPropagation();mostrarInfoContagem('${prod.id}','${lojaAtiva}')" title="${contInfoTxt.replace(/"/g,'&quot;')}" style="cursor:pointer;opacity:.7">🕒</span>` : '';
@@ -1844,10 +1852,10 @@ function renderPedido() {
             const divL = itemLoja?.diverg ?? false;
             const ulPedQtd = (S.pedidosConfirmados[prod.id]?.[loja.slug_pedido] ?? 0);
             const dsh = '<span style="opacity:.35">—</span>';
-            const ulEstV = contagem?.ul_estoque != null ? `<span class="v">${fmtQtd(contagem.ul_estoque)}</span>` : dsh;
+            const { estAnt: estAntL, estVig: estVigL } = _estAntVigEfetivo(contagem, _semAtivaMonISO, _semAtivaSunISO);
+            const ulEstV = estAntL != null ? `<span class="v">${fmtQtd(estAntL)}</span>` : dsh;
             const ulPedV = contagem?.ul_pedido  != null ? `<span class="v">${fmtQtd(contagem.ul_pedido)}</span>`  : dsh;
-            const contNaSemanaL = _contagemNaSemana(contagem, _semAtivaMonISO, _semAtivaSunISO);
-            const vigV   = contagem?.atual      != null ? `<span class="v"${contNaSemanaL?' style="color:#22c55e;font-weight:700"':''}>${contNaSemanaL?'✓':''}${fmtQtd(contagem.atual)}</span>`      : dsh;
+            const vigV   = estVigL != null ? `<span class="v" style="color:#22c55e;font-weight:700">✓${fmtQtd(estVigL)}</span>` : dsh;
             const subT = qtdL > 0 ? `<span class="v">R$${fmt(qtdL*(prod.custo||0))}</span>` : '';
             const isUrgenteL = _pedidoItemUrgente(prod, loja.slug_pedido);
             const contInfoTxtL = _contagemInfoTxt(contagem);
