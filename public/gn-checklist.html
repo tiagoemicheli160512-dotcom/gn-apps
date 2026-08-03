@@ -2222,24 +2222,41 @@ async function loadComissoesData(){
     });
   }
   renderComissoesFuncs();
-  // Sincroniza repique com o Bruto do dia em Comissões sempre que os dois valores não
-  // batem — não só quando pendingRepiqueCaixaSync está setado. Esse flag é uma variável
-  // em memória que não sobrevive a um reload: se a sincronização anterior falhar em
-  // silêncio (ex.: página fechada antes do debounce de 900ms do flushComissoesOps
-  // terminar, ou a escrita em gn_comissoes der erro), o repique fica salvo certinho no
-  // Check-list (checklist_diario.repique) mas nunca chega no bruto do dia em Comissões —
-  // e como o valor local já "bate" com o que tinha antes, o próximo carregamento nem
-  // tenta de novo. Comparando direto com o bruto já carregado, todo load da tela detecta
-  // e corrige esse desalinhamento, não só a primeira vez.
-  const _diaIdxRep = comissoesDiaIdx(state.data);
-  if (state.repique > 0 && _diaIdxRep != null && comissoesWD) {
-    const _brutoAtual = parseFloat(comissoesWD.brutos?.[_diaIdxRep]) || 0;
-    if (_brutoAtual !== state.repique) {
-      pendingRepiqueCaixaSync = false;
-      const _el = document.getElementById('repique-valor');
-      if (_el) _el.value = state.repique;
-      onRepiqueChange();
-    }
+  // Sincroniza repique com o Bruto em Comissões pra semana INTEIRA, não só o dia
+  // atualmente aberto no Check-list. Isso é necessário porque a sincronização "no ato"
+  // (onRepiqueChange) pode falhar em silêncio (ex.: página fechada antes do debounce de
+  // 900ms do flushComissoesOps terminar, ou o Caixa lançar/editar o repique bem depois
+  // do Check-list daquele dia já ter sido fechado) — e como ninguém costuma reabrir o
+  // Check-list de um dia que já passou, um desalinhamento de um dia anterior nunca se
+  // autocorrigia sozinho. Buscando a semana toda aqui, o problema se resolve assim que
+  // alguém abrir o Check-list em QUALQUER dia da mesma semana (o mais comum: hoje).
+  if (comissoesWD && LOJA) {
+    try {
+      const _monday = state.semanaInicio || state.data;
+      const _sunday = _addDays(_monday, 6);
+      const { data: _semRows } = await sb.from('checklist_diario')
+        .select('data_operacao,repique')
+        .eq('loja', LOJA)
+        .gte('data_operacao', _monday)
+        .lte('data_operacao', _sunday);
+      (_semRows || []).forEach(row => {
+        const rv = parseFloat(row.repique) || 0;
+        if (rv <= 0) return;
+        const di = comissoesDiaIdx(row.data_operacao);
+        if (di == null) return;
+        const brutoAtual = parseFloat(comissoesWD.brutos?.[di]) || 0;
+        if (brutoAtual !== rv) {
+          if (row.data_operacao === state.data) {
+            pendingRepiqueCaixaSync = false;
+            const _el = document.getElementById('repique-valor');
+            if (_el) _el.value = rv;
+          }
+          const mutator = wd => { wd = {...wd}; wd.brutos = [...wd.brutos]; wd.brutos[di] = rv; return wd; };
+          comissoesWD = mutator(comissoesWD);
+          scheduleComissoesOp(mutator);
+        }
+      });
+    } catch (e) { window.gnLogError('checklist:resyncSemanaRepique', e); }
   }
 }
 
