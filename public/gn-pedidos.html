@@ -931,9 +931,14 @@ async function carregarFornecedoresConfirmados() {
 
 async function carregarItensPedido() {
   if (!S.pedidoAtual) return;
+  // O pedido da semana já passa de 1200 itens (catálogo × lojas) — sem .limit()
+  // explícito, essa busca batia no limite padrão de linhas do Supabase (~1000) e
+  // vinha CORTADA silenciosamente, fazendo quantidades reais de várias lojas sumirem
+  // da tela mesmo já gravadas no banco (mesmo bug encontrado em carregarContagens()).
   const { data } = await db.from('gn_pedido_itens')
     .select('*, gn_catalogo(id,produto,grupo,fornecedor,und,custo)')
-    .eq('pedido_id', S.pedidoAtual.id);
+    .eq('pedido_id', S.pedidoAtual.id)
+    .limit(20000);
 
   S.pedidoItens = {};
   S.pedidosConfirmados = {};
@@ -972,7 +977,7 @@ async function carregarUltimoPedido() {
       .order('semana_inicio', { ascending: false }).limit(1);
     if (!qq || qq.length === 0) { S.ultimoPedido = {}; return; }
     const { data: itens } = await db.from('gn_pedido_itens')
-      .select('catalogo_id,loja_slug,qtd_pedida').eq('pedido_id', qq[0].id);
+      .select('catalogo_id,loja_slug,qtd_pedida').eq('pedido_id', qq[0].id).limit(20000);
     S.ultimoPedido = {};
     (itens || []).forEach(i => {
       if (!S.ultimoPedido[i.catalogo_id]) S.ultimoPedido[i.catalogo_id] = {};
@@ -982,7 +987,7 @@ async function carregarUltimoPedido() {
   }
 
   const { data } = await db.from('gn_pedido_itens')
-    .select('catalogo_id,loja_slug,qtd_pedida').eq('pedido_id', ultPed[0].id);
+    .select('catalogo_id,loja_slug,qtd_pedida').eq('pedido_id', ultPed[0].id).limit(20000);
 
   S.ultimoPedido = {};
   (data || []).forEach(item => {
@@ -1007,7 +1012,8 @@ async function carregarConfirmadosSemana() {
 
     const { data: itens } = await db.from('gn_pedido_itens')
       .select('catalogo_id,loja_slug,qtd_pedida')
-      .in('pedido_id', ids);
+      .in('pedido_id', ids)
+      .limit(20000);
 
     (itens || []).forEach(i => {
       if (!S.pedidosConfirmados[i.catalogo_id]) S.pedidosConfirmados[i.catalogo_id] = {};
@@ -1018,10 +1024,19 @@ async function carregarConfirmadosSemana() {
 }
 
 async function carregarContagens() {
-  // Última contagem por produto por loja
+  // Última contagem por produto por loja. A tabela já passa de 3500 linhas e cresce
+  // todo dia — sem limitar por data, a busca batia no limite padrão de linhas do
+  // Supabase (~1000) e vinha CORTADA silenciosamente, sumindo com contagens de hoje
+  // de várias lojas sem erro nenhum (relato: Boulevard/Norte Shopping "divergentes",
+  // mas o dado existia no banco — só não chegava na tela). Uma janela de 45 dias
+  // cobre folgado o "Est.ant" mais antigo que a tela realmente usa, e o .limit()
+  // explícito é uma segunda trava pro mesmo problema não voltar conforme a tabela cresce.
+  const cutoffISO = new Date(Date.now() - 45 * 86400000).toISOString().slice(0, 10);
   const { data } = await db.from('gn_contagens_pedido')
     .select('catalogo_id,loja_slug,ul_estoque,ul_pedido,atual,data_contagem,criado_por,criado_em')
-    .order('data_contagem', {ascending:false});
+    .gte('data_contagem', cutoffISO)
+    .order('data_contagem', {ascending:false})
+    .limit(20000);
 
   S.contagens = {};
   (data || []).forEach(c => {
