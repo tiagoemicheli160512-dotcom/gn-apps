@@ -939,7 +939,13 @@ async function carregarItensPedido() {
   (data || []).forEach(item => {
     const cid = item.catalogo_id;
     if (!S.pedidoItens[cid]) S.pedidoItens[cid] = {};
-    S.pedidoItens[cid][item.loja_slug] = { id: item.id, qtd: parseFloat(item.qtd_pedida) || 0, custo: item.custo_unitario, diverg: item.divergencia || false };
+    S.pedidoItens[cid][item.loja_slug] = {
+      id: item.id, qtd: parseFloat(item.qtd_pedida) || 0, custo: item.custo_unitario, diverg: item.divergencia || false,
+      // Quebra real em Cx/Und (quando veio do app Lojas ou foi digitada aqui mesmo nos
+      // campos separados) — null quando só existe o total, aí o Pedido decompõe na hora.
+      qtdCx: item.qtd_cx != null ? parseFloat(item.qtd_cx) : null,
+      qtdUnd: item.qtd_und != null ? parseFloat(item.qtd_und) : null
+    };
   });
   calcularTotais();
 }
@@ -1206,9 +1212,9 @@ async function carregarEntregasConfirmadas() {
 function _ppKey(){ return 'gn_ped_pend_'+(S.pedidoAtual?.id||''); }
 function _ppLoad(){ try{ return JSON.parse(localStorage.getItem(_ppKey())||'{}'); }catch(_){ return {}; } }
 function _ppSave(q){ try{ localStorage.setItem(_ppKey(),JSON.stringify(q)); }catch(_){} }
-function _ppSet(catalogoId, lojaSlug, qtd, custo){
+function _ppSet(catalogoId, lojaSlug, qtd, custo, cxUnd){
   const q=_ppLoad(); if(!q[catalogoId]) q[catalogoId]={};
-  q[catalogoId][lojaSlug]={qtd,custo}; _ppSave(q); _ppBadge();
+  q[catalogoId][lojaSlug]={qtd,custo,cxUnd:cxUnd||null}; _ppSave(q); _ppBadge();
 }
 function _ppDel(catalogoId, lojaSlug){
   const q=_ppLoad(); if(q[catalogoId]) delete q[catalogoId][lojaSlug];
@@ -1241,17 +1247,19 @@ async function flushPendingItems(manual){
   // foi exatamente isso que deixava o banner "alterações offline" preso indefinidamente.
   for(const catalogoId of Object.keys(q)){
     for(const lojaSlug of Object.keys(q[catalogoId])){
-      const {qtd,custo}=q[catalogoId][lojaSlug];
+      const {qtd,custo,cxUnd}=q[catalogoId][lojaSlug];
       try{
         // Upsert (não insert/update por idExistente) — a fila offline pode ser antiga
         // e o item já ter sido salvo nesse meio-tempo (outro dispositivo, ou uma
         // tentativa anterior que na verdade deu certo mas não limpou a fila local);
         // um "insert" nesse caso batia num "duplicate key" e falhava pra sempre.
+        const payload={
+          pedido_id:S.pedidoAtual.id, catalogo_id:catalogoId, loja_slug:lojaSlug,
+          qtd_pedida:qtd, custo_unitario:custo
+        };
+        if(cxUnd){ payload.qtd_cx=cxUnd.cx; payload.qtd_und=cxUnd.und; }
         const {data,error}=await db.from('gn_pedido_itens')
-          .upsert({
-            pedido_id:S.pedidoAtual.id, catalogo_id:catalogoId, loja_slug:lojaSlug,
-            qtd_pedida:qtd, custo_unitario:custo
-          }, { onConflict:'pedido_id,catalogo_id,loja_slug' })
+          .upsert(payload, { onConflict:'pedido_id,catalogo_id,loja_slug' })
           .select('id').single();
         if(error) throw error;
         if(data&&S.pedidoItens[catalogoId]?.[lojaSlug]) S.pedidoItens[catalogoId][lojaSlug].id=data.id;
@@ -1282,15 +1290,20 @@ async function _carregarFaltasBadge() {
   }catch(e){}
 }
 
-async function salvarItem(catalogoId, lojaSlug, qtd, custo) {
+async function salvarItem(catalogoId, lojaSlug, qtd, custo, cxUnd) {
   if (!S.pedidoItens[catalogoId]) S.pedidoItens[catalogoId] = {};
 
   // Preserva o id e o estado de divergência ANTES de sobrescrever
   const idExistente  = S.pedidoItens[catalogoId][lojaSlug]?.id;
   const divExistente = S.pedidoItens[catalogoId][lojaSlug]?.diverg || false;
 
-  // Atualiza estado preservando id e divergência
-  S.pedidoItens[catalogoId][lojaSlug] = { id: idExistente, qtd, custo, diverg: divExistente };
+  // Atualiza estado preservando id e divergência. cxUnd (quando veio da digitação nos
+  // campos Cx/Und) grava a quebra real digitada — pra não confundir com o total, o
+  // Pedido usa isso pra exibir exatamente o que foi digitado em vez de decompor.
+  S.pedidoItens[catalogoId][lojaSlug] = {
+    id: idExistente, qtd, custo, diverg: divExistente,
+    qtdCx: cxUnd ? cxUnd.cx : null, qtdUnd: cxUnd ? cxUnd.und : null
+  };
   calcularTotais();
   renderTotalLoja();
 
@@ -1299,21 +1312,23 @@ async function salvarItem(catalogoId, lojaSlug, qtd, custo) {
     // desatualizado sobre se a linha já existe (ex.: mesmo item salvo por outro
     // dispositivo/aba, ou reenvio de uma fila offline antiga) — nesse caso um "insert"
     // batia num "duplicate key value violates unique constraint" e falhava pra sempre.
+    const payload = {
+      pedido_id: S.pedidoAtual.id,
+      catalogo_id: catalogoId,
+      loja_slug: lojaSlug,
+      qtd_pedida: qtd,
+      custo_unitario: custo
+    };
+    if (cxUnd) { payload.qtd_cx = cxUnd.cx; payload.qtd_und = cxUnd.und; }
     const { data, error } = await db.from('gn_pedido_itens')
-      .upsert({
-        pedido_id: S.pedidoAtual.id,
-        catalogo_id: catalogoId,
-        loja_slug: lojaSlug,
-        qtd_pedida: qtd,
-        custo_unitario: custo
-      }, { onConflict: 'pedido_id,catalogo_id,loja_slug' })
+      .upsert(payload, { onConflict: 'pedido_id,catalogo_id,loja_slug' })
       .select('id').single();
     if (error) throw error;
     if (data) S.pedidoItens[catalogoId][lojaSlug].id = data.id;
     _ppDel(catalogoId, lojaSlug);
   } catch (e) {
     console.error('Erro salvarItem:', e.message);
-    _ppSet(catalogoId, lojaSlug, qtd, custo);
+    _ppSet(catalogoId, lojaSlug, qtd, custo, cxUnd);
     toast('⚠️ Offline — salvo localmente', 'err');
   }
 }
@@ -1924,7 +1939,11 @@ function renderPedido() {
           const prodConfirmado = S.fornecedoresConfirmados.has(prod.fornecedor);
           const fator = prod.und_por_caixa > 1 ? prod.und_por_caixa : null;
           const qtyCtrlHtml = fator ? (() => {
-            const { cx, und } = _decomporCxUnd(qtdAtual, fator);
+            // Usa a quebra REAL digitada (no app Lojas ou aqui mesmo) quando existir —
+            // só decompõe o total "na marra" se nunca houve uma quebra registrada.
+            const { cx, und } = (itemAtual?.qtdCx != null || itemAtual?.qtdUnd != null)
+              ? { cx: itemAtual.qtdCx || 0, und: itemAtual.qtdUnd || 0 }
+              : _decomporCxUnd(qtdAtual, fator);
             return `<div class="qty-ctrl" style="gap:5px">
                 <div style="display:flex;flex-direction:column;align-items:center;gap:1px">
                   <input class="qty-input qty-cx" type="text" inputmode="decimal" min="0" style="width:40px;border:1px solid var(--border);border-radius:var(--rs)"
@@ -2027,7 +2046,9 @@ function renderPedido() {
               ? `<span onclick="event.stopPropagation();mostrarInfoContagem('${prod.id}','${loja.slug_pedido}')" title="${contInfoTxtL.replace(/"/g,'&quot;')}" style="cursor:pointer;opacity:.7">🕒</span>` : '';
             const corrigirBtnL = `<span onclick="event.stopPropagation();corrigirEstVig('${prod.id}','${loja.slug_pedido}','${prod.produto.replace(/'/g,"\\'")}')" title="Corrigir Est.vig" style="cursor:pointer;opacity:.7">✏️</span>`;
             const qtyCtrlSmHtml = fator ? (() => {
-              const { cx, und } = _decomporCxUnd(qtdL, fator);
+              const { cx, und } = (itemLoja?.qtdCx != null || itemLoja?.qtdUnd != null)
+                ? { cx: itemLoja.qtdCx || 0, und: itemLoja.qtdUnd || 0 }
+                : _decomporCxUnd(qtdL, fator);
               return `<div class="qty-ctrl-sm" style="gap:3px">
                   <input class="qty-input-sm qty-cx" type="text" inputmode="decimal" min="0" style="width:26px;border:1px solid var(--border);border-radius:4px" title="Caixas"
                     value="${cx||''}" placeholder="Cx" ${prodConfirmado?'disabled':''}
@@ -2278,9 +2299,9 @@ const _qtdSaveTimers = {};
 
 function _qtdSaveKey(catalogoId, lojaSlug) { return catalogoId + '|' + lojaSlug; }
 
-async function _executarSalvarQtd(catalogoId, lojaSlug, custo, valor) {
+async function _executarSalvarQtd(catalogoId, lojaSlug, custo, valor, cxUnd) {
   const qtd = parseFloat(valor) || 0;
-  await salvarItem(catalogoId, lojaSlug, qtd, custo || null);
+  await salvarItem(catalogoId, lojaSlug, qtd, custo || null, cxUnd);
   renderTotalLoja();
   // Atualiza contagem na tab
   document.querySelectorAll('.store-tab').forEach(btn => {
@@ -2295,18 +2316,18 @@ async function _executarSalvarQtd(catalogoId, lojaSlug, custo, valor) {
   });
 }
 
-function qtdChanged(catalogoId, lojaSlug, custo, valor, imediato) {
+function qtdChanged(catalogoId, lojaSlug, custo, valor, imediato, cxUnd) {
   const key = _qtdSaveKey(catalogoId, lojaSlug);
   if (_qtdSaveTimers[key]) clearTimeout(_qtdSaveTimers[key].timer);
   delete _qtdSaveTimers[key];
   if (imediato) {
-    _executarSalvarQtd(catalogoId, lojaSlug, custo, valor);
+    _executarSalvarQtd(catalogoId, lojaSlug, custo, valor, cxUnd);
   } else {
     const timer = setTimeout(() => {
       delete _qtdSaveTimers[key];
-      _executarSalvarQtd(catalogoId, lojaSlug, custo, valor);
+      _executarSalvarQtd(catalogoId, lojaSlug, custo, valor, cxUnd);
     }, 500);
-    _qtdSaveTimers[key] = { timer, catalogoId, lojaSlug, custo, valor };
+    _qtdSaveTimers[key] = { timer, catalogoId, lojaSlug, custo, valor, cxUnd };
   }
 }
 
@@ -2331,7 +2352,7 @@ function qtdCxUndInput(el, catalogoId, lojaSlug, custo, fator, imediato) {
   const total = cx * fator + und;
   const totalEl = row?.querySelector('.cxund-total');
   if (totalEl) totalEl.textContent = '= ' + fmtQtd(total);
-  qtdChanged(catalogoId, lojaSlug, custo, total, imediato);
+  qtdChanged(catalogoId, lojaSlug, custo, total, imediato, { cx, und });
 }
 
 function _flushQtdTimersPendentes() {
@@ -2339,7 +2360,7 @@ function _flushQtdTimersPendentes() {
     const pend = _qtdSaveTimers[key];
     clearTimeout(pend.timer);
     delete _qtdSaveTimers[key];
-    _executarSalvarQtd(pend.catalogoId, pend.lojaSlug, pend.custo, pend.valor);
+    _executarSalvarQtd(pend.catalogoId, pend.lojaSlug, pend.custo, pend.valor, pend.cxUnd);
   });
 }
 document.addEventListener('visibilitychange', () => { if (document.hidden) _flushQtdTimersPendentes(); });
