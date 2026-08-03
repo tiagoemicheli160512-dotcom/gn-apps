@@ -1004,7 +1004,7 @@ async function carregarConfirmadosSemana() {
 async function carregarContagens() {
   // Última contagem por produto por loja
   const { data } = await db.from('gn_contagens_pedido')
-    .select('catalogo_id,loja_slug,ul_estoque,ul_pedido,atual,data_contagem')
+    .select('catalogo_id,loja_slug,ul_estoque,ul_pedido,atual,data_contagem,criado_por,criado_em')
     .order('data_contagem', {ascending:false});
 
   S.contagens = {};
@@ -1013,10 +1013,35 @@ async function carregarContagens() {
     if (!S.contagens[c.catalogo_id][c.loja_slug]) {
       // só pega a mais recente (já ordenado DESC)
       S.contagens[c.catalogo_id][c.loja_slug] = {
-        atual: c.atual, ul_estoque: c.ul_estoque, ul_pedido: c.ul_pedido
+        atual: c.atual, ul_estoque: c.ul_estoque, ul_pedido: c.ul_pedido,
+        data_contagem: c.data_contagem, criado_por: c.criado_por, criado_em: c.criado_em
       };
     }
   });
+}
+
+// Texto "Contado por Fulano em DD/MM HH:MM" (ou só a data, se não houver hora) pra
+// garantir que o Est.vig exibido foi realmente contado — e não um saldo carregado de
+// outra semana. Usado como observação junto ao Est.vig no Pedido.
+function _contagemInfoTxt(c) {
+  if (!c || c.atual == null) return null;
+  const quem = c.criado_por || null;
+  let quando = null;
+  if (c.criado_em) {
+    const dt = new Date(c.criado_em);
+    quando = dt.toLocaleDateString('pt-BR') + ' ' + dt.toLocaleTimeString('pt-BR', {hour:'2-digit',minute:'2-digit'});
+  } else if (c.data_contagem) {
+    quando = c.data_contagem.split('-').reverse().join('/');
+  }
+  if (!quem && !quando) return null;
+  return `Contado${quem?' por '+quem:''}${quando?' em '+quando:''}`;
+}
+
+function mostrarInfoContagem(catalogoId, lojaSlug) {
+  const c = S.contagens[catalogoId]?.[lojaSlug];
+  const txt = _contagemInfoTxt(c);
+  if (txt) toast('📋 ' + txt);
+  else toast('Sem registro de quem/quando contou.', 'err');
 }
 
 async function carregarProvisoes() {
@@ -1731,6 +1756,9 @@ function renderPedido() {
             ? `<span class="val">${fmtQtd(contagem.ul_pedido)}</span>` : dash;
           const estVigDisp = contagem?.atual != null
             ? `<span class="val">${fmtQtd(contagem.atual)}</span>` : dash;
+          const contInfoTxt = _contagemInfoTxt(contagem);
+          const contInfoBtn = contInfoTxt
+            ? `<span onclick="event.stopPropagation();mostrarInfoContagem('${prod.id}','${lojaAtiva}')" title="${contInfoTxt.replace(/"/g,'&quot;')}" style="cursor:pointer;opacity:.7">🕒</span>` : '';
           const isUrgente = _pedidoItemUrgente(prod, lojaAtiva);
           return `<div class="prod-row${divAtual?' diverg-ativo':jaPedido?' ja-pedido':''}" data-cid="${prod.id}" data-loja="${lojaAtiva}">
             <div class="prod-info">
@@ -1740,7 +1768,7 @@ function renderPedido() {
                 ${prod.custo?`<span class="prod-custo num">R$${fmt(prod.custo)}</span>`:''}
                 <span class="prod-est">Est.ant: ${ulEstDisp}</span>
                 <span class="prod-ulp">Ped.ant: ${ulPedDisp}</span>
-                <span class="prod-vig">Est.vig: ${estVigDisp}</span>
+                <span class="prod-vig">Est.vig: ${estVigDisp} ${contInfoBtn}</span>
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:0">
@@ -1805,11 +1833,14 @@ function renderPedido() {
             const vigV   = contagem?.atual      != null ? `<span class="v">${fmtQtd(contagem.atual)}</span>`      : dsh;
             const subT = qtdL > 0 ? `<span class="v">R$${fmt(qtdL*(prod.custo||0))}</span>` : '';
             const isUrgenteL = _pedidoItemUrgente(prod, loja.slug_pedido);
+            const contInfoTxtL = _contagemInfoTxt(contagem);
+            const contInfoBtnL = contInfoTxtL
+              ? `<span onclick="event.stopPropagation();mostrarInfoContagem('${prod.id}','${loja.slug_pedido}')" title="${contInfoTxtL.replace(/"/g,'&quot;')}" style="cursor:pointer;opacity:.7">🕒</span>` : '';
             return `<div class="todos-loja-row${divL?' diverg-ativo':ulPedQtd>0?' ja-pedido':''}">
               <span class="todos-loja-nome">${loja.nome_display}</span>
               <span class="todos-loja-est">Est.ant:${ulEstV}</span>
               <span class="todos-loja-ulp">Ped.ant:${ulPedV}</span>
-              <span class="todos-loja-vig">Est.vig:${vigV}</span>
+              <span class="todos-loja-vig">Est.vig:${vigV}${contInfoBtnL}</span>
               <div style="display:flex;align-items:center;gap:0">
                 <div class="qty-ctrl-sm">
                   <button class="qty-btn-sm" onclick="ajustarQtd('${prod.id}','${loja.slug_pedido}',${prod.custo||0},-1)" ${pedConfirmado?'disabled':''}>−</button>
