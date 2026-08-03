@@ -2091,12 +2091,14 @@ function renderPedido() {
           <span style="flex:1;font-size:12px;font-weight:700;color:var(--primary)">Pedido Completo — Todas as Lojas</span>
           <button onclick="gerarWppFornAllLojas(null)" style="background:rgba(37,211,102,.2);border:1px solid rgba(37,211,102,.5);border-radius:8px;padding:6px 12px;color:#22c55e;font-weight:700;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:4px">📲 WPP</button>
           <button onclick="gerarPDFFornAllLojas(null)" style="background:rgba(192,57,43,.15);border:1px solid rgba(192,57,43,.4);border-radius:8px;padding:6px 12px;color:#e74c3c;font-weight:700;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:4px">📄 PDF</button>
+          <button onclick="enviarPDFFornAllLojasWpp(null)" title="Enviar PDF pelo WhatsApp" style="background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);border-radius:8px;padding:6px 12px;color:#22c55e;font-weight:700;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:4px">📄📲</button>
         </div>
         ${fornsTodasLojas.map(f=>`
         <div style="display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:10px">
           <span style="flex:1;font-size:11px;font-weight:600;color:var(--text)">📦 ${f}</span>
           <button onclick="gerarWppFornAllLojas('${f.replace(/'/g,"\\'")}')" style="background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);border-radius:7px;padding:5px 10px;color:#22c55e;font-weight:700;font-size:11px;cursor:pointer">📲</button>
           <button onclick="gerarPDFFornAllLojas('${f.replace(/'/g,"\\'")}')" style="background:rgba(192,57,43,.12);border:1px solid rgba(192,57,43,.35);border-radius:7px;padding:5px 10px;color:#e74c3c;font-weight:700;font-size:11px;cursor:pointer">📄</button>
+          <button onclick="enviarPDFFornAllLojasWpp('${f.replace(/'/g,"\\'")}')" title="Enviar PDF pelo WhatsApp" style="background:rgba(37,211,102,.1);border:1px solid rgba(37,211,102,.3);border-radius:7px;padding:5px 10px;color:#22c55e;font-weight:700;font-size:11px;cursor:pointer">📄📲</button>
         </div>`).join('')}
       </div>
     </div>` : ''}
@@ -3036,12 +3038,14 @@ function gerarWppFornAllLojas(fornecedor) {
   window.open('https://wa.me/?text=' + encodeURIComponent(msg));
 }
 
-function gerarPDFFornAllLojas(fornecedor) {
-  if (!S.pedidoAtual) { toast('Nenhum pedido ativo.', 'err'); return; }
+// Monta o texto do relatório por fornecedor (todas as lojas) — reaproveitado pelo PDF
+// impresso e pelo PDF anexado no WhatsApp.
+function _relatorioFornAllLojasMsgETitulo(fornecedor) {
+  if (!S.pedidoAtual) return null;
   const sem = formatarSemana(S.semanaAtiva);
   const porForn = _buildRelatorioFornAllLojas(fornecedor);
   const fns = Object.keys(porForn).sort();
-  if (!fns.length) { toast('Nenhum item no pedido.', 'err'); return; }
+  if (!fns.length) return null;
 
   const tituloLabel = fornecedor ? fornecedor : 'PEDIDO GERAL';
   let msg = `${tituloLabel} — TODAS AS LOJAS\nSemana ${sem.num}/${sem.ano} (${sem.periodo})\n${'─'.repeat(40)}\n`;
@@ -3065,7 +3069,22 @@ function gerarPDFFornAllLojas(fornecedor) {
   });
 
   if (totalGeral > 0) msg += `\nTotal: R$ ${fmt(totalGeral)}`;
-  gerarPDF(msg, `${tituloLabel} — Semana ${sem.num}/${sem.ano}`);
+  return { msg, titulo: `${tituloLabel} — Semana ${sem.num}/${sem.ano}` };
+}
+
+function gerarPDFFornAllLojas(fornecedor) {
+  if (!S.pedidoAtual) { toast('Nenhum pedido ativo.', 'err'); return; }
+  const r = _relatorioFornAllLojasMsgETitulo(fornecedor);
+  if (!r) { toast('Nenhum item no pedido.', 'err'); return; }
+  gerarPDF(r.msg, r.titulo);
+}
+
+// Mesmo conteúdo do PDF acima, mas anexado direto no compartilhamento nativo (WhatsApp).
+async function enviarPDFFornAllLojasWpp(fornecedor) {
+  if (!S.pedidoAtual) { toast('Nenhum pedido ativo.', 'err'); return; }
+  const r = _relatorioFornAllLojasMsgETitulo(fornecedor);
+  if (!r) { toast('Nenhum item no pedido.', 'err'); return; }
+  await _compartilharPdfWpp(r.msg, r.titulo);
 }
 // ───────────────────────────────────────────────────────────────────────
 
@@ -3316,18 +3335,16 @@ function _textoParaPdfBlob(texto, titulo){
   return doc.output('blob');
 }
 
-// Gera o PDF do pedido como arquivo e abre o compartilhamento nativo do dispositivo
+// Gera o PDF (a partir de msg/titulo) e abre o compartilhamento nativo do dispositivo
 // pra enviar direto pelo WhatsApp. Sem suporte a compartilhar arquivo (ex.: desktop),
-// baixa o PDF e abre o WhatsApp com um texto pra anexar manualmente.
-async function enviarPDFPedidoWpp(){
-  if(!S.pedidoAtual){toast('Nenhum pedido ativo.','err');return;}
-  const r=_pedidoMsgETitulo();
-  if(!r){toast('Nenhum item com pedido.','err');return;}
+// baixa o PDF e abre o WhatsApp com um texto pra anexar manualmente. Compartilhado por
+// todos os botões "PDF no Whats" da aba Pedido (geral e por fornecedor).
+async function _compartilharPdfWpp(msg, titulo){
   try{
-    const blob=_textoParaPdfBlob(r.msg, r.titulo);
-    const file=new File([blob], r.titulo.replace(/\s+/g,'_')+'.pdf', { type:'application/pdf' });
+    const blob=_textoParaPdfBlob(msg, titulo);
+    const file=new File([blob], titulo.replace(/\s+/g,'_')+'.pdf', { type:'application/pdf' });
     if(navigator.canShare && navigator.canShare({ files:[file] })){
-      await navigator.share({ files:[file], title:r.titulo, text:r.titulo });
+      await navigator.share({ files:[file], title:titulo, text:titulo });
       return;
     }
     const url=URL.createObjectURL(blob);
@@ -3335,11 +3352,18 @@ async function enviarPDFPedidoWpp(){
     a.href=url; a.download=file.name; document.body.appendChild(a); a.click(); a.remove();
     setTimeout(()=>URL.revokeObjectURL(url), 10000);
     toast('📄 PDF baixado — anexe no WhatsApp manualmente.');
-    window.open('https://wa.me/?text='+encodeURIComponent(r.titulo));
+    window.open('https://wa.me/?text='+encodeURIComponent(titulo));
   }catch(e){
     if(e && e.name==='AbortError') return; // usuário cancelou o share sheet
     toast('⚠️ Erro ao gerar PDF: '+(e.message||e), 'err');
   }
+}
+
+async function enviarPDFPedidoWpp(){
+  if(!S.pedidoAtual){toast('Nenhum pedido ativo.','err');return;}
+  const r=_pedidoMsgETitulo();
+  if(!r){toast('Nenhum item com pedido.','err');return;}
+  await _compartilharPdfWpp(r.msg, r.titulo);
 }
 function gerarPDFProvisoes(){
   if(!S.provisoes.length){toast('Nenhuma provisão.','err');return;}
