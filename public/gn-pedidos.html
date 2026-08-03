@@ -1223,18 +1223,19 @@ async function flushPendingItems(manual){
   for(const catalogoId of Object.keys(q)){
     for(const lojaSlug of Object.keys(q[catalogoId])){
       const {qtd,custo}=q[catalogoId][lojaSlug];
-      const idExistente=S.pedidoItens[catalogoId]?.[lojaSlug]?.id;
       try{
-        if(idExistente){
-          const {error}=await db.from('gn_pedido_itens').update({qtd_pedida:qtd,custo_unitario:custo}).eq('id',idExistente);
-          if(error) throw error;
-        } else {
-          const {data,error}=await db.from('gn_pedido_itens').insert([{
-            pedido_id:S.pedidoAtual.id,catalogo_id:catalogoId,loja_slug:lojaSlug,qtd_pedida:qtd,custo_unitario:custo
-          }]).select('id').single();
-          if(error) throw error;
-          if(data&&S.pedidoItens[catalogoId]?.[lojaSlug]) S.pedidoItens[catalogoId][lojaSlug].id=data.id;
-        }
+        // Upsert (não insert/update por idExistente) — a fila offline pode ser antiga
+        // e o item já ter sido salvo nesse meio-tempo (outro dispositivo, ou uma
+        // tentativa anterior que na verdade deu certo mas não limpou a fila local);
+        // um "insert" nesse caso batia num "duplicate key" e falhava pra sempre.
+        const {data,error}=await db.from('gn_pedido_itens')
+          .upsert({
+            pedido_id:S.pedidoAtual.id, catalogo_id:catalogoId, loja_slug:lojaSlug,
+            qtd_pedida:qtd, custo_unitario:custo
+          }, { onConflict:'pedido_id,catalogo_id,loja_slug' })
+          .select('id').single();
+        if(error) throw error;
+        if(data&&S.pedidoItens[catalogoId]?.[lojaSlug]) S.pedidoItens[catalogoId][lojaSlug].id=data.id;
         _ppDel(catalogoId,lojaSlug);
       } catch(e){
         ultimoErro=e;
@@ -1275,22 +1276,21 @@ async function salvarItem(catalogoId, lojaSlug, qtd, custo) {
   renderTotalLoja();
 
   try {
-    if (idExistente) {
-      const { error } = await db.from('gn_pedido_itens')
-        .update({ qtd_pedida: qtd, custo_unitario: custo })
-        .eq('id', idExistente);
-      if (error) throw error;
-    } else {
-      const { data, error } = await db.from('gn_pedido_itens').insert([{
+    // Upsert (não insert/update condicionados a idExistente): o estado local pode ficar
+    // desatualizado sobre se a linha já existe (ex.: mesmo item salvo por outro
+    // dispositivo/aba, ou reenvio de uma fila offline antiga) — nesse caso um "insert"
+    // batia num "duplicate key value violates unique constraint" e falhava pra sempre.
+    const { data, error } = await db.from('gn_pedido_itens')
+      .upsert({
         pedido_id: S.pedidoAtual.id,
         catalogo_id: catalogoId,
         loja_slug: lojaSlug,
         qtd_pedida: qtd,
         custo_unitario: custo
-      }]).select('id').single();
-      if (error) throw error;
-      if (data) S.pedidoItens[catalogoId][lojaSlug].id = data.id;
-    }
+      }, { onConflict: 'pedido_id,catalogo_id,loja_slug' })
+      .select('id').single();
+    if (error) throw error;
+    if (data) S.pedidoItens[catalogoId][lojaSlug].id = data.id;
     _ppDel(catalogoId, lojaSlug);
   } catch (e) {
     console.error('Erro salvarItem:', e.message);
