@@ -1871,8 +1871,8 @@ function renderPedido() {
                 <input class="qty-input" type="text" inputmode="decimal" min="0"
                   value="${qtdAtual||''}" placeholder="0" ${pedConfirmado?'disabled':''}
                   oninput="qtdChanged('${prod.id}','${lojaAtiva}',${prod.custo||0},this.value)"
-                  onchange="qtdChanged('${prod.id}','${lojaAtiva}',${prod.custo||0},this.value)"
-                  onblur="qtdChanged('${prod.id}','${lojaAtiva}',${prod.custo||0},this.value)"
+                  onchange="qtdChanged('${prod.id}','${lojaAtiva}',${prod.custo||0},this.value,true)"
+                  onblur="qtdChanged('${prod.id}','${lojaAtiva}',${prod.custo||0},this.value,true)"
                   onkeydown="nextInput(event,this)">
                 <button class="qty-btn" onclick="ajustarQtd('${prod.id}','${lojaAtiva}',${prod.custo||0},1)" ${pedConfirmado?'disabled':''}>+</button>
               </div>
@@ -1943,8 +1943,8 @@ function renderPedido() {
                   <input class="qty-input-sm" type="text" inputmode="decimal" min="0"
                     value="${qtdL||''}" placeholder="0" ${pedConfirmado?'disabled':''}
                     oninput="qtdChanged('${prod.id}','${loja.slug_pedido}',${prod.custo||0},this.value)"
-                    onchange="qtdChanged('${prod.id}','${loja.slug_pedido}',${prod.custo||0},this.value)"
-                    onblur="qtdChanged('${prod.id}','${loja.slug_pedido}',${prod.custo||0},this.value)"
+                    onchange="qtdChanged('${prod.id}','${loja.slug_pedido}',${prod.custo||0},this.value,true)"
+                    onblur="qtdChanged('${prod.id}','${loja.slug_pedido}',${prod.custo||0},this.value,true)"
                     onkeydown="nextInput(event,this)">
                   <button class="qty-btn-sm" onclick="ajustarQtd('${prod.id}','${loja.slug_pedido}',${prod.custo||0},1)" ${pedConfirmado?'disabled':''}>+</button>
                 </div>
@@ -2152,7 +2152,15 @@ function toggleGrupo(grupo) {
   if (el) el.classList.toggle('aberto', S.gruposAbertos.has(grupo));
 }
 
-async function qtdChanged(catalogoId, lojaSlug, custo, valor) {
+// Debounce por campo (catalogoId+lojaSlug): oninput dispara a cada tecla digitada,
+// então sem coalescer as gravações viravam upserts concorrentes que podiam chegar
+// fora de ordem no servidor e sobrescrever o valor final com um dígito intermediário
+// (relato: "as atualizações não estão ficando").
+const _qtdSaveTimers = {};
+
+function _qtdSaveKey(catalogoId, lojaSlug) { return catalogoId + '|' + lojaSlug; }
+
+async function _executarSalvarQtd(catalogoId, lojaSlug, custo, valor) {
   const qtd = parseFloat(valor) || 0;
   await salvarItem(catalogoId, lojaSlug, qtd, custo || null);
   renderTotalLoja();
@@ -2169,7 +2177,25 @@ async function qtdChanged(catalogoId, lojaSlug, custo, valor) {
   });
 }
 
+function qtdChanged(catalogoId, lojaSlug, custo, valor, imediato) {
+  const key = _qtdSaveKey(catalogoId, lojaSlug);
+  clearTimeout(_qtdSaveTimers[key]);
+  delete _qtdSaveTimers[key];
+  if (imediato) {
+    _executarSalvarQtd(catalogoId, lojaSlug, custo, valor);
+  } else {
+    _qtdSaveTimers[key] = setTimeout(() => {
+      delete _qtdSaveTimers[key];
+      _executarSalvarQtd(catalogoId, lojaSlug, custo, valor);
+    }, 500);
+  }
+}
+
 async function ajustarQtd(catalogoId, lojaSlug, custo, delta) {
+  const key = _qtdSaveKey(catalogoId, lojaSlug);
+  clearTimeout(_qtdSaveTimers[key]);
+  delete _qtdSaveTimers[key];
+
   const atual = S.pedidoItens[catalogoId]?.[lojaSlug]?.qtd ?? 0;
   const nova = Math.max(0, atual + delta);
 
@@ -2189,7 +2215,7 @@ async function ajustarQtd(catalogoId, lojaSlug, custo, delta) {
     if (onclick.includes(catalogoId) && onclick.includes(lojaSlug)) inp.value = nova || '';
   });
 
-  await salvarItem(catalogoId, lojaSlug, nova, custo || null);
+  await _executarSalvarQtd(catalogoId, lojaSlug, custo, nova);
 }
 
 function _renderComFoco(renderFn) {
