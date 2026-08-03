@@ -690,6 +690,16 @@ let sbSyncTimer = null;
 let sbPollTimer = null;
 let sbLastError = "";
 
+// Controle de "tenho edição local ainda não confirmada na nuvem" — incrementado a cada
+// autoSave() e comparado com a última versão que realmente terminou de gravar no
+// Supabase. Enquanto divergem, sbPull() não pode mesclar por cima dos campos desta loja
+// (senão o pull periódico de 20s apaga silenciosamente uma contagem ainda não sincronizada),
+// e um retry automático continua tentando reenviar em vez de desistir no primeiro erro.
+let sbEditVersion = 0;
+let sbPushedVersion = 0;
+let sbRetryTimer = null;
+function sbTemPendente() { return sbEditVersion !== sbPushedVersion; }
+
 async function sbRequest(path, opts) {
   opts = opts || {};
   const mergedHeaders = Object.assign({
@@ -777,6 +787,9 @@ async function _fetchAllDataAtual(lojaKey) {
 }
 
 async function sbPush() {
+  if (sbRetryTimer) { clearTimeout(sbRetryTimer); sbRetryTimer = null; }
+  const versionAoIniciar = sbEditVersion;
+  const statusAntes = sbStatus;
   try {
     sbStatus = "conectando"; updateSyncIndicator();
     const payload = {
@@ -810,10 +823,22 @@ async function sbPush() {
       body: JSON.stringify({ all_data: mergedAllData, updated_at: new Date().toISOString(), updated_by: loja + (usuarioAtual ? '/' + usuarioAtual.nome : '') })
     });
     sbStatus = "online"; sbLastError = "";
+    if (statusAntes === 'erro') showToast('✅ Sincronizado com a nuvem novamente.', '', 2500);
+    // Só marca como sincronizado até a versão que existia quando este push começou —
+    // se o usuário editou de novo enquanto a requisição estava em voo, sbEditVersion já
+    // avançou e sbTemPendente() continua true, garantindo outro envio (agendado pelo
+    // próprio autoSave) e mantendo o sbPull() bloqueado pra essa loja até aquele também confirmar.
+    if (versionAoIniciar > sbPushedVersion) sbPushedVersion = versionAoIniciar;
     updateSyncIndicator();
   } catch(e) {
     sbStatus = "erro"; sbLastError = e.message || String(e);
     updateSyncIndicator();
+    // Avisa só na transição pra erro (não a cada retry) — senão vira spam de toast
+    // numa loja com internet ruim, tentando de 8 em 8s.
+    if (statusAntes !== 'erro') showToast('⚠️ Falha ao sincronizar — dados salvos só neste aparelho. Tentando de novo automaticamente.', 'err', 4000);
+    // Retry automático — sem isso, uma falha de rede passageira perdia a edição pra
+    // sempre (só reenviava se o usuário editasse algo de novo, reagendando o debounce).
+    sbRetryTimer = setTimeout(sbPush, 8000);
   }
 }
 
@@ -869,7 +894,12 @@ async function sbPull(silent) {
           if (d.fichasMapeamentos && typeof d.fichasMapeamentos === 'object') Object.assign(fichasMapeamentos, d.fichasMapeamentos);
           return;
         }
-        if (d.estIniAll) {
+        // Enquanto houver edição local desta loja ainda sem confirmação de gravação na
+        // nuvem (sbTemPendente), pula o merge dos campos desta mesma loja — senão o
+        // polling de 20s (ou um pull manual) sobrescrevia contagem/pedido digitados há
+        // poucos segundos com a versão antiga que ainda estava na nuvem.
+        const pulaMeusCamposPendentes = row.loja === loja && sbTemPendente();
+        if (d.estIniAll && !pulaMeusCamposPendentes) {
           // Só aplicar semanas da semana atual em diante (evita valores fantasma de semanas passadas)
           const hoje = getMonday(new Date());
           Object.entries(d.estIniAll).forEach(([key, val]) => {
@@ -883,14 +913,16 @@ async function sbPull(silent) {
             }
           });
         }
-        if (d.vendasAll)   Object.assign(vendasAll,   d.vendasAll);
-        if (d.contAll)     Object.assign(contAll,     d.contAll);
-        if (d.entradasAll) Object.assign(entradasAll, d.entradasAll);
-        if (d.transferAll) Object.assign(transferAll, d.transferAll);
-        if (d.pedidoAll)   Object.assign(pedidoAll,   d.pedidoAll);
-        if (d.pedidoConfs) Object.assign(pedidoConfs, d.pedidoConfs);
-        if (d.avariasAll)  Object.assign(avariasAll,  d.avariasAll);
-        if (d.devolucoesAll) Object.assign(devolucoesAll, d.devolucoesAll);
+        if (!pulaMeusCamposPendentes) {
+          if (d.vendasAll)   Object.assign(vendasAll,   d.vendasAll);
+          if (d.contAll)     Object.assign(contAll,     d.contAll);
+          if (d.entradasAll) Object.assign(entradasAll, d.entradasAll);
+          if (d.transferAll) Object.assign(transferAll, d.transferAll);
+          if (d.pedidoAll)   Object.assign(pedidoAll,   d.pedidoAll);
+          if (d.pedidoConfs) Object.assign(pedidoConfs, d.pedidoConfs);
+          if (d.avariasAll)  Object.assign(avariasAll,  d.avariasAll);
+          if (d.devolucoesAll) Object.assign(devolucoesAll, d.devolucoesAll);
+        }
         if (d.urgenciaTemplate) Object.assign(urgenciaTemplate, d.urgenciaTemplate);
         // Configurações globais: usa a versão mais recente (sobrescreve)
         if (d.fatoresConversao)  Object.assign(fatoresConversao,  d.fatoresConversao);
@@ -918,9 +950,23 @@ async function sbPull(silent) {
 
 /* Agenda envio (debounce) após qualquer alteração local */
 function sbScheduleSync() {
+  sbEditVersion++;
   if (sbSyncTimer) clearTimeout(sbSyncTimer);
   sbSyncTimer = setTimeout(sbPush, 1500);
 }
+
+// Força o envio imediato de qualquer edição ainda pendente (debounce de 1,5s ou retry
+// de 8s ainda não disparou) quando o usuário troca de app, apaga a tela ou fecha a
+// aba — sem isso, um recarregamento nesse intervalo perdia a última contagem/pedido
+// digitado, mesmo já estando salvo no localStorage deste aparelho.
+function _forcarSyncPendente() {
+  if (!sbTemPendente()) return;
+  if (sbSyncTimer) { clearTimeout(sbSyncTimer); sbSyncTimer = null; }
+  sbPush();
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden) _forcarSyncPendente(); });
+window.addEventListener('pagehide', _forcarSyncPendente);
+window.addEventListener('blur', _forcarSyncPendente);
 
 /* Carrega faturamento semanal e vendas individuais do check-list (checklist_diario) */
 async function loadChecklistFat() {
