@@ -2551,6 +2551,9 @@ function renderCatalogo() {
         <button class="btn-sm${S.catEditLote?' btn-success':' btn-outline'}" onclick="toggleCatEditLote()" title="Editar 'Und por Cx' de vários produtos seguido, sem abrir o modal de cada um">
           ✏️ Und/Cx em lote${S.catEditLote?' (ativo)':''}
         </button>
+        <button class="btn-sm btn-outline" onclick="abrirImportarUndCx()" title="Sugere o 'Und por Cx' a partir do fator já cadastrado no app Lojas (ou do nome do produto), pra revisar e aplicar de uma vez">
+          📥 Importar do Lojas
+        </button>
         <button class="btn-sm btn-orange" onclick="modalNovoProduto()">+ Novo</button>
       </div>
     </div>
@@ -2595,6 +2598,121 @@ async function salvarUndCxLote(id, valor) {
   if (error) { toast('⚠️ Erro ao salvar: ' + error.message, 'err'); return; }
   const idx = S.catalogo.findIndex(p => p.id === id);
   if (idx >= 0) S.catalogo[idx].und_por_caixa = undPorCaixa;
+}
+
+// ── Importar "Und por Cx" a partir do que já existe no app Lojas ──────────────
+// O app Lojas tem um "fator de conversão" próprio (aba Pedido, calculadora de
+// Cx/Und) guardado por nome de produto em cada loja — como é o mesmo objeto
+// global replicado em todas, basta juntar (merge) o de todas as lojas pra ter o
+// conjunto completo. Quando o nome não bate com nenhum fator lá, tenta extrair
+// do próprio nome do produto no Catálogo (ex.: "... cx c/ 12 unds" → 12), já que
+// muitos produtos já descrevem a caixa no nome. Nada é gravado sem confirmação.
+async function _buscarFatoresConversaoLojas() {
+  const { data, error } = await db.from('gn_lojas').select('all_data');
+  if (error) throw error;
+  const merged = {};
+  (data || []).forEach(row => {
+    const fc = row.all_data && row.all_data.fatoresConversao;
+    if (fc && typeof fc === 'object') Object.assign(merged, fc);
+  });
+  return merged;
+}
+
+function _extrairFatorDoNome(nomeOrig) {
+  // "3 mil" / "3mil" → 3000, antes de qualquer outro parse.
+  const nome = nomeOrig.replace(/(\d+)\s*mil\b/gi, (_, n) => String(parseInt(n, 10) * 1000));
+  // Embalagem aninhada — "cx c/ 16 pcts e cada pct com 250 unds" = 16×250, não 16.
+  // Sem isso o valor extraído ficava só o número de pacotes, ignorando quantas
+  // unidades cada pacote tem (bug real encontrado testando contra o catálogo real).
+  const aninhado = nome.match(/(?:c\/|com)\s*(\d+)\s*(?:pcts?|cartelas?|bandejas?)\b[\s\S]{0,25}?(?:c\/|com|de)\s*(\d+)\s*und/i);
+  if (aninhado) {
+    const n = parseInt(aninhado[1], 10), m = parseInt(aninhado[2], 10);
+    if (n > 1 && m > 1) return n * m;
+  }
+  const m = nome.match(/c\/\s*(\d+)\s*und/i) || nome.match(/cx\s+c\/\s*(\d+)/i);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  return n > 1 ? n : null;
+}
+
+async function abrirImportarUndCx() {
+  let fatores;
+  try {
+    toast('Buscando fatores cadastrados no app Lojas...', 'ok');
+    fatores = await _buscarFatoresConversaoLojas();
+  } catch (e) {
+    toast('⚠️ Erro ao buscar do app Lojas: ' + (e.message || e), 'err');
+    return;
+  }
+
+  const sugestoes = [];
+  S.catalogo.filter(p => p.ativo && !p.und_por_caixa).forEach(p => {
+    const nomeUp = p.produto.trim().toUpperCase();
+    let valor = fatores[nomeUp];
+    let fonte = 'app Lojas';
+    if (!valor) { valor = _extrairFatorDoNome(p.produto); fonte = 'nome do produto'; }
+    if (valor && valor > 1) sugestoes.push({ id: p.id, produto: p.produto, valor, fonte });
+  });
+
+  if (!sugestoes.length) {
+    toast('Nenhuma sugestão encontrada — os produtos sem Und/Cx não bateram com nenhum fator do app Lojas nem seguem o padrão "cx c/ N und" no nome.', 'err');
+    return;
+  }
+
+  S._sugestoesUndCx = sugestoes;
+  abrirModal(`
+    <div class="modal-titulo">📥 Importar Und/Cx
+      <button class="modal-close" onclick="$('modal-bg').classList.remove('ativo')">×</button>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:10px">
+      ${sugestoes.length} sugestão${sugestoes.length>1?'ões':''} — do app Lojas quando o nome bate, ou lido direto do nome do produto ("cx c/ N und"). Confira antes de aplicar.
+    </div>
+    <div style="display:flex;justify-content:flex-end;margin-bottom:6px">
+      <button class="btn-sm btn-outline" onclick="_toggleTodosSugestoesUndCx(this)" data-marcados="1">Desmarcar todos</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px;max-height:50vh;overflow-y:auto">
+      ${sugestoes.map((s,i) => `
+        <label style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:rgba(255,255,255,.04);border-radius:8px;cursor:pointer">
+          <input type="checkbox" class="importUndCx-chk" data-idx="${i}" checked style="width:16px;height:16px;flex-shrink:0">
+          <span style="flex:1;min-width:0">${s.produto}</span>
+          <span style="color:#22c55e;font-weight:700;white-space:nowrap">${s.valor} und/cx</span>
+          <span style="font-size:9px;color:var(--muted);white-space:nowrap">${s.fonte}</span>
+        </label>`).join('')}
+    </div>
+    <div class="modal-acoes">
+      <button class="btn-sm btn-success" onclick="_aplicarImportacaoUndCx()">✓ Aplicar Selecionados</button>
+    </div>
+  `);
+}
+
+function _toggleTodosSugestoesUndCx(btn) {
+  const marcado = btn.getAttribute('data-marcados') === '1';
+  document.querySelectorAll('.importUndCx-chk').forEach(chk => { chk.checked = !marcado; });
+  btn.setAttribute('data-marcados', marcado ? '0' : '1');
+  btn.textContent = marcado ? 'Marcar todos' : 'Desmarcar todos';
+}
+
+async function _aplicarImportacaoUndCx() {
+  const idxs = [...document.querySelectorAll('.importUndCx-chk:checked')].map(chk => parseInt(chk.dataset.idx, 10));
+  if (!idxs.length) { toast('Selecione ao menos um produto.', 'err'); return; }
+  $('modal-bg').classList.remove('ativo');
+  toast('Aplicando...', 'ok');
+
+  let erros = 0;
+  for (const i of idxs) {
+    const s = S._sugestoesUndCx[i];
+    const { error } = await db.from('gn_catalogo')
+      .update({ und_por_caixa: s.valor, atualizado_em: new Date().toISOString() })
+      .eq('id', s.id);
+    if (error) { erros++; continue; }
+    const idx = S.catalogo.findIndex(p => p.id === s.id);
+    if (idx >= 0) S.catalogo[idx].und_por_caixa = s.valor;
+  }
+
+  toast(erros > 0
+    ? `Aplicado com ${erros} erro(s). Verifique o console.`
+    : `✓ ${idxs.length} produto${idxs.length>1?'s':''} atualizado${idxs.length>1?'s':''}!`, erros>0?'err':'ok');
+  renderCatalogo();
 }
 
 async function toggleAtivoProd(id, novoStatus) {
