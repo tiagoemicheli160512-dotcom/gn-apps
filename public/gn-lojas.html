@@ -661,6 +661,7 @@ let pedidoOficialAtual = {};
 let avariasAll   = {};  // loja -> [{id,ts,semana,insumo,qtd,custoUnit,valorTotal,status,loja_conf_por,loja_conf_ts,rh_conf_por,rh_conf_ts}]
 let devolucoesAll = {}; // loja -> [{id,ts,semana,fornecedor,insumo,qtd,motivo,obs,status,loja_conf_por,loja_conf_ts,pedidos_conf_por,pedidos_conf_ts}]
 let urgenciaTemplate = {}; // loja -> [item_id_string, ...] — itens usados na última urgência
+let correcoesSetor = []; // últimas correções de Est.vig feitas pelo setor de Compras (app Estoque e Pedido)
 let fatoresConversao  = {}; // insumo -> numero (ex: {"AGUA TONICA CX C/ 12 UND": 12})
 
 /* Fatores padrão — aplicados na primeira inicialização se ainda não configurados */
@@ -5368,6 +5369,26 @@ function render() {
   } else if (tab === "estoque") {
     c.innerHTML = `
     <div class="section">
+      ${(() => {
+        const pend = correcoesSetor.filter(r => !_correcaoSetorVista(r.catalogo_id+'|'+r.data_contagem));
+        if (!pend.length) return '';
+        return `<div class="alert-box" style="background:rgba(139,92,246,.12);border:1px solid rgba(139,92,246,.35);border-radius:12px;padding:10px 12px;margin-bottom:8px">
+          <div style="font-size:12px;font-weight:800;color:#c4b5fd;margin-bottom:6px">🏢 Estoque corrigido pelo setor de Compras</div>
+          ${pend.map(r => {
+            const id = r.catalogo_id+'|'+r.data_contagem;
+            const dt = r.criado_em ? new Date(r.criado_em) : null;
+            const quando = dt ? dt.toLocaleDateString('pt-BR')+' '+dt.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}) : r.data_contagem.split('-').reverse().join('/');
+            const quem = (r.criado_por||'').replace(CORRECAO_SETOR_PREFIX,'');
+            return `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 0;border-top:1px solid rgba(139,92,246,.2)">
+              <div style="min-width:0">
+                <div style="font-size:12px;font-weight:700;color:#e2e8f0">${(r.gn_catalogo&&r.gn_catalogo.produto)||'—'}</div>
+                <div style="font-size:10px;color:#a78bfa">Novo Est.vig: ${r.atual} · ${quem} em ${quando}</div>
+              </div>
+              <button onclick="dispensarCorrecaoSetor('${id}')" style="background:none;border:1px solid rgba(255,255,255,.15);border-radius:8px;color:#94a3b8;font-size:10px;padding:4px 8px;cursor:pointer;flex-shrink:0">OK</button>
+            </div>`;
+          }).join('')}
+        </div>`;
+      })()}
       ${qa>0?`
         <div class="alert-box alert-red" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;padding:10px 12px">
           <span>⚠️ <strong>${qa} insumo${qa>1?"s":""}</strong> abaixo do mínimo</span>
@@ -7538,6 +7559,33 @@ async function carregarEntregas(silent) {
     _verificarAutoAlertaEntregas();
   }catch(e){}
 }
+
+/* ── CORREÇÕES DE ESTOQUE FEITAS PELO SETOR DE COMPRAS (app Estoque e Pedido) ──
+   O comprador pode corrigir o Est.vig direto por lá (corrigirEstVig em gn-pedidos.html),
+   marcando o registro com o prefixo CORRECAO_SETOR_PREFIX. Aqui a loja só avisa/mostra
+   — não é uma segunda fonte de estoque, é só a loja saber que o setor mexeu no número. */
+const CORRECAO_SETOR_PREFIX = '🏢 Compras: ';
+function _correcoesSetorVistasKey(){ return 'gn_correcoes_setor_vistas'; }
+function _correcaoSetorVista(id){
+  try{ return (JSON.parse(localStorage.getItem(_correcoesSetorVistasKey())||'[]')).includes(id); }catch(e){ return false; }
+}
+function dispensarCorrecaoSetor(id){
+  try{
+    const vistas=JSON.parse(localStorage.getItem(_correcoesSetorVistasKey())||'[]');
+    if(!vistas.includes(id)) vistas.push(id);
+    localStorage.setItem(_correcoesSetorVistasKey(), JSON.stringify(vistas.slice(-200)));
+  }catch(e){}
+  render();
+}
+async function carregarCorrecoesSetor(silent) {
+  try{
+    const slug=LOJA_SLUG[loja]||loja.toLowerCase().replace(/ /g,'_');
+    const desde=new Date(Date.now()-7*86400000).toISOString().slice(0,10);
+    const rows=await sbRequest('gn_contagens_pedido?loja_slug=eq.'+slug+'&data_contagem=gte.'+desde+'&select=catalogo_id,atual,data_contagem,criado_por,criado_em,gn_catalogo(produto)&order=criado_em.desc&limit=50',{method:'GET'});
+    correcoesSetor=(rows||[]).filter(r=>(r.criado_por||'').indexOf(CORRECAO_SETOR_PREFIX)===0);
+    if(!silent) render();
+  }catch(e){}
+}
 async function confirmarEntrega(id){
   const prov=provisoesEntrega.find(p=>p.id===id);
   if(!prov) return;
@@ -7646,6 +7694,7 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').then(function(reg) { reg.update(); }).catch(() => {});
 }
 carregarEntregas(true);
+carregarCorrecoesSetor(true);
 
 /* ═══════════ SENHA MESTRE — CORREÇÃO DE ENTRADAS ═══════════ */
 

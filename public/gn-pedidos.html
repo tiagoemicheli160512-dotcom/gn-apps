@@ -1063,6 +1063,62 @@ function mostrarInfoContagem(catalogoId, lojaSlug) {
   else toast('Sem registro de quem/quando contou.', 'err');
 }
 
+// Início/fim (ISO) da semana ativa do Pedido — mesma lógica usada em renderPedido().
+function _semanaAtivaBounds() {
+  if (!S.semanaAtiva) S.semanaAtiva = getMondayOfWeek();
+  return {
+    monISO: S.semanaAtiva.toISOString().slice(0,10),
+    sunISO: getSundayOfWeek(S.semanaAtiva).toISOString().slice(0,10)
+  };
+}
+
+// Prefixo que marca uma contagem como corrigida manualmente pelo setor de Compras (em
+// vez de uma contagem física feita pela loja) — usado tanto pra colorir/rotular aqui
+// quanto pra a loja identificar essas correções no app Lojas (carregarCorrecoesSetor).
+const CORRECAO_SETOR_PREFIX = '🏢 Compras: ';
+
+// Corrige o Est.vig (estoque vigente) direto pelo app Pedidos, sem precisar que a loja
+// reconte. Grava em gn_contagens_pedido marcado com CORRECAO_SETOR_PREFIX, pra a loja
+// ver no app Lojas que aquele valor foi ajustado pelo setor.
+async function corrigirEstVig(catalogoId, lojaSlug, nomeProduto) {
+  const contagemAtual = S.contagens[catalogoId]?.[lojaSlug];
+  const { monISO, sunISO } = _semanaAtivaBounds();
+  const { estAnt } = _estAntVigEfetivo(contagemAtual, monISO, sunISO);
+  const sugestao = contagemAtual?.atual != null ? String(contagemAtual.atual) : '';
+  const resp = prompt(`Corrigir Est.vig de "${nomeProduto}":`, sugestao);
+  if (resp === null) return;
+  const novoValor = parseFloat(resp.replace(',', '.'));
+  if (isNaN(novoValor) || novoValor < 0) { toast('⚠️ Informe um valor válido.', 'err'); return; }
+
+  const nome = (() => {
+    try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null')?.nome || 'Compras'; }
+    catch(e) { return 'Compras'; }
+  })();
+  const hoje = new Date().toISOString().slice(0,10);
+  const criadoPor = CORRECAO_SETOR_PREFIX + nome;
+  const payload = {
+    catalogo_id: catalogoId, loja_slug: lojaSlug,
+    atual: novoValor, data_contagem: hoje, criado_por: criadoPor
+  };
+  // Preserva o Est.ant (não sobrescreve com null) — só a contagem "atual" está sendo corrigida.
+  if (estAnt != null) payload.ul_estoque = estAnt;
+  if (contagemAtual?.ul_pedido != null) payload.ul_pedido = contagemAtual.ul_pedido;
+
+  try {
+    await db.from('gn_contagens_pedido').upsert(payload, { onConflict: 'catalogo_id,loja_slug,data_contagem' });
+    if (!S.contagens[catalogoId]) S.contagens[catalogoId] = {};
+    S.contagens[catalogoId][lojaSlug] = {
+      ...(S.contagens[catalogoId][lojaSlug] || {}),
+      atual: novoValor, data_contagem: hoje, criado_por: criadoPor, criado_em: new Date().toISOString(),
+      ul_estoque: payload.ul_estoque ?? (S.contagens[catalogoId][lojaSlug]?.ul_estoque ?? null)
+    };
+    toast('✏️ Est.vig corrigido!');
+    renderPedido();
+  } catch(e) {
+    toast('⚠️ Erro ao corrigir: ' + (e.message || e), 'err');
+  }
+}
+
 async function carregarProvisoes() {
   const semAtiva = S.provSemana || getMondayOfWeek();
   const monday = semAtiva.toISOString().split('T')[0];
@@ -1674,11 +1730,9 @@ function _pedidoItemPreenchido(prod, lojaSlug) {
 // RENDER: PEDIDO
 // ═══════════════════════════════════════════════
 function renderPedido() {
-  if (!S.semanaAtiva) S.semanaAtiva = getMondayOfWeek();
   // Início/fim (ISO) da semana ativa — usado pra destacar em verde quando a contagem
   // (Est.vig) foi feita DENTRO dessa semana, e não é um saldo carregado de outra semana.
-  const _semAtivaMonISO = S.semanaAtiva.toISOString().slice(0,10);
-  const _semAtivaSunISO = getSundayOfWeek(S.semanaAtiva).toISOString().slice(0,10);
+  const { monISO: _semAtivaMonISO, sunISO: _semAtivaSunISO } = _semanaAtivaBounds();
 
   const sem = formatarSemana(S.semanaAtiva);
   const mondayHoje = getMondayOfWeek();
@@ -1783,6 +1837,7 @@ function renderPedido() {
           const contInfoTxt = _contagemInfoTxt(contagem);
           const contInfoBtn = contInfoTxt
             ? `<span onclick="event.stopPropagation();mostrarInfoContagem('${prod.id}','${lojaAtiva}')" title="${contInfoTxt.replace(/"/g,'&quot;')}" style="cursor:pointer;opacity:.7">🕒</span>` : '';
+          const corrigirBtn = `<span onclick="event.stopPropagation();corrigirEstVig('${prod.id}','${lojaAtiva}','${prod.produto.replace(/'/g,"\\'")}')" title="Corrigir Est.vig" style="cursor:pointer;opacity:.7">✏️</span>`;
           const isUrgente = _pedidoItemUrgente(prod, lojaAtiva);
           return `<div class="prod-row${divAtual?' diverg-ativo':jaPedido?' ja-pedido':''}" data-cid="${prod.id}" data-loja="${lojaAtiva}">
             <div class="prod-info">
@@ -1792,7 +1847,7 @@ function renderPedido() {
                 ${prod.custo?`<span class="prod-custo num">R$${fmt(prod.custo)}</span>`:''}
                 <span class="prod-est">Est.ant: ${ulEstDisp}</span>
                 <span class="prod-ulp">Ped.ant: ${ulPedDisp}</span>
-                <span class="prod-vig">Est.vig: ${estVigDisp} ${contInfoBtn}</span>
+                <span class="prod-vig">Est.vig: ${estVigDisp} ${contInfoBtn}${corrigirBtn}</span>
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:0">
@@ -1861,11 +1916,12 @@ function renderPedido() {
             const contInfoTxtL = _contagemInfoTxt(contagem);
             const contInfoBtnL = contInfoTxtL
               ? `<span onclick="event.stopPropagation();mostrarInfoContagem('${prod.id}','${loja.slug_pedido}')" title="${contInfoTxtL.replace(/"/g,'&quot;')}" style="cursor:pointer;opacity:.7">🕒</span>` : '';
+            const corrigirBtnL = `<span onclick="event.stopPropagation();corrigirEstVig('${prod.id}','${loja.slug_pedido}','${prod.produto.replace(/'/g,"\\'")}')" title="Corrigir Est.vig" style="cursor:pointer;opacity:.7">✏️</span>`;
             return `<div class="todos-loja-row${divL?' diverg-ativo':ulPedQtd>0?' ja-pedido':''}">
               <span class="todos-loja-nome">${loja.nome_display}</span>
               <span class="todos-loja-est">Est.ant:${ulEstV}</span>
               <span class="todos-loja-ulp">Ped.ant:${ulPedV}</span>
-              <span class="todos-loja-vig">Est.vig:${vigV}${contInfoBtnL}</span>
+              <span class="todos-loja-vig">Est.vig:${vigV}${contInfoBtnL}${corrigirBtnL}</span>
               <div style="display:flex;align-items:center;gap:0">
                 <div class="qty-ctrl-sm">
                   <button class="qty-btn-sm" onclick="ajustarQtd('${prod.id}','${loja.slug_pedido}',${prod.custo||0},-1)" ${pedConfirmado?'disabled':''}>−</button>
