@@ -820,6 +820,28 @@ $('inp-senha').onkeydown = e => { if(e.key==='Enter') $('btn-entrar').click(); }
 // ═══════════════════════════════════════════════
 // SUPABASE — DATA LOADING
 // ═══════════════════════════════════════════════
+// Busca TODAS as linhas de uma query, paginando em blocos de 1000 via .range().
+// O Supabase tem um teto de linhas por resposta configurado no servidor (~1000)
+// que um simples .limit(N maior) do lado do cliente NÃO consegue ultrapassar — só
+// pedir um limite maior continua vindo cortado em 1000, sem erro nenhum. Isso já
+// escondeu itens/contagens reais de várias lojas (pedido da semana passa de 1200
+// linhas, contagens já passam de 3500). queryFn deve retornar uma query do Supabase
+// ainda SEM .range() encadeado (ele é aplicado aqui, em cada página).
+async function _fetchTodasPaginas(queryFn, paginaSize) {
+  paginaSize = paginaSize || 1000;
+  let offset = 0;
+  let todas = [];
+  while (true) {
+    const { data, error } = await queryFn().range(offset, offset + paginaSize - 1);
+    if (error) { console.error('Erro paginando:', error.message); break; }
+    if (!data || data.length === 0) break;
+    todas = todas.concat(data);
+    if (data.length < paginaSize) break;
+    offset += paginaSize;
+  }
+  return todas;
+}
+
 async function carregarCatalogo() {
   const { data } = await db.from('gn_catalogo')
     .select('*').order('grupo').order('fornecedor').order('produto');
@@ -931,14 +953,14 @@ async function carregarFornecedoresConfirmados() {
 
 async function carregarItensPedido() {
   if (!S.pedidoAtual) return;
-  // O pedido da semana já passa de 1200 itens (catálogo × lojas) — sem .limit()
-  // explícito, essa busca batia no limite padrão de linhas do Supabase (~1000) e
-  // vinha CORTADA silenciosamente, fazendo quantidades reais de várias lojas sumirem
-  // da tela mesmo já gravadas no banco (mesmo bug encontrado em carregarContagens()).
-  const { data } = await db.from('gn_pedido_itens')
+  // O pedido da semana já passa de 1200 itens (catálogo × lojas) — o servidor corta
+  // em ~1000 linhas por página não importa o .limit() pedido pelo cliente, então
+  // isso precisa paginar de verdade (ver _fetchTodasPaginas) pra não sumir com
+  // quantidades reais de várias lojas mesmo já gravadas no banco.
+  const data = await _fetchTodasPaginas(() => db.from('gn_pedido_itens')
     .select('*, gn_catalogo(id,produto,grupo,fornecedor,und,custo)')
     .eq('pedido_id', S.pedidoAtual.id)
-    .limit(20000);
+    .order('id'));
 
   S.pedidoItens = {};
   S.pedidosConfirmados = {};
@@ -976,8 +998,8 @@ async function carregarUltimoPedido() {
       .lt('semana_inicio', S.semanaAtiva.toISOString().split('T')[0])
       .order('semana_inicio', { ascending: false }).limit(1);
     if (!qq || qq.length === 0) { S.ultimoPedido = {}; return; }
-    const { data: itens } = await db.from('gn_pedido_itens')
-      .select('catalogo_id,loja_slug,qtd_pedida').eq('pedido_id', qq[0].id).limit(20000);
+    const itens = await _fetchTodasPaginas(() => db.from('gn_pedido_itens')
+      .select('catalogo_id,loja_slug,qtd_pedida').eq('pedido_id', qq[0].id).order('id'));
     S.ultimoPedido = {};
     (itens || []).forEach(i => {
       if (!S.ultimoPedido[i.catalogo_id]) S.ultimoPedido[i.catalogo_id] = {};
@@ -986,8 +1008,8 @@ async function carregarUltimoPedido() {
     return;
   }
 
-  const { data } = await db.from('gn_pedido_itens')
-    .select('catalogo_id,loja_slug,qtd_pedida').eq('pedido_id', ultPed[0].id).limit(20000);
+  const data = await _fetchTodasPaginas(() => db.from('gn_pedido_itens')
+    .select('catalogo_id,loja_slug,qtd_pedida').eq('pedido_id', ultPed[0].id).order('id'));
 
   S.ultimoPedido = {};
   (data || []).forEach(item => {
@@ -1010,10 +1032,10 @@ async function carregarConfirmadosSemana() {
 
     const ids = peds.map(p => p.id);
 
-    const { data: itens } = await db.from('gn_pedido_itens')
+    const itens = await _fetchTodasPaginas(() => db.from('gn_pedido_itens')
       .select('catalogo_id,loja_slug,qtd_pedida')
       .in('pedido_id', ids)
-      .limit(20000);
+      .order('id'));
 
     (itens || []).forEach(i => {
       if (!S.pedidosConfirmados[i.catalogo_id]) S.pedidosConfirmados[i.catalogo_id] = {};
@@ -1025,18 +1047,17 @@ async function carregarConfirmadosSemana() {
 
 async function carregarContagens() {
   // Última contagem por produto por loja. A tabela já passa de 3500 linhas e cresce
-  // todo dia — sem limitar por data, a busca batia no limite padrão de linhas do
-  // Supabase (~1000) e vinha CORTADA silenciosamente, sumindo com contagens de hoje
-  // de várias lojas sem erro nenhum (relato: Boulevard/Norte Shopping "divergentes",
-  // mas o dado existia no banco — só não chegava na tela). Uma janela de 45 dias
-  // cobre folgado o "Est.ant" mais antigo que a tela realmente usa, e o .limit()
-  // explícito é uma segunda trava pro mesmo problema não voltar conforme a tabela cresce.
+  // todo dia — mesmo com paginação, sem limitar por data isso ficaria lento à toa.
+  // Uma janela de 45 dias cobre folgado o "Est.ant" mais antigo que a tela realmente usa.
+  // .order('id') no final garante ordenação totalmente determinística entre páginas
+  // (sem isso, paginar com .range() não tem garantia de não pular ou repetir linha
+  // quando há empate no data_contagem, que é o normal aqui).
   const cutoffISO = new Date(Date.now() - 45 * 86400000).toISOString().slice(0, 10);
-  const { data } = await db.from('gn_contagens_pedido')
+  const data = await _fetchTodasPaginas(() => db.from('gn_contagens_pedido')
     .select('catalogo_id,loja_slug,ul_estoque,ul_pedido,atual,data_contagem,criado_por,criado_em')
     .gte('data_contagem', cutoffISO)
     .order('data_contagem', {ascending:false})
-    .limit(20000);
+    .order('id'));
 
   S.contagens = {};
   (data || []).forEach(c => {
