@@ -1055,7 +1055,7 @@ async function carregarContagens() {
   // quando há empate no data_contagem, que é o normal aqui).
   const cutoffISO = new Date(Date.now() - 45 * 86400000).toISOString().slice(0, 10);
   const data = await _fetchTodasPaginas(() => db.from('gn_contagens_pedido')
-    .select('catalogo_id,loja_slug,ul_estoque,ul_pedido,atual,data_contagem,criado_por,criado_em')
+    .select('catalogo_id,loja_slug,ul_estoque,ul_pedido,atual,atual_cx,atual_und,data_contagem,criado_por,criado_em')
     .gte('data_contagem', cutoffISO)
     .order('data_contagem', {ascending:false})
     .order('id'));
@@ -1067,6 +1067,7 @@ async function carregarContagens() {
       // só pega a mais recente (já ordenado DESC)
       S.contagens[c.catalogo_id][c.loja_slug] = {
         atual: c.atual, ul_estoque: c.ul_estoque, ul_pedido: c.ul_pedido,
+        atualCx: c.atual_cx, atualUnd: c.atual_und,
         data_contagem: c.data_contagem, criado_por: c.criado_por, criado_em: c.criado_em
       };
     }
@@ -1107,11 +1108,11 @@ function _contagemNaSemana(c, monISO, sunISO) {
 // esperando a nova contagem. Se não é fresca (não é dessa semana), ela vira o Est.ant
 // exibido e o Est.vig some até a loja contar de novo.
 function _estAntVigEfetivo(contagem, monISO, sunISO) {
-  if (!contagem) return { estAnt: null, estVig: null, fresh: false };
+  if (!contagem) return { estAnt: null, estVig: null, estVigCx: null, estVigUnd: null, fresh: false };
   const fresh = _contagemNaSemana(contagem, monISO, sunISO);
   return fresh
-    ? { estAnt: contagem.ul_estoque, estVig: contagem.atual, fresh: true }
-    : { estAnt: contagem.atual, estVig: null, fresh: false };
+    ? { estAnt: contagem.ul_estoque, estVig: contagem.atual, estVigCx: contagem.atualCx, estVigUnd: contagem.atualUnd, fresh: true }
+    : { estAnt: contagem.atual, estVig: null, estVigCx: null, estVigUnd: null, fresh: false };
 }
 
 function mostrarInfoContagem(catalogoId, lojaSlug) {
@@ -1977,13 +1978,18 @@ function renderPedido() {
           const divAtual  = itemAtual?.diverg ?? false;
           const jaPedido  = (S.pedidosConfirmados[prod.id]?.[lojaAtiva] ?? 0) > 0;
           const dash = '<span style="color:var(--muted)">—</span>';
-          const { estAnt, estVig } = _estAntVigEfetivo(contagem, _semAtivaMonISO, _semAtivaSunISO);
+          const { estAnt, estVig, estVigCx, estVigUnd } = _estAntVigEfetivo(contagem, _semAtivaMonISO, _semAtivaSunISO);
           const ulEstDisp = estAnt != null
             ? `<span class="val">${fmtQtd(estAnt)}</span>` : dash;
           const ulPedDisp = contagem?.ul_pedido != null
             ? `<span class="val">${fmtQtd(contagem.ul_pedido)}</span>` : dash;
+          // Espelho do que a loja digitou em Cx/Und no app Lojas (Est. Atual) — exatamente
+          // como foi digitado, não uma decomposição estimada. Some quando não existir
+          // (contagem antiga, anterior a essa quebra) e cai pro total simples de sempre.
+          const estVigCxUndTxt = (estVigCx != null || estVigUnd != null)
+            ? ` <span style="font-weight:400;opacity:.85">(${fmtQtd(estVigCx||0)}CX+${fmtQtd(estVigUnd||0)}UN)</span>` : '';
           const estVigDisp = estVig != null
-            ? `<span class="val" style="color:#22c55e;font-weight:700">✓ ${fmtQtd(estVig)}</span>` : dash;
+            ? `<span class="val" style="color:#22c55e;font-weight:700">✓ ${fmtQtd(estVig)}${estVigCxUndTxt}</span>` : dash;
           const contInfoTxt = _contagemInfoTxt(contagem);
           const contInfoBtn = contInfoTxt
             ? `<span onclick="event.stopPropagation();mostrarInfoContagem('${prod.id}','${lojaAtiva}')" title="${contInfoTxt.replace(/"/g,'&quot;')}" style="cursor:pointer;opacity:.7">🕒</span>` : '';
@@ -1991,32 +1997,9 @@ function renderPedido() {
           const isUrgente = _pedidoItemUrgente(prod, lojaAtiva);
           const prodConfirmado = S.fornecedoresConfirmados.has(prod.fornecedor);
           const fator = prod.und_por_caixa > 1 ? prod.und_por_caixa : null;
-          const qtyCtrlHtml = fator ? (() => {
-            // Usa a quebra REAL digitada (no app Lojas ou aqui mesmo) quando existir —
-            // só decompõe o total "na marra" se nunca houve uma quebra registrada.
-            const { cx, und } = (itemAtual?.qtdCx != null || itemAtual?.qtdUnd != null)
-              ? { cx: itemAtual.qtdCx || 0, und: itemAtual.qtdUnd || 0 }
-              : _decomporCxUnd(qtdAtual, fator);
-            return `<div class="qty-ctrl" style="gap:5px">
-                <div style="display:flex;flex-direction:column;align-items:center;gap:1px">
-                  <input class="qty-input qty-cx" type="text" inputmode="decimal" min="0" style="width:40px;border:1px solid var(--border);border-radius:var(--rs)"
-                    value="${cx||''}" placeholder="0" ${prodConfirmado?'disabled':''}
-                    oninput="qtdCxUndInput(this,'${prod.id}','${lojaAtiva}',${prod.custo||0},${fator})"
-                    onchange="qtdCxUndInput(this,'${prod.id}','${lojaAtiva}',${prod.custo||0},${fator},true)"
-                    onblur="qtdCxUndInput(this,'${prod.id}','${lojaAtiva}',${prod.custo||0},${fator},true)">
-                  <span style="font-size:8px;color:var(--muted)">CX</span>
-                </div>
-                <div style="display:flex;flex-direction:column;align-items:center;gap:1px">
-                  <input class="qty-input qty-und" type="text" inputmode="decimal" min="0" style="width:40px;border:1px solid var(--border);border-radius:var(--rs)"
-                    value="${und||''}" placeholder="0" ${prodConfirmado?'disabled':''}
-                    oninput="qtdCxUndInput(this,'${prod.id}','${lojaAtiva}',${prod.custo||0},${fator})"
-                    onchange="qtdCxUndInput(this,'${prod.id}','${lojaAtiva}',${prod.custo||0},${fator},true)"
-                    onblur="qtdCxUndInput(this,'${prod.id}','${lojaAtiva}',${prod.custo||0},${fator},true)">
-                  <span style="font-size:8px;color:var(--muted)">UND</span>
-                </div>
-                <span class="cxund-total num" style="font-size:10px;color:var(--muted);white-space:nowrap">= ${fmtQtd(qtdAtual)}</span>
-              </div>`;
-          })() : `<div class="qty-ctrl">
+          // O campo Pedido é sempre um número simples — a quebra Cx/Und real (quando
+          // existe fator) aparece só como espelho, visual, no Est.vig (ver estVigDisp).
+          const qtyCtrlHtml = `<div class="qty-ctrl">
                 <button class="qty-btn" onclick="ajustarQtd('${prod.id}','${lojaAtiva}',${prod.custo||0},-1)" ${prodConfirmado?'disabled':''}>−</button>
                 <input class="qty-input" type="text" inputmode="decimal" min="0"
                   value="${qtdAtual||''}" placeholder="0" ${prodConfirmado?'disabled':''}
@@ -2088,34 +2071,19 @@ function renderPedido() {
             const divL = itemLoja?.diverg ?? false;
             const ulPedQtd = (S.pedidosConfirmados[prod.id]?.[loja.slug_pedido] ?? 0);
             const dsh = '<span style="opacity:.35">—</span>';
-            const { estAnt: estAntL, estVig: estVigL } = _estAntVigEfetivo(contagem, _semAtivaMonISO, _semAtivaSunISO);
+            const { estAnt: estAntL, estVig: estVigL, estVigCx: estVigCxL, estVigUnd: estVigUndL } = _estAntVigEfetivo(contagem, _semAtivaMonISO, _semAtivaSunISO);
             const ulEstV = estAntL != null ? `<span class="v">${fmtQtd(estAntL)}</span>` : dsh;
             const ulPedV = contagem?.ul_pedido  != null ? `<span class="v">${fmtQtd(contagem.ul_pedido)}</span>`  : dsh;
-            const vigV   = estVigL != null ? `<span class="v" style="color:#22c55e;font-weight:700">✓${fmtQtd(estVigL)}</span>` : dsh;
+            const vigCxUndTxtL = (estVigCxL != null || estVigUndL != null)
+              ? ` <span style="font-weight:400;opacity:.85">(${fmtQtd(estVigCxL||0)}CX+${fmtQtd(estVigUndL||0)}UN)</span>` : '';
+            const vigV   = estVigL != null ? `<span class="v" style="color:#22c55e;font-weight:700">✓${fmtQtd(estVigL)}${vigCxUndTxtL}</span>` : dsh;
             const subT = qtdL > 0 ? `<span class="v">R$${fmt(qtdL*(prod.custo||0))}</span>` : '';
             const isUrgenteL = _pedidoItemUrgente(prod, loja.slug_pedido);
             const contInfoTxtL = _contagemInfoTxt(contagem);
             const contInfoBtnL = contInfoTxtL
               ? `<span onclick="event.stopPropagation();mostrarInfoContagem('${prod.id}','${loja.slug_pedido}')" title="${contInfoTxtL.replace(/"/g,'&quot;')}" style="cursor:pointer;opacity:.7">🕒</span>` : '';
             const corrigirBtnL = `<span onclick="event.stopPropagation();corrigirEstVig('${prod.id}','${loja.slug_pedido}','${prod.produto.replace(/'/g,"\\'")}')" title="Corrigir Est.vig" style="cursor:pointer;opacity:.7">✏️</span>`;
-            const qtyCtrlSmHtml = fator ? (() => {
-              const { cx, und } = (itemLoja?.qtdCx != null || itemLoja?.qtdUnd != null)
-                ? { cx: itemLoja.qtdCx || 0, und: itemLoja.qtdUnd || 0 }
-                : _decomporCxUnd(qtdL, fator);
-              return `<div class="qty-ctrl-sm" style="gap:3px">
-                  <input class="qty-input-sm qty-cx" type="text" inputmode="decimal" min="0" style="width:26px;border:1px solid var(--border);border-radius:4px" title="Caixas"
-                    value="${cx||''}" placeholder="Cx" ${prodConfirmado?'disabled':''}
-                    oninput="qtdCxUndInput(this,'${prod.id}','${loja.slug_pedido}',${prod.custo||0},${fator})"
-                    onchange="qtdCxUndInput(this,'${prod.id}','${loja.slug_pedido}',${prod.custo||0},${fator},true)"
-                    onblur="qtdCxUndInput(this,'${prod.id}','${loja.slug_pedido}',${prod.custo||0},${fator},true)">
-                  <input class="qty-input-sm qty-und" type="text" inputmode="decimal" min="0" style="width:26px;border:1px solid var(--border);border-radius:4px" title="Unidades avulsas"
-                    value="${und||''}" placeholder="Un" ${prodConfirmado?'disabled':''}
-                    oninput="qtdCxUndInput(this,'${prod.id}','${loja.slug_pedido}',${prod.custo||0},${fator})"
-                    onchange="qtdCxUndInput(this,'${prod.id}','${loja.slug_pedido}',${prod.custo||0},${fator},true)"
-                    onblur="qtdCxUndInput(this,'${prod.id}','${loja.slug_pedido}',${prod.custo||0},${fator},true)">
-                  <span class="cxund-total" style="font-size:9px;color:var(--muted)">=${fmtQtd(qtdL)}</span>
-                </div>`;
-            })() : `<div class="qty-ctrl-sm">
+            const qtyCtrlSmHtml = `<div class="qty-ctrl-sm">
                   <button class="qty-btn-sm" onclick="ajustarQtd('${prod.id}','${loja.slug_pedido}',${prod.custo||0},-1)" ${prodConfirmado?'disabled':''}>−</button>
                   <input class="qty-input-sm" type="text" inputmode="decimal" min="0"
                     value="${qtdL||''}" placeholder="0" ${prodConfirmado?'disabled':''}
@@ -2382,30 +2350,6 @@ function qtdChanged(catalogoId, lojaSlug, custo, valor, imediato, cxUnd) {
     }, 500);
     _qtdSaveTimers[key] = { timer, catalogoId, lojaSlug, custo, valor, cxUnd };
   }
-}
-
-// Decompõe uma quantidade total (o que fica salvo) em Cx + Und, usando o fator de
-// conversão do produto (und_por_caixa) — só pra exibir os dois campos separados no
-// Pedido, facilitando pro pessoal do estoque que já pensa em caixas. O que é salvo no
-// banco continua sendo sempre o total (qtd_pedida), igual antes.
-function _decomporCxUnd(total, fator) {
-  const t = parseFloat(total) || 0;
-  const cx = Math.floor(t / fator);
-  const und = Math.round((t - cx * fator) * 100) / 100;
-  return { cx, und };
-}
-
-// Lida com a digitação nos campos Cx/Und: recalcula o total, atualiza o "= X UND" ao
-// lado na hora (sem esperar o debounce salvar) e segue o mesmo fluxo de gravação/
-// debounce de sempre (qtdChanged) com o total resultante.
-function qtdCxUndInput(el, catalogoId, lojaSlug, custo, fator, imediato) {
-  const row = el.closest('[data-cid]');
-  const cx = parseFloat(row?.querySelector('.qty-cx')?.value) || 0;
-  const und = parseFloat(row?.querySelector('.qty-und')?.value) || 0;
-  const total = cx * fator + und;
-  const totalEl = row?.querySelector('.cxund-total');
-  if (totalEl) totalEl.textContent = '= ' + fmtQtd(total);
-  qtdChanged(catalogoId, lojaSlug, custo, total, imediato, { cx, und });
 }
 
 function _flushQtdTimersPendentes() {
