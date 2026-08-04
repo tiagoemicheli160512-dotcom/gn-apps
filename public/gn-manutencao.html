@@ -1778,6 +1778,13 @@ function _horaAtual(){
   const n=new Date();
   return n.getHours().toString().padStart(2,'0')+':'+n.getMinutes().toString().padStart(2,'0');
 }
+// Data local (não UTC) — new Date().toISOString() usa UTC, então uma chegada às 22h-23h
+// no horário do Brasil (UTC-3) virava "amanhã" no campo data, ficando fora do filtro de
+// "hoje" e do agrupamento por dia nos relatórios.
+function _hojeLocalVisita(){
+  const n=new Date();
+  return n.getFullYear()+'-'+String(n.getMonth()+1).padStart(2,'0')+'-'+String(n.getDate()).padStart(2,'0');
+}
 
 async function loadVisitas(){
   const {from,to}=getPeriodoDates();
@@ -1802,7 +1809,7 @@ function renderVisitasPanel(){
   const lojaLabel=isMaster()&&S.lojaFiltro!=='Todas'?S.lojaFiltro:isMaster()?'Todas as lojas':(S.usuario?.loja||'');
 
   // Quick-action block: show new visit form for non-master or form for master
-  const hoje=new Date().toISOString().split('T')[0];
+  const hoje=_hojeLocalVisita();
 
   // Find if user has an open visit today (chegada sem saída)
   const visitaAbertaHoje=S.visitasItems.find(v=>
@@ -2022,7 +2029,7 @@ async function iniciarVisita(){
   if(!oficial){ toast('Informe o nome do oficial'); return; }
   // ⚠️ captura a hora ANTES de qualquer operação async
   const horaChegada=_horaAtual();
-  const hoje=new Date().toISOString().split('T')[0];
+  const hoje=_hojeLocalVisita();
   _savingVisita=true;
   const body={
     loja, data:hoje, oficial, hora_chegada:horaChegada, hora_saida:null,
@@ -2038,7 +2045,19 @@ async function iniciarVisita(){
     toast('📍 Chegada registrada: '+horaChegada);
     // GPS em background — não bloqueia o fluxo principal
     _capturarGeoVisita(newId);
-  }catch(e){ toast('Erro ao registrar: '+e.message); }
+  }catch(e){
+    // Trava do banco (índice único "só uma visita aberta por loja+oficial+dia") — o
+    // motivo mais comum de bater aqui é uma tentativa anterior que na verdade deu certo,
+    // mas o app não recebeu a resposta a tempo (rede instável) e achou que tinha falhado.
+    // Em vez de mostrar erro cru, recarrega e mostra a visita que já está aberta.
+    if(/duplicate key|23505/i.test(e.message||'')){
+      S._visitaFormOpen=false;
+      await loadVisitas(); renderVisitasPanel();
+      toast('⏳ Já existe uma chegada registrada aqui hoje — veja abaixo.');
+    } else {
+      toast('Erro ao registrar: '+e.message);
+    }
+  }
   finally{ _savingVisita=false; }
 }
 
