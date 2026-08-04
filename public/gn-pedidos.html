@@ -1554,6 +1554,68 @@ async function _confirmarFornecedoresSelecionados() {
   }
 }
 
+// Desfaz a confirmação de um fornecedor (ex.: clicou "Confirmar" sem querer, confirmou o
+// fornecedor errado). Só apaga as provisões que ainda estão AGUARDANDO — uma entrega que
+// já foi validada/recebida (RECEBIDO_OK/DIVERGENCIA) é um evento real que já aconteceu, e
+// nunca é tocada aqui. Confirmação em duas etapas, dado que provisões apagadas não têm
+// volta (é preciso confirmar de novo do zero pra recriar).
+async function reverterConfirmacaoFornecedor(fornecedor) {
+  if (!S.pedidoAtual?.id) return;
+  if (!S.fornecedoresConfirmados.has(fornecedor)) { toast('Esse fornecedor não está confirmado.', 'err'); return; }
+
+  let provisoesForn;
+  try {
+    provisoesForn = await _fetchTodasPaginas(() => db.from('gn_provisoes')
+      .select('id,status')
+      .eq('pedido_id', S.pedidoAtual.id)
+      .eq('fornecedor', fornecedor)
+      .order('id'));
+  } catch (e) {
+    toast('Erro ao verificar provisões: ' + (e.message || e), 'err');
+    return;
+  }
+
+  const reversiveis = (provisoesForn || []).filter(p => p.status === 'AGUARDANDO');
+  const jaRecebidas = (provisoesForn || []).length - reversiveis.length;
+
+  if (reversiveis.length === 0) {
+    toast(`Todas as provisões de ${fornecedor} já foram recebidas/validadas — não dá pra reverter.`, 'err');
+    return;
+  }
+
+  const avisoRecebidas = jaRecebidas > 0
+    ? `\n\n⚠️ ${jaRecebidas} item(ns) já foram recebidos/validados e NÃO serão afetados — só as ${reversiveis.length} provisões ainda aguardando entrega vão ser apagadas.`
+    : '';
+  if (!confirm(`Reverter a confirmação de ${fornecedor}?${avisoRecebidas}\n\nOs itens voltam a ficar editáveis, e alguém vai precisar confirmar de novo pra gerar as provisões.`)) return;
+  if (!confirm(`Tem certeza mesmo? Essa ação apaga ${reversiveis.length} provisão(ões) e não pode ser desfeita — depois de reverter, é preciso confirmar de novo do zero.`)) return;
+
+  try {
+    const ids = reversiveis.map(p => p.id);
+    for (let i = 0; i < ids.length; i += 100) {
+      const { error } = await db.from('gn_provisoes').delete().in('id', ids.slice(i, i + 100));
+      if (error) throw error;
+    }
+
+    S.fornecedoresConfirmados.delete(fornecedor);
+    S.fornecedoresReabertos.delete(fornecedor);
+
+    // Se o pedido já tinha virado CONFIRMADO (todo mundo tinha confirmado), reverter um
+    // fornecedor tira ele dessa lista — o pedido não está mais 100% confirmado.
+    if (S.pedidoAtual.status === 'CONFIRMADO') {
+      const { error: errPed } = await db.from('gn_pedidos')
+        .update({ status: 'RASCUNHO', atualizado_em: new Date().toISOString() })
+        .eq('id', S.pedidoAtual.id);
+      if (errPed) throw errPed;
+      S.pedidoAtual.status = 'RASCUNHO';
+    }
+
+    toast(`↩️ Confirmação de ${fornecedor} revertida (${reversiveis.length} provisão(ões) apagada(s)).`, 'ok');
+    renderPedido();
+  } catch (e) {
+    toast('Erro ao reverter: ' + (e.message || e), 'err');
+  }
+}
+
 async function novoPedido() {
   // Na aba Edu/Oseas, "Novo" não pode cancelar o rascunho inteiro — é compartilhado com
   // quem ainda está lançando na outra aba. Em vez disso, limpa só os itens dos
@@ -2156,7 +2218,9 @@ function renderPedido() {
         }).join('');
         const fornConfirmadoBadge = S.fornecedoresReabertos.has(forn)
           ? ' <span style="color:#f59e0b;font-weight:700">🔓 nova rodada (pedido anterior já confirmado)</span>'
-          : S.fornecedoresConfirmados.has(forn) ? ' <span style="color:#22c55e;font-weight:700">✓ confirmado</span>' : '';
+          : S.fornecedoresConfirmados.has(forn)
+            ? ` <span style="color:#22c55e;font-weight:700">✓ confirmado</span> <span onclick="event.stopPropagation();reverterConfirmacaoFornecedor('${forn.replace(/'/g,"\\'")}')" title="Reverter confirmação (voltar a editar)" style="cursor:pointer;font-size:11px;color:#f87171;font-weight:700">↩️ Reverter</span>`
+            : '';
         return `<div><div class="forn-header">${forn}${fornConfirmadoBadge}</div>${rowsHtml}</div>`;
       }).join('');
 
@@ -2251,7 +2315,9 @@ function renderPedido() {
 
         const fornConfirmadoBadgeT = S.fornecedoresReabertos.has(forn)
           ? ' <span style="color:#f59e0b;font-weight:700">🔓 nova rodada (pedido anterior já confirmado)</span>'
-          : S.fornecedoresConfirmados.has(forn) ? ' <span style="color:#22c55e;font-weight:700">✓ confirmado</span>' : '';
+          : S.fornecedoresConfirmados.has(forn)
+            ? ` <span style="color:#22c55e;font-weight:700">✓ confirmado</span> <span onclick="event.stopPropagation();reverterConfirmacaoFornecedor('${forn.replace(/'/g,"\\'")}')" title="Reverter confirmação (voltar a editar)" style="cursor:pointer;font-size:11px;color:#f87171;font-weight:700">↩️ Reverter</span>`
+            : '';
         return `<div><div class="forn-header">${forn}${fornConfirmadoBadgeT}</div>${cardsHtml}</div>`;
       }).join('');
 
