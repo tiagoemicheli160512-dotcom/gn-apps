@@ -1388,17 +1388,23 @@ function _fornecedoresComItensPedido() {
 async function confirmarPedido() {
   if (!S.pedidoAtual) return;
 
-  const pendentes = _fornecedoresComItensPedido().filter(f => !S.fornecedoresConfirmados.has(f));
+  // Na aba Edu/Oseas, só entram os fornecedores dessa aba — impede confirmar (e gerar
+  // provisões de) fornecedores de quem ainda está lançando o pedido em outra aba.
+  const escopo = S.eduAtivo ? EDU_FORNECEDORES : S.oseasAtivo ? OSEAS_FORNECEDORES : null;
+  let comItens = _fornecedoresComItensPedido();
+  if (escopo) comItens = comItens.filter(f => escopo.includes(f));
+  const pendentes = comItens.filter(f => !S.fornecedoresConfirmados.has(f));
 
   if (pendentes.length === 0) {
-    toast(S.fornecedoresConfirmados.size > 0
-      ? 'Todos os fornecedores deste pedido já foram confirmados.'
-      : 'Nenhum item com quantidade para confirmar.', 'err');
+    const jaConfirmouAlgum = comItens.some(f => S.fornecedoresConfirmados.has(f));
+    toast(jaConfirmouAlgum
+      ? 'Todos os fornecedores desta aba já foram confirmados.'
+      : 'Nenhum item com quantidade para confirmar nesta aba.', 'err');
     return;
   }
 
   abrirModal(`
-    <div class="modal-titulo">✓ Confirmar Pedido
+    <div class="modal-titulo">✓ Confirmar Pedido${escopo?' — '+(S.eduAtivo?'Edu':'Oseas'):''}
       <button class="modal-close" onclick="$('modal-bg').classList.remove('ativo')">×</button>
     </div>
     <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Selecione os fornecedores pra gerar as provisões agora. Os demais continuam em aberto pra confirmar depois.</div>
@@ -1528,6 +1534,10 @@ async function _confirmarFornecedoresSelecionados() {
 }
 
 async function novoPedido() {
+  // Na aba Edu/Oseas, "Novo" não pode cancelar o rascunho inteiro — é compartilhado com
+  // quem ainda está lançando na outra aba. Em vez disso, limpa só os itens dos
+  // fornecedores dessa aba, deixando o resto do pedido intocado.
+  if (S.eduAtivo || S.oseasAtivo) { await _limparFornecedoresAba(); return; }
   const ehConfirmado = S.pedidoAtual?.status === 'CONFIRMADO';
   // Quantos itens (de qualquer loja) já têm quantidade lançada no rascunho atual —
   // cancelar o pedido sem avisar isso claramente já fez itens de 9 lojas sumirem
@@ -1556,6 +1566,58 @@ async function novoPedido() {
   calcularTotais();
   renderPedido();
   toast('Novo pedido criado.', 'ok');
+}
+
+// Zera só os itens dos fornecedores da aba ativa (Edu ou Oseas) no rascunho atual —
+// não mexe no gn_pedidos (a semana continua a mesma) nem nos itens de outros
+// fornecedores, então quem ainda está lançando na outra aba não perde nada. Fornecedores
+// já confirmados da própria aba também ficam de fora (já geraram provisão, não faz
+// sentido zerar).
+async function _limparFornecedoresAba() {
+  const label = S.eduAtivo ? 'Edu' : 'Oseas';
+  const fornsAba = (S.eduAtivo ? EDU_FORNECEDORES : OSEAS_FORNECEDORES)
+    .filter(f => !S.fornecedoresConfirmados.has(f));
+
+  if (fornsAba.length === 0) {
+    toast(`Nenhum fornecedor pendente de ${label} pra limpar.`, 'err');
+    return;
+  }
+
+  const fornsSet = new Set(fornsAba);
+  const catalogoIdsAba = S.catalogo.filter(p => fornsSet.has(p.fornecedor)).map(p => p.id);
+
+  let totalItens = 0;
+  catalogoIdsAba.forEach(cid => {
+    Object.values(S.pedidoItens[cid] || {}).forEach(item => { if (item.qtd > 0) totalItens++; });
+  });
+
+  const aviso = totalItens > 0
+    ? `\n\n⚠️ ${totalItens} item(ns) já lançado(s) pelas lojas pra ${label} vão ser zerados.`
+    : '';
+  if (!confirm(`Limpar o pedido de ${label} (${fornsAba.join('/')}) pra lançar de novo?${aviso}\n\nOs itens dos outros fornecedores (de quem ainda está lançando na outra aba) não são afetados.`)) return;
+
+  if (S.pedidoAtual?.id && catalogoIdsAba.length > 0) {
+    try {
+      const { error } = await db.from('gn_pedido_itens')
+        .update({ qtd_pedida: 0, qtd_cx: null, qtd_und: null })
+        .eq('pedido_id', S.pedidoAtual.id)
+        .in('catalogo_id', catalogoIdsAba);
+      if (error) throw error;
+    } catch (e) {
+      toast('Erro ao limpar: ' + (e.message || e), 'err');
+      return;
+    }
+  }
+
+  catalogoIdsAba.forEach(cid => {
+    Object.values(S.pedidoItens[cid] || {}).forEach(item => {
+      item.qtd = 0; item.qtdCx = null; item.qtdUnd = null; item.diverg = false;
+    });
+  });
+
+  calcularTotais();
+  renderPedido();
+  toast(`Pedido de ${label} limpo — pode lançar de novo.`, 'ok');
 }
 
 // ═══════════════════════════════════════════════
@@ -2164,7 +2226,10 @@ function renderPedido() {
     ? (S.urgenciaTemplate[LOJA_USERKEY_BY_SLUG[_lojaFiltroUrg]] || []).length
     : S.lojas.reduce((sum,l)=>sum+((S.urgenciaTemplate[LOJA_USERKEY_BY_SLUG[l.slug_pedido]]||[]).length),0);
 
-  const fornsPendentes = fornsTodasLojas.filter(f => !S.fornecedoresConfirmados.has(f));
+  // Na aba Edu/Oseas, o botão "Confirmar" só considera (e mostra pendência de)
+  // fornecedores dessa aba — evita confirmar por engano os do outro comprador.
+  const escopoForn = S.eduAtivo ? EDU_FORNECEDORES : S.oseasAtivo ? OSEAS_FORNECEDORES : null;
+  const fornsPendentes = fornsTodasLojas.filter(f => !S.fornecedoresConfirmados.has(f) && (!escopoForn || escopoForn.includes(f)));
 
   $('content').innerHTML = semNavHtml + _datasEspeciaisCardHtml() + _vendaSemanaAntCardHtml() + `
     <div class="pedido-bar">
@@ -2174,7 +2239,7 @@ function renderPedido() {
         <div style="font-size:11px;color:var(--muted);margin-top:2px">${S.todosModo ? 'Total geral' : lojaDisplay} : <span class="num" id="hdr-total">${S.todosModo ? `R$ ${fmt(totalGeral)}` : `R$ ${fmt(totalLoja)}`}</span> · <span style="color:var(--text)">${totalItensGeral} item${totalItensGeral!==1?'s':''}</span></div>
       </div>
       <div class="pedido-acoes">
-        <button class="btn-sm btn-outline" onclick="novoPedido()">Novo</button>
+        <button class="btn-sm btn-outline" onclick="novoPedido()" title="${(S.eduAtivo||S.oseasAtivo)?'Limpa só os itens desta aba — não afeta quem ainda está lançando':'Cancela o rascunho inteiro e começa do zero'}">${(S.eduAtivo||S.oseasAtivo)?'Limpar':'Novo'}</button>
         <button class="btn-sm" onclick="flushPendingItems(true)" title="Forçar salvamento agora" style="background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.4);color:#22c55e">💾 Salvar</button>
         <button class="btn-sm" onclick="gerarWppPedido()" style="background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);color:#22c55e">📲</button>
         <button class="btn-sm" onclick="gerarPDFPedido()" style="background:rgba(192,57,43,.15);border:1px solid rgba(192,57,43,.4);color:#e74c3c">📄</button>
