@@ -643,6 +643,7 @@ let S = {
   // Filtros provisão
   provLoja: '',
   provStatus: '',
+  provComprador: '', // '' = todos | 'edu' | 'oseas' — filtra pelos fornecedores daquele comprador
   provSemana: null,   // semana selecionada na aba Provisão (independente de semanaAtiva)
   provisoes: [],
   entregasPendentes: [],
@@ -2585,6 +2586,9 @@ async function toggleDiverg(catalogoId, lojaSlug) {
 }
 
 function verProvisoes() {
+  // Ao vir da aba Edu/Oseas, a tela de Provisões já abre filtrada pro comprador daquela
+  // aba — assim dá pra conferir de fato só o que ele pediu, sem precisar filtrar na mão.
+  S.provComprador = S.eduAtivo ? 'edu' : S.oseasAtivo ? 'oseas' : '';
   S.tab = 'provisoes';
   setTab('provisoes');
 }
@@ -3207,8 +3211,23 @@ async function renderProvisoes() {
     `<button class="store-tab${S.provStatus===o.v?' ativo':''}" onclick="S.provStatus='${o.v}';renderProvisoes()">${o.l}</button>`
   ).join('');
 
+  // Filtro de comprador — pra ver (e gerar relatório) só do que Edu ou Oseas pediu,
+  // igual à confirmação já ser separada por aba neles.
+  const COMPRADOR_OPTS = [
+    {v:'',l:'Todos'},
+    {v:'edu',l:'👤 Edu'},
+    {v:'oseas',l:'👤 Oseas'},
+  ];
+  const compradorChips = COMPRADOR_OPTS.map(o=>
+    `<button class="store-tab${S.provComprador===o.v?' ativo':''}" onclick="S.provComprador='${o.v}';renderProvisoes()">${o.l}</button>`
+  ).join('');
+
+  const lojaLabelAtual = S.provLoja ? (S.lojas.find(l=>l.slug_pedido===S.provLoja)?.nome_display||S.provLoja) : 'Todas as Lojas';
+
   // Filtrar e agrupar por fornecedor
-  const provisoesFilt = S.provStatus ? S.provisoes.filter(p=>p.status===S.provStatus) : S.provisoes;
+  const escopoCompradorForn = S.provComprador === 'edu' ? EDU_FORNECEDORES : S.provComprador === 'oseas' ? OSEAS_FORNECEDORES : null;
+  const provisoesFilt = (S.provStatus ? S.provisoes.filter(p=>p.status===S.provStatus) : S.provisoes)
+    .filter(p => !escopoCompradorForn || escopoCompradorForn.includes(p.fornecedor));
   const por_forn = {};
   provisoesFilt.forEach(p => {
     const forn = p.fornecedor || 'SEM FORNECEDOR';
@@ -3355,6 +3374,7 @@ async function renderProvisoes() {
       </div>
     </div>
     <div class="store-tabs" style="margin-bottom:8px">${lojaTabs}</div>
+    <div class="store-tabs" style="margin-bottom:8px">${compradorChips}</div>
     <div class="store-tabs" style="margin-bottom:12px">${statusChips}</div>
     ${provHtml}
 
@@ -3369,10 +3389,10 @@ async function renderProvisoes() {
     </div>
 
     <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px">
-      <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:10px;letter-spacing:.5px">📋 Relatório de Pedido para Fornecedores — Todas as Lojas</div>
+      <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:10px;letter-spacing:.5px">📋 Relatório de Pedido para Fornecedores — ${lojaLabelAtual}${S.provComprador?' · '+(S.provComprador==='edu'?'Edu':'Oseas'):''}</div>
       <div style="display:flex;flex-direction:column;gap:8px">
         <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:rgba(232,88,10,.08);border:1px solid rgba(232,88,10,.25);border-radius:10px">
-          <span style="flex:1;font-size:12px;font-weight:700;color:var(--primary)">Pedido Completo — Todas as Lojas</span>
+          <span style="flex:1;font-size:12px;font-weight:700;color:var(--primary)">Pedido Completo — ${lojaLabelAtual}${S.provComprador?' ('+(S.provComprador==='edu'?'Edu':'Oseas')+')':''}</span>
           <button onclick="gerarWppPedidoProvForn(null)" style="background:rgba(37,211,102,.2);border:1px solid rgba(37,211,102,.5);border-radius:8px;padding:6px 12px;color:#22c55e;font-weight:700;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:4px">📲 WPP</button>
           <button onclick="gerarPDFPedidoProvForn(null)" style="background:rgba(192,57,43,.15);border:1px solid rgba(192,57,43,.4);border-radius:8px;padding:6px 12px;color:#e74c3c;font-weight:700;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:4px">📄 PDF</button>
         </div>
@@ -3399,10 +3419,39 @@ async function _navegarSemanaProvisao(delta) {
   await renderProvisoes();
 }
 
+// Provisões dentro do escopo de comprador ativo na tela (Todos/Edu/Oseas) — mesmo filtro
+// usado na lista, aplicado também nos relatórios (geral e por fornecedor).
+function _provisoesEscopoComprador() {
+  if (S.provComprador === 'edu') return S.provisoes.filter(p => EDU_FORNECEDORES.includes(p.fornecedor));
+  if (S.provComprador === 'oseas') return S.provisoes.filter(p => OSEAS_FORNECEDORES.includes(p.fornecedor));
+  return S.provisoes;
+}
+
+// Soma pedidos repetidos do mesmo produto na mesma loja/fornecedor (ex.: 2ª rodada de
+// pedido na mesma semana) numa linha só nos relatórios, em vez de listar duas entradas
+// separadas (ex.: pediu 20, depois mais 20 → aparece 40, não "20" e "20"). Se as rodadas
+// somadas têm status diferentes, o total fica como AGUARDANDO — só marca como recebido
+// quando TODAS as rodadas confirmarem.
+function _agruparPorProdutoLoja(itens) {
+  const out = [];
+  itens.forEach(p => {
+    const existente = out.find(e => e.catalogo_id === p.catalogo_id && e.loja_slug === p.loja_slug && e.fornecedor === p.fornecedor);
+    if (existente) {
+      existente.qtd_prevista = (parseFloat(existente.qtd_prevista) || 0) + (parseFloat(p.qtd_prevista) || 0);
+      existente.valor_previsto = (parseFloat(existente.valor_previsto) || 0) + (parseFloat(p.valor_previsto) || 0);
+      if (existente.status !== p.status) existente.status = 'AGUARDANDO';
+    } else {
+      out.push({ ...p });
+    }
+  });
+  return out;
+}
+
 function gerarWppProvisoes() {
-  if (!S.provisoes.length) { toast('Nenhuma provisão para enviar.', 'err'); return; }
+  const escopo = _agruparPorProdutoLoja(_provisoesEscopoComprador());
+  if (!escopo.length) { toast('Nenhuma provisão para enviar.', 'err'); return; }
   const porForn = {};
-  S.provisoes.forEach(p => {
+  escopo.forEach(p => {
     const f = p.fornecedor || 'SEM FORNECEDOR';
     (porForn[f] = porForn[f] || []).push(p);
   });
@@ -3410,7 +3459,8 @@ function gerarWppProvisoes() {
   const lojaLabel = S.provLoja
     ? (S.lojas.find(l => l.slug_pedido === S.provLoja)?.nome_display || S.provLoja)
     : 'Todas as lojas';
-  let msg = `📦 *PROVISÕES — ${lojaLabel}*\n`;
+  const compradorLabel = S.provComprador === 'edu' ? ' · Edu' : S.provComprador === 'oseas' ? ' · Oseas' : '';
+  let msg = `📦 *PROVISÕES — ${lojaLabel}${compradorLabel}*\n`;
   let total = 0;
   fns.forEach(forn => {
     const itens = porForn[forn];
@@ -3566,7 +3616,7 @@ async function enviarPDFFornAllLojasWpp(fornecedor) {
 // ───────────────────────────────────────────────────────────────────────
 
 function gerarWppProvisoesForn(fornecedor) {
-  const itens=S.provisoes.filter(p=>(p.fornecedor||'SEM FORNECEDOR')===fornecedor);
+  const itens=_agruparPorProdutoLoja(S.provisoes.filter(p=>(p.fornecedor||'SEM FORNECEDOR')===fornecedor));
   if(!itens.length){toast('Nenhuma provisão deste fornecedor.','err');return;}
   const lojaLabel=S.provLoja?(S.lojas.find(l=>l.slug_pedido===S.provLoja)?.nome_display||S.provLoja):'Todas as lojas';
   let msg=`📦 *PROVISÕES — ${fornecedor}*\n📍 ${lojaLabel}\n━━━━━━━━━━━━━━━━━━\n`;
@@ -3583,10 +3633,14 @@ function gerarWppProvisoesForn(fornecedor) {
 }
 
 // ── Relatório de PEDIDO (formato limpo) a partir de S.provisoes ────────
+// fornecedor: string = 1 fornecedor específico; null/undefined = respeita o filtro de
+// comprador ativo na tela (Todos/Edu/Oseas). Sempre soma rodadas repetidas do mesmo
+// produto/loja (2ª rodada de pedido na semana) numa linha só.
 function _buildPedidoProv(fornecedor) {
-  const itens = fornecedor
+  const base = fornecedor
     ? S.provisoes.filter(p => (p.fornecedor || 'SEM FORNECEDOR') === fornecedor)
-    : S.provisoes;
+    : _provisoesEscopoComprador();
+  const itens = _agruparPorProdutoLoja(base);
   const lojaMap = {};
   itens.forEach(p => {
     const loja = S.lojas.find(l => l.slug_pedido === p.loja_slug)?.nome_display || p.loja_slug;
@@ -3601,9 +3655,11 @@ function gerarWppPedidoProvForn(fornecedor) {
   const lojaMap = _buildPedidoProv(fornecedor);
   if (!Object.keys(lojaMap).length) { toast('Nenhum item para este fornecedor.', 'err'); return; }
 
+  const lojaLabel = S.provLoja ? (S.lojas.find(l=>l.slug_pedido===S.provLoja)?.nome_display||S.provLoja) : 'TODAS AS LOJAS';
+  const compradorLabel = !fornecedor && S.provComprador ? ' · ' + (S.provComprador==='edu'?'EDU':'OSEAS') : '';
   const cabecalho = fornecedor
-    ? `🛒 *PEDIDO — ${fornecedor}*\nSemana ${sem.num}/${sem.ano} (${sem.periodo})\n📍 TODAS AS LOJAS`
-    : `🛒 *PEDIDO GERAL — TODAS AS LOJAS*\nSemana ${sem.num}/${sem.ano} (${sem.periodo})`;
+    ? `🛒 *PEDIDO — ${fornecedor}*\nSemana ${sem.num}/${sem.ano} (${sem.periodo})\n📍 ${lojaLabel}`
+    : `🛒 *PEDIDO GERAL${compradorLabel}*\nSemana ${sem.num}/${sem.ano} (${sem.periodo})\n📍 ${lojaLabel}`;
   let msg = cabecalho + '\n━━━━━━━━━━━━━━━━━━\n';
   let totalGeral = 0;
 
@@ -3633,8 +3689,10 @@ function gerarPDFPedidoProvForn(fornecedor) {
   const lojaMap = _buildPedidoProv(fornecedor);
   if (!Object.keys(lojaMap).length) { toast('Nenhum item para este fornecedor.', 'err'); return; }
 
-  const tituloLabel = fornecedor ? fornecedor : 'PEDIDO GERAL';
-  let msg = `${tituloLabel} — TODAS AS LOJAS\nSemana ${sem.num}/${sem.ano} (${sem.periodo})\n${'─'.repeat(40)}\n`;
+  const lojaLabel = S.provLoja ? (S.lojas.find(l=>l.slug_pedido===S.provLoja)?.nome_display||S.provLoja) : 'TODAS AS LOJAS';
+  const compradorLabel = !fornecedor && S.provComprador ? ' · ' + (S.provComprador==='edu'?'EDU':'OSEAS') : '';
+  const tituloLabel = fornecedor ? fornecedor : ('PEDIDO GERAL'+compradorLabel);
+  let msg = `${tituloLabel} — ${lojaLabel}\nSemana ${sem.num}/${sem.ano} (${sem.periodo})\n${'─'.repeat(40)}\n`;
   let totalGeral = 0;
 
   Object.entries(lojaMap).sort(([a],[b]) => a.localeCompare(b)).forEach(([lojaNome, itens]) => {
@@ -3843,12 +3901,14 @@ async function enviarPDFPedidoWpp(){
   await _compartilharPdfWpp(r.msg, r.titulo);
 }
 function gerarPDFProvisoes(){
-  if(!S.provisoes.length){toast('Nenhuma provisão.','err');return;}
+  const escopo = _agruparPorProdutoLoja(_provisoesEscopoComprador());
+  if(!escopo.length){toast('Nenhuma provisão.','err');return;}
   const porForn={};
-  S.provisoes.forEach(p=>{const f=p.fornecedor||'SEM FORNECEDOR';(porForn[f]=porForn[f]||[]).push(p);});
+  escopo.forEach(p=>{const f=p.fornecedor||'SEM FORNECEDOR';(porForn[f]=porForn[f]||[]).push(p);});
   const fns=Object.keys(porForn).sort();
   const lojaLabel=S.provLoja?(S.lojas.find(l=>l.slug_pedido===S.provLoja)?.nome_display||S.provLoja):'Todas as lojas';
-  let msg=`PROVISÕES — ${lojaLabel}\n`;
+  const compradorLabel = S.provComprador === 'edu' ? ' · Edu' : S.provComprador === 'oseas' ? ' · Oseas' : '';
+  let msg=`PROVISÕES — ${lojaLabel}${compradorLabel}\n`;
   let total=0;
   fns.forEach(forn=>{
     const itens=porForn[forn];
