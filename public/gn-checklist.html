@@ -1436,6 +1436,19 @@
       <button class="btn-secondary" onclick="renderLivroCaixa()" style="font-size:10px;padding:5px 10px;">🔄 Atualizar</button>
     </div>
   </div>
+  <div style="background:linear-gradient(135deg,#1a1a2a,#1a2a1a);border-radius:12px;padding:14px;margin-bottom:14px;border:1px solid #2a2a3a;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+      <button onclick="navegarMesCaixa(-1)" style="background:#111;border:1px solid #333;border-radius:8px;padding:5px 12px;color:#f0f0f0;font-size:14px;cursor:pointer;">←</button>
+      <div style="text-align:center;">
+        <div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.5px;">Resumo do Mês</div>
+        <div style="font-size:12px;font-weight:700;color:#f0f0f0;" id="caixa-mes-label">—</div>
+      </div>
+      <button id="caixa-mes-next" onclick="navegarMesCaixa(1)" style="background:#111;border:1px solid #333;border-radius:8px;padding:5px 12px;color:#f0f0f0;font-size:14px;cursor:pointer;">→</button>
+    </div>
+    <div id="caixa-mensal-content">
+      <div style="text-align:center;padding:10px;color:#444;font-size:11px;">Carregando mês...</div>
+    </div>
+  </div>
   <div id="caixa-content">
     <div style="text-align:center;padding:40px;color:#444;font-size:12px;">Carregando...</div>
   </div>
@@ -2759,6 +2772,122 @@ function onFotoDespCaixa(despId, input){
     autoSave();
     renderLivroCaixa();
   });
+}
+
+// ── RESUMO MENSAL DO CAIXA ──────────────────────────────────────────────
+// Mês exibido no resumo mensal — independente da semana selecionada no resto do app.
+// Sempre começa no mês da data de hoje.
+let _caixaMesRef = new Date();
+
+function navegarMesCaixa(delta){
+  const hoje = new Date();
+  const novo = new Date(_caixaMesRef.getFullYear(), _caixaMesRef.getMonth()+delta, 1);
+  if(novo.getFullYear() > hoje.getFullYear() || (novo.getFullYear()===hoje.getFullYear() && novo.getMonth() > hoje.getMonth())) return;
+  _caixaMesRef = novo;
+  renderResumoMensalCaixa();
+}
+
+// Entrada bruta e saídas de um dia do checklist_diario — mesma fórmula usada no Livro
+// Caixa semanal (dinheiro_caixa já vem líquido de despesas, então a entrada bruta é
+// reconstituída somando de volta as despesas do dia).
+function _entradaSaidaDia(r){
+  const allDesp = Array.isArray(r.despesas) ? r.despesas : [];
+  const desp = allDesp.filter(d=>d._tipo!=='foto_dinheiro');
+  const totalDesp = desp.reduce((s,d)=>s+(parseFloat(d.valor)||0),0);
+  const rets = Array.isArray(r.retiradas) ? r.retiradas : [];
+  const totalRet = rets.reduce((s,x)=>s+(parseFloat(x.valor)||0),0);
+  const caixa = parseFloat(r.dinheiro_caixa)||0;
+  return { entradaBruta: caixa + totalDesp, saidas: totalDesp + totalRet };
+}
+
+async function renderResumoMensalCaixa(){
+  const el = document.getElementById('caixa-mensal-content');
+  const lbl = document.getElementById('caixa-mes-label');
+  const btnNext = document.getElementById('caixa-mes-next');
+  if(!el) return;
+
+  const ano = _caixaMesRef.getFullYear(), mes = _caixaMesRef.getMonth();
+  const MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+  if(lbl) lbl.textContent = `${MESES[mes]}/${ano}`;
+  const hoje = new Date();
+  if(btnNext) btnNext.style.opacity = (ano===hoje.getFullYear() && mes===hoje.getMonth()) ? '.35' : '1';
+
+  const iso = d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  const inicioMes = iso(new Date(ano, mes, 1));
+  const fimMes = iso(new Date(ano, mes+1, 0));
+
+  el.innerHTML = '<div style="text-align:center;padding:10px;color:#444;font-size:11px;">Carregando mês...</div>';
+
+  let rows = [];
+  try{
+    const {data,error} = await sb.from('checklist_diario')
+      .select('data_operacao,dinheiro_caixa,despesas,retiradas')
+      .eq('loja', LOJA)
+      .gte('data_operacao', inicioMes)
+      .lte('data_operacao', fimMes)
+      .order('data_operacao', {ascending:true});
+    if(error) throw error;
+    rows = data || [];
+  }catch(e){
+    el.innerHTML = '<div style="text-align:center;padding:10px;color:#e04040;font-size:11px;">Falha ao carregar o mês</div>';
+    return;
+  }
+
+  let totalEntradas=0, totalSaidas=0;
+  rows.forEach(r=>{
+    const {entradaBruta, saidas} = _entradaSaidaDia(r);
+    totalEntradas += entradaBruta;
+    totalSaidas += saidas;
+  });
+  const saldoMes = totalEntradas - totalSaidas;
+
+  // Saldo anterior: última contagem de dinheiro em caixa do mês ANTERIOR — o valor físico
+  // que já estava no caixa não zera no fim do mês, continua sendo o ponto de partida do
+  // mês seguinte (é recorrente, não reinicia).
+  let saldoAnterior = 0;
+  try{
+    const {data: prevRows} = await sb.from('checklist_diario')
+      .select('data_operacao,dinheiro_caixa,retiradas')
+      .eq('loja', LOJA)
+      .lt('data_operacao', inicioMes)
+      .order('data_operacao', {ascending:false})
+      .limit(1);
+    if(prevRows && prevRows[0]){
+      const rets = Array.isArray(prevRows[0].retiradas) ? prevRows[0].retiradas : [];
+      const totalRet = rets.reduce((s,x)=>s+(parseFloat(x.valor)||0),0);
+      saldoAnterior = (parseFloat(prevRows[0].dinheiro_caixa)||0) - totalRet;
+    }
+  }catch(e){}
+
+  const saldoAcumulado = saldoAnterior + saldoMes;
+
+  el.innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
+      <div style="text-align:center;">
+        <div style="font-size:9px;color:#4ade80;margin-bottom:2px;">Total Entradas</div>
+        <div style="font-size:13px;font-weight:700;color:#4ade80;">${_fmtBRL(totalEntradas)}</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:9px;color:#e04040;margin-bottom:2px;">Total Saídas</div>
+        <div style="font-size:13px;font-weight:700;color:#e04040;">${_fmtBRL(totalSaidas)}</div>
+      </div>
+    </div>
+    <div style="border-top:1px solid #2a2a3a;padding-top:8px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
+      <div style="text-align:center;">
+        <div style="font-size:9px;color:#888;margin-bottom:2px;">Saldo anterior</div>
+        <div style="font-size:12px;font-weight:700;color:#ccc;">${_fmtBRL(saldoAnterior)}</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:9px;color:${saldoMes>=0?'#4ade80':'#e04040'};margin-bottom:2px;">Saldo do mês</div>
+        <div style="font-size:12px;font-weight:700;color:${saldoMes>=0?'#4ade80':'#e04040'};">${_fmtBRL(saldoMes)}</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:9px;color:${saldoAcumulado>=0?'#4ade80':'#e04040'};margin-bottom:2px;">Saldo total</div>
+        <div style="font-size:13px;font-weight:800;color:${saldoAcumulado>=0?'#4ade80':'#e04040'};">${_fmtBRL(saldoAcumulado)}</div>
+      </div>
+    </div>
+    ${rows.length===0?'<div style="text-align:center;padding:6px;color:#444;font-size:10px;margin-top:6px;">Nenhum dado neste mês</div>':''}
+  `;
 }
 
 async function renderLivroCaixa(){
@@ -6317,7 +6446,7 @@ function switchTab(tab,btn){
   if(tab==='dados') { _reparentBandaHojeCard(); _preencherBandaDiaFromAgenda(); _renderDatasEspeciaisReminder('datas-especiais-dados-card'); }
   if(tab==='historico') loadHistorico();
   if(tab==='visitas'){ switchVisitasView(_visitasView||'hoje'); }
-  if(tab==='caixa') renderLivroCaixa();
+  if(tab==='caixa') { renderLivroCaixa(); renderResumoMensalCaixa(); }
   if(tab==='fichas') carregarFichas(false);
   if(tab==='banco') carregarBancoHoras(false);
   if(tab==='banda') { _reparentBandaHojeCard(); carregarBandaTab(false); }
