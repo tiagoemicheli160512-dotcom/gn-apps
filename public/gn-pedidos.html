@@ -370,6 +370,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   <button class="sidebar-link active" data-sidebar-tab="pedido" onclick="setTab('pedido')"><span class="sl-icon">📋</span>Pedido</button>
   <button class="sidebar-link" data-sidebar-tab="edu" onclick="setTab('edu')"><span class="sl-icon">👤</span>Edu</button>
   <button class="sidebar-link" data-sidebar-tab="oseas" onclick="setTab('oseas')"><span class="sl-icon">👤</span>Oseas</button>
+  <button class="sidebar-link" data-sidebar-tab="matheus" onclick="setTab('matheus')"><span class="sl-icon">👤</span>Matheus</button>
   <button class="sidebar-link" data-sidebar-tab="catalogo" onclick="setTab('catalogo')"><span class="sl-icon">📦</span>Catálogo</button>
   <button class="sidebar-link" data-sidebar-tab="fornecedores" onclick="setTab('fornecedores')"><span class="sl-icon">🏭</span>Fornecedores</button>
   <button class="sidebar-link" data-sidebar-tab="provisoes" onclick="setTab('provisoes')"><span class="sl-icon">🧾</span>Provisões</button>
@@ -435,6 +436,10 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
     <button class="nav-btn" data-tab="oseas" onclick="setTab('oseas')">
       <span class="nav-icon">&#128100;</span>
       <span class="nav-label">Oseas</span>
+    </button>
+    <button class="nav-btn" data-tab="matheus" onclick="setTab('matheus')">
+      <span class="nav-icon">&#128100;</span>
+      <span class="nav-label">Matheus</span>
     </button>
     <button class="nav-btn" data-tab="catalogo" onclick="setTab('catalogo')">
       <span class="nav-icon">&#128722;</span>
@@ -629,6 +634,7 @@ let S = {
   fornFiltro: '',
   eduAtivo: false, // aba "Edu" — espelho do Pedido, só com itens de EDU_FORNECEDORES
   oseasAtivo: false, // aba "Oseas" — espelho do Pedido, só com itens de OSEAS_FORNECEDORES
+  matheusAtivo: false, // aba "Matheus" — espelho do Pedido, com todo o resto (fora Edu/Oseas)
   pedFiltro: '',    // '' | 'urgencia' | 'vazios' | 'preenchidos'
   urgenciaTemplate: {}, // userKey (mesma chave de gn_lojas.loja) -> [item_id_string, ...]
   gruposAbertos: new Set(['BEBIDAS','PROTEÍNA','PRODUÇÃO']),
@@ -643,7 +649,7 @@ let S = {
   // Filtros provisão
   provLoja: '',
   provStatus: '',
-  provComprador: '', // '' = todos | 'edu' | 'oseas' — filtra pelos fornecedores daquele comprador
+  provComprador: '', // '' = todos | 'edu' | 'oseas' | 'matheus' — filtra pelos fornecedores daquele comprador
   provSemana: null,   // semana selecionada na aba Provisão (independente de semanaAtiva)
   provisoes: [],
   entregasPendentes: [],
@@ -1397,11 +1403,11 @@ function _fornecedoresComItensPedido() {
 async function confirmarPedido() {
   if (!S.pedidoAtual) return;
 
-  // Na aba Edu/Oseas, só entram os fornecedores dessa aba — impede confirmar (e gerar
-  // provisões de) fornecedores de quem ainda está lançando o pedido em outra aba.
-  const escopo = S.eduAtivo ? EDU_FORNECEDORES : S.oseasAtivo ? OSEAS_FORNECEDORES : null;
+  // Na aba Edu/Oseas/Matheus, só entram os fornecedores dessa aba — impede confirmar (e
+  // gerar provisões de) fornecedores de quem ainda está lançando o pedido em outra aba.
+  const escopoAtivo = S.eduAtivo || S.oseasAtivo || S.matheusAtivo;
   let comItens = _fornecedoresComItensPedido();
-  if (escopo) comItens = comItens.filter(f => escopo.includes(f));
+  if (escopoAtivo) comItens = comItens.filter(f => _fornecedorNoEscopoAtivo(f));
   // Fornecedor reaberto pra uma 2ª rodada (ver _limparFornecedoresAba) volta a contar
   // como pendente — senão nunca dava pra confirmar a rodada nova.
   const pendentes = comItens.filter(f => !S.fornecedoresConfirmados.has(f) || S.fornecedoresReabertos.has(f));
@@ -1415,7 +1421,7 @@ async function confirmarPedido() {
   }
 
   abrirModal(`
-    <div class="modal-titulo">✓ Confirmar Pedido${escopo?' — '+(S.eduAtivo?'Edu':'Oseas'):''}
+    <div class="modal-titulo">✓ Confirmar Pedido${escopoAtivo?' — '+(S.eduAtivo?'Edu':S.oseasAtivo?'Oseas':'Matheus'):''}
       <button class="modal-close" onclick="$('modal-bg').classList.remove('ativo')">×</button>
     </div>
     <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Selecione os fornecedores pra gerar as provisões agora. Os demais continuam em aberto pra confirmar depois.</div>
@@ -1552,7 +1558,7 @@ async function novoPedido() {
   // Na aba Edu/Oseas, "Novo" não pode cancelar o rascunho inteiro — é compartilhado com
   // quem ainda está lançando na outra aba. Em vez disso, limpa só os itens dos
   // fornecedores dessa aba, deixando o resto do pedido intocado.
-  if (S.eduAtivo || S.oseasAtivo) { await _limparFornecedoresAba(); return; }
+  if (S.eduAtivo || S.oseasAtivo || S.matheusAtivo) { await _limparFornecedoresAba(); return; }
   const ehConfirmado = S.pedidoAtual?.status === 'CONFIRMADO';
   // Quantos itens (de qualquer loja) já têm quantidade lançada no rascunho atual —
   // cancelar o pedido sem avisar isso claramente já fez itens de 9 lojas sumirem
@@ -1590,8 +1596,8 @@ async function novoPedido() {
 //    intacta em gn_provisoes — isso só reabre a digitação (fornecedoresReabertos) e zera
 //    gn_pedido_itens pra começar uma 2ª rodada, sem tocar no que já foi confirmado.
 async function _limparFornecedoresAba() {
-  const label = S.eduAtivo ? 'Edu' : 'Oseas';
-  const todosForns = S.eduAtivo ? EDU_FORNECEDORES : OSEAS_FORNECEDORES;
+  const label = S.eduAtivo ? 'Edu' : S.oseasAtivo ? 'Oseas' : 'Matheus';
+  const todosForns = _fornecedoresDaAbaAtiva();
   const pendentes = todosForns.filter(f => !S.fornecedoresConfirmados.has(f));
 
   if (pendentes.length > 0) {
@@ -1703,10 +1709,12 @@ function setTab(tab) {
 function renderContent() {
   S.eduAtivo = S.tab === 'edu';
   S.oseasAtivo = S.tab === 'oseas';
+  S.matheusAtivo = S.tab === 'matheus';
   switch(S.tab) {
     case 'pedido':      renderPedido(); break;
     case 'edu':         renderPedido(); break;
     case 'oseas':       renderPedido(); break;
+    case 'matheus':     renderPedido(); break;
     case 'catalogo':    renderCatalogo(); break;
     case 'fornecedores':renderFornecedores(); break;
     case 'provisoes':   renderProvisoes(); break;
@@ -1857,7 +1865,7 @@ async function _carregarVendaSemanaAnterior(lojaSlug, semanaAtivaDate) {
   }
   const aindaNaMesmaTela = S.lojaAtiva === lojaSlug && S.semanaAtiva &&
     S.semanaAtiva.toISOString().split('T')[0] === semanaAtivaDate.toISOString().split('T')[0] &&
-    (S.tab === 'pedido' || S.tab === 'edu' || S.tab === 'oseas');
+    (S.tab === 'pedido' || S.tab === 'edu' || S.tab === 'oseas' || S.tab === 'matheus');
   if (aindaNaMesmaTela) renderPedido();
 }
 
@@ -1906,6 +1914,29 @@ function _vendaSemanaAntCardHtml() {
 const EDU_FORNECEDORES = ['AMBEV', 'JBS', 'FAFS /VILLA PESCADOS'];
 // Fornecedores da aba "Oseas" — mesmo esquema da aba Edu, restrito ao fornecedor PETISCOS.
 const OSEAS_FORNECEDORES = ['PETISCOS'];
+// Fornecedores da aba "Matheus" — todo o resto (não é uma lista fixa, é "tudo que não é
+// do Edu nem do Oseas"), pra nunca precisar atualizar essa lista quando um fornecedor
+// novo for cadastrado.
+function _ehFornecedorMatheus(forn) {
+  return !EDU_FORNECEDORES.includes(forn) && !OSEAS_FORNECEDORES.includes(forn);
+}
+// Escopo de fornecedores da aba de comprador ativa (Edu/Oseas/Matheus) — null = aba
+// Pedido geral, sem filtro. Centraliza a regra usada em Confirmar/Limpar/Provisões pra
+// não ter que lembrar de estender os três lugares toda vez que mudar alguma coisa.
+function _fornecedorNoEscopoAtivo(forn) {
+  if (S.eduAtivo) return EDU_FORNECEDORES.includes(forn);
+  if (S.oseasAtivo) return OSEAS_FORNECEDORES.includes(forn);
+  if (S.matheusAtivo) return _ehFornecedorMatheus(forn);
+  return true;
+}
+// Lista de fornecedores "donos" da aba de comprador ativa — universo usado por
+// _limparFornecedoresAba() pra saber quem ainda está pendente vs. já confirmado.
+function _fornecedoresDaAbaAtiva() {
+  if (S.eduAtivo) return EDU_FORNECEDORES;
+  if (S.oseasAtivo) return OSEAS_FORNECEDORES;
+  if (S.matheusAtivo) return S.fornecedores.map(f => f.nome).filter(_ehFornecedorMatheus);
+  return [];
+}
 
 // ── URGÊNCIA (raio) — compartilhada com o app Lojas ────────────────────────
 // gn_lojas_pedido usa slug_pedido (ex.: 'boulevard'); o app Lojas guarda a urgência em
@@ -2019,8 +2050,9 @@ function renderPedido() {
     ? S.lojas.reduce((sum,l)=>sum+contarItensLoja(l.slug_pedido),0)
     : contarItensLoja(S.lojaAtiva);
 
-  // Grupos únicos do catálogo ativo (na aba Edu, só os grupos com itens de EDU_FORNECEDORES)
-  const grupos = [...new Set(S.catalogo.filter(p=>p.ativo && (!S.eduAtivo || EDU_FORNECEDORES.includes(p.fornecedor)) && (!S.oseasAtivo || OSEAS_FORNECEDORES.includes(p.fornecedor))).map(p=>p.grupo))].sort();
+  // Grupos únicos do catálogo ativo (na aba Edu/Oseas/Matheus, só os grupos com itens
+  // dos fornecedores daquela aba — ver _fornecedorNoEscopoAtivo)
+  const grupos = [...new Set(S.catalogo.filter(p=>p.ativo && _fornecedorNoEscopoAtivo(p.fornecedor)).map(p=>p.grupo))].sort();
   const busca   = S.busca.toLowerCase();
   const lojaAtiva = S.lojaAtiva;
 
@@ -2044,8 +2076,7 @@ function renderPedido() {
   function prodsFiltrados(grupo) {
     let lista = S.catalogo.filter(p =>
       p.ativo && p.grupo === grupo &&
-      (!S.eduAtivo    || EDU_FORNECEDORES.includes(p.fornecedor)) &&
-      (!S.oseasAtivo  || OSEAS_FORNECEDORES.includes(p.fornecedor)) &&
+      _fornecedorNoEscopoAtivo(p.fornecedor) &&
       (!S.grupoFiltro || p.grupo === S.grupoFiltro) &&
       (!S.fornFiltro  || p.fornecedor === S.fornFiltro) &&
       (!busca || p.produto.toLowerCase().includes(busca) || p.fornecedor.toLowerCase().includes(busca))
@@ -2264,21 +2295,22 @@ function renderPedido() {
     ? (S.urgenciaTemplate[LOJA_USERKEY_BY_SLUG[_lojaFiltroUrg]] || []).length
     : S.lojas.reduce((sum,l)=>sum+((S.urgenciaTemplate[LOJA_USERKEY_BY_SLUG[l.slug_pedido]]||[]).length),0);
 
-  // Na aba Edu/Oseas, o botão "Confirmar" só considera (e mostra pendência de)
+  // Na aba Edu/Oseas/Matheus, o botão "Confirmar" só considera (e mostra pendência de)
   // fornecedores dessa aba — evita confirmar por engano os do outro comprador.
-  const escopoForn = S.eduAtivo ? EDU_FORNECEDORES : S.oseasAtivo ? OSEAS_FORNECEDORES : null;
+  const escopoAtivoBar = S.eduAtivo || S.oseasAtivo || S.matheusAtivo;
   const fornsPendentes = fornsTodasLojas.filter(f =>
-    (!S.fornecedoresConfirmados.has(f) || S.fornecedoresReabertos.has(f)) && (!escopoForn || escopoForn.includes(f)));
+    (!S.fornecedoresConfirmados.has(f) || S.fornecedoresReabertos.has(f)) && (!escopoAtivoBar || _fornecedorNoEscopoAtivo(f)));
+  const labelAba = S.eduAtivo ? ' · 👤 EDU ('+EDU_FORNECEDORES.join('/')+')' : S.oseasAtivo ? ' · 👤 OSEAS ('+OSEAS_FORNECEDORES.join('/')+')' : S.matheusAtivo ? ' · 👤 MATHEUS' : '';
 
   $('content').innerHTML = semNavHtml + _datasEspeciaisCardHtml() + _vendaSemanaAntCardHtml() + `
     <div class="pedido-bar">
       <div class="pedido-info">
-        <div class="pedido-label">PEDIDO${S.eduAtivo?' · 👤 EDU ('+EDU_FORNECEDORES.join('/')+')':''}${S.oseasAtivo?' · 👤 OSEAS ('+OSEAS_FORNECEDORES.join('/')+')':''}</div>
+        <div class="pedido-label">PEDIDO${labelAba}</div>
         <div class="pedido-valor">${statusChip} &nbsp;<span style="font-size:11px;color:var(--muted)">Semana ${_fmtDDMM(_semAtivaMonISO)} – ${_fmtDDMM(_semAtivaSunISO)}</span></div>
         <div style="font-size:11px;color:var(--muted);margin-top:2px">${S.todosModo ? 'Total geral' : lojaDisplay} : <span class="num" id="hdr-total">${S.todosModo ? `R$ ${fmt(totalGeral)}` : `R$ ${fmt(totalLoja)}`}</span> · <span style="color:var(--text)">${totalItensGeral} item${totalItensGeral!==1?'s':''}</span></div>
       </div>
       <div class="pedido-acoes">
-        <button class="btn-sm btn-outline" onclick="novoPedido()" title="${(S.eduAtivo||S.oseasAtivo)?'Limpa só os itens desta aba — não afeta quem ainda está lançando':'Cancela o rascunho inteiro e começa do zero'}">${(S.eduAtivo||S.oseasAtivo)?'Limpar':'Novo'}</button>
+        <button class="btn-sm btn-outline" onclick="novoPedido()" title="${escopoAtivoBar?'Limpa só os itens desta aba — não afeta quem ainda está lançando':'Cancela o rascunho inteiro e começa do zero'}">${escopoAtivoBar?'Limpar':'Novo'}</button>
         <button class="btn-sm" onclick="flushPendingItems(true)" title="Forçar salvamento agora" style="background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.4);color:#22c55e">💾 Salvar</button>
         <button class="btn-sm" onclick="gerarWppPedido()" style="background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);color:#22c55e">📲</button>
         <button class="btn-sm" onclick="gerarPDFPedido()" style="background:rgba(192,57,43,.15);border:1px solid rgba(192,57,43,.4);color:#e74c3c">📄</button>
@@ -2304,7 +2336,7 @@ function renderPedido() {
       </select>
       <select class="filtro-select" onchange="S.fornFiltro=this.value;renderPedido()">
         <option value="">Todos fornec.</option>
-        ${[...new Set(S.catalogo.filter(p=>p.ativo && (!S.eduAtivo || EDU_FORNECEDORES.includes(p.fornecedor)) && (!S.oseasAtivo || OSEAS_FORNECEDORES.includes(p.fornecedor))).map(p=>p.fornecedor))].sort().map(f=>`<option value="${esc(f)}"${S.fornFiltro===f?' selected':''}>${esc(f)}</option>`).join('')}
+        ${[...new Set(S.catalogo.filter(p=>p.ativo && _fornecedorNoEscopoAtivo(p.fornecedor)).map(p=>p.fornecedor))].sort().map(f=>`<option value="${esc(f)}"${S.fornFiltro===f?' selected':''}>${esc(f)}</option>`).join('')}
       </select>
     </div>
 
@@ -2586,9 +2618,10 @@ async function toggleDiverg(catalogoId, lojaSlug) {
 }
 
 function verProvisoes() {
-  // Ao vir da aba Edu/Oseas, a tela de Provisões já abre filtrada pro comprador daquela
-  // aba — assim dá pra conferir de fato só o que ele pediu, sem precisar filtrar na mão.
-  S.provComprador = S.eduAtivo ? 'edu' : S.oseasAtivo ? 'oseas' : '';
+  // Ao vir da aba Edu/Oseas/Matheus, a tela de Provisões já abre filtrada pro comprador
+  // daquela aba — assim dá pra conferir de fato só o que ele pediu, sem precisar
+  // filtrar na mão.
+  S.provComprador = S.eduAtivo ? 'edu' : S.oseasAtivo ? 'oseas' : S.matheusAtivo ? 'matheus' : '';
   S.tab = 'provisoes';
   setTab('provisoes');
 }
@@ -3211,12 +3244,13 @@ async function renderProvisoes() {
     `<button class="store-tab${S.provStatus===o.v?' ativo':''}" onclick="S.provStatus='${o.v}';renderProvisoes()">${o.l}</button>`
   ).join('');
 
-  // Filtro de comprador — pra ver (e gerar relatório) só do que Edu ou Oseas pediu,
-  // igual à confirmação já ser separada por aba neles.
+  // Filtro de comprador — pra ver (e gerar relatório) só do que Edu, Oseas ou Matheus
+  // pediu, igual à confirmação já ser separada por aba neles.
   const COMPRADOR_OPTS = [
     {v:'',l:'Todos'},
     {v:'edu',l:'👤 Edu'},
     {v:'oseas',l:'👤 Oseas'},
+    {v:'matheus',l:'👤 Matheus'},
   ];
   const compradorChips = COMPRADOR_OPTS.map(o=>
     `<button class="store-tab${S.provComprador===o.v?' ativo':''}" onclick="S.provComprador='${o.v}';renderProvisoes()">${o.l}</button>`
@@ -3225,9 +3259,8 @@ async function renderProvisoes() {
   const lojaLabelAtual = S.provLoja ? (S.lojas.find(l=>l.slug_pedido===S.provLoja)?.nome_display||S.provLoja) : 'Todas as Lojas';
 
   // Filtrar e agrupar por fornecedor
-  const escopoCompradorForn = S.provComprador === 'edu' ? EDU_FORNECEDORES : S.provComprador === 'oseas' ? OSEAS_FORNECEDORES : null;
   const provisoesFilt = (S.provStatus ? S.provisoes.filter(p=>p.status===S.provStatus) : S.provisoes)
-    .filter(p => !escopoCompradorForn || escopoCompradorForn.includes(p.fornecedor));
+    .filter(p => _fornecedorNoEscopoComprador(p.fornecedor));
   const por_forn = {};
   provisoesFilt.forEach(p => {
     const forn = p.fornecedor || 'SEM FORNECEDOR';
@@ -3389,10 +3422,10 @@ async function renderProvisoes() {
     </div>
 
     <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px">
-      <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:10px;letter-spacing:.5px">📋 Relatório de Pedido para Fornecedores — ${lojaLabelAtual}${S.provComprador?' · '+(S.provComprador==='edu'?'Edu':'Oseas'):''}</div>
+      <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:10px;letter-spacing:.5px">📋 Relatório de Pedido para Fornecedores — ${lojaLabelAtual}${_compradorAtualLabel()?' · '+_compradorAtualLabel():''}</div>
       <div style="display:flex;flex-direction:column;gap:8px">
         <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:rgba(232,88,10,.08);border:1px solid rgba(232,88,10,.25);border-radius:10px">
-          <span style="flex:1;font-size:12px;font-weight:700;color:var(--primary)">Pedido Completo — ${lojaLabelAtual}${S.provComprador?' ('+(S.provComprador==='edu'?'Edu':'Oseas')+')':''}</span>
+          <span style="flex:1;font-size:12px;font-weight:700;color:var(--primary)">Pedido Completo — ${lojaLabelAtual}${_compradorAtualLabel()?' ('+_compradorAtualLabel()+')':''}</span>
           <button onclick="gerarWppPedidoProvForn(null)" style="background:rgba(37,211,102,.2);border:1px solid rgba(37,211,102,.5);border-radius:8px;padding:6px 12px;color:#22c55e;font-weight:700;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:4px">📲 WPP</button>
           <button onclick="gerarPDFPedidoProvForn(null)" style="background:rgba(192,57,43,.15);border:1px solid rgba(192,57,43,.4);border-radius:8px;padding:6px 12px;color:#e74c3c;font-weight:700;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:4px">📄 PDF</button>
         </div>
@@ -3419,12 +3452,28 @@ async function _navegarSemanaProvisao(delta) {
   await renderProvisoes();
 }
 
-// Provisões dentro do escopo de comprador ativo na tela (Todos/Edu/Oseas) — mesmo filtro
-// usado na lista, aplicado também nos relatórios (geral e por fornecedor).
+// Filtro de comprador da TELA de Provisões (S.provComprador) — independente da aba
+// Edu/Oseas/Matheus ativa (S.eduAtivo etc.), já que dá pra chegar em Provisões por fora
+// dessas abas (sidebar) e o filtro continua valendo.
+function _fornecedorNoEscopoComprador(forn) {
+  if (S.provComprador === 'edu') return EDU_FORNECEDORES.includes(forn);
+  if (S.provComprador === 'oseas') return OSEAS_FORNECEDORES.includes(forn);
+  if (S.provComprador === 'matheus') return _ehFornecedorMatheus(forn);
+  return true;
+}
+// Nome do comprador filtrado na tela de Provisões, pros títulos dos relatórios — null
+// quando o filtro está em "Todos".
+function _compradorAtualLabel() {
+  if (S.provComprador === 'edu') return 'Edu';
+  if (S.provComprador === 'oseas') return 'Oseas';
+  if (S.provComprador === 'matheus') return 'Matheus';
+  return null;
+}
+
+// Provisões dentro do escopo de comprador ativo na tela (Todos/Edu/Oseas/Matheus) — mesmo
+// filtro usado na lista, aplicado também nos relatórios (geral e por fornecedor).
 function _provisoesEscopoComprador() {
-  if (S.provComprador === 'edu') return S.provisoes.filter(p => EDU_FORNECEDORES.includes(p.fornecedor));
-  if (S.provComprador === 'oseas') return S.provisoes.filter(p => OSEAS_FORNECEDORES.includes(p.fornecedor));
-  return S.provisoes;
+  return S.provComprador ? S.provisoes.filter(p => _fornecedorNoEscopoComprador(p.fornecedor)) : S.provisoes;
 }
 
 // Soma pedidos repetidos do mesmo produto na mesma loja/fornecedor (ex.: 2ª rodada de
@@ -3459,7 +3508,7 @@ function gerarWppProvisoes() {
   const lojaLabel = S.provLoja
     ? (S.lojas.find(l => l.slug_pedido === S.provLoja)?.nome_display || S.provLoja)
     : 'Todas as lojas';
-  const compradorLabel = S.provComprador === 'edu' ? ' · Edu' : S.provComprador === 'oseas' ? ' · Oseas' : '';
+  const compradorLabel = _compradorAtualLabel() ? ' · ' + _compradorAtualLabel() : '';
   let msg = `📦 *PROVISÕES — ${lojaLabel}${compradorLabel}*\n`;
   let total = 0;
   fns.forEach(forn => {
@@ -3656,7 +3705,7 @@ function gerarWppPedidoProvForn(fornecedor) {
   if (!Object.keys(lojaMap).length) { toast('Nenhum item para este fornecedor.', 'err'); return; }
 
   const lojaLabel = S.provLoja ? (S.lojas.find(l=>l.slug_pedido===S.provLoja)?.nome_display||S.provLoja) : 'TODAS AS LOJAS';
-  const compradorLabel = !fornecedor && S.provComprador ? ' · ' + (S.provComprador==='edu'?'EDU':'OSEAS') : '';
+  const compradorLabel = !fornecedor && _compradorAtualLabel() ? ' · ' + _compradorAtualLabel().toUpperCase() : '';
   const cabecalho = fornecedor
     ? `🛒 *PEDIDO — ${fornecedor}*\nSemana ${sem.num}/${sem.ano} (${sem.periodo})\n📍 ${lojaLabel}`
     : `🛒 *PEDIDO GERAL${compradorLabel}*\nSemana ${sem.num}/${sem.ano} (${sem.periodo})\n📍 ${lojaLabel}`;
@@ -3690,7 +3739,7 @@ function gerarPDFPedidoProvForn(fornecedor) {
   if (!Object.keys(lojaMap).length) { toast('Nenhum item para este fornecedor.', 'err'); return; }
 
   const lojaLabel = S.provLoja ? (S.lojas.find(l=>l.slug_pedido===S.provLoja)?.nome_display||S.provLoja) : 'TODAS AS LOJAS';
-  const compradorLabel = !fornecedor && S.provComprador ? ' · ' + (S.provComprador==='edu'?'EDU':'OSEAS') : '';
+  const compradorLabel = !fornecedor && _compradorAtualLabel() ? ' · ' + _compradorAtualLabel().toUpperCase() : '';
   const tituloLabel = fornecedor ? fornecedor : ('PEDIDO GERAL'+compradorLabel);
   let msg = `${tituloLabel} — ${lojaLabel}\nSemana ${sem.num}/${sem.ano} (${sem.periodo})\n${'─'.repeat(40)}\n`;
   let totalGeral = 0;
@@ -3907,7 +3956,7 @@ function gerarPDFProvisoes(){
   escopo.forEach(p=>{const f=p.fornecedor||'SEM FORNECEDOR';(porForn[f]=porForn[f]||[]).push(p);});
   const fns=Object.keys(porForn).sort();
   const lojaLabel=S.provLoja?(S.lojas.find(l=>l.slug_pedido===S.provLoja)?.nome_display||S.provLoja):'Todas as lojas';
-  const compradorLabel = S.provComprador === 'edu' ? ' · Edu' : S.provComprador === 'oseas' ? ' · Oseas' : '';
+  const compradorLabel = _compradorAtualLabel() ? ' · ' + _compradorAtualLabel() : '';
   let msg=`PROVISÕES — ${lojaLabel}${compradorLabel}\n`;
   let total=0;
   fns.forEach(forn=>{
@@ -4470,7 +4519,7 @@ async function iniciarApp() {
     const _sess = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
     const abasArr = _sess && _sess.permissoes && _sess.permissoes.pedidos_abas;
     S.abasPermitidas = Array.isArray(abasArr) ? new Set(abasArr) : null;
-    const ALL_TABS = ['pedido','edu','oseas','catalogo','fornecedores','provisoes','entrega','fichas','faltas-dia','carnes','trios'];
+    const ALL_TABS = ['pedido','edu','oseas','matheus','catalogo','fornecedores','provisoes','entrega','fichas','faltas-dia','carnes','trios'];
     ALL_TABS.forEach(t => {
       const hidden = S.abasPermitidas && !S.abasPermitidas.has(t);
       document.querySelectorAll(`.sidebar-link[data-sidebar-tab="${t}"], .nav-btn[data-tab="${t}"]`).forEach(b => {
