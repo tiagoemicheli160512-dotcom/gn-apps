@@ -2313,7 +2313,7 @@ let state = {
   data: hojeLocal(),
   semanaInicio: '', semanaFim: '', semanaLabel: '',
   vendaSalao:0, vendaDelivery:0, repique:0, dinheiroCaixa:0,
-  despesas:[], retiradas:[],
+  despesas:[], retiradas:[], entradasManuais:[],
   banda:{nome:'',valor:0,consumo:0,qtd_couvert:0},
   vendas:{},
   checklist:{}, abertura:{}, fechamento:{},
@@ -2603,6 +2603,7 @@ async function adicionarRetirada(rowIdx){
   const valEl  = document.getElementById('ret-val-'+rowIdx);
   const desc = (descEl ? descEl.value.trim() : '');
   const val  = parseFloat(valEl ? valEl.value.replace(',','.') : 0) || 0;
+  if(!desc){ toast('Informe o motivo da retirada','err'); return; }
   if(val <= 0){ toast('Informe um valor maior que zero','err'); return; }
   const r = _livroCaixaRows[rowIdx];
   if(!r) return;
@@ -2617,6 +2618,51 @@ async function adicionarRetirada(rowIdx){
       {onConflict:'data_operacao,loja'}
     );
     if(error){ toast('Erro ao salvar retirada','err'); return; }
+  }
+  renderLivroCaixa();
+}
+
+// Entrada manual de dinheiro no caixa — mesmo mecanismo da retirada, só que soma em vez de
+// subtrair. Motivo é sempre obrigatório nas duas, pra identificar por que o valor bateu
+// diferente do esperado (venda) sem precisar perguntar depois.
+async function adicionarEntradaManual(rowIdx){
+  const descEl = document.getElementById('ent-desc-'+rowIdx);
+  const valEl  = document.getElementById('ent-val-'+rowIdx);
+  const desc = (descEl ? descEl.value.trim() : '');
+  const val  = parseFloat(valEl ? valEl.value.replace(',','.') : 0) || 0;
+  if(!desc){ toast('Informe o motivo da entrada','err'); return; }
+  if(val <= 0){ toast('Informe um valor maior que zero','err'); return; }
+  const r = _livroCaixaRows[rowIdx];
+  if(!r) return;
+  const novaEnt = {id: Date.now(), descricao: desc, valor: val};
+  const atualizadas = [...(Array.isArray(r.entradas_manuais)?r.entradas_manuais:[]), novaEnt];
+  if(r.data_operacao === hojeLocal()){
+    state.entradasManuais = atualizadas;
+    autoSave();
+  } else {
+    const {error} = await sb.from('checklist_diario').upsert(
+      {data_operacao: r.data_operacao, loja: LOJA, entradas_manuais: atualizadas},
+      {onConflict:'data_operacao,loja'}
+    );
+    if(error){ toast('Erro ao salvar entrada','err'); return; }
+  }
+  renderLivroCaixa();
+}
+
+async function removerEntradaManual(rowIdx, entIdx){
+  const r = _livroCaixaRows[rowIdx];
+  if(!r) return;
+  if(!confirm('Excluir esta entrada?')) return;
+  const atualizadas = (Array.isArray(r.entradas_manuais)?r.entradas_manuais:[]).filter((_,i)=>i!==entIdx);
+  if(r.data_operacao === hojeLocal()){
+    state.entradasManuais = atualizadas;
+    autoSave();
+  } else {
+    const {error} = await sb.from('checklist_diario').upsert(
+      {data_operacao: r.data_operacao, loja: LOJA, entradas_manuais: atualizadas},
+      {onConflict:'data_operacao,loja'}
+    );
+    if(error){ toast('Erro ao remover entrada','err'); return; }
   }
   renderLivroCaixa();
 }
@@ -2644,9 +2690,23 @@ async function adicionarRetiradaSemanal(){
   const valEl  = document.getElementById('ret-sem-val');
   const desc = (descEl ? descEl.value.trim() : '');
   const val  = parseFloat(valEl ? valEl.value.replace(',','.') : 0) || 0;
+  if(!desc){ toast('Informe o motivo da retirada','err'); return; }
   if(val <= 0){ toast('Informe um valor maior que zero','err'); return; }
   const novaRet = {id: Date.now(), descricao: desc, valor: val};
   state.retiradas = [...(Array.isArray(state.retiradas)?state.retiradas:[]), novaRet];
+  autoSave();
+  renderLivroCaixa();
+}
+
+async function adicionarEntradaManualSemanal(){
+  const descEl = document.getElementById('ent-sem-desc');
+  const valEl  = document.getElementById('ent-sem-val');
+  const desc = (descEl ? descEl.value.trim() : '');
+  const val  = parseFloat(valEl ? valEl.value.replace(',','.') : 0) || 0;
+  if(!desc){ toast('Informe o motivo da entrada','err'); return; }
+  if(val <= 0){ toast('Informe um valor maior que zero','err'); return; }
+  const novaEnt = {id: Date.now(), descricao: desc, valor: val};
+  state.entradasManuais = [...(Array.isArray(state.entradasManuais)?state.entradasManuais:[]), novaEnt];
   autoSave();
   renderLivroCaixa();
 }
@@ -2804,8 +2864,10 @@ function _entradaSaidaDia(r){
   const totalDesp = desp.reduce((s,d)=>s+(parseFloat(d.valor)||0),0);
   const rets = Array.isArray(r.retiradas) ? r.retiradas : [];
   const totalRet = rets.reduce((s,x)=>s+(parseFloat(x.valor)||0),0);
+  const ents = Array.isArray(r.entradas_manuais) ? r.entradas_manuais : [];
+  const totalEnt = ents.reduce((s,x)=>s+(parseFloat(x.valor)||0),0);
   const caixa = parseFloat(r.dinheiro_caixa)||0;
-  return { entradaBruta: caixa + totalDesp, saidas: totalDesp + totalRet };
+  return { entradaBruta: caixa + totalDesp + totalEnt, saidas: totalDesp + totalRet };
 }
 
 async function renderResumoMensalCaixa(){
@@ -2829,7 +2891,7 @@ async function renderResumoMensalCaixa(){
   let rows = [];
   try{
     const {data,error} = await sb.from('checklist_diario')
-      .select('data_operacao,dinheiro_caixa,despesas,retiradas')
+      .select('data_operacao,dinheiro_caixa,despesas,retiradas,entradas_manuais')
       .eq('loja', LOJA)
       .gte('data_operacao', inicioMes)
       .lte('data_operacao', fimMes)
@@ -2855,7 +2917,7 @@ async function renderResumoMensalCaixa(){
   let saldoAnterior = 0;
   try{
     const {data: prevRows} = await sb.from('checklist_diario')
-      .select('data_operacao,dinheiro_caixa,retiradas')
+      .select('data_operacao,dinheiro_caixa,retiradas,entradas_manuais')
       .eq('loja', LOJA)
       .lt('data_operacao', inicioMes)
       .order('data_operacao', {ascending:false})
@@ -2863,7 +2925,9 @@ async function renderResumoMensalCaixa(){
     if(prevRows && prevRows[0]){
       const rets = Array.isArray(prevRows[0].retiradas) ? prevRows[0].retiradas : [];
       const totalRet = rets.reduce((s,x)=>s+(parseFloat(x.valor)||0),0);
-      saldoAnterior = (parseFloat(prevRows[0].dinheiro_caixa)||0) - totalRet;
+      const ents = Array.isArray(prevRows[0].entradas_manuais) ? prevRows[0].entradas_manuais : [];
+      const totalEnt = ents.reduce((s,x)=>s+(parseFloat(x.valor)||0),0);
+      saldoAnterior = (parseFloat(prevRows[0].dinheiro_caixa)||0) - totalRet + totalEnt;
     }
   }catch(e){}
 
@@ -2937,7 +3001,7 @@ async function renderLivroCaixa(){
   let rows = [];
   try{
     const {data,error} = await sb.from('checklist_diario')
-      .select('data_operacao,venda_salao,venda_delivery,dinheiro_caixa,despesas,retiradas')
+      .select('data_operacao,venda_salao,venda_delivery,dinheiro_caixa,despesas,retiradas,entradas_manuais')
       .eq('loja', LOJA)
       .gte('data_operacao', state.semanaInicio)
       .lte('data_operacao', state.semanaFim)
@@ -2955,12 +3019,13 @@ async function renderLivroCaixa(){
     rows.push({
       data_operacao: hojeISO,
       venda_salao: state.vendaSalao, venda_delivery: state.vendaDelivery,
-      dinheiro_caixa: state.dinheiroCaixa, despesas: state.despesas, retiradas: state.retiradas
+      dinheiro_caixa: state.dinheiroCaixa, despesas: state.despesas, retiradas: state.retiradas,
+      entradas_manuais: state.entradasManuais
     });
     rows.sort((a,b)=>a.data_operacao.localeCompare(b.data_operacao));
   } else {
     const idx = rows.findIndex(r=>r.data_operacao===hojeISO);
-    rows[idx] = {...rows[idx], dinheiro_caixa: state.dinheiroCaixa, despesas: state.despesas, retiradas: state.retiradas};
+    rows[idx] = {...rows[idx], dinheiro_caixa: state.dinheiroCaixa, despesas: state.despesas, retiradas: state.retiradas, entradas_manuais: state.entradasManuais};
   }
 
   _livroCaixaRows = rows; // cache para verFotoLC()
@@ -2975,9 +3040,11 @@ async function renderLivroCaixa(){
     const totalDesp = desp.reduce((s,d)=>s+(parseFloat(d.valor)||0),0);
     const rets = Array.isArray(r.retiradas)?r.retiradas:[];
     const totalRet = rets.reduce((s,x)=>s+(parseFloat(x.valor)||0),0);
+    const ents = Array.isArray(r.entradas_manuais)?r.entradas_manuais:[];
+    const totalEnt = ents.reduce((s,x)=>s+(parseFloat(x.valor)||0),0);
     const caixa = parseFloat(r.dinheiro_caixa)||0; // dinheiro encontrado no cofre (já pós-saídas)
-    const entradaBruta = caixa + totalDesp;         // reconstituir entrada bruta
-    const saldo = caixa - totalRet;                 // retiradas do checklist reduzem o saldo
+    const entradaBruta = caixa + totalDesp + totalEnt; // reconstituir entrada bruta + entradas manuais
+    const saldo = caixa - totalRet + totalEnt;      // retiradas reduzem, entradas manuais somam ao saldo
     totalEntradas += entradaBruta;
     totalSaidas += totalDesp + totalRet;
 
@@ -3009,11 +3076,28 @@ async function renderLivroCaixa(){
 
     const retForm = `
       <div style="display:flex;gap:6px;margin-top:8px;align-items:center;">
-        <input type="text" id="ret-desc-${rowIdx}" placeholder="Descrição da retirada"
+        <input type="text" id="ret-desc-${rowIdx}" placeholder="Motivo da retirada (obrigatório)"
           style="flex:1;font-size:11px;padding:5px 8px;background:#111;border:1px solid #333;border-radius:6px;color:#f0f0f0;">
         <input type="number" id="ret-val-${rowIdx}" placeholder="Valor" min="0" step="0.01"
           style="width:80px;font-size:11px;padding:5px 8px;background:#111;border:1px solid #333;border-radius:6px;color:#f0f0f0;">
         <button onclick="adicionarRetirada(${rowIdx})" style="background:#2d1a00;border:1px solid #7a4500;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:11px;color:#f59e0b;font-weight:700;">+ Add</button>
+      </div>`;
+
+    // Entradas manuais list
+    const entHTML = ents.length > 0 ? ents.map((x, xi) => `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid #222;gap:8px;">
+        <div style="flex:1;font-size:11px;color:#ccc;">${_esc(x.descricao)||'Sem descrição'}</div>
+        <div style="font-size:11px;font-weight:700;color:#4ade80;white-space:nowrap;">${_fmtBRL(x.valor)}</div>
+        <button onclick="removerEntradaManual(${rowIdx},${xi})" style="background:#2d0d0d;border:1px solid #5a1a1a;border-radius:5px;padding:2px 7px;cursor:pointer;font-size:10px;color:#e04040;">✕</button>
+      </div>`).join('') : '';
+
+    const entForm = `
+      <div style="display:flex;gap:6px;margin-top:8px;align-items:center;">
+        <input type="text" id="ent-desc-${rowIdx}" placeholder="Motivo da entrada (obrigatório)"
+          style="flex:1;font-size:11px;padding:5px 8px;background:#111;border:1px solid #333;border-radius:6px;color:#f0f0f0;">
+        <input type="number" id="ent-val-${rowIdx}" placeholder="Valor" min="0" step="0.01"
+          style="width:80px;font-size:11px;padding:5px 8px;background:#111;border:1px solid #333;border-radius:6px;color:#f0f0f0;">
+        <button onclick="adicionarEntradaManual(${rowIdx})" style="background:#0d2d1a;border:1px solid #1a7a45;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:11px;color:#4ade80;font-weight:700;">+ Add</button>
       </div>`;
 
     return `
@@ -3038,7 +3122,12 @@ async function renderLivroCaixa(){
         </div>
         ${desp.length>0?`<div style="margin-top:4px;"><div style="font-size:9px;color:#555;text-transform:uppercase;margin-bottom:4px;">Despesas (App Caixa)</div>${despHTML}</div>`:''}
         <div style="margin-top:8px;">
-          <div style="font-size:9px;color:#7a4500;text-transform:uppercase;margin-bottom:4px;">💸 Retiradas</div>
+          <div style="font-size:9px;color:#22c55e;text-transform:uppercase;margin-bottom:4px;">➕ Entrada Manual</div>
+          ${entHTML || '<div style="font-size:11px;color:#444;padding:4px 0;">Nenhuma entrada manual</div>'}
+          ${entForm}
+        </div>
+        <div style="margin-top:8px;">
+          <div style="font-size:9px;color:#7a4500;text-transform:uppercase;margin-bottom:4px;">💸 Retirada Manual</div>
           ${retHTML || '<div style="font-size:11px;color:#444;padding:4px 0;">Nenhuma retirada</div>'}
           ${retForm}
         </div>
@@ -3065,9 +3154,17 @@ async function renderLivroCaixa(){
         </div>
       </div>
       <div style="border-top:1px solid #2a2a3a;padding-top:10px;">
-        <div style="font-size:9px;color:#f9a825;font-weight:700;margin-bottom:6px;">💸 Registrar Retirada</div>
+        <div style="font-size:9px;color:#4ade80;font-weight:700;margin-bottom:6px;">➕ Registrar Entrada (hoje)</div>
         <div style="display:flex;gap:6px;align-items:center;">
-          <input type="text" id="ret-sem-desc" placeholder="Descrição" style="flex:2;background:#0d0d1a;border:1px solid #2a2a3a;border-radius:6px;padding:5px 8px;color:#e2e8f0;font-size:11px;min-width:0;">
+          <input type="text" id="ent-sem-desc" placeholder="Motivo (obrigatório)" style="flex:2;background:#0d0d1a;border:1px solid #2a2a3a;border-radius:6px;padding:5px 8px;color:#e2e8f0;font-size:11px;min-width:0;">
+          <input type="number" id="ent-sem-val" placeholder="Valor" min="0" step="0.01" style="flex:1;background:#0d0d1a;border:1px solid #2a2a3a;border-radius:6px;padding:5px 8px;color:#e2e8f0;font-size:11px;min-width:0;">
+          <button onclick="adicionarEntradaManualSemanal()" style="background:#4ade80;border:none;border-radius:6px;padding:5px 10px;color:#000;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;">+ Add</button>
+        </div>
+      </div>
+      <div style="border-top:1px solid #2a2a3a;padding-top:10px;margin-top:10px;">
+        <div style="font-size:9px;color:#f9a825;font-weight:700;margin-bottom:6px;">💸 Registrar Retirada (hoje)</div>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <input type="text" id="ret-sem-desc" placeholder="Motivo (obrigatório)" style="flex:2;background:#0d0d1a;border:1px solid #2a2a3a;border-radius:6px;padding:5px 8px;color:#e2e8f0;font-size:11px;min-width:0;">
           <input type="number" id="ret-sem-val" placeholder="Valor" min="0" step="0.01" style="flex:1;background:#0d0d1a;border:1px solid #2a2a3a;border-radius:6px;padding:5px 8px;color:#e2e8f0;font-size:11px;min-width:0;">
           <button onclick="adicionarRetiradaSemanal()" style="background:#f9a825;border:none;border-radius:6px;padding:5px 10px;color:#000;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;">+ Add</button>
         </div>
@@ -4028,7 +4125,7 @@ async function saveAll(){
       semana_inicio: state.semanaInicio, semana_fim: state.semanaFim,
       ...(!_caixaTemDados && { venda_salao: state.vendaSalao, venda_delivery: state.vendaDelivery, repique: state.repique,
         dinheiro_caixa: state.dinheiroCaixa, despesas: state.despesas }),
-      retiradas: state.retiradas, banda: state.banda, vendas: state.vendas,
+      retiradas: state.retiradas, entradas_manuais: state.entradasManuais, banda: state.banda, vendas: state.vendas,
       checklist: state.checklist, abertura: state.abertura, fechamento: state.fechamento,
       faltas: state.faltas, manutencao: state.manutencao,
       faltas_funcionarios: state.faltasFuncionarios,
@@ -4165,6 +4262,7 @@ function mergeState(rows){
   if(rows.dinheiro_caixa!=null) state.dinheiroCaixa=rows.dinheiro_caixa;
   if(Array.isArray(rows.despesas)) state.despesas=rows.despesas;
   if(Array.isArray(rows.retiradas)) state.retiradas=rows.retiradas;
+  if(Array.isArray(rows.entradas_manuais)) state.entradasManuais=rows.entradas_manuais;
   if(rows.banda && typeof rows.banda==='object') state.banda={...{nome:'',valor:0,consumo:0,qtd_couvert:0}, ...rows.banda};
   if(rows.vendas && typeof rows.vendas==='object') state.vendas={...rows.vendas};
   ['checklist','abertura','fechamento'].forEach(key=>{
@@ -4289,7 +4387,7 @@ async function onDataChange(val){
   state.obs_abertura=''; state.obs_checklist=''; state.obs_fechamento='';
   state.faltas=[]; state.manutencao=[]; state.faltasFuncionarios=[];
   state.vendaSalao=0; state.vendaDelivery=0; state.repique=0; state.dinheiroCaixa=0;
-  state.despesas=[]; state.retiradas=[]; state.banda={nome:'',valor:0,consumo:0,qtd_couvert:0}; state.vendas={};
+  state.despesas=[]; state.retiradas=[]; state.entradasManuais=[]; state.banda={nome:'',valor:0,consumo:0,qtd_couvert:0}; state.vendas={};
   document.getElementById('venda-salao').value='';
   document.getElementById('venda-delivery').value='';
   document.getElementById('repique-valor').value='';
