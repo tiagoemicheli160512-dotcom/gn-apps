@@ -945,9 +945,10 @@ async function carregarPedidoAtual() {
 async function carregarFornecedoresConfirmados() {
   S.fornecedoresConfirmados = new Set();
   if (!S.pedidoAtual?.id) return;
-  const { data } = await db.from('gn_provisoes')
+  const data = await _fetchTodasPaginas(() => db.from('gn_provisoes')
     .select('fornecedor')
-    .eq('pedido_id', S.pedidoAtual.id);
+    .eq('pedido_id', S.pedidoAtual.id)
+    .order('id'));
   (data || []).forEach(p => { if (p.fornecedor) S.fornecedoresConfirmados.add(p.fornecedor); });
 }
 
@@ -1190,38 +1191,42 @@ async function carregarProvisoes() {
   const SEL = '*, gn_catalogo(produto,und,grupo), gn_recebimentos(validado_por,qtd_recebida,valor_recebido,diferenca_qtd)';
 
   // Itens pendentes: filtro direto por data_entrega da semana
-  let qPend = db.from('gn_provisoes').select(SEL)
-    .eq('status', 'AGUARDANDO')
-    .gte('data_entrega', monday).lte('data_entrega', sunday)
-    .order('data_entrega', {ascending:true}).order('fornecedor');
-  if (S.provLoja) qPend = qPend.eq('loja_slug', S.provLoja);
+  const qPend = _fetchTodasPaginas(() => {
+    let q = db.from('gn_provisoes').select(SEL)
+      .eq('status', 'AGUARDANDO')
+      .gte('data_entrega', monday).lte('data_entrega', sunday)
+      .order('data_entrega', {ascending:true}).order('fornecedor').order('id');
+    if (S.provLoja) q = q.eq('loja_slug', S.provLoja);
+    return q;
+  });
 
   // Itens confirmados: via pedido_id da semana (mesma lógica de carregarEntregasConfirmadas)
   const { data: pedidos } = await db.from('gn_pedidos').select('id')
     .or(`semana_inicio.eq.${monday},and(data_pedido.gte.${monday},data_pedido.lte.${sunday})`);
   const pedidoIds = (pedidos || []).map(p => p.id);
 
-  let qConf = Promise.resolve({ data: [] });
-  if (pedidoIds.length) {
-    let q2 = db.from('gn_provisoes').select(SEL)
-      .in('status', ['RECEBIDO_OK', 'DIVERGENCIA'])
-      .in('pedido_id', pedidoIds)
-      .order('data_entrega', {ascending:true}).order('fornecedor');
-    if (S.provLoja) q2 = q2.eq('loja_slug', S.provLoja);
-    qConf = q2;
-  }
+  const qConf = pedidoIds.length
+    ? _fetchTodasPaginas(() => {
+        let q = db.from('gn_provisoes').select(SEL)
+          .in('status', ['RECEBIDO_OK', 'DIVERGENCIA'])
+          .in('pedido_id', pedidoIds)
+          .order('data_entrega', {ascending:true}).order('fornecedor').order('id');
+        if (S.provLoja) q = q.eq('loja_slug', S.provLoja);
+        return q;
+      })
+    : Promise.resolve([]);
 
-  const [{ data: pending }, { data: confirmed }] = await Promise.all([qPend, qConf]);
+  const [pending, confirmed] = await Promise.all([qPend, qConf]);
   const seen = new Set();
   const all = [...(pending || []), ...(confirmed || [])];
   S.provisoes = all.filter(p => { if (seen.has(p.id)) return false; seen.add(p.id); return true; });
 }
 
 async function carregarEntregasPendentes() {
-  const { data } = await db.from('gn_provisoes')
+  const data = await _fetchTodasPaginas(() => db.from('gn_provisoes')
     .select('*, gn_catalogo(produto,und), gn_pedidos(data_pedido)')
     .eq('status', 'AGUARDANDO')
-    .order('data_entrega');
+    .order('data_entrega').order('id'));
   S.entregasPendentes = data || [];
 }
 
@@ -1234,11 +1239,11 @@ async function carregarEntregasConfirmadas() {
     .or(`semana_inicio.eq.${monday},and(data_pedido.gte.${monday},data_pedido.lte.${sunday})`);
   const pedidoIds = (pedidos || []).map(p => p.id);
   if (!pedidoIds.length) { S.entregasConfirmadas = []; return; }
-  const { data } = await db.from('gn_provisoes')
+  const data = await _fetchTodasPaginas(() => db.from('gn_provisoes')
     .select('*, gn_catalogo(produto,und), gn_pedidos(data_pedido), gn_recebimentos(qtd_recebida,valor_recebido,validado_por,diferenca_qtd,observacao)')
     .in('status', ['RECEBIDO_OK','DIVERGENCIA'])
     .in('pedido_id', pedidoIds)
-    .order('data_entrega');
+    .order('data_entrega').order('id'));
   S.entregasConfirmadas = data || [];
 }
 
@@ -2410,6 +2415,10 @@ function _flushQtdTimersPendentes() {
     delete _qtdSaveTimers[key];
     _executarSalvarQtd(pend.catalogoId, pend.lojaSlug, pend.custo, pend.valor, pend.cxUnd);
   });
+  // Também tenta reenviar quem já falhou antes (fila offline) — sem isso, um item que
+  // caiu na fila só era reenviado no próximo tick de 25s, então minimizar/fechar logo
+  // depois de ficar sem internet podia atrasar a sincronização até a próxima abertura.
+  if (_ppCount() > 0) flushPendingItems(false);
 }
 document.addEventListener('visibilitychange', () => { if (document.hidden) _flushQtdTimersPendentes(); });
 window.addEventListener('pagehide', _flushQtdTimersPendentes);
@@ -3904,12 +3913,12 @@ async function salvarEditarEntrega(provisaoId) {
 async function carregarProvisoesPendentes() {
   // Busca por data_entrega (início) < hoje — quando há período (data_entrega_fim), o
   // prazo real só vence no fim, então filtra de novo no cliente com a data efetiva.
-  const { data } = await db.from('gn_provisoes')
+  const data = await _fetchTodasPaginas(() => db.from('gn_provisoes')
     .select('*, gn_catalogo(produto,und)')
     .eq('status', 'AGUARDANDO')
     .not('data_entrega', 'is', null)
     .lt('data_entrega', hoje())
-    .order('data_entrega');
+    .order('data_entrega').order('id'));
   const h = hoje();
   S.provisoesAtrasadas = (data || []).filter(p => (p.data_entrega_fim || p.data_entrega) < h);
   _atualizarBadgeAtrasadas();
