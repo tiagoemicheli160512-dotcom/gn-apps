@@ -4917,17 +4917,11 @@ async function renderHistorico() {
 // ═══════════════════════════════════════════════
 // RENDER: PRODUÇÃO (controle de estoque dos itens do fornecedor PETISCOS)
 // ═══════════════════════════════════════════════
-// Margem 2, Estoque, Sexta e Entrada são digitados à mão. Saída é sempre calculada a
-// partir das provisões de PETISCOS ainda AGUARDANDO com entrega prevista na semana
-// selecionada (mesmo padrão de navegação por semana já usado em Provisões). Assim que
-// uma dessas provisões é confirmada (RECEBIDO_OK ou DIVERGENCIA — não importa em qual
-// app: Lojas ou aqui), ela some da Saída e o Estoque já sai descontado automaticamente
-// — sem precisar editar nada à mão, embora o campo continue editável pra corrigir numa
-// contagem física. Não existe nenhum "gancho" preso à ação de confirmar: o desconto é
-// sempre recalculado na hora de exibir a tela, comparando a data da confirmação com a
-// data do último ajuste manual do Estoque — por isso funciona não importa quem
-// confirmou a entrega nem em qual app, e não depende de qual semana está sendo vista
-// (esse desconto NÃO é escopado por semana, o Estoque é um valor corrente único).
+// Margem 2, Sexta e Entrada são digitados à mão. Estoque NÃO é digitado — é sempre
+// calculado pela mesma fórmula da planilha original: Sexta (última contagem física)
+// + Entrada (produzido/recebido) − Saída. Saída é puxada automaticamente das provisões
+// de PETISCOS ainda AGUARDANDO com entrega prevista na semana selecionada (mesmo
+// padrão de navegação por semana já usado em Provisões).
 //
 // "Contagem" mostra a quantidade lançada na aba Pedido pra essa mesma semana (antes
 // mesmo de o fornecedor ser confirmado) — filtrável por loja ou somada em "Todas as
@@ -4948,30 +4942,25 @@ async function renderProducao() {
   const monday = semAtiva.toISOString().split('T')[0];
   const sunday = getSundayOfWeek(semAtiva).toISOString().split('T')[0];
 
-  let baseRows = [], provAguard = [], provConf = [], pedidoItensSemana = [];
+  let baseRows = [], provAguard = [], pedidoItensSemana = [];
   try {
     const { data: pedidosSemana } = await db.from('gn_pedidos').select('id')
       .or(`semana_inicio.eq.${monday},and(data_pedido.gte.${monday},data_pedido.lte.${sunday})`);
     const pedidoIds = (pedidosSemana || []).map(p => p.id);
 
-    const [r1, aguard, conf, itensSem] = await Promise.all([
+    const [r1, aguard, itensSem] = await Promise.all([
       db.from('gn_producao_estoque').select('*').in('catalogo_id', ids),
       _fetchTodasPaginas(() => db.from('gn_provisoes').select('catalogo_id,qtd_prevista')
         .eq('fornecedor','PETISCOS').eq('status','AGUARDANDO')
         .gte('data_entrega', monday).lte('data_entrega', sunday)
         .in('catalogo_id', ids)),
-      // Sem limite de data — precisa achar TODA confirmação mais nova que o último ajuste
-      // manual do Estoque, mesmo que ele não seja mexido há meses. Paginado (_fetchTodasPaginas)
-      // porque com o tempo isso passa fácil de 1000 linhas.
-      _fetchTodasPaginas(() => db.from('gn_provisoes').select('catalogo_id,qtd_prevista,atualizado_em,gn_recebimentos(qtd_recebida)')
-        .eq('fornecedor','PETISCOS').in('status',['RECEBIDO_OK','DIVERGENCIA']).in('catalogo_id', ids)),
       pedidoIds.length
         ? _fetchTodasPaginas(() => db.from('gn_pedido_itens').select('catalogo_id,loja_slug,qtd_pedida')
             .in('pedido_id', pedidoIds).in('catalogo_id', ids))
         : Promise.resolve([]),
     ]);
     if (r1.error) throw r1.error;
-    baseRows = r1.data || []; provAguard = aguard || []; provConf = conf || []; pedidoItensSemana = itensSem || [];
+    baseRows = r1.data || []; provAguard = aguard || []; pedidoItensSemana = itensSem || [];
   } catch (e) {
     $('content').innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-texto">Erro ao carregar Produção</div></div>`;
     return;
@@ -4982,13 +4971,6 @@ async function renderProducao() {
 
   const saidaMap = {};
   provAguard.forEach(p => { saidaMap[p.catalogo_id] = (saidaMap[p.catalogo_id]||0) + (parseFloat(p.qtd_prevista)||0); });
-
-  const confMap = {};
-  provConf.forEach(p => {
-    const rec = Array.isArray(p.gn_recebimentos) ? p.gn_recebimentos[0] : p.gn_recebimentos;
-    const qtd = parseFloat(rec?.qtd_recebida ?? p.qtd_prevista) || 0;
-    (confMap[p.catalogo_id] = confMap[p.catalogo_id] || []).push({ qtd, ts: p.atualizado_em });
-  });
 
   const contagemMap = {};
   pedidoItensSemana.forEach(it => {
@@ -5017,24 +4999,23 @@ async function renderProducao() {
 
   const linhasHtml = produtos.map(prod => {
     const base = baseMap[prod.id] || {};
-    const baselineTs = base.estoque_atualizado_em ? new Date(base.estoque_atualizado_em).getTime() : 0;
-    const aDebitar = (confMap[prod.id]||[])
-      .filter(c => c.ts && new Date(c.ts).getTime() > baselineTs)
-      .reduce((s,c) => s + c.qtd, 0);
     const margem2 = parseFloat(base.margem2)||0;
     const sexta = parseFloat(base.sexta)||0;
-    const estoqueAtual = (parseFloat(base.estoque)||0) - aDebitar;
+    const entrada = parseFloat(base.entrada)||0;
     const saida = saidaMap[prod.id] || 0;
     const contagem = contagemMap[prod.id] || 0;
+    // Mesma fórmula da planilha original: Estoque = Sexta + Entrada − Saída. Não é
+    // digitado — sempre recalculado, pra Entrada (e Saída) refletirem na hora.
+    const estoqueAtual = sexta + entrada - saida;
     const abaixoMargem = margem2 > 0 && estoqueAtual < margem2;
     // Quanto falta produzir pra fechar a margem, a partir da última contagem física
-    // (Sexta) — não do Estoque corrente, que já reflete saídas ainda não contadas.
+    // (Sexta) — não do Estoque corrente, que já embute a Entrada digitada.
     const aProduzir = Math.max(0, margem2 - sexta);
 
-    const campoEdit = (label, campoNome, valor, cor) => `
+    const campoEdit = (label, campoNome, valor) => `
       <div>
         <div style="font-size:9px;color:var(--muted);text-transform:uppercase;margin-bottom:2px;text-align:center">${label}</div>
-        <input type="number" step="1" class="form-input" style="padding:5px 2px;font-size:12px;text-align:center;${cor?`color:${cor};font-weight:700;border-color:${cor}`:''}"
+        <input type="number" step="1" class="form-input" style="padding:5px 2px;font-size:12px;text-align:center"
           value="${valor}" onchange="salvarProducaoCampo('${prod.id}','${campoNome}',this.value)">
       </div>`;
     const campoView = (label, valor, cor) => `
@@ -5047,15 +5028,14 @@ async function renderProducao() {
       <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:8px">${prod.produto}${abaixoMargem?' <span style="color:#ef4444;font-size:10px;font-weight:700">⚠️ abaixo da margem</span>':''}</div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:6px">
         ${campoEdit('Margem 2','margem2', margem2)}
-        ${campoEdit('Estoque','estoque', estoqueAtual, abaixoMargem?'#ef4444':null)}
+        ${campoView('Estoque', estoqueAtual, abaixoMargem?'#ef4444':'var(--text)')}
         ${campoEdit('Sexta','sexta', sexta)}
       </div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">
-        ${campoEdit('Entrada','entrada', base.entrada||0)}
+        ${campoEdit('Entrada','entrada', entrada)}
         ${campoView('Saída', saida, saida>0?'#fbbf24':'var(--muted)')}
         ${campoView('Contagem', contagem, contagem>0?'#60a5fa':'var(--muted)')}
       </div>
-      ${aDebitar>0 ? `<div style="font-size:10px;color:#4ade80;margin-top:6px">✓ ${fmtQtd(aDebitar)} já descontado do estoque (entregas confirmadas)</div>` : ''}
       ${aProduzir>0
         ? `<div style="margin-top:8px;padding:6px 8px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);border-radius:6px;font-size:11px;color:#f87171;font-weight:700">🔧 Precisa produzir ${fmtQtd(aProduzir)} pra completar a margem (a partir da contagem de Sexta)</div>`
         : margem2>0 ? `<div style="margin-top:8px;font-size:10px;color:#4ade80">✓ Margem completa na contagem de Sexta</div>` : ''}
@@ -5070,7 +5050,7 @@ async function renderProducao() {
     ${_semNavHtml}
     <div class="store-tabs" style="margin-bottom:12px">${lojaTabs}</div>
     <div style="font-size:11px;color:var(--muted);margin-bottom:12px">
-      Saída é puxada automaticamente dos pedidos de PETISCOS ainda aguardando entrega nesta semana; assim que a entrega é confirmada, o valor some daqui e já é descontado do Estoque.
+      Estoque = Sexta + Entrada − Saída. Saída é puxada automaticamente dos pedidos de PETISCOS ainda aguardando entrega nesta semana.
       Contagem mostra o que foi lançado na aba Pedido nesta semana (${lojaLabelAtual}).
     </div>
     ${linhasHtml}
@@ -5087,13 +5067,12 @@ async function _navegarSemanaProducao(delta) {
 async function salvarProducaoCampo(catalogoId, campo, valor) {
   const num = parseFloat(String(valor).replace(',','.')) || 0;
   const payload = { catalogo_id: catalogoId, [campo]: num, atualizado_em: new Date().toISOString() };
-  // Editar o Estoque na mão é uma contagem física nova — reseta o marco de tempo usado
-  // pra calcular o que já foi descontado automaticamente, senão entregas confirmadas
-  // antes dessa edição seriam descontadas de novo na próxima tela.
-  if (campo === 'estoque') payload.estoque_atualizado_em = new Date().toISOString();
   const { error } = await db.from('gn_producao_estoque')
     .upsert(payload, { onConflict: 'catalogo_id' });
-  if (error) toast('Erro ao salvar: ' + error.message, 'err');
+  if (error) { toast('Erro ao salvar: ' + error.message, 'err'); return; }
+  // Estoque é calculado (Sexta + Entrada − Saída), não gravado — mudar Margem/Sexta/
+  // Entrada precisa refletir na hora, sem esperar recarregar a tela toda.
+  await renderProducao();
 }
 
 // ═══════════════════════════════════════════════
