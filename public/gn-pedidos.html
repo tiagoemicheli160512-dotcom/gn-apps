@@ -674,6 +674,10 @@ let S = {
   // Histórico de ações (auditoria)
   histAcaoFiltro: '',
 
+  // Produção (controle de estoque PETISCOS)
+  producaoSemana: null,
+  producaoLoja: '',
+
   // Totais pedido por loja (calculado)
   totaisPorLoja: {},
 };
@@ -4914,14 +4918,20 @@ async function renderHistorico() {
 // RENDER: PRODUÇÃO (controle de estoque dos itens do fornecedor PETISCOS)
 // ═══════════════════════════════════════════════
 // Margem 2, Estoque, Sexta e Entrada são digitados à mão. Saída é sempre calculada a
-// partir das provisões de PETISCOS ainda AGUARDANDO (pedidos já lançados, prestes a
-// sair da produção). Assim que uma dessas provisões é confirmada (RECEBIDO_OK ou
-// DIVERGENCIA — não importa em qual app: Lojas ou aqui), ela some da Saída e o Estoque
-// já sai descontado automaticamente — sem precisar editar nada à mão, embora o campo
-// continue editável pra corrigir numa contagem física. Não existe nenhum "gancho" preso
-// à ação de confirmar: o desconto é sempre recalculado na hora de exibir a tela,
-// comparando a data da confirmação com a data do último ajuste manual do Estoque —
-// por isso funciona não importa quem confirmou a entrega nem em qual app.
+// partir das provisões de PETISCOS ainda AGUARDANDO com entrega prevista na semana
+// selecionada (mesmo padrão de navegação por semana já usado em Provisões). Assim que
+// uma dessas provisões é confirmada (RECEBIDO_OK ou DIVERGENCIA — não importa em qual
+// app: Lojas ou aqui), ela some da Saída e o Estoque já sai descontado automaticamente
+// — sem precisar editar nada à mão, embora o campo continue editável pra corrigir numa
+// contagem física. Não existe nenhum "gancho" preso à ação de confirmar: o desconto é
+// sempre recalculado na hora de exibir a tela, comparando a data da confirmação com a
+// data do último ajuste manual do Estoque — por isso funciona não importa quem
+// confirmou a entrega nem em qual app, e não depende de qual semana está sendo vista
+// (esse desconto NÃO é escopado por semana, o Estoque é um valor corrente único).
+//
+// "Contagem" mostra a quantidade lançada na aba Pedido pra essa mesma semana (antes
+// mesmo de o fornecedor ser confirmado) — filtrável por loja ou somada em "Todas as
+// lojas", pelos chips no topo.
 async function renderProducao() {
   $('content').innerHTML = '<div class="empty"><div class="spin"></div></div>';
 
@@ -4934,20 +4944,34 @@ async function renderProducao() {
   }
   const ids = produtos.map(p => p.id);
 
-  let baseRows = [], provAguard = [], provConf = [];
+  const semAtiva = S.producaoSemana || getMondayOfWeek();
+  const monday = semAtiva.toISOString().split('T')[0];
+  const sunday = getSundayOfWeek(semAtiva).toISOString().split('T')[0];
+
+  let baseRows = [], provAguard = [], provConf = [], pedidoItensSemana = [];
   try {
-    const [r1, aguard, conf] = await Promise.all([
+    const { data: pedidosSemana } = await db.from('gn_pedidos').select('id')
+      .or(`semana_inicio.eq.${monday},and(data_pedido.gte.${monday},data_pedido.lte.${sunday})`);
+    const pedidoIds = (pedidosSemana || []).map(p => p.id);
+
+    const [r1, aguard, conf, itensSem] = await Promise.all([
       db.from('gn_producao_estoque').select('*').in('catalogo_id', ids),
       _fetchTodasPaginas(() => db.from('gn_provisoes').select('catalogo_id,qtd_prevista')
-        .eq('fornecedor','PETISCOS').eq('status','AGUARDANDO').in('catalogo_id', ids)),
+        .eq('fornecedor','PETISCOS').eq('status','AGUARDANDO')
+        .gte('data_entrega', monday).lte('data_entrega', sunday)
+        .in('catalogo_id', ids)),
       // Sem limite de data — precisa achar TODA confirmação mais nova que o último ajuste
       // manual do Estoque, mesmo que ele não seja mexido há meses. Paginado (_fetchTodasPaginas)
       // porque com o tempo isso passa fácil de 1000 linhas.
       _fetchTodasPaginas(() => db.from('gn_provisoes').select('catalogo_id,qtd_prevista,atualizado_em,gn_recebimentos(qtd_recebida)')
         .eq('fornecedor','PETISCOS').in('status',['RECEBIDO_OK','DIVERGENCIA']).in('catalogo_id', ids)),
+      pedidoIds.length
+        ? _fetchTodasPaginas(() => db.from('gn_pedido_itens').select('catalogo_id,loja_slug,qtd_pedida')
+            .in('pedido_id', pedidoIds).in('catalogo_id', ids))
+        : Promise.resolve([]),
     ]);
     if (r1.error) throw r1.error;
-    baseRows = r1.data || []; provAguard = aguard || []; provConf = conf || [];
+    baseRows = r1.data || []; provAguard = aguard || []; provConf = conf || []; pedidoItensSemana = itensSem || [];
   } catch (e) {
     $('content').innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-texto">Erro ao carregar Produção</div></div>`;
     return;
@@ -4966,6 +4990,31 @@ async function renderProducao() {
     (confMap[p.catalogo_id] = confMap[p.catalogo_id] || []).push({ qtd, ts: p.atualizado_em });
   });
 
+  const contagemMap = {};
+  pedidoItensSemana.forEach(it => {
+    if (S.producaoLoja && it.loja_slug !== S.producaoLoja) return;
+    const qtd = parseFloat(it.qtd_pedida) || 0;
+    if (qtd <= 0) return;
+    contagemMap[it.catalogo_id] = (contagemMap[it.catalogo_id]||0) + qtd;
+  });
+
+  const lojaTabs = [{ slug_pedido:'', nome_display:'Todas as lojas' }, ...S.lojas].map(l =>
+    `<button class="store-tab${S.producaoLoja===l.slug_pedido?' ativo':''}" onclick="S.producaoLoja='${l.slug_pedido}';renderProducao()">${l.nome_display}</button>`
+  ).join('');
+
+  const _semFmt = formatarSemana(semAtiva);
+  const _semNavHtml = `
+    <div style="display:flex;align-items:center;justify-content:space-between;background:var(--card2);border:1px solid var(--border);border-radius:12px;padding:7px 10px;margin-bottom:10px;gap:8px">
+      <button onclick="_navegarSemanaProducao(-1)" style="background:rgba(255,255,255,.07);border:1px solid var(--border);border-radius:8px;padding:5px 12px;color:var(--text);font-size:16px;cursor:pointer">←</button>
+      <div style="text-align:center;flex:1">
+        <div style="font-size:12px;font-weight:800;color:var(--text)">Semana ${_semFmt.num}${_semFmt.ehAtual?' · <span style="color:#22c55e;font-size:11px">Atual</span>':''}</div>
+        <div style="font-size:11px;color:var(--muted)">${_semFmt.periodo}</div>
+      </div>
+      <button onclick="_navegarSemanaProducao(1)" style="background:rgba(255,255,255,.07);border:1px solid var(--border);border-radius:8px;padding:5px 12px;color:${_semFmt.ehAtual?'var(--muted)':'var(--text)'};font-size:16px;cursor:pointer;opacity:${_semFmt.ehAtual?'.35':'1'}" ${_semFmt.ehAtual?'disabled':''}>→</button>
+    </div>`;
+
+  const lojaLabelAtual = S.producaoLoja ? (S.lojas.find(l=>l.slug_pedido===S.producaoLoja)?.nome_display||S.producaoLoja) : 'todas';
+
   const linhasHtml = produtos.map(prod => {
     const base = baseMap[prod.id] || {};
     const baselineTs = base.estoque_atualizado_em ? new Date(base.estoque_atualizado_em).getTime() : 0;
@@ -4974,25 +5023,31 @@ async function renderProducao() {
       .reduce((s,c) => s + c.qtd, 0);
     const estoqueAtual = (parseFloat(base.estoque)||0) - aDebitar;
     const saida = saidaMap[prod.id] || 0;
+    const contagem = contagemMap[prod.id] || 0;
 
-    const campo = (label, campoNome, valor) => `
+    const campoEdit = (label, campoNome, valor) => `
       <div>
         <div style="font-size:9px;color:var(--muted);text-transform:uppercase;margin-bottom:2px;text-align:center">${label}</div>
         <input type="number" step="1" class="form-input" style="padding:5px 2px;font-size:12px;text-align:center"
           value="${valor}" onchange="salvarProducaoCampo('${prod.id}','${campoNome}',this.value)">
       </div>`;
+    const campoView = (label, valor, cor) => `
+      <div>
+        <div style="font-size:9px;color:var(--muted);text-transform:uppercase;margin-bottom:2px;text-align:center">${label}</div>
+        <div style="padding:5px 2px;font-size:12px;text-align:center;font-weight:700;color:${cor}">${fmtQtd(valor)}</div>
+      </div>`;
 
     return `<div class="prov-item" style="padding:10px 12px">
       <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:8px">${prod.produto}</div>
-      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px">
-        ${campo('Margem 2','margem2', base.margem2||0)}
-        ${campo('Estoque','estoque', estoqueAtual)}
-        ${campo('Sexta','sexta', base.sexta||0)}
-        ${campo('Entrada','entrada', base.entrada||0)}
-        <div>
-          <div style="font-size:9px;color:var(--muted);text-transform:uppercase;margin-bottom:2px;text-align:center">Saída</div>
-          <div style="padding:5px 2px;font-size:12px;text-align:center;font-weight:700;color:${saida>0?'#fbbf24':'var(--muted)'}">${fmtQtd(saida)}</div>
-        </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:6px">
+        ${campoEdit('Margem 2','margem2', base.margem2||0)}
+        ${campoEdit('Estoque','estoque', estoqueAtual)}
+        ${campoEdit('Sexta','sexta', base.sexta||0)}
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">
+        ${campoEdit('Entrada','entrada', base.entrada||0)}
+        ${campoView('Saída', saida, saida>0?'#fbbf24':'var(--muted)')}
+        ${campoView('Contagem', contagem, contagem>0?'#60a5fa':'var(--muted)')}
       </div>
       ${aDebitar>0 ? `<div style="font-size:10px;color:#4ade80;margin-top:6px">✓ ${fmtQtd(aDebitar)} já descontado do estoque (entregas confirmadas)</div>` : ''}
     </div>`;
@@ -5003,11 +5058,21 @@ async function renderProducao() {
       <div class="sec-titulo">🏭 Produção</div>
       <button onclick="renderProducao()" style="padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:none;color:var(--muted);font-size:11px;cursor:pointer">↻ Atualizar</button>
     </div>
+    ${_semNavHtml}
+    <div class="store-tabs" style="margin-bottom:12px">${lojaTabs}</div>
     <div style="font-size:11px;color:var(--muted);margin-bottom:12px">
-      Saída é puxada automaticamente dos pedidos de PETISCOS ainda aguardando entrega. Assim que a entrega é confirmada, o valor some daqui e já é descontado do Estoque.
+      Saída é puxada automaticamente dos pedidos de PETISCOS ainda aguardando entrega nesta semana; assim que a entrega é confirmada, o valor some daqui e já é descontado do Estoque.
+      Contagem mostra o que foi lançado na aba Pedido nesta semana (${lojaLabelAtual}).
     </div>
     ${linhasHtml}
   `;
+}
+
+async function _navegarSemanaProducao(delta) {
+  const nova = datePlusWeeks(S.producaoSemana || getMondayOfWeek(), delta);
+  if (nova > getMondayOfWeek()) return;
+  S.producaoSemana = nova;
+  await renderProducao();
 }
 
 async function salvarProducaoCampo(catalogoId, campo, valor) {
