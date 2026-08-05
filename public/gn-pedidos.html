@@ -381,6 +381,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   <div class="sidebar-section">Gestão</div>
   <button class="sidebar-link" data-sidebar-tab="carnes" onclick="setTab('carnes')"><span class="sl-icon">🥩</span>Controle de Carnes</button>
   <button class="sidebar-link" data-sidebar-tab="trios" onclick="setTab('trios')"><span class="sl-icon">🎵</span>Trios / Bandas</button>
+  <button class="sidebar-link" data-sidebar-tab="historico" onclick="setTab('historico')"><span class="sl-icon">📜</span>Histórico</button>
 </nav>
 
 <div id="splash"><div class="spin"></div><span style="font-size:12px;color:var(--muted)">Carregando...</span></div>
@@ -473,6 +474,10 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
     <button class="nav-btn" data-tab="trios" onclick="setTab('trios')">
       <span class="nav-icon">🎵</span>
       <span class="nav-label">Trios</span>
+    </button>
+    <button class="nav-btn" data-tab="historico" onclick="setTab('historico')">
+      <span class="nav-icon">📜</span>
+      <span class="nav-label">Histórico</span>
     </button>
   </nav>
 </div>
@@ -645,6 +650,7 @@ let S = {
   catForn: '',
   mostraInativos: false,
   catEditLote: false, // modo edição em lote do "Und por Cx" (ver toggleCatEditLote)
+  catEditLoteCusto: false, // modo edição em lote do "Custo" (ver toggleCatEditLoteCusto)
 
   // Filtros provisão
   provLoja: '',
@@ -659,6 +665,9 @@ let S = {
 
   // Faltas do dia
   faltaDiaLoja: '',
+
+  // Histórico de ações (auditoria)
+  histAcaoFiltro: '',
 
   // Totais pedido por loja (calculado)
   totaisPorLoja: {},
@@ -779,6 +788,26 @@ function fecharModal(e) {
 function abrirModal(html) {
   $('modal-box').innerHTML = html;
   $('modal-bg').classList.add('ativo');
+}
+
+// ═══════════════════════════════════════════════
+// AUDITORIA — registro de ações relevantes (quem fez o quê e quando), pra ter rastro
+// de confirmações/reversões/cancelamentos/mudanças de custo sem depender só do toast
+// que desaparece na hora. Nunca deve travar a ação principal: erro aqui só vai pro
+// console, e a ação que originou o log já terminou antes desta chamada.
+// ═══════════════════════════════════════════════
+async function _logAuditoria(acao, detalhes, extra) {
+  try {
+    let usuario = 'SISTEMA';
+    try { usuario = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null')?.nome || 'SISTEMA'; } catch(e) {}
+    await db.from('gn_auditoria_pedidos').insert([{
+      usuario, acao, detalhes: detalhes || null,
+      pedido_id: extra?.pedido_id || null,
+      fornecedor: extra?.fornecedor || null,
+      loja_slug: extra?.loja_slug || null,
+      catalogo_id: extra?.catalogo_id || null
+    }]);
+  } catch (e) { console.error('Erro ao registrar auditoria:', e.message || e); }
 }
 
 // ═══════════════════════════════════════════════
@@ -1551,6 +1580,7 @@ async function _confirmarFornecedoresSelecionados() {
     } else {
       toast(`✓ ${selecionados.length} fornecedor${selecionados.length>1?'es':''} confirmado${selecionados.length>1?'s':''}! ${provisoes.length} provisões geradas.${aindaPendentes.length>0?' '+aindaPendentes.length+' fornecedor(es) ainda em aberto.':''}`, 'ok');
     }
+    _logAuditoria('CONFIRMAR_FORNECEDOR', { fornecedores: selecionados, provisoes_geradas: provisoes.length }, { pedido_id: S.pedidoAtual.id });
 
     // 6. Atualizar estado local e re-renderizar
     calcularTotais();
@@ -1618,6 +1648,7 @@ async function reverterConfirmacaoFornecedor(fornecedor) {
     }
 
     toast(`↩️ Confirmação de ${fornecedor} revertida (${reversiveis.length} provisão(ões) apagada(s)).`, 'ok');
+    _logAuditoria('REVERTER_CONFIRMACAO', { fornecedor, provisoes_apagadas: reversiveis.length, ja_recebidas: jaRecebidas }, { pedido_id: S.pedidoAtual.id, fornecedor });
     renderPedido();
   } catch (e) {
     toast('Erro ao reverter: ' + (e.message || e), 'err');
@@ -1647,14 +1678,16 @@ async function novoPedido() {
   }
   const semIsoStr = S.semanaAtiva.toISOString().split('T')[0];
   if (!ehConfirmado && S.pedidoAtual?.id) {
-    await db.from('gn_pedidos').update({ status: 'CANCELADO' }).eq('id', S.pedidoAtual.id);
+    const pedidoCanceladoId = S.pedidoAtual.id;
+    await db.from('gn_pedidos').update({ status: 'CANCELADO' }).eq('id', pedidoCanceladoId);
     // Provisões de fornecedores que já tinham sido confirmados nesse rascunho (2ª rodada,
     // ou confirmação parcial antes de cancelar o resto) não podem ficar "aguardando
     // entrega" pra sempre — a loja continuaria vendo essa entrega na aba Entrega, duplicada
     // com a do próximo pedido dessa mesma semana (foi exatamente isso que aconteceu: um
     // pedido cancelado deixou 286 provisões órfãs ainda AGUARDANDO).
     await db.from('gn_provisoes').update({ status: 'CANCELADO', atualizado_em: new Date().toISOString() })
-      .eq('pedido_id', S.pedidoAtual.id).eq('status', 'AGUARDANDO');
+      .eq('pedido_id', pedidoCanceladoId).eq('status', 'AGUARDANDO');
+    _logAuditoria('CANCELAR_PEDIDO', { itens_ocultados: totalItensAtuais }, { pedido_id: pedidoCanceladoId });
   }
   const { data } = await db.from('gn_pedidos')
     .insert([{ data_pedido: hoje(), semana_inicio: semIsoStr, status: 'RASCUNHO', regiao: 'RJ' }])
@@ -1800,6 +1833,7 @@ function renderContent() {
     case 'faltas-dia':  renderFaltaDia(); break;
     case 'carnes':      renderCarnesCtrl(); break;
     case 'trios':       renderTrios(); break;
+    case 'historico':   renderHistorico(); break;
   }
 }
 
@@ -2741,7 +2775,15 @@ function renderCatalogo() {
             <span>${p.und}</span>
           </div>
         </div>
-        <div class="cat-item-custo num">${p.custo ? 'R$'+fmt(p.custo) : '—'}</div>
+        ${S.catEditLoteCusto ? `
+          <input type="number" min="0" step="0.01" class="form-input" placeholder="R$"
+            style="width:76px;height:32px;padding:2px 4px;text-align:center;font-size:12px;flex-shrink:0"
+            value="${p.custo||''}"
+            onchange="salvarCustoLote('${p.id}',this.value)"
+            onblur="salvarCustoLote('${p.id}',this.value)">
+        ` : `
+          <div class="cat-item-custo num">${p.custo ? 'R$'+fmt(p.custo) : '—'}</div>
+        `}
         <div class="cat-item-acoes">
           ${S.catEditLote ? `
             <input type="number" min="1" step="1" class="form-input" placeholder="Und/Cx"
@@ -2772,6 +2814,9 @@ function renderCatalogo() {
         <button class="btn-sm${S.catEditLote?' btn-success':' btn-outline'}" onclick="toggleCatEditLote()" title="Editar 'Und por Cx' de vários produtos seguido, sem abrir o modal de cada um">
           ✏️ Und/Cx em lote${S.catEditLote?' (ativo)':''}
         </button>
+        <button class="btn-sm${S.catEditLoteCusto?' btn-success':' btn-outline'}" onclick="toggleCatEditLoteCusto()" title="Editar o custo de vários produtos seguido, sem abrir o modal de cada um">
+          💰 Custo em lote${S.catEditLoteCusto?' (ativo)':''}
+        </button>
         <button class="btn-sm btn-outline" onclick="abrirImportarUndCx()" title="Sugere o 'Und por Cx' a partir do fator já cadastrado no app Lojas (ou do nome do produto), pra revisar e aplicar de uma vez">
           📥 Importar do Lojas
         </button>
@@ -2779,6 +2824,7 @@ function renderCatalogo() {
       </div>
     </div>
     ${S.catEditLote ? `<div style="font-size:11px;color:var(--muted);margin:-4px 0 8px;padding:0 4px">✏️ Modo edição em lote: digite quantas UND tem uma CX de cada produto e saia do campo (Tab/clique fora) — salva sozinho. Deixe em branco pra produto que não vende em caixa.</div>` : ''}
+    ${S.catEditLoteCusto ? `<div style="font-size:11px;color:var(--muted);margin:-4px 0 8px;padding:0 4px">💰 Modo edição em lote: digite o novo custo de cada produto e saia do campo (Tab/clique fora) — salva sozinho.</div>` : ''}
 
     <div class="filtros">
       <input class="filtro-input" type="search" placeholder="🔍 Buscar produto..."
@@ -2819,6 +2865,30 @@ async function salvarUndCxLote(id, valor) {
   if (error) { toast('⚠️ Erro ao salvar: ' + error.message, 'err'); return; }
   const idx = S.catalogo.findIndex(p => p.id === id);
   if (idx >= 0) S.catalogo[idx].und_por_caixa = undPorCaixa;
+}
+
+function toggleCatEditLoteCusto() {
+  S.catEditLoteCusto = !S.catEditLoteCusto;
+  renderCatalogo();
+}
+
+// Salva o "Custo" de um produto direto na lista do Catálogo (modo edição em lote) —
+// mesmo mecanismo do salvarUndCxLote, mas pro campo de custo. Registra na auditoria
+// pra manter rastro de reajuste de preço (útil pra entender por que o valor previsto
+// de uma provisão mudou de uma semana pra outra).
+async function salvarCustoLote(id, valor) {
+  const custo = parseFloat(String(valor).replace(',','.')) || null;
+  const idxAntes = S.catalogo.findIndex(p => p.id === id);
+  const custoAntigo = idxAntes >= 0 ? S.catalogo[idxAntes].custo : null;
+  if (custo === custoAntigo) return;
+
+  const { error } = await db.from('gn_catalogo')
+    .update({ custo, atualizado_em: new Date().toISOString() })
+    .eq('id', id);
+  if (error) { toast('⚠️ Erro ao salvar: ' + error.message, 'err'); return; }
+  const idx = S.catalogo.findIndex(p => p.id === id);
+  if (idx >= 0) S.catalogo[idx].custo = custo;
+  _logAuditoria('ALTERAR_CUSTO_CATALOGO', { produto: idx>=0?S.catalogo[idx].produto:null, custo_antigo: custoAntigo, custo_novo: custo }, { catalogo_id: id });
 }
 
 // ── Importar "Und por Cx" a partir do que já existe no app Lojas ──────────────
@@ -3130,6 +3200,9 @@ async function salvarEdicaoProduto(id) {
 
   if (!produto || !grupo) { toast('Preencha produto e grupo.','err'); return; }
 
+  const idxAntes = S.catalogo.findIndex(p => p.id === id);
+  const custoAntigo = idxAntes >= 0 ? S.catalogo[idxAntes].custo : null;
+
   const { error } = await db.from('gn_catalogo')
     .update({ produto, grupo, subgrupo, fornecedor, und, custo, und_por_caixa: undPorCaixa, atualizado_em: new Date().toISOString() })
     .eq('id', id);
@@ -3137,6 +3210,9 @@ async function salvarEdicaoProduto(id) {
   if (error) { toast('Erro: '+error.message,'err'); return; }
   const idx = S.catalogo.findIndex(p => p.id === id);
   if (idx >= 0) Object.assign(S.catalogo[idx], { produto, grupo, subgrupo, fornecedor, und, custo, und_por_caixa: undPorCaixa });
+  if (custo !== custoAntigo) {
+    _logAuditoria('ALTERAR_CUSTO_CATALOGO', { produto, custo_antigo: custoAntigo, custo_novo: custo }, { catalogo_id: id });
+  }
   $('modal-bg').classList.remove('ativo');
   toast('Produto atualizado!','ok');
   renderCatalogo();
@@ -4306,6 +4382,45 @@ async function confirmarEntrega(provisaoId) {
   await renderProvisoes();
 }
 
+// Confirma de uma vez todas as entregas pendentes de uma data, assumindo que qtd e valor
+// recebidos bateram exatamente com o previsto — pra quando a entrega toda chegou certinha
+// e não faz sentido abrir o modal item por item. Item que veio diferente do previsto
+// continua precisando ser validado individualmente (clicando nele), sem passar por aqui.
+async function confirmarEntregasEmLote(dataKey) {
+  const itens = S.entregasPendentes.filter(p => (p.data_entrega || 'Sem data') === dataKey);
+  if (!itens.length) return;
+
+  const total = itens.reduce((a,p) => a+(parseFloat(p.valor_previsto)||0), 0);
+  if (!confirm(`Confirmar TODAS as ${itens.length} entregas desta data como recebidas certinho (qtd e valor exatamente como previsto)?\n\nTotal: R$ ${fmt(total)}\n\nSe algum item veio diferente do previsto, valide ele individualmente em vez de usar este botão.`)) return;
+
+  let recebidoPor = 'SISTEMA';
+  try { recebidoPor = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null')?.nome || 'SISTEMA'; } catch(e) {}
+
+  let erros = 0;
+  for (const p of itens) {
+    try {
+      const { error: e1 } = await db.from('gn_recebimentos').insert([{
+        provisao_id: p.id,
+        qtd_recebida: p.qtd_prevista,
+        valor_recebido: p.valor_previsto,
+        diferenca_qtd: 0,
+        observacao: null,
+        validado_por: recebidoPor
+      }]);
+      if (e1) throw e1;
+      const { error: e2 } = await db.from('gn_provisoes')
+        .update({ status: 'RECEBIDO_OK', atualizado_em: new Date().toISOString() }).eq('id', p.id);
+      if (e2) throw e2;
+    } catch (e) { erros++; console.error('Erro ao confirmar em lote:', p.id, e.message||e); }
+  }
+
+  toast(erros > 0
+    ? `Confirmado com ${erros} erro(s) de ${itens.length}. Verifique o console.`
+    : `✓ ${itens.length} entrega${itens.length>1?'s':''} confirmada${itens.length>1?'s':''}!`, erros>0?'err':'ok');
+  _logAuditoria('CONFIRMAR_ENTREGA_LOTE', { data: dataKey, itens: itens.length - erros, valor_total: total }, {});
+  await renderEntrega();
+}
+
 // ═══════════════════════════════════════════════
 // RENDER: ENTREGA (pendentes + confirmados semana)
 // ═══════════════════════════════════════════════
@@ -4355,6 +4470,11 @@ async function renderEntrega() {
             <span class="num" style="font-size:12px">R$ ${fmt(total)}</span>
           </div>
         </div>
+        ${itens.length > 1 ? `<div style="padding:6px 12px;border-bottom:1px solid var(--border)">
+          <button onclick="confirmarEntregasEmLote('${data}')" style="width:100%;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);border-radius:8px;padding:7px;color:#4ade80;font-size:11px;font-weight:700;cursor:pointer">
+            ✓ Confirmar tudo certo (qtd e valor previstos)
+          </button>
+        </div>` : ''}
         <div class="grupo-body" style="display:block">${itensHtml}</div>
       </div>`;
     }).join('');
@@ -4492,11 +4612,19 @@ async function renderFaltaDia() {
         <div class="empty-texto">${S.faltaDiaLoja ? 'Nenhuma falta registrada nessa loja hoje.' : 'Nenhuma falta registrada hoje.'}</div>
       </div>`
     : registrosFiltrados.map(r => {
-        const lojaDisplay = S.lojas.find(l =>
+        const lojaObj = S.lojas.find(l =>
           l.slug_pedido === r.loja || l.loja === r.loja || l.nome_display === r.loja
-        )?.nome_display || r.loja;
+        );
+        const lojaDisplay = lojaObj?.nome_display || r.loja;
+        // "+ Pedido" só aparece quando dá pra resolver a loja no cadastro de Pedido e
+        // existe um rascunho ativo pra semana — sem isso não tem onde salvar o item.
+        const podeAdicionar = !!(lojaObj && S.pedidoAtual?.id);
         const itensLoja = r.faltas.map(f => {
           const icon = urgenciaIcon(f.urgencia);
+          const qtdNum = parseFloat(String(f.quantidade||'').replace(',','.')) || 0;
+          const btnAdd = podeAdicionar
+            ? `<button onclick="modalAdicionarFalta('${lojaObj.slug_pedido}','${(f.nome||'').replace(/'/g,"\\'")}',${qtdNum})" title="Adicionar ao pedido" style="flex-shrink:0;background:rgba(232,88,10,.12);border:1px solid rgba(232,88,10,.35);border-radius:6px;padding:4px 8px;color:#E8580A;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap">+ Pedido</button>`
+            : '';
           return `<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)">
             <span style="font-size:16px;flex-shrink:0">${icon}</span>
             <div style="flex:1;min-width:0">
@@ -4508,6 +4636,7 @@ async function renderFaltaDia() {
               f.urgencia==='Media' ? 'background:rgba(251,191,36,.15);color:#fbbf24' :
               'background:rgba(34,197,94,.15);color:#4ade80'
             }">${f.urgencia || 'Média'}</span>
+            ${btnAdd}
           </div>`;
         }).join('');
         return `<div class="grupo-bloco aberto" style="margin-bottom:10px">
@@ -4563,6 +4692,136 @@ async function renderFaltaDia() {
   _atualizarFaltasBadge(registros.reduce((n,r)=>n+(r.faltas?.length||0),0));
 }
 
+// Abre um modal pra escolher, no Catálogo, o produto correspondente à falta reportada
+// pela loja (o nome vem digitado livre pela loja, não é garantido bater com o produto
+// cadastrado) e a quantidade a acrescentar no rascunho da semana atual.
+function modalAdicionarFalta(lojaSlug, nomeFalta, qtdFalta) {
+  const lojaObj = S.lojas.find(l => l.slug_pedido === lojaSlug);
+  if (!lojaObj) { toast('Loja não encontrada.', 'err'); return; }
+  if (!S.pedidoAtual?.id) { toast('Nenhum pedido em rascunho nesta semana.', 'err'); return; }
+
+  const nomeUp = (nomeFalta||'').trim().toUpperCase();
+  const candidatos = S.catalogo.filter(p => p.ativo && p.produto.toUpperCase().includes(nomeUp));
+  const opcoes = (candidatos.length ? candidatos : S.catalogo.filter(p=>p.ativo))
+    .slice().sort((a,b)=>a.produto.localeCompare(b.produto));
+
+  if (!opcoes.length) { toast('Nenhum produto ativo no catálogo.', 'err'); return; }
+
+  const optsHtml = opcoes.map(p => `<option value="${p.id}">${p.produto} — ${p.fornecedor}</option>`).join('');
+
+  abrirModal(`
+    <div class="modal-titulo">+ Adicionar ao Pedido
+      <button class="modal-close" onclick="$('modal-bg').classList.remove('ativo')">×</button>
+    </div>
+    <div style="background:var(--card2);border-radius:var(--rs);padding:12px;margin-bottom:14px;font-size:12px">
+      Falta reportada: <b>${nomeFalta||'—'}</b><br>${lojaObj.nome_display}
+    </div>
+    <div class="form-group">
+      <label class="form-label">PRODUTO NO CATÁLOGO${candidatos.length?'':' (nenhum nome parecido — escolha manualmente)'}</label>
+      <select class="form-select" id="m-falta-prod">${optsHtml}</select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">QTD A ACRESCENTAR NO PEDIDO</label>
+      <input class="form-input" id="m-falta-qtd" type="number" step="0.5" min="0" value="${qtdFalta>0?qtdFalta:1}">
+    </div>
+    <div class="modal-acoes">
+      <button class="btn-sm btn-outline" onclick="$('modal-bg').classList.remove('ativo')">Cancelar</button>
+      <button class="btn-sm btn-orange" onclick="_confirmarAdicionarFalta('${lojaSlug}')">+ Adicionar</button>
+    </div>
+  `);
+}
+
+async function _confirmarAdicionarFalta(lojaSlug) {
+  const catalogoId = $('m-falta-prod').value;
+  const qtdAdd = parseFloat($('m-falta-qtd').value) || 0;
+  if (!catalogoId || qtdAdd <= 0) { toast('Selecione o produto e uma quantidade válida.', 'err'); return; }
+
+  const prod = S.catalogo.find(p => p.id === catalogoId);
+  const qtdAtual = S.pedidoItens[catalogoId]?.[lojaSlug]?.qtd || 0;
+  const custo = S.pedidoItens[catalogoId]?.[lojaSlug]?.custo ?? prod?.custo ?? 0;
+  const novaQtd = qtdAtual + qtdAdd;
+
+  await salvarItem(catalogoId, lojaSlug, novaQtd, custo, null);
+
+  $('modal-bg').classList.remove('ativo');
+  const lojaDisplay = S.lojas.find(l=>l.slug_pedido===lojaSlug)?.nome_display || lojaSlug;
+  toast(`✓ ${fmtQtd(qtdAdd)} ${prod?.und||''} de "${prod?.produto||'—'}" ${qtdAtual>0?'somado ao':'adicionado ao'} pedido de ${lojaDisplay}.`, 'ok');
+}
+
+// ═══════════════════════════════════════════════
+// RENDER: HISTÓRICO (auditoria de ações)
+// ═══════════════════════════════════════════════
+const HISTORICO_ACOES = {
+  CONFIRMAR_FORNECEDOR:    { icon: '✅', label: 'Confirmou fornecedor(es)', cor: '#4ade80' },
+  REVERTER_CONFIRMACAO:    { icon: '↩️', label: 'Reverteu confirmação',     cor: '#f87171' },
+  CANCELAR_PEDIDO:         { icon: '🗑️', label: 'Cancelou pedido',          cor: '#f87171' },
+  ALTERAR_CUSTO_CATALOGO:  { icon: '💰', label: 'Alterou custo',            cor: '#fbbf24' },
+  CONFIRMAR_ENTREGA_LOTE:  { icon: '📦', label: 'Confirmou entregas em lote', cor: '#4ade80' },
+};
+
+function _formatarDetalhesAuditoria(acao, d) {
+  if (!d) return '';
+  try {
+    if (acao === 'CONFIRMAR_FORNECEDOR')   return `${(d.fornecedores||[]).join(', ')} — ${d.provisoes_geradas||0} provisõe(s)`;
+    if (acao === 'REVERTER_CONFIRMACAO')   return `${d.fornecedor||''} — ${d.provisoes_apagadas||0} provisõe(s) apagada(s)${d.ja_recebidas?` (${d.ja_recebidas} já recebida(s) preservada(s))`:''}`;
+    if (acao === 'CANCELAR_PEDIDO')        return d.itens_ocultados ? `${d.itens_ocultados} item(ns) ficaram ocultos` : '';
+    if (acao === 'ALTERAR_CUSTO_CATALOGO') return `${d.produto||''}: ${d.custo_antigo!=null?'R$'+fmt(d.custo_antigo):'—'} → ${d.custo_novo!=null?'R$'+fmt(d.custo_novo):'—'}`;
+    if (acao === 'CONFIRMAR_ENTREGA_LOTE') return `${d.data||''} — ${d.itens||0} item(ns), R$ ${fmt(d.valor_total||0)}`;
+  } catch(e) {}
+  return '';
+}
+
+async function renderHistorico() {
+  $('content').innerHTML = '<div class="empty"><div class="spin"></div></div>';
+
+  let rows = [];
+  try {
+    const { data, error } = await db.from('gn_auditoria_pedidos')
+      .select('*').order('criado_em', { ascending: false }).limit(150);
+    if (error) throw error;
+    rows = data || [];
+  } catch (e) {
+    $('content').innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-texto">Erro ao carregar histórico</div></div>`;
+    return;
+  }
+
+  const filtroAcao = S.histAcaoFiltro || '';
+  const rowsFiltradas = filtroAcao ? rows.filter(r => r.acao === filtroAcao) : rows;
+
+  const itensHtml = rowsFiltradas.length === 0
+    ? `<div class="empty" style="padding:30px 0"><div class="empty-icon">📜</div><div class="empty-texto">Nenhum registro ainda</div></div>`
+    : rowsFiltradas.map(r => {
+        const meta = HISTORICO_ACOES[r.acao] || { icon: '•', label: r.acao, cor: 'var(--muted)' };
+        const dt = new Date(r.criado_em).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
+        const detalheStr = _formatarDetalhesAuditoria(r.acao, r.detalhes);
+        return `<div class="prov-item">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:12px;font-weight:700;color:${meta.cor}">${meta.icon} ${meta.label}</div>
+            ${detalheStr?`<div style="font-size:11px;color:var(--text);margin-top:2px">${detalheStr}</div>`:''}
+            <div style="font-size:10px;color:var(--muted);margin-top:3px">👤 ${r.usuario||'—'} · ${dt}</div>
+          </div>
+        </div>`;
+      }).join('');
+
+  const opcoesAcao = Object.entries(HISTORICO_ACOES).map(([k,v]) =>
+    `<option value="${k}"${filtroAcao===k?' selected':''}>${v.icon} ${v.label}</option>`).join('');
+
+  $('content').innerHTML = `
+    <div class="sec-header">
+      <div class="sec-titulo">Histórico de Ações <span class="badge badge-r">${rowsFiltradas.length}</span></div>
+      <button onclick="renderHistorico()" style="padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:none;color:var(--muted);font-size:11px;cursor:pointer">↻ Atualizar</button>
+    </div>
+    <div class="filtros">
+      <select class="filtro-select" onchange="S.histAcaoFiltro=this.value;renderHistorico()">
+        <option value="">Todas as ações</option>
+        ${opcoesAcao}
+      </select>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin:6px 0 12px">Últimos ${rows.length} registros.</div>
+    ${itensHtml}
+  `;
+}
+
 // ═══════════════════════════════════════════════
 // INICIALIZAÇÃO
 // ═══════════════════════════════════════════════
@@ -4600,7 +4859,7 @@ async function iniciarApp() {
     const _sess = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
     const abasArr = _sess && _sess.permissoes && _sess.permissoes.pedidos_abas;
     S.abasPermitidas = Array.isArray(abasArr) ? new Set(abasArr) : null;
-    const ALL_TABS = ['pedido','edu','oseas','matheus','catalogo','fornecedores','provisoes','entrega','fichas','faltas-dia','carnes','trios'];
+    const ALL_TABS = ['pedido','edu','oseas','matheus','catalogo','fornecedores','provisoes','entrega','fichas','faltas-dia','carnes','trios','historico'];
     ALL_TABS.forEach(t => {
       const hidden = S.abasPermitidas && !S.abasPermitidas.has(t);
       document.querySelectorAll(`.sidebar-link[data-sidebar-tab="${t}"], .nav-btn[data-tab="${t}"]`).forEach(b => {
