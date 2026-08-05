@@ -2747,8 +2747,8 @@ function gerarRelatorioWpp() {
   const pendentes = [...emp.enviados, ...emp.recebidos];
   if (pendentes.length) {
     linhas.push("\n⏳ *EMPRÉSTIMOS PENDENTES*");
-    emp.enviados.forEach(t=>linhas.push("  📤 " + t.insumo + " (" + t.qtd.toFixed(3) + ") → " + t.destino));
-    emp.recebidos.forEach(t=>linhas.push("  📥 " + t.insumo + " (" + t.qtd.toFixed(3) + ") ← " + t.origem));
+    emp.enviados.forEach(t=>linhas.push("  📤 " + t.insumo + " (" + (t.qtdOriginal!=null?t.qtdOriginal:t.qtd).toFixed(3) + " " + (t.unidade||'UN') + ") → " + t.destino));
+    emp.recebidos.forEach(t=>linhas.push("  📥 " + t.insumo + " (" + (t.qtdOriginal!=null?t.qtdOriginal:t.qtd).toFixed(3) + " " + (t.unidade||'UN') + ") ← " + t.origem));
   }
 
   linhas.push("\n━━━━━━━━━━━━━━━━━━");
@@ -2792,8 +2792,8 @@ function gerarRelatorioInsumoWpp(nomeInsumo) {
 
   const tfEnv = tf.enviadas.filter(t=>t.insumo===nomeInsumo);
   const tfRec = tf.recebidas.filter(t=>t.insumo===nomeInsumo);
-  if (tfEnv.length) linhas.push('📤 Transferido para: ' + tfEnv.map(t=>t.destino+' ('+t.qtd.toFixed(3)+')').join(', '));
-  if (tfRec.length) linhas.push('📥 Recebido de: ' + tfRec.map(t=>t.origem+' ('+t.qtd.toFixed(3)+')').join(', '));
+  if (tfEnv.length) linhas.push('📤 Transferido para: ' + tfEnv.map(t=>t.destino+' ('+(t.qtdOriginal!=null?t.qtdOriginal:t.qtd).toFixed(3)+' '+(t.unidade||'UN')+')').join(', '));
+  if (tfRec.length) linhas.push('📥 Recebido de: ' + tfRec.map(t=>t.origem+' ('+(t.qtdOriginal!=null?t.qtdOriginal:t.qtd).toFixed(3)+' '+(t.unidade||'UN')+')').join(', '));
 
   linhas.push('🍽️ Consumo teórico: *-' + (cons[nomeInsumo]||0).toFixed(3) + '*');
   linhas.push('📊 Saldo teórico: *' + (teo[nomeInsumo]||0).toFixed(3) + '*');
@@ -4666,13 +4666,15 @@ function getTransfPorLoja() {
   return result;
 }
 
-function addTransferencia(destino, insumo, qtdCx, qtdUnd, motivo) {
+function addTransferencia(destino, insumo, unidade, qtd, fator, motivo) {
   if (!destino || !insumo) { showToast("⚠️ Preencha insumo e destino."); return false; }
-  const fatorT = getFator(insumo.trim().toUpperCase());
-  const cx  = parseFloat(qtdCx)  || 0;
-  const und = parseFloat(qtdUnd) || 0;
-  const qtdTotal = (cx * fatorT) + und;
-  if (qtdTotal <= 0) { showToast("⚠️ Informe a quantidade (CX ou UN)."); return false; }
+  const unid = unidade === 'CX' ? 'CX' : (unidade === 'KG' ? 'KG' : 'UN');
+  const q = parseFloat(qtd) || 0;
+  if (q <= 0) { showToast("⚠️ Informe a quantidade."); return false; }
+  const fatorT = unid === 'CX' ? (parseFloat(fator) || 0) : 1;
+  if (unid === 'CX' && fatorT <= 0) { showToast("⚠️ Informe quantas unidades tem em cada caixa (fator)."); return false; }
+  const qtdTotal = unid === 'CX' ? q * fatorT : q;
+  if (qtdTotal <= 0) { showToast("⚠️ Informe a quantidade."); return false; }
   if (destino === loja) { showToast("⚠️ Origem e destino iguais."); return false; }
 
   // Validar saldo disponível
@@ -4690,8 +4692,7 @@ function addTransferencia(destino, insumo, qtdCx, qtdUnd, motivo) {
   const nomeInsumo = insumo.trim().toUpperCase();
   const t = {
     id, data: new Date().toISOString(), origem: loja, destino,
-    insumo: nomeInsumo, qtd: qtdTotal,
-    qtdCx: cx, qtdUnd: und, fator: fatorT,
+    insumo: nomeInsumo, qtd: qtdTotal, unidade: unid, qtdOriginal: q, fator: fatorT,
     motivo: motivo||"", quitado: false, dataQuitacao: null
   };
   transferAll[k].push(t);
@@ -4703,11 +4704,50 @@ function addTransferencia(destino, insumo, qtdCx, qtdUnd, motivo) {
   autoSave();
   // Push ORIGEM (débito saiu) E DESTINO (crédito chegou) simultaneamente
   Promise.all([sbPush(), sbPushLoja(destino)]).then(() => {
-    showToast("✅ " + qtdTotal.toFixed(0) + " UN saíram do seu estoque → " + destino + "!\n📤 Aguardando confirmação de devolução.");
+    showToast("✅ " + q.toFixed(3) + " " + unid + " saíram do seu estoque → " + destino + "!\n📤 Aguardando confirmação de devolução.");
   }).catch(() => {
     showToast("✅ Registrado localmente — sincronize para atualizar as lojas.");
   });
   return true;
+}
+
+// Alterna a unidade do Novo Empréstimo — mesmo padrão de Entradas/Saída Terceiros:
+// UN/KG a quantidade digitada já é o total, CX multiplica pelo fator.
+function setUnidadeTransf(unidade) {
+  const un = document.getElementById('tfUnidade');
+  if (!un) return;
+  un.value = unidade;
+  document.querySelectorAll('.tf-un-btn').forEach(b => {
+    const ativo = b.dataset.un === unidade;
+    b.style.border = '1px solid ' + (ativo ? '#E8580A' : 'rgba(255,255,255,.14)');
+    b.style.background = ativo ? 'rgba(232,88,10,.18)' : 'transparent';
+    b.style.color = ativo ? '#fb923c' : '#94a3b8';
+  });
+  const fatorWrap = document.getElementById('tfFatorWrap');
+  const qtdLabel = document.getElementById('tfQtdLabel');
+  if (unidade === 'CX') {
+    fatorWrap.style.display = '';
+    qtdLabel.textContent = 'Quantidade (caixas) *';
+    const insumo = (document.getElementById('tfInsumo')||{}).value || '';
+    const fatorEl = document.getElementById('tfFator');
+    if (fatorEl && !fatorEl.value) {
+      const f = getFator(insumo.trim().toUpperCase());
+      if (f > 1) fatorEl.value = f;
+    }
+  } else {
+    fatorWrap.style.display = 'none';
+    qtdLabel.textContent = `Quantidade (${unidade}) *`;
+  }
+  atualizarPreviewTransf();
+}
+
+function atualizarPreviewTransf() {
+  const unidade = (document.getElementById('tfUnidade')||{}).value || 'UN';
+  const q = parseFloat((document.getElementById('tfQtd')||{}).value) || 0;
+  const fator = unidade === 'CX' ? (parseFloat((document.getElementById('tfFator')||{}).value) || 0) : 1;
+  const tot = unidade === 'CX' ? q * fator : q;
+  const prev = document.getElementById('tfPreview');
+  if (prev) prev.textContent = tot > 0 ? (unidade === 'CX' && fator > 1 ? '×' + fator + ' = ' + tot.toFixed(0) + ' UN' : '= ' + tot.toFixed(3) + ' ' + unidade) : '';
 }
 
 function quitarEmprestimo(id) {
@@ -4796,8 +4836,8 @@ function marcarPagamentoDinheiro(id) {
   const outroJaConfirmou = isDestino ? found.pagDinheiroOrigem : found.pagDinheiroDestino;
 
   if (!confirm(isDestino
-    ? 'Confirmar que "' + found.insumo + '" (' + found.qtd.toFixed(3) + ' UN) será pago em dinheiro/PIX pra ' + found.origem + ', em vez de devolvido fisicamente?'
-    : 'Confirmar que aceita receber "' + found.insumo + '" (' + found.qtd.toFixed(3) + ' UN) em dinheiro/PIX de ' + found.destino + ', em vez de devolução física?')) return;
+    ? 'Confirmar que "' + found.insumo + '" (' + (found.qtdOriginal!=null?found.qtdOriginal:found.qtd).toFixed(3) + ' ' + (found.unidade||'UN') + ') será pago em dinheiro/PIX pra ' + found.origem + ', em vez de devolvido fisicamente?'
+    : 'Confirmar que aceita receber "' + found.insumo + '" (' + (found.qtdOriginal!=null?found.qtdOriginal:found.qtd).toFixed(3) + ' ' + (found.unidade||'UN') + ') em dinheiro/PIX de ' + found.destino + ', em vez de devolução física?')) return;
 
   let valorCombinado = found.valorPagDinheiro || 0;
   if (outroJaConfirmou) {
@@ -4894,15 +4934,15 @@ function delTransferencia(id) {
 function submitTransf() {
   const insumo  = ((document.getElementById("tfInsumo")||{}).value||"").trim().toUpperCase();
   const destino = (document.getElementById("tfDestino")||{}).value||"";
-  const qtdCx   = parseFloat((document.getElementById("tfQtdCx")||{}).value)||0;
-  const qtdUnd  = parseFloat((document.getElementById("tfQtdUnd")||{}).value)||0;
+  const unidade = (document.getElementById("tfUnidade")||{}).value||"UN";
+  const qtd     = (document.getElementById("tfQtd")||{}).value;
+  const fator   = (document.getElementById("tfFator")||{}).value;
   const motivo  = (document.getElementById("tfMotivo")||{}).value||"";
-  const fatorT  = getFator(insumo);
-  const total   = qtdCx * fatorT + qtdUnd;
-  if (addTransferencia(destino, insumo, qtdCx, qtdUnd, motivo)) {
-    ["tfInsumo","tfDestino","tfQtdCx","tfQtdUnd","tfMotivo"].forEach(id => {
+  if (addTransferencia(destino, insumo, unidade, qtd, fator, motivo)) {
+    ["tfInsumo","tfDestino","tfQtd","tfFator","tfMotivo"].forEach(id => {
       const el = document.getElementById(id); if (el) el.value = "";
     });
+    setUnidadeTransf('UN');
     render();
   }
 }
@@ -5024,14 +5064,14 @@ function gerarRelatorioTransfWpp() {
   if (tf.enviadas.length) {
     linhas.push("\n📤 *ENVIADOS (você emprestou)*");
     tf.enviadas.forEach(t => {
-      linhas.push("  • " + t.insumo + ": *" + t.qtd.toFixed(3) + "* → " + t.destino + " [" + (t.quitado?"✅ devolvido":"⏳ pendente") + "]");
+      linhas.push("  • " + t.insumo + ": *" + (t.qtdOriginal!=null?t.qtdOriginal:t.qtd).toFixed(3) + " " + (t.unidade||'UN') + "* → " + t.destino + " [" + (t.quitado?"✅ devolvido":"⏳ pendente") + "]");
       if (t.motivo) linhas.push("    _" + t.motivo + "_");
     });
   }
   if (tf.recebidas.length) {
     linhas.push("\n📥 *RECEBIDOS (você deve)*");
     tf.recebidas.forEach(t => {
-      linhas.push("  • " + t.insumo + ": *" + t.qtd.toFixed(3) + "* ← " + t.origem + " [" + (t.quitado?"✅ devolvido":"⏳ pendente") + "]");
+      linhas.push("  • " + t.insumo + ": *" + (t.qtdOriginal!=null?t.qtdOriginal:t.qtd).toFixed(3) + " " + (t.unidade||'UN') + "* ← " + t.origem + " [" + (t.quitado?"✅ devolvido":"⏳ pendente") + "]");
       if (t.motivo) linhas.push("    _" + t.motivo + "_");
     });
   }
@@ -6273,7 +6313,7 @@ function render() {
             <div style="display:flex;align-items:center;gap:8px">
               <div style="flex:1;min-width:0">
                 <span style="font-weight:700;font-size:12px;color:#fff">${t.insumo}</span>
-                <div style="font-size:10px;color:#94a3b8">← ${t.origem} · <span style="color:#34d399">+${t.qtd.toFixed(3)}</span>${t.motivo?" · "+t.motivo:""}</div>
+                <div style="font-size:10px;color:#94a3b8">← ${t.origem} · <span style="color:#34d399">+${(t.qtdOriginal!=null?t.qtdOriginal:t.qtd).toFixed(3)} ${t.unidade||'UN'}</span>${t.motivo?" · "+t.motivo:""}</div>
               </div>
               ${(function(){
                 const isOrigem  = t.origem  === loja;
@@ -6314,7 +6354,7 @@ function render() {
             <div style="display:flex;align-items:center;gap:8px">
               <div style="flex:1;min-width:0">
                 <span style="font-weight:700;font-size:12px;color:#fff">${t.insumo}</span>
-                <div style="font-size:10px;color:#94a3b8">→ ${t.destino} · <span style="color:#f87171">-${t.qtd.toFixed(0)} UN</span>${t.motivo?" · "+t.motivo:""}</div>
+                <div style="font-size:10px;color:#94a3b8">→ ${t.destino} · <span style="color:#f87171">-${(t.qtdOriginal!=null?t.qtdOriginal:t.qtd).toFixed(3)} ${t.unidade||'UN'}</span>${t.motivo?" · "+t.motivo:""}</div>
                 ${t.pagDinheiroAvariaId?`<div style="font-size:10px;color:#c4b5fd;font-weight:700">⏳ Aguardando Financeiro validar pagamento em dinheiro</div>`
                   :outroOk&&!meuOk?`<div style="font-size:10px;color:#fbbf24;font-weight:700">⚡ ${t.destino} confirmou! Confirme o recebimento.</div>`
                   :meuOk&&!outroOk?`<div style="font-size:10px;color:#94a3b8">Aguardando ${t.destino} confirmar devolução...</div>`
@@ -6356,43 +6396,32 @@ function render() {
               ${allInsumosT.map(n=>`<option value="${n}"></option>`).join("")}
             </datalist>
           </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
-            <div>
-              <label style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase">Destino *</label>
-              <select id="tfDestino" class="inp-full" style="background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.15);border-radius:11px;padding:7px 10px;color:#fff">
-                <option value="" style="background:#3a3a3a">-- Selecione --</option>
-                ${LOJAS.filter(l2=>l2!==loja && l2!==LOJA_TESTE).map(l2=>`<option value="${l2}" style="background:#3a3a3a">${l2}</option>`).join("")}
-              </select>
-            </div>
+          <div>
+            <label style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase">Destino *</label>
+            <select id="tfDestino" class="inp-full" style="background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.15);border-radius:11px;padding:7px 10px;color:#fff">
+              <option value="" style="background:#3a3a3a">-- Selecione --</option>
+              ${LOJAS.filter(l2=>l2!==loja && l2!==LOJA_TESTE).map(l2=>`<option value="${l2}" style="background:#3a3a3a">${l2}</option>`).join("")}
+            </select>
+          </div>
+          <div>
+            <label style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase;display:block;margin-bottom:3px">Unidade *</label>
+            <input type="hidden" id="tfUnidade" value="UN"/>
+            <div style="display:flex;gap:5px">${['UN','KG','CX'].map(u=>`<button type="button" class="tf-un-btn" data-un="${u}" onclick="setUnidadeTransf('${u}')"
+              style="flex:1;padding:7px 0;border-radius:8px;border:1px solid ${u==='UN'?'#E8580A':'rgba(255,255,255,.14)'};background:${u==='UN'?'rgba(232,88,10,.18)':'transparent'};color:${u==='UN'?'#fb923c':'#94a3b8'};font-size:11px;font-weight:800;cursor:pointer;font-family:inherit">${u}</button>`).join('')}</div>
+          </div>
+          <div id="tfFatorWrap" style="display:none">
+            <label style="font-size:10px;color:#f59e0b;font-weight:700;text-transform:uppercase">Unidades por caixa (fator) *</label>
+            <input id="tfFator" class="inp-full" type="number" step="1" min="1" placeholder="Ex: 12"
+              style="background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.3)"
+              oninput="atualizarPreviewTransf()" onchange="atualizarPreviewTransf()"/>
+          </div>
+          <div style="display:flex;gap:8px;align-items:flex-end">
             <div style="flex:1">
-              <label style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase">CX/BB/PCT</label>
-              <input id="tfQtdCx" class="inp-full" type="number" step="1" min="0" placeholder="0"
-                oninput="(function(){
-                  const ins=(document.getElementById('tfInsumo')||{}).value||'';
-                  const f=getFator(ins.trim().toUpperCase());
-                  const cx=parseFloat(document.getElementById('tfQtdCx').value)||0;
-                  const und=parseFloat((document.getElementById('tfQtdUnd')||{}).value)||0;
-                  const tot=cx*f+und;
-                  const prev=document.getElementById('tfPreview');
-                  if(prev)prev.textContent=tot>0?(f>1?'×'+f+' = '+tot.toFixed(0)+' UN':'= '+tot.toFixed(0)+' UN'):'';
-                })()"/>
-              <button type="button" onclick="(function(btn){var p=btn.parentElement;var inp=p.querySelector('input');if(!inp){p=p.parentElement;inp=p?p.querySelector('input'):null;}if(inp)calcOpen(inp);})(this)" style="width:30px;height:30px;border-radius:8px;background:rgba(232,88,10,.2);border:none;color:#E8580A;font-size:15px;cursor:pointer;margin-top:2px">🧮</button>
+              <label id="tfQtdLabel" style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase">Quantidade (UN) *</label>
+              <input id="tfQtd" class="inp-full" type="number" step="0.001" min="0" placeholder="0"
+                oninput="atualizarPreviewTransf()" onchange="atualizarPreviewTransf()"/>
             </div>
-            <div style="flex:1">
-              <label style="font-size:10px;color:#94a3b8;font-weight:700;text-transform:uppercase">+ Avulso UN</label>
-              <input id="tfQtdUnd" class="inp-full" type="number" step="1" min="0" placeholder="0"
-                style="background:rgba(167,139,250,.08);border-color:rgba(167,139,250,.3)"
-                oninput="(function(){
-                  const ins=(document.getElementById('tfInsumo')||{}).value||'';
-                  const f=getFator(ins.trim().toUpperCase());
-                  const cx=parseFloat((document.getElementById('tfQtdCx')||{}).value)||0;
-                  const und=parseFloat(document.getElementById('tfQtdUnd').value)||0;
-                  const tot=cx*f+und;
-                  const prev=document.getElementById('tfPreview');
-                  if(prev)prev.textContent=tot>0?(f>1?'×'+f+' = '+tot.toFixed(0)+' UN':'= '+tot.toFixed(0)+' UN'):'';
-                })()"/>
-              <button type="button" onclick="(function(btn){var p=btn.parentElement;var inp=p.querySelector('input');if(!inp){p=p.parentElement;inp=p?p.querySelector('input'):null;}if(inp)calcOpen(inp);})(this)" style="width:30px;height:30px;border-radius:8px;background:rgba(232,88,10,.2);border:none;color:#E8580A;font-size:15px;cursor:pointer;margin-top:2px">🧮</button>
-            </div>
+            <button type="button" onclick="calcOpen(document.getElementById('tfQtd'))" style="width:30px;height:30px;border-radius:8px;background:rgba(232,88,10,.2);border:none;color:#E8580A;font-size:15px;cursor:pointer;flex-shrink:0">🧮</button>
           </div>
           <div id="tfPreview" style="font-size:12px;color:#34d399;font-weight:800;text-align:center;padding:4px 0;min-height:20px"></div>
           <div>
@@ -6482,7 +6511,7 @@ function render() {
           ${[...tfLoja.enviadas,...tfLoja.recebidas].filter(t=>t.quitado).map(t=>`
             <div class="row-item" style="flex-direction:column;align-items:flex-start;gap:2px">
               <div style="display:flex;width:100%;align-items:center">
-                <span class="item-name">${t.insumo} (${t.qtd.toFixed(3)})</span>
+                <span class="item-name">${t.insumo} (${(t.qtdOriginal!=null?t.qtdOriginal:t.qtd).toFixed(3)} ${t.unidade||'UN'})</span>
                 <span style="font-size:10px;color:${t.formaQuitacao==='dinheiro'?'#c4b5fd':'#34d399'};flex-shrink:0">${t.formaQuitacao==='dinheiro'?'💵 pago em dinheiro (R$ '+(t.valorPagDinheiro||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})+')':'✅ devolvido'}</span>
               </div>
               <div style="font-size:10px;color:#64748b">${t.origem} → ${t.destino} · ${new Date(t.dataQuitacao||t.data).toLocaleDateString("pt-BR")}</div>
@@ -7396,10 +7425,10 @@ function render() {
     let html2 = `<div style="background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.4);border-radius:16px;padding:13px;margin-bottom:0">
       <div style="font-weight:800;color:#fbbf24;font-size:13px;margin-bottom:6px">⏳ ${total} empréstimo(s) pendente(s)</div>`;
     emp.recebidos.filter(t=>!t.quitado).forEach(t=>{
-      html2 += `<div style="font-size:11px;color:#fde68a;padding:3px 0">📥 Deve ${t.qtd.toFixed(3)} de <b>${t.insumo}</b> para ${t.origem}</div>`;
+      html2 += `<div style="font-size:11px;color:#fde68a;padding:3px 0">📥 Deve ${(t.qtdOriginal!=null?t.qtdOriginal:t.qtd).toFixed(3)} ${t.unidade||'UN'} de <b>${t.insumo}</b> para ${t.origem}</div>`;
     });
     emp.enviados.filter(t=>!t.quitado).forEach(t=>{
-      html2 += `<div style="font-size:11px;color:#fde68a;padding:3px 0">📤 Aguarda ${t.qtd.toFixed(3)} de <b>${t.insumo}</b> de ${t.destino}</div>`;
+      html2 += `<div style="font-size:11px;color:#fde68a;padding:3px 0">📤 Aguarda ${(t.qtdOriginal!=null?t.qtdOriginal:t.qtd).toFixed(3)} ${t.unidade||'UN'} de <b>${t.insumo}</b> de ${t.destino}</div>`;
     });
     html2 += `<button onclick="goTab('transf')" style="margin-top:8px;width:100%;background:rgba(245,158,11,.3);border:1px solid rgba(245,158,11,.5);border-radius:10px;padding:7px 0;color:#fbbf24;font-size:12px;font-weight:700">Ver Empréstimos →</button></div>`;
     el.innerHTML = html2;
