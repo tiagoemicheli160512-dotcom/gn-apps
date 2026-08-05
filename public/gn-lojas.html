@@ -4907,6 +4907,69 @@ function submitTransf() {
   }
 }
 
+/* Saída para Terceiros — diferente de um empréstimo entre lojas: não tem devolução, o
+   estoque sai em definitivo já na hora. Vira um registro no mesmo mecanismo de Avarias
+   (avariasAll) usado pelo Financeiro, com um tipo próprio ('saida_terceiro') pra não se
+   confundir com avaria de verdade — mas passa por um passo extra antes do Financeiro: o
+   setor de Compras (Matheus/Eduardo/Oseas, no app Estoque e Pedido) precisa confirmar o
+   valor negociado primeiro, já que quem registra aqui na loja não define preço. */
+function addSaidaTerceiro(insumo, qtdCx, qtdUnd, terceiro, motivo) {
+  const nomeInsumo = (insumo||'').trim().toUpperCase();
+  const nomeTerceiro = (terceiro||'').trim();
+  if (!nomeInsumo) { showToast('⚠️ Preencha o insumo.'); return false; }
+  if (!nomeTerceiro) { showToast('⚠️ Informe o terceiro que está recebendo.'); return false; }
+  const fatorT = getFator(nomeInsumo);
+  const cx  = parseFloat(qtdCx)  || 0;
+  const und = parseFloat(qtdUnd) || 0;
+  const qtdTotal = (cx * fatorT) + und;
+  if (qtdTotal <= 0) { showToast('⚠️ Informe a quantidade (CX ou UN).'); return false; }
+
+  const k = lojaKey();
+  const saldoAtual = (estIniAll[k]||{})[nomeInsumo] || 0;
+  if (qtdTotal > saldoAtual + 0.001) {
+    showToast('⚠️ Saldo insuficiente! Disponível: ' + saldoAtual.toFixed(3) + ' UN');
+    return false;
+  }
+
+  if (!confirm('Registrar saída de ' + qtdTotal.toFixed(0) + ' UN de "' + nomeInsumo + '" para ' + nomeTerceiro + '?\n\nO estoque sai AGORA — não tem devolução física, só o pagamento em PIX depois de confirmado pela Compras e pelo Financeiro.')) return false;
+  if (!confirm('Tem certeza mesmo? Depois de registrada, só dá pra cancelar (estornando o estoque) enquanto a Compras ainda não tiver confirmado o valor — depois disso, some do botão de cancelar.')) return false;
+
+  if (!avariasAll[loja]) avariasAll[loja] = [];
+  const id = Date.now() + '_' + Math.random().toString(36).slice(2,6);
+  avariasAll[loja].push({
+    id, ts: new Date().toISOString(), semana: wkKey(semana),
+    insumo: nomeInsumo, qtd: qtdTotal, custoUnit: 0, valorTotal: 0,
+    status: 'pendente',
+    loja_conf_por: null, loja_conf_ts: null,
+    rh_conf_por: null, rh_conf_ts: null,
+    tipo: 'saida_terceiro', terceiro: nomeTerceiro, motivo: motivo||'', pagamento: 'PIX'
+  });
+
+  if (!estIniAll[k]) estIniAll[k] = {};
+  estIniAll[k][nomeInsumo] = Math.max(0, saldoAtual - qtdTotal);
+  autoSave();
+  sbPush().then(() => {
+    showToast('✅ ' + qtdTotal.toFixed(0) + ' UN saíram do estoque → ' + nomeTerceiro + '!\n📤 Aguardando Compras confirmar o valor.');
+  }).catch(() => {
+    showToast('✅ Registrado localmente — sincronize para confirmar.');
+  });
+  return true;
+}
+
+function submitSaidaTerceiro() {
+  const insumo   = ((document.getElementById('stInsumo')||{}).value||'');
+  const qtdCx    = (document.getElementById('stQtdCx')||{}).value;
+  const qtdUnd   = (document.getElementById('stQtdUnd')||{}).value;
+  const terceiro = (document.getElementById('stTerceiro')||{}).value;
+  const motivo   = (document.getElementById('stMotivo')||{}).value;
+  if (addSaidaTerceiro(insumo, qtdCx, qtdUnd, terceiro, motivo)) {
+    ['stInsumo','stQtdCx','stQtdUnd','stTerceiro','stMotivo'].forEach(id => {
+      const el = document.getElementById(id); if (el) el.value = '';
+    });
+    render();
+  }
+}
+
 function gerarRelatorioTransfWpp() {
   const tf = getTransfPorLoja();
   const dom = addDays(semana,6);
@@ -6299,6 +6362,88 @@ function render() {
         </div>
       </div>
 
+      <div class="card" style="padding:13px;border:1px solid rgba(232,88,10,.25)">
+        <div class="sec-label" style="margin-bottom:4px">📤 Saída para Terceiros</div>
+        <div style="font-size:10px;color:#94a3b8;margin-bottom:10px">Sai do estoque em definitivo agora. Pagamento só em PIX — o valor é confirmado pelo setor de Compras e finalizado pelo Financeiro.</div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <div>
+            <label style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase">Insumo ou Bebida *</label>
+            <input id="stInsumo" class="inp-full" list="dlTfInsumos" type="text" placeholder="Digite o insumo" autocomplete="off"
+              oninput="(function(){
+                const n=(document.getElementById('stInsumo').value||'').trim().toUpperCase();
+                const f=getFator(n);
+                const saldo=(estIniAll[lojaKey()]||{})[n]||0;
+                const el=document.getElementById('stSaldoInfo');
+                if(el) el.textContent=n?'Saldo: '+saldo.toFixed(3)+' UN'+(f>1?' (fator ×'+f+')':''):'';
+              })()"/>
+            <div id="stSaldoInfo" style="font-size:10px;color:#34d399;margin-top:3px;font-weight:700"></div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <div>
+              <label style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase">CX/BB/PCT</label>
+              <input id="stQtdCx" class="inp-full" type="number" step="1" min="0" placeholder="0"
+                oninput="(function(){
+                  const ins=(document.getElementById('stInsumo')||{}).value||'';
+                  const f=getFator(ins.trim().toUpperCase());
+                  const cx=parseFloat(document.getElementById('stQtdCx').value)||0;
+                  const und=parseFloat((document.getElementById('stQtdUnd')||{}).value)||0;
+                  const tot=cx*f+und;
+                  const prev=document.getElementById('stPreview');
+                  if(prev)prev.textContent=tot>0?(f>1?'×'+f+' = '+tot.toFixed(0)+' UN':'= '+tot.toFixed(0)+' UN'):'';
+                })()"/>
+            </div>
+            <div>
+              <label style="font-size:10px;color:#94a3b8;font-weight:700;text-transform:uppercase">+ Avulso UN</label>
+              <input id="stQtdUnd" class="inp-full" type="number" step="1" min="0" placeholder="0"
+                style="background:rgba(167,139,250,.08);border-color:rgba(167,139,250,.3)"
+                oninput="(function(){
+                  const ins=(document.getElementById('stInsumo')||{}).value||'';
+                  const f=getFator(ins.trim().toUpperCase());
+                  const cx=parseFloat((document.getElementById('stQtdCx')||{}).value)||0;
+                  const und=parseFloat(document.getElementById('stQtdUnd').value)||0;
+                  const tot=cx*f+und;
+                  const prev=document.getElementById('stPreview');
+                  if(prev)prev.textContent=tot>0?(f>1?'×'+f+' = '+tot.toFixed(0)+' UN':'= '+tot.toFixed(0)+' UN'):'';
+                })()"/>
+            </div>
+          </div>
+          <div id="stPreview" style="font-size:12px;color:#34d399;font-weight:800;text-align:center;padding:4px 0;min-height:20px"></div>
+          <div>
+            <label style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase">Terceiro (pessoa/empresa) *</label>
+            <input id="stTerceiro" class="inp-full" type="text" placeholder="Nome de quem está recebendo"/>
+          </div>
+          <div>
+            <label style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase">Motivo</label>
+            <input id="stMotivo" class="inp-full" type="text" placeholder="ex: Venda avulsa, doação..."/>
+          </div>
+          <button onclick="submitSaidaTerceiro()" style="background:linear-gradient(135deg,#E8580A,#c2410c);border:none;border-radius:13px;padding:12px 0;color:#fff;font-weight:800;font-size:13px">
+            📤 Registrar Saída (sai do estoque agora)
+          </button>
+        </div>
+      </div>
+
+      ${(function(){
+        const stPend = (avariasAll[loja]||[]).filter(a=>a.tipo==='saida_terceiro' && a.status!=='finalizado');
+        if (!stPend.length) return '';
+        return `<div>
+          <div class="sec-label">📤 Saídas para Terceiros — pendentes</div>
+          <div class="card">
+            ${stPend.map(a=>{
+              const st = a.status==='pendente'
+                ? '<span style="color:#fbbf24;font-weight:700">⏳ Aguardando valor (Compras)</span>'
+                : '<span style="color:#c4b5fd;font-weight:700">⏳ Aguardando Financeiro</span>';
+              return `<div class="row-item" style="flex-direction:column;align-items:flex-start;gap:2px">
+                <div style="display:flex;width:100%;align-items:center;justify-content:space-between">
+                  <span class="item-name">${a.insumo} (${(a.qtd||0).toFixed(3)})</span>
+                  <span style="font-size:10px">${st}</span>
+                </div>
+                <div style="font-size:10px;color:#64748b">→ ${a.terceiro||'—'}${a.motivo?' · '+a.motivo:''} · ${new Date(a.ts).toLocaleDateString("pt-BR")}</div>
+              </div>`;
+            }).join("")}
+          </div>
+        </div>`;
+      })()}
+
       ${tfLoja.enviadas.filter(t=>t.quitado).length + tfLoja.recebidas.filter(t=>t.quitado).length > 0 ? `
       <div>
         <div class="sec-label">✅ Quitados esta semana</div>
@@ -6954,7 +7099,10 @@ function render() {
         <div class="card-header">Histórico de Avarias — ${loja}</div>
         ${avarias.length === 0 ? '<div style="padding:16px 14px;font-size:12px;color:#475569;text-align:center">Nenhuma avaria registrada.</div>' :
           avarias.map(av => {
-            const stMap = {pendente:{lbl:'⏳ Pendente',clr:'#f59e0b',bg:'rgba(245,158,11,.12)'},loja_confirmou:{lbl:'🏪 Loja confirmou',clr:'#60a5fa',bg:'rgba(96,165,250,.12)'},finalizado:{lbl:'✅ Finalizado',clr:'#34d399',bg:'rgba(52,211,153,.12)'}};
+            const isTerceiro = av.tipo === 'saida_terceiro';
+            const stMap = isTerceiro
+              ? {pendente:{lbl:'⏳ Aguard. valor (Compras)',clr:'#fbbf24',bg:'rgba(251,191,36,.12)'},loja_confirmou:{lbl:'💰 Valor confirmado',clr:'#60a5fa',bg:'rgba(96,165,250,.12)'},finalizado:{lbl:'✅ Finalizado',clr:'#34d399',bg:'rgba(52,211,153,.12)'}}
+              : {pendente:{lbl:'⏳ Pendente',clr:'#f59e0b',bg:'rgba(245,158,11,.12)'},loja_confirmou:{lbl:'🏪 Loja confirmou',clr:'#60a5fa',bg:'rgba(96,165,250,.12)'},finalizado:{lbl:'✅ Finalizado',clr:'#34d399',bg:'rgba(52,211,153,.12)'}};
             const st = stMap[av.status] || stMap.pendente;
             const dataFmt = av.ts ? new Date(av.ts).toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—';
             return `<div class="row-item" style="flex-direction:column;align-items:stretch;gap:8px;padding:12px 13px">
@@ -6971,15 +7119,17 @@ function render() {
               <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap">
                 <span style="font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;background:${st.bg};color:${st.clr}">${st.lbl}</span>
                 <div style="display:flex;gap:6px">
-                  ${av.status==='pendente' ? `<button onclick="confirmarAvaria('${av.id}','loja')" style="background:rgba(96,165,250,.15);border:1px solid rgba(96,165,250,.4);border-radius:10px;padding:5px 11px;color:#93c5fd;font-size:11px;font-weight:800">🏪 Pago pela Loja</button>` : ''}
-                  ${av.status==='loja_confirmou' && isMestre && av.tipo!=='transferencia_dinheiro' ? `<button onclick="confirmarAvaria('${av.id}','rh')" style="background:rgba(52,211,153,.15);border:1px solid rgba(52,211,153,.4);border-radius:10px;padding:5px 11px;color:#6ee7b7;font-size:11px;font-weight:800">✅ Confirmar RH/Fin.</button>` : ''}
-                  ${av.status==='loja_confirmou' && (!isMestre || av.tipo==='transferencia_dinheiro') ? `<span style="font-size:10px;color:#94a3b8;font-style:italic">Aguard. RH/Financeiro</span>` : ''}
+                  ${av.status==='pendente' && !isTerceiro ? `<button onclick="confirmarAvaria('${av.id}','loja')" style="background:rgba(96,165,250,.15);border:1px solid rgba(96,165,250,.4);border-radius:10px;padding:5px 11px;color:#93c5fd;font-size:11px;font-weight:800">🏪 Pago pela Loja</button>` : ''}
+                  ${av.status==='pendente' && isTerceiro ? `<span style="font-size:10px;color:#94a3b8;font-style:italic">Aguardando Compras confirmar valor</span>` : ''}
+                  ${av.status==='loja_confirmou' && isMestre && av.tipo!=='transferencia_dinheiro' && !isTerceiro ? `<button onclick="confirmarAvaria('${av.id}','rh')" style="background:rgba(52,211,153,.15);border:1px solid rgba(52,211,153,.4);border-radius:10px;padding:5px 11px;color:#6ee7b7;font-size:11px;font-weight:800">✅ Confirmar RH/Fin.</button>` : ''}
+                  ${av.status==='loja_confirmou' && (!isMestre || av.tipo==='transferencia_dinheiro' || isTerceiro) ? `<span style="font-size:10px;color:#94a3b8;font-style:italic">Aguard. RH/Financeiro</span>` : ''}
                   ${av.status==='finalizado' ? `<span style="font-size:10px;color:#34d399">Conf. por: ${av.rh_conf_por||'—'}</span>` : ''}
                   ${av.status==='pendente' ? `<button onclick="cancelarAvaria('${av.id}')" style="background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:5px 8px;color:#64748b;font-size:11px">🗑️</button>` : ''}
                 </div>
               </div>
               ${av.tipo==='transferencia_dinheiro' ? `<div style="font-size:10px;color:#c4b5fd;font-weight:700">💰 ${av.transferOrigemLoja||'?'} recebe em dinheiro · 📦 ${av.transferDestinoLoja||'?'} fica com o produto — validar pelo app RH/Financeiro</div>` : ''}
-              ${av.loja_conf_por ? `<div style="font-size:10px;color:#64748b">Loja: ${av.loja_conf_por}${av.loja_conf_ts?' · '+new Date(av.loja_conf_ts).toLocaleDateString('pt-BR'):''}</div>` : ''}
+              ${isTerceiro ? `<div style="font-size:10px;color:#fdba74;font-weight:700">📤 Terceiro: ${av.terceiro||'—'} · Pagamento via PIX${av.motivo?' · '+av.motivo:''}</div>` : ''}
+              ${av.loja_conf_por ? `<div style="font-size:10px;color:#64748b">${isTerceiro?'Compras':'Loja'}: ${av.loja_conf_por}${av.loja_conf_ts?' · '+new Date(av.loja_conf_ts).toLocaleDateString('pt-BR'):''}</div>` : ''}
             </div>`;
           }).join('')
         }

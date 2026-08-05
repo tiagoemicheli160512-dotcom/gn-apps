@@ -382,6 +382,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   <button class="sidebar-link" data-sidebar-tab="carnes" onclick="setTab('carnes')"><span class="sl-icon">🥩</span>Controle de Carnes</button>
   <button class="sidebar-link" data-sidebar-tab="trios" onclick="setTab('trios')"><span class="sl-icon">🎵</span>Trios / Bandas</button>
   <button class="sidebar-link" data-sidebar-tab="producao" onclick="setTab('producao')"><span class="sl-icon">🏭</span>Produção</button>
+  <button class="sidebar-link" data-sidebar-tab="terceiros" onclick="setTab('terceiros')"><span class="sl-icon">🤝</span>Saída Terceiros</button>
   <button class="sidebar-link" data-sidebar-tab="historico" onclick="setTab('historico')"><span class="sl-icon">📜</span>Histórico</button>
 </nav>
 
@@ -479,6 +480,10 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
     <button class="nav-btn" data-tab="producao" onclick="setTab('producao')">
       <span class="nav-icon">🏭</span>
       <span class="nav-label">Produção</span>
+    </button>
+    <button class="nav-btn" data-tab="terceiros" onclick="setTab('terceiros')">
+      <span class="nav-icon">🤝</span>
+      <span class="nav-label">Terceiros</span>
     </button>
     <button class="nav-btn" data-tab="historico" onclick="setTab('historico')">
       <span class="nav-icon">📜</span>
@@ -1851,6 +1856,7 @@ function renderContent() {
     case 'trios':       renderTrios(); break;
     case 'historico':   renderHistorico(); break;
     case 'producao':    renderProducao(); break;
+    case 'terceiros':   renderTerceiros(); break;
   }
 }
 
@@ -4849,6 +4855,7 @@ const HISTORICO_ACOES = {
   CANCELAR_PEDIDO:         { icon: '🗑️', label: 'Cancelou pedido',          cor: '#f87171' },
   ALTERAR_CUSTO_CATALOGO:  { icon: '💰', label: 'Alterou custo',            cor: '#fbbf24' },
   CONFIRMAR_ENTREGA_LOTE:  { icon: '📦', label: 'Confirmou entregas em lote', cor: '#4ade80' },
+  CONFIRMAR_VALOR_TERCEIRO:{ icon: '🤝', label: 'Confirmou valor — Saída Terceiro', cor: '#60a5fa' },
 };
 
 function _formatarDetalhesAuditoria(acao, d) {
@@ -4859,6 +4866,7 @@ function _formatarDetalhesAuditoria(acao, d) {
     if (acao === 'CANCELAR_PEDIDO')        return d.itens_ocultados ? `${d.itens_ocultados} item(ns) ficaram ocultos` : '';
     if (acao === 'ALTERAR_CUSTO_CATALOGO') return `${d.produto||''}: ${d.custo_antigo!=null?'R$'+fmt(d.custo_antigo):'—'} → ${d.custo_novo!=null?'R$'+fmt(d.custo_novo):'—'}`;
     if (acao === 'CONFIRMAR_ENTREGA_LOTE') return `${d.data||''} — ${d.itens||0} item(ns), R$ ${fmt(d.valor_total||0)}`;
+    if (acao === 'CONFIRMAR_VALOR_TERCEIRO') return `${d.loja||''} — ${d.insumo||''} → ${d.terceiro||''}: R$ ${fmt(d.valor||0)}`;
   } catch(e) {}
   return '';
 }
@@ -5119,6 +5127,172 @@ async function salvarProducaoCampo(catalogoId, campo, valor) {
 }
 
 // ═══════════════════════════════════════════════
+// RENDER: TERCEIROS (confirmar valor negociado das Saídas para Terceiros do app Lojas)
+// ═══════════════════════════════════════════════
+// A loja registra a saída (aba Empréstimo do app Lojas) e o estoque já sai na hora —
+// mas quem define o valor negociado com o terceiro é sempre o setor de Compras (aqui),
+// nunca a loja. Isso fica gravado como um registro do mecanismo de Avarias do app Lojas
+// (avariasAll, tipo 'saida_terceiro'), guardado dentro de gn_lojas.all_data — mesma
+// tabela/coluna que o app Lojas e o app RH já leem e escrevem pra esse fluxo. Depois que
+// o valor é confirmado aqui, o registro cai automaticamente na fila do Financeiro no app
+// RH (mesmo mecanismo que já existe pra avarias e pra pagamento de empréstimo em
+// dinheiro) — sem precisar de nenhuma mudança lá.
+async function _fetchSaidasTerceiros() {
+  const chaves = [...new Set((window.GN_LOJAS||[]).flatMap(l => [l.userKey, l.comKey]))];
+  const { data, error } = await db.from('gn_lojas').select('loja,all_data').in('loja', chaves);
+  if (error) throw error;
+  const itens = [];
+  (data||[]).forEach(row => {
+    const lojaObj = (window.GN_LOJAS||[]).find(l => l.userKey === row.loja || l.comKey === row.loja);
+    const display = lojaObj ? lojaObj.display : row.loja;
+    const avarias = (row.all_data?.avariasAll || {})[row.loja] || [];
+    avarias.filter(a => a.tipo === 'saida_terceiro').forEach(a => {
+      itens.push({ ...a, _lojaKey: row.loja, _lojaDisplay: display });
+    });
+  });
+  itens.sort((a,b) => new Date(b.ts||0) - new Date(a.ts||0));
+  return itens;
+}
+
+async function renderTerceiros() {
+  $('content').innerHTML = '<div class="empty"><div class="spin"></div></div>';
+
+  let itens = [];
+  try {
+    itens = await _fetchSaidasTerceiros();
+  } catch (e) {
+    $('content').innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-texto">Erro ao carregar Saídas para Terceiros</div></div>`;
+    return;
+  }
+  S._terceirosCache = itens;
+
+  const pendentes = itens.filter(a => a.status === 'pendente');
+  const aguardFin = itens.filter(a => a.status === 'loja_confirmou');
+  const finalizados = itens.filter(a => a.status === 'finalizado');
+
+  const cardPendente = a => `<div class="prov-item" style="border-left:3px solid #fbbf24">
+    <div class="prov-item-header">
+      <div>
+        <div class="prov-forn">${a._lojaDisplay}</div>
+        <div class="prov-produto">${a.insumo}</div>
+        <div style="font-size:11px;color:var(--muted)">→ ${a.terceiro||'—'}${a.motivo?' · '+a.motivo:''}</div>
+      </div>
+      <div style="text-align:right">
+        <div class="num" style="font-size:13px;font-weight:700">${fmtQtd(a.qtd)} UN</div>
+        <div style="font-size:10px;color:var(--muted)">${a.ts?new Date(a.ts).toLocaleDateString('pt-BR'):'—'}</div>
+      </div>
+    </div>
+    <button onclick="modalConfirmarValorTerceiro('${a._lojaKey}','${a.id}')" style="width:100%;margin-top:6px;background:rgba(96,165,250,.12);border:1px solid rgba(96,165,250,.35);border-radius:8px;padding:7px;color:#60a5fa;font-size:11px;font-weight:700;cursor:pointer">
+      💰 Confirmar Valor Negociado
+    </button>
+  </div>`;
+
+  const cardHistorico = (a, cor, label) => `<div class="prov-item">
+    <div class="prov-item-header">
+      <div>
+        <div class="prov-forn">${a._lojaDisplay}</div>
+        <div class="prov-produto">${a.insumo}</div>
+        <div style="font-size:11px;color:var(--muted)">→ ${a.terceiro||'—'}</div>
+      </div>
+      <div style="text-align:right">
+        <div class="num" style="font-size:13px;font-weight:700;color:${cor}">R$ ${fmt(a.valorTotal)}</div>
+        <div style="font-size:10px;color:${cor}">${label}</div>
+      </div>
+    </div>
+  </div>`;
+
+  $('content').innerHTML = `
+    <div class="sec-header">
+      <div class="sec-titulo">🤝 Saída para Terceiros <span class="badge badge-r">${pendentes.length}</span></div>
+      <button onclick="renderTerceiros()" style="padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:none;color:var(--muted);font-size:11px;cursor:pointer">↻ Atualizar</button>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:12px">
+      Saídas registradas no app Lojas (aba Empréstimo). Confirme o valor negociado com o terceiro — depois disso, vai pro Financeiro (app RH) validar o pagamento em PIX.
+    </div>
+    ${pendentes.length === 0
+      ? `<div class="empty" style="padding:20px 0"><div class="empty-icon">✅</div><div class="empty-texto">Nenhuma saída aguardando valor</div></div>`
+      : pendentes.map(cardPendente).join('')}
+    ${aguardFin.length ? `
+      <div style="margin-top:20px">
+        <div class="sec-titulo" style="font-size:13px;margin-bottom:8px">Aguardando Financeiro <span class="badge" style="background:rgba(96,165,250,.15);color:#60a5fa;font-size:10px">${aguardFin.length}</span></div>
+        ${aguardFin.map(a=>cardHistorico(a,'#60a5fa','Confirmado por '+(a.loja_conf_por||'—'))).join('')}
+      </div>` : ''}
+    ${finalizados.length ? `
+      <div style="margin-top:20px">
+        <div class="sec-titulo" style="font-size:13px;margin-bottom:8px">Finalizados <span class="badge" style="background:rgba(34,197,94,.15);color:#4ade80;font-size:10px">${finalizados.length}</span></div>
+        ${finalizados.slice(0,20).map(a=>cardHistorico(a,'#4ade80','✓ '+(a.rh_conf_por||'—'))).join('')}
+      </div>` : ''}
+  `;
+}
+
+function modalConfirmarValorTerceiro(lojaKey, avId) {
+  const item = (S._terceirosCache||[]).find(a => a._lojaKey === lojaKey && a.id === avId);
+  if (!item) return;
+  abrirModal(`
+    <div class="modal-titulo">💰 Confirmar Valor Negociado
+      <button class="modal-close" onclick="$('modal-bg').classList.remove('ativo')">×</button>
+    </div>
+    <div style="background:var(--card2);border-radius:var(--rs);padding:12px;margin-bottom:14px;font-size:12px">
+      <div style="font-weight:600;margin-bottom:4px">${item.insumo} — ${fmtQtd(item.qtd)} UN</div>
+      <div style="color:var(--muted)">${item._lojaDisplay} → ${item.terceiro||'—'}${item.motivo?' · '+item.motivo:''}</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">VALOR TOTAL NEGOCIADO (R$) — pagamento em PIX</label>
+      <input class="form-input" id="m-valor-terceiro" type="number" step="0.01" min="0" placeholder="0,00">
+    </div>
+    <div class="modal-acoes">
+      <button class="btn-sm btn-outline" onclick="$('modal-bg').classList.remove('ativo')">Cancelar</button>
+      <button class="btn-sm btn-success" onclick="confirmarValorTerceiro('${lojaKey}','${avId}')">✓ Confirmar</button>
+    </div>
+  `);
+}
+
+async function confirmarValorTerceiro(lojaKey, avId) {
+  const valor = parseFloat((document.getElementById('m-valor-terceiro')?.value||'').replace(',','.')) || 0;
+  if (valor <= 0) { toast('Informe um valor válido.', 'err'); return; }
+  if (!confirm('Confirmar R$ ' + fmt(valor) + ' como valor negociado? Depois de confirmado, vai direto pra fila do Financeiro.')) return;
+
+  try {
+    const { data: rows, error } = await db.from('gn_lojas').select('loja,all_data').eq('loja', lojaKey);
+    if (error) throw error;
+    const row = (rows||[])[0];
+    if (!row) throw new Error('Loja não encontrada');
+
+    const allData = JSON.parse(JSON.stringify(row.all_data || {}));
+    const avarias = (allData.avariasAll || {})[lojaKey] || [];
+    const idx = avarias.findIndex(a => a.id === avId);
+    if (idx < 0) throw new Error('Registro não encontrado');
+    if (avarias[idx].status !== 'pendente') { toast('Esse registro já foi confirmado.', 'err'); return; }
+
+    let sessNome = 'Compras';
+    try { sessNome = JSON.parse(localStorage.getItem(SESSION_KEY)||'null')?.nome || 'Compras'; } catch(e) {}
+
+    const qtd = parseFloat(avarias[idx].qtd) || 0;
+    const insumoNome = avarias[idx].insumo;
+    const terceiroNome = avarias[idx].terceiro;
+    avarias[idx].status = 'loja_confirmou';
+    avarias[idx].custoUnit = qtd > 0 ? +(valor/qtd).toFixed(4) : 0;
+    avarias[idx].valorTotal = valor;
+    avarias[idx].loja_conf_por = sessNome;
+    avarias[idx].loja_conf_ts = new Date().toISOString();
+    if (!allData.avariasAll) allData.avariasAll = {};
+    allData.avariasAll[lojaKey] = avarias;
+
+    const { error: errUp } = await db.from('gn_lojas')
+      .update({ all_data: allData, updated_at: new Date().toISOString(), updated_by: lojaKey+'/'+sessNome })
+      .eq('loja', lojaKey);
+    if (errUp) throw errUp;
+
+    _logAuditoria('CONFIRMAR_VALOR_TERCEIRO', { loja: lojaKey, insumo: insumoNome, terceiro: terceiroNome, valor }, {});
+    $('modal-bg').classList.remove('ativo');
+    toast('✓ Valor confirmado! Enviado pro Financeiro.', 'ok');
+    renderTerceiros();
+  } catch (e) {
+    toast('Erro: ' + (e.message||e), 'err');
+  }
+}
+
+// ═══════════════════════════════════════════════
 // INICIALIZAÇÃO
 // ═══════════════════════════════════════════════
 async function iniciarApp() {
@@ -5155,7 +5329,7 @@ async function iniciarApp() {
     const _sess = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
     const abasArr = _sess && _sess.permissoes && _sess.permissoes.pedidos_abas;
     S.abasPermitidas = Array.isArray(abasArr) ? new Set(abasArr) : null;
-    const ALL_TABS = ['pedido','edu','oseas','matheus','catalogo','fornecedores','provisoes','entrega','fichas','faltas-dia','carnes','trios','historico','producao'];
+    const ALL_TABS = ['pedido','edu','oseas','matheus','catalogo','fornecedores','provisoes','entrega','fichas','faltas-dia','carnes','trios','historico','producao','terceiros'];
     ALL_TABS.forEach(t => {
       const hidden = S.abasPermitidas && !S.abasPermitidas.has(t);
       document.querySelectorAll(`.sidebar-link[data-sidebar-tab="${t}"], .nav-btn[data-tab="${t}"]`).forEach(b => {
