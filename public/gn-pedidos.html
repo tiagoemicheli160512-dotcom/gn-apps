@@ -1544,7 +1544,10 @@ async function _confirmarFornecedoresSelecionados() {
           data_entrega:    dataEntrega,
           data_entrega_fim:dataEntregaFim,
           qtd_prevista:    item.qtd,
-          valor_previsto:  item.qtd * (item.custo ?? prod.custo ?? 0),
+          // Custo do catálogo manda (ver mesmo comentário em calcularTotais) — a provisão
+          // gerada na confirmação precisa refletir o preço corrigido, não o retrato de
+          // quando a quantidade foi lançada.
+          valor_previsto:  item.qtd * (prod.custo ?? item.custo ?? 0),
           status:          'AGUARDANDO'
         });
       });
@@ -1782,7 +1785,11 @@ function calcularTotais() {
     if (!prod) return;
     Object.entries(lojas).forEach(([loja, item]) => {
       if (item.qtd > 0) {
-        const custo = item.custo ?? prod.custo ?? 0;
+        // Custo do catálogo manda — o custo gravado no item (custo_unitario) é só um
+        // retrato de quando a quantidade foi lançada, e não acompanha reajuste de preço
+        // feito depois no Catálogo. Sem isso, corrigir o custo lá não refletia no total
+        // do pedido nem no valor previsto das provisões dos itens já lançados.
+        const custo = prod.custo ?? item.custo ?? 0;
         S.totaisPorLoja[loja] = (S.totaisPorLoja[loja] || 0) + item.qtd * custo;
       }
     });
@@ -2550,6 +2557,24 @@ function setModo(todos) {
 function toggleEpGrupoProvisao(id) {
   const el = document.getElementById(id);
   if (el) el.classList.toggle('aberto');
+}
+
+// Dispara a cada tecla digitada no campo de busca de fornecedor (Provisões). Só reage
+// quando o texto bate com um grupo realmente renderizado na tela — do contrário o
+// getElementById simplesmente não acha nada e não faz nada, sem risco.
+function pularParaFornecedorProvisao(valorDigitado) {
+  const nome = (valorDigitado||'').trim();
+  if (!nome) return;
+  const gid = 'prov_forn_'+nome.replace(/[^a-z0-9]/gi,'_');
+  const el = document.getElementById(gid);
+  if (!el) return;
+  if (!el.classList.contains('aberto')) el.classList.add('aberto');
+  el.scrollIntoView({behavior:'smooth', block:'start'});
+  el.style.transition = 'box-shadow .3s';
+  el.style.boxShadow = '0 0 0 2px #fbbf24';
+  setTimeout(()=>{ el.style.boxShadow=''; }, 1500);
+  const input = document.getElementById('prov-forn-jump');
+  if (input) { input.value=''; input.blur(); }
 }
 
 function toggleGrupo(grupo) {
@@ -3427,6 +3452,18 @@ async function renderProvisoes() {
 
   const totalValor = provisoesFilt.reduce((a,p) => a + (parseFloat(p.valor_previsto)||0), 0);
 
+  // Campo pra digitar o fornecedor e pular direto pro grupo dele — mesmo mecanismo já
+  // usado na aba Entrega do app Lojas, útil aqui porque com muitos fornecedores (ordem
+  // alfabética) rolar a tela até achar o certo era o principal atrito.
+  const fornsProv = Object.keys(por_forn).sort((a,b) => a.localeCompare(b));
+  const fornBuscaHtml = fornsProv.length > 1 ? `
+    <div style="margin-bottom:10px">
+      <input list="prov-forn-datalist" id="prov-forn-jump" placeholder="🔍 Digite o fornecedor pra pular direto..." autocomplete="off"
+        oninput="pularParaFornecedorProvisao(this.value)"
+        style="width:100%;background:var(--card2);border:1px solid var(--border);border-radius:10px;color:var(--text);padding:9px 10px;font-size:12px;font-weight:600;box-sizing:border-box">
+      <datalist id="prov-forn-datalist">${fornsProv.map(f=>`<option value="${escapeHtml(f)}">`).join('')}</datalist>
+    </div>` : '';
+
   const provHtml = Object.keys(por_forn).length === 0
     ? `<div class="empty"><div class="empty-icon">📬</div><div class="empty-texto">${S.provStatus?'Nenhuma provisão com esse status':'Nenhuma provisão encontrada'}</div></div>`
     : Object.entries(por_forn).sort(([a],[b])=>a.localeCompare(b)).map(([forn, itens]) => {
@@ -3566,6 +3603,7 @@ async function renderProvisoes() {
     <div class="store-tabs" style="margin-bottom:8px">${lojaTabs}</div>
     <div class="store-tabs" style="margin-bottom:8px">${compradorChips}</div>
     <div class="store-tabs" style="margin-bottom:12px">${statusChips}</div>
+    ${fornBuscaHtml}
     ${provHtml}
 
     ${Object.keys(por_forn).length ? `
@@ -4782,7 +4820,7 @@ async function _confirmarAdicionarFalta(lojaSlug) {
 
   const prod = S.catalogo.find(p => p.id === catalogoId);
   const qtdAtual = S.pedidoItens[catalogoId]?.[lojaSlug]?.qtd || 0;
-  const custo = S.pedidoItens[catalogoId]?.[lojaSlug]?.custo ?? prod?.custo ?? 0;
+  const custo = prod?.custo ?? S.pedidoItens[catalogoId]?.[lojaSlug]?.custo ?? 0;
   const novaQtd = qtdAtual + qtdAdd;
 
   await salvarItem(catalogoId, lojaSlug, novaQtd, custo, null);
