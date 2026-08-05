@@ -4880,6 +4880,14 @@ function quitarEmprestimo(id) {
    usado pelo RH/Financeiro pra validar pagamentos) na loja DESTINO, pra o Financeiro validar
    o valor combinado. O estoque NÃO muda aqui: a saída já ficou valendo na origem e a entrada
    já ficou valendo no destino desde o empréstimo — só o Financeiro finaliza a pendência. */
+// Status da avaria de pagamento em dinheiro vinculada ao empréstimo — 'pendente' (Compras
+// ainda não validou o valor) ou 'loja_confirmou' (Compras já validou, falta o Financeiro).
+function _statusAvariaTransf(t) {
+  if (!t.pagDinheiroAvariaId) return null;
+  const av = (avariasAll[t.destino]||[]).find(a => a.id === t.pagDinheiroAvariaId);
+  return av ? av.status : null;
+}
+
 function marcarPagamentoDinheiro(id) {
   let found = null;
   Object.values(transferAll).forEach(lista => {
@@ -4895,43 +4903,32 @@ function marcarPagamentoDinheiro(id) {
 
   const jaConfirmei = isDestino ? found.pagDinheiroDestino : found.pagDinheiroOrigem;
   if (jaConfirmei) { showToast("⚠️ Você já confirmou o pagamento em dinheiro."); return; }
-  const outroJaConfirmou = isDestino ? found.pagDinheiroOrigem : found.pagDinheiroDestino;
 
   if (!confirm(isDestino
     ? 'Confirmar que "' + found.insumo + '" (' + (found.qtdOriginal!=null?found.qtdOriginal:found.qtd).toFixed(3) + ' ' + (found.unidade||'UN') + ') será pago em dinheiro/PIX pra ' + found.origem + ', em vez de devolvido fisicamente?'
     : 'Confirmar que aceita receber "' + found.insumo + '" (' + (found.qtdOriginal!=null?found.qtdOriginal:found.qtd).toFixed(3) + ' ' + (found.unidade||'UN') + ') em dinheiro/PIX de ' + found.destino + ', em vez de devolução física?')) return;
-
-  let valorCombinado = found.valorPagDinheiro || 0;
-  if (outroJaConfirmou) {
-    // Segunda confirmação — fecha o acordo entre as lojas, precisa do valor combinado
-    // pra mandar ao Financeiro validar.
-    const sugestao = (getUltimoCusto(found.insumo) || 0) * found.qtd;
-    const resp = prompt('Valor combinado a pagar via PIX/dinheiro por "' + found.insumo + '" (R$):', sugestao > 0 ? sugestao.toFixed(2) : '');
-    if (resp === null) { showToast('Cancelado.'); return; }
-    valorCombinado = parseFloat(resp.replace(',', '.')) || 0;
-    if (valorCombinado <= 0) { showToast('⚠️ Informe um valor válido.'); return; }
-  }
 
   Object.values(transferAll).forEach(lista => {
     (lista||[]).forEach(t => {
       if (t.id !== id) return;
       if (isDestino) t.pagDinheiroDestino = true;
       if (isOrigem)  t.pagDinheiroOrigem  = true;
-      if (valorCombinado > 0) t.valorPagDinheiro = valorCombinado;
     });
   });
 
   const ambosConfirmaram = found.pagDinheiroDestino && found.pagDinheiroOrigem;
 
   if (ambosConfirmaram) {
+    // Ambas as lojas confirmaram a intenção — quem define o valor agora é o Compras
+    // (mesmo fluxo da Saída pra Terceiros), não mais as lojas entre si.
     if (!avariasAll[found.destino]) avariasAll[found.destino] = [];
     const avId = Date.now() + '_' + Math.random().toString(36).slice(2,6);
     avariasAll[found.destino].push({
       id: avId, ts: new Date().toISOString(), semana: wkKey(semana),
-      insumo: found.insumo, qtd: found.qtd,
-      custoUnit: +(valorCombinado / found.qtd).toFixed(4), valorTotal: valorCombinado,
-      status: 'loja_confirmou',
-      loja_conf_por: found.origem + ' + ' + found.destino, loja_conf_ts: new Date().toISOString(),
+      insumo: found.insumo, qtd: found.qtd, unidade: found.unidade||'UN', qtdOriginal: found.qtdOriginal!=null?found.qtdOriginal:found.qtd,
+      custoUnit: 0, valorTotal: 0,
+      status: 'pendente',
+      loja_conf_por: null, loja_conf_ts: null,
       rh_conf_por: null, rh_conf_ts: null,
       tipo: 'transferencia_dinheiro',
       transferId: found.id, transferOrigemLoja: found.origem, transferDestinoLoja: found.destino
@@ -4941,7 +4938,7 @@ function marcarPagamentoDinheiro(id) {
     });
     autoSave();
     Promise.all([sbPush(), sbPushLoja(isOrigem ? found.destino : found.origem)]).then(() => {
-      showToast("✅ Combinado! Enviado pro Financeiro validar o pagamento em dinheiro.");
+      showToast("✅ Combinado! Enviado pro Compras validar o valor.");
     }).catch(() => {
       showToast("✅ Registrado localmente — sincronize para atualizar a outra loja.");
     });
@@ -6385,7 +6382,9 @@ function render() {
                 const outraLoja = isDestino ? t.origem : t.destino;
                 const meuPagOk = isDestino ? t.pagDinheiroDestino : t.pagDinheiroOrigem;
                 if (t.pagDinheiroAvariaId) {
-                  return '<div style="font-size:10px;color:#c4b5fd;font-weight:700;flex-shrink:0;text-align:right">⏳ Aguardando Financeiro<br><span style=\'color:#64748b\'>validar pagamento em dinheiro</span></div>';
+                  const stTransf = _statusAvariaTransf(t);
+                  const quemTransf = stTransf === 'loja_confirmou' ? 'Financeiro' : 'Compras';
+                  return '<div style="font-size:10px;color:#c4b5fd;font-weight:700;flex-shrink:0;text-align:right">⏳ Aguardando ' + quemTransf + '<br><span style=\'color:#64748b\'>validar pagamento em dinheiro</span></div>';
                 }
                 if (meuOk) {
                   return '<div style="font-size:10px;color:#34d399;font-weight:700;flex-shrink:0">✅ Você confirmou<br><span style=\'color:#64748b\'>Aguard. '+outraLoja+'</span></div>';
@@ -6417,7 +6416,7 @@ function render() {
               <div style="flex:1;min-width:0">
                 <span style="font-weight:700;font-size:12px;color:#fff">${t.insumo}</span>
                 <div style="font-size:10px;color:#94a3b8">→ ${t.destino} · <span style="color:#f87171">-${(t.qtdOriginal!=null?t.qtdOriginal:t.qtd).toFixed(3)} ${t.unidade||'UN'}</span>${t.motivo?" · "+t.motivo:""}</div>
-                ${t.pagDinheiroAvariaId?`<div style="font-size:10px;color:#c4b5fd;font-weight:700">⏳ Aguardando Financeiro validar pagamento em dinheiro</div>`
+                ${t.pagDinheiroAvariaId?`<div style="font-size:10px;color:#c4b5fd;font-weight:700">⏳ Aguardando ${_statusAvariaTransf(t)==='loja_confirmou'?'Financeiro':'Compras'} validar pagamento em dinheiro</div>`
                   :outroOk&&!meuOk?`<div style="font-size:10px;color:#fbbf24;font-weight:700">⚡ ${t.destino} confirmou! Confirme o recebimento.</div>`
                   :meuOk&&!outroOk?`<div style="font-size:10px;color:#94a3b8">Aguardando ${t.destino} confirmar devolução...</div>`
                   :outroPagOk&&!meuPagOk?`<div style="font-size:10px;color:#a78bfa;font-weight:700">💵 ${t.destino} quer pagar em dinheiro! Confirme.</div>`
@@ -7229,7 +7228,8 @@ function render() {
         ${avarias.length === 0 ? '<div style="padding:16px 14px;font-size:12px;color:#475569;text-align:center">Nenhuma avaria registrada.</div>' :
           avarias.map(av => {
             const isTerceiro = av.tipo === 'saida_terceiro';
-            const stMap = isTerceiro
+            const isTransf = av.tipo === 'transferencia_dinheiro';
+            const stMap = (isTerceiro || isTransf)
               ? {pendente:{lbl:'⏳ Aguard. valor (Compras)',clr:'#fbbf24',bg:'rgba(251,191,36,.12)'},loja_confirmou:{lbl:'💰 Valor confirmado',clr:'#60a5fa',bg:'rgba(96,165,250,.12)'},finalizado:{lbl:'✅ Finalizado',clr:'#34d399',bg:'rgba(52,211,153,.12)'}}
               : {pendente:{lbl:'⏳ Pendente',clr:'#f59e0b',bg:'rgba(245,158,11,.12)'},loja_confirmou:{lbl:'🏪 Loja confirmou',clr:'#60a5fa',bg:'rgba(96,165,250,.12)'},finalizado:{lbl:'✅ Finalizado',clr:'#34d399',bg:'rgba(52,211,153,.12)'}};
             const st = stMap[av.status] || stMap.pendente;
@@ -7248,17 +7248,17 @@ function render() {
               <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap">
                 <span style="font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;background:${st.bg};color:${st.clr}">${st.lbl}</span>
                 <div style="display:flex;gap:6px">
-                  ${av.status==='pendente' && !isTerceiro ? `<button onclick="confirmarAvaria('${av.id}','loja')" style="background:rgba(96,165,250,.15);border:1px solid rgba(96,165,250,.4);border-radius:10px;padding:5px 11px;color:#93c5fd;font-size:11px;font-weight:800">🏪 Pago pela Loja</button>` : ''}
-                  ${av.status==='pendente' && isTerceiro ? `<span style="font-size:10px;color:#94a3b8;font-style:italic">Aguardando Compras confirmar valor</span>` : ''}
-                  ${av.status==='loja_confirmou' && isMestre && av.tipo!=='transferencia_dinheiro' && !isTerceiro ? `<button onclick="confirmarAvaria('${av.id}','rh')" style="background:rgba(52,211,153,.15);border:1px solid rgba(52,211,153,.4);border-radius:10px;padding:5px 11px;color:#6ee7b7;font-size:11px;font-weight:800">✅ Confirmar RH/Fin.</button>` : ''}
-                  ${av.status==='loja_confirmou' && (!isMestre || av.tipo==='transferencia_dinheiro' || isTerceiro) ? `<span style="font-size:10px;color:#94a3b8;font-style:italic">Aguard. RH/Financeiro</span>` : ''}
+                  ${av.status==='pendente' && !isTerceiro && !isTransf ? `<button onclick="confirmarAvaria('${av.id}','loja')" style="background:rgba(96,165,250,.15);border:1px solid rgba(96,165,250,.4);border-radius:10px;padding:5px 11px;color:#93c5fd;font-size:11px;font-weight:800">🏪 Pago pela Loja</button>` : ''}
+                  ${av.status==='pendente' && (isTerceiro || isTransf) ? `<span style="font-size:10px;color:#94a3b8;font-style:italic">Aguardando Compras confirmar valor</span>` : ''}
+                  ${av.status==='loja_confirmou' && isMestre && !isTransf && !isTerceiro ? `<button onclick="confirmarAvaria('${av.id}','rh')" style="background:rgba(52,211,153,.15);border:1px solid rgba(52,211,153,.4);border-radius:10px;padding:5px 11px;color:#6ee7b7;font-size:11px;font-weight:800">✅ Confirmar RH/Fin.</button>` : ''}
+                  ${av.status==='loja_confirmou' && (!isMestre || isTransf || isTerceiro) ? `<span style="font-size:10px;color:#94a3b8;font-style:italic">Aguard. RH/Financeiro</span>` : ''}
                   ${av.status==='finalizado' ? `<span style="font-size:10px;color:#34d399">Conf. por: ${av.rh_conf_por||'—'}</span>` : ''}
-                  ${av.status==='pendente' ? `<button onclick="cancelarAvaria('${av.id}')" style="background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:5px 8px;color:#64748b;font-size:11px">🗑️</button>` : ''}
+                  ${av.status==='pendente' && !isTransf ? `<button onclick="cancelarAvaria('${av.id}')" style="background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:5px 8px;color:#64748b;font-size:11px">🗑️</button>` : ''}
                 </div>
               </div>
-              ${av.tipo==='transferencia_dinheiro' ? `<div style="font-size:10px;color:#c4b5fd;font-weight:700">💰 ${av.transferOrigemLoja||'?'} recebe em dinheiro · 📦 ${av.transferDestinoLoja||'?'} fica com o produto — validar pelo app RH/Financeiro</div>` : ''}
+              ${isTransf ? `<div style="font-size:10px;color:#c4b5fd;font-weight:700">💰 ${av.transferOrigemLoja||'?'} recebe em dinheiro · 📦 ${av.transferDestinoLoja||'?'} fica com o produto — valor validado pelo Compras, pagamento pelo Financeiro</div>` : ''}
               ${isTerceiro ? `<div style="font-size:10px;color:#fdba74;font-weight:700">📤 Terceiro: ${av.terceiro||'—'} · Pagamento via PIX${av.motivo?' · '+av.motivo:''}</div>` : ''}
-              ${av.loja_conf_por ? `<div style="font-size:10px;color:#64748b">${isTerceiro?'Compras':'Loja'}: ${av.loja_conf_por}${av.loja_conf_ts?' · '+new Date(av.loja_conf_ts).toLocaleDateString('pt-BR'):''}</div>` : ''}
+              ${av.loja_conf_por ? `<div style="font-size:10px;color:#64748b">${(isTerceiro||isTransf)?'Compras':'Loja'}: ${av.loja_conf_por}${av.loja_conf_ts?' · '+new Date(av.loja_conf_ts).toLocaleDateString('pt-BR'):''}</div>` : ''}
             </div>`;
           }).join('')
         }
