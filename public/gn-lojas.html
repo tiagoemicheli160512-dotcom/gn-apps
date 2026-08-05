@@ -4913,16 +4913,18 @@ function submitTransf() {
    confundir com avaria de verdade — mas passa por um passo extra antes do Financeiro: o
    setor de Compras (Matheus/Eduardo/Oseas, no app Estoque e Pedido) precisa confirmar o
    valor negociado primeiro, já que quem registra aqui na loja não define preço. */
-function addSaidaTerceiro(insumo, qtdCx, qtdUnd, terceiro, motivo) {
+function addSaidaTerceiro(insumo, unidade, qtd, fator, terceiro, motivo) {
   const nomeInsumo = (insumo||'').trim().toUpperCase();
   const nomeTerceiro = (terceiro||'').trim();
+  const unid = unidade === 'CX' ? 'CX' : (unidade === 'KG' ? 'KG' : 'UN');
   if (!nomeInsumo) { showToast('⚠️ Preencha o insumo.'); return false; }
   if (!nomeTerceiro) { showToast('⚠️ Informe o terceiro que está recebendo.'); return false; }
-  const fatorT = getFator(nomeInsumo);
-  const cx  = parseFloat(qtdCx)  || 0;
-  const und = parseFloat(qtdUnd) || 0;
-  const qtdTotal = (cx * fatorT) + und;
-  if (qtdTotal <= 0) { showToast('⚠️ Informe a quantidade (CX ou UN).'); return false; }
+  const q = parseFloat(qtd) || 0;
+  if (q <= 0) { showToast('⚠️ Informe a quantidade.'); return false; }
+  const fatorT = unid === 'CX' ? (parseFloat(fator) || 0) : 1;
+  if (unid === 'CX' && fatorT <= 0) { showToast('⚠️ Informe quantas unidades tem em cada caixa (fator).'); return false; }
+  const qtdTotal = unid === 'CX' ? q * fatorT : q;
+  if (qtdTotal <= 0) { showToast('⚠️ Informe a quantidade.'); return false; }
 
   const k = lojaKey();
   const saldoAtual = (estIniAll[k]||{})[nomeInsumo] || 0;
@@ -4931,14 +4933,14 @@ function addSaidaTerceiro(insumo, qtdCx, qtdUnd, terceiro, motivo) {
     return false;
   }
 
-  if (!confirm('Registrar saída de ' + qtdTotal.toFixed(0) + ' UN de "' + nomeInsumo + '" para ' + nomeTerceiro + '?\n\nO estoque sai AGORA — não tem devolução física, só o pagamento em PIX depois de confirmado pela Compras e pelo Financeiro.')) return false;
+  if (!confirm('Registrar saída de ' + q.toFixed(3) + ' ' + unid + (unid==='CX'?' (= '+qtdTotal.toFixed(0)+' UN)':'') + ' de "' + nomeInsumo + '" para ' + nomeTerceiro + '?\n\nO estoque sai AGORA — não tem devolução física, só o pagamento em PIX depois de confirmado pela Compras e pelo Financeiro.')) return false;
   if (!confirm('Tem certeza mesmo? Depois de registrada, só dá pra cancelar (estornando o estoque) enquanto a Compras ainda não tiver confirmado o valor — depois disso, some do botão de cancelar.')) return false;
 
   if (!avariasAll[loja]) avariasAll[loja] = [];
   const id = Date.now() + '_' + Math.random().toString(36).slice(2,6);
   avariasAll[loja].push({
     id, ts: new Date().toISOString(), semana: wkKey(semana),
-    insumo: nomeInsumo, qtd: qtdTotal, custoUnit: 0, valorTotal: 0,
+    insumo: nomeInsumo, qtd: qtdTotal, unidade: unid, qtdOriginal: q, custoUnit: 0, valorTotal: 0,
     status: 'pendente',
     loja_conf_por: null, loja_conf_ts: null,
     rh_conf_por: null, rh_conf_ts: null,
@@ -4949,23 +4951,64 @@ function addSaidaTerceiro(insumo, qtdCx, qtdUnd, terceiro, motivo) {
   estIniAll[k][nomeInsumo] = Math.max(0, saldoAtual - qtdTotal);
   autoSave();
   sbPush().then(() => {
-    showToast('✅ ' + qtdTotal.toFixed(0) + ' UN saíram do estoque → ' + nomeTerceiro + '!\n📤 Aguardando Compras confirmar o valor.');
+    showToast('✅ ' + q.toFixed(3) + ' ' + unid + ' saíram do estoque → ' + nomeTerceiro + '!\n📤 Aguardando Compras confirmar o valor.');
   }).catch(() => {
     showToast('✅ Registrado localmente — sincronize para confirmar.');
   });
   return true;
 }
 
+// Alterna a unidade em que a saída pra terceiro está sendo digitada — mesmo
+// padrão da aba Entradas: UN/KG a quantidade digitada já é o total, CX multiplica pelo fator.
+function setUnidadeSaidaTerceiro(unidade) {
+  const un = document.getElementById('stUnidade');
+  if (!un) return;
+  un.value = unidade;
+  document.querySelectorAll('.st-un-btn').forEach(b => {
+    const ativo = b.dataset.un === unidade;
+    b.style.border = '1px solid ' + (ativo ? '#E8580A' : 'rgba(255,255,255,.14)');
+    b.style.background = ativo ? 'rgba(232,88,10,.18)' : 'transparent';
+    b.style.color = ativo ? '#fb923c' : '#94a3b8';
+  });
+  const fatorWrap = document.getElementById('stFatorWrap');
+  const qtdLabel = document.getElementById('stQtdLabel');
+  if (unidade === 'CX') {
+    fatorWrap.style.display = '';
+    qtdLabel.textContent = 'Quantidade (caixas) *';
+    const insumo = (document.getElementById('stInsumo')||{}).value || '';
+    const fatorEl = document.getElementById('stFator');
+    if (fatorEl && !fatorEl.value) {
+      const f = getFator(insumo.trim().toUpperCase());
+      if (f > 1) fatorEl.value = f;
+    }
+  } else {
+    fatorWrap.style.display = 'none';
+    qtdLabel.textContent = `Quantidade (${unidade}) *`;
+  }
+  atualizarPreviewSaidaTerceiro();
+}
+
+function atualizarPreviewSaidaTerceiro() {
+  const unidade = (document.getElementById('stUnidade')||{}).value || 'UN';
+  const q = parseFloat((document.getElementById('stQtd')||{}).value) || 0;
+  const fator = unidade === 'CX' ? (parseFloat((document.getElementById('stFator')||{}).value) || 0) : 1;
+  const tot = unidade === 'CX' ? q * fator : q;
+  const prev = document.getElementById('stPreview');
+  if (prev) prev.textContent = tot > 0 ? (unidade === 'CX' && fator > 1 ? '×' + fator + ' = ' + tot.toFixed(0) + ' UN' : '= ' + tot.toFixed(3) + ' ' + unidade) : '';
+}
+
 function submitSaidaTerceiro() {
   const insumo   = ((document.getElementById('stInsumo')||{}).value||'');
-  const qtdCx    = (document.getElementById('stQtdCx')||{}).value;
-  const qtdUnd   = (document.getElementById('stQtdUnd')||{}).value;
+  const unidade  = ((document.getElementById('stUnidade')||{}).value||'UN');
+  const qtd      = (document.getElementById('stQtd')||{}).value;
+  const fator    = (document.getElementById('stFator')||{}).value;
   const terceiro = (document.getElementById('stTerceiro')||{}).value;
   const motivo   = (document.getElementById('stMotivo')||{}).value;
-  if (addSaidaTerceiro(insumo, qtdCx, qtdUnd, terceiro, motivo)) {
-    ['stInsumo','stQtdCx','stQtdUnd','stTerceiro','stMotivo'].forEach(id => {
+  if (addSaidaTerceiro(insumo, unidade, qtd, fator, terceiro, motivo)) {
+    ['stInsumo','stQtd','stFator','stTerceiro','stMotivo'].forEach(id => {
       const el = document.getElementById(id); if (el) el.value = '';
     });
+    setUnidadeSaidaTerceiro('UN');
     render();
   }
 }
@@ -6378,34 +6421,22 @@ function render() {
               })()"/>
             <div id="stSaldoInfo" style="font-size:10px;color:#34d399;margin-top:3px;font-weight:700"></div>
           </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-            <div>
-              <label style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase">CX/BB/PCT</label>
-              <input id="stQtdCx" class="inp-full" type="number" step="1" min="0" placeholder="0"
-                oninput="(function(){
-                  const ins=(document.getElementById('stInsumo')||{}).value||'';
-                  const f=getFator(ins.trim().toUpperCase());
-                  const cx=parseFloat(document.getElementById('stQtdCx').value)||0;
-                  const und=parseFloat((document.getElementById('stQtdUnd')||{}).value)||0;
-                  const tot=cx*f+und;
-                  const prev=document.getElementById('stPreview');
-                  if(prev)prev.textContent=tot>0?(f>1?'×'+f+' = '+tot.toFixed(0)+' UN':'= '+tot.toFixed(0)+' UN'):'';
-                })()"/>
-            </div>
-            <div>
-              <label style="font-size:10px;color:#94a3b8;font-weight:700;text-transform:uppercase">+ Avulso UN</label>
-              <input id="stQtdUnd" class="inp-full" type="number" step="1" min="0" placeholder="0"
-                style="background:rgba(167,139,250,.08);border-color:rgba(167,139,250,.3)"
-                oninput="(function(){
-                  const ins=(document.getElementById('stInsumo')||{}).value||'';
-                  const f=getFator(ins.trim().toUpperCase());
-                  const cx=parseFloat((document.getElementById('stQtdCx')||{}).value)||0;
-                  const und=parseFloat(document.getElementById('stQtdUnd').value)||0;
-                  const tot=cx*f+und;
-                  const prev=document.getElementById('stPreview');
-                  if(prev)prev.textContent=tot>0?(f>1?'×'+f+' = '+tot.toFixed(0)+' UN':'= '+tot.toFixed(0)+' UN'):'';
-                })()"/>
-            </div>
+          <div>
+            <label style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase;display:block;margin-bottom:3px">Unidade *</label>
+            <input type="hidden" id="stUnidade" value="UN"/>
+            <div style="display:flex;gap:5px">${['UN','KG','CX'].map(u=>`<button type="button" class="st-un-btn" data-un="${u}" onclick="setUnidadeSaidaTerceiro('${u}')"
+              style="flex:1;padding:7px 0;border-radius:8px;border:1px solid ${u==='UN'?'#E8580A':'rgba(255,255,255,.14)'};background:${u==='UN'?'rgba(232,88,10,.18)':'transparent'};color:${u==='UN'?'#fb923c':'#94a3b8'};font-size:11px;font-weight:800;cursor:pointer;font-family:inherit">${u}</button>`).join('')}</div>
+          </div>
+          <div id="stFatorWrap" style="display:none">
+            <label style="font-size:10px;color:#f59e0b;font-weight:700;text-transform:uppercase">Unidades por caixa (fator) *</label>
+            <input id="stFator" class="inp-full" type="number" step="1" min="1" placeholder="Ex: 12"
+              style="background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.3)"
+              oninput="atualizarPreviewSaidaTerceiro()" onchange="atualizarPreviewSaidaTerceiro()"/>
+          </div>
+          <div>
+            <label id="stQtdLabel" style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase">Quantidade (UN) *</label>
+            <input id="stQtd" class="inp-full" type="number" step="0.001" min="0" placeholder="0"
+              oninput="atualizarPreviewSaidaTerceiro()" onchange="atualizarPreviewSaidaTerceiro()"/>
           </div>
           <div id="stPreview" style="font-size:12px;color:#34d399;font-weight:800;text-align:center;padding:4px 0;min-height:20px"></div>
           <div>
@@ -6434,7 +6465,7 @@ function render() {
                 : '<span style="color:#c4b5fd;font-weight:700">⏳ Aguardando Financeiro</span>';
               return `<div class="row-item" style="flex-direction:column;align-items:flex-start;gap:2px">
                 <div style="display:flex;width:100%;align-items:center;justify-content:space-between">
-                  <span class="item-name">${a.insumo} (${(a.qtd||0).toFixed(3)})</span>
+                  <span class="item-name">${a.insumo} (${(a.qtdOriginal!=null?a.qtdOriginal:(a.qtd||0)).toFixed(3)} ${a.unidade||'UN'})</span>
                   <span style="font-size:10px">${st}</span>
                 </div>
                 <div style="font-size:10px;color:#64748b">→ ${a.terceiro||'—'}${a.motivo?' · '+a.motivo:''} · ${new Date(a.ts).toLocaleDateString("pt-BR")}</div>
