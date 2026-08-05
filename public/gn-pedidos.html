@@ -4917,15 +4917,41 @@ async function renderHistorico() {
 // ═══════════════════════════════════════════════
 // RENDER: PRODUÇÃO (controle de estoque dos itens do fornecedor PETISCOS)
 // ═══════════════════════════════════════════════
-// Margem 2, Sexta e Entrada são digitados à mão. Estoque NÃO é digitado — é sempre
-// calculado pela mesma fórmula da planilha original: Sexta (última contagem física)
-// + Entrada (produzido/recebido) − Saída. Saída é puxada automaticamente das provisões
-// de PETISCOS ainda AGUARDANDO com entrega prevista na semana selecionada (mesmo
-// padrão de navegação por semana já usado em Provisões).
+// Margem 2, Sexta e Entrada são digitados à mão, e valem só pra semana selecionada
+// (mesmo padrão de navegação por semana já usado em Provisões). Estoque NÃO é
+// digitado — é sempre calculado pela mesma fórmula da planilha original: Sexta
+// (contagem que abre a semana) + Entrada (produzido) − Saída. Saída soma TODAS as
+// provisões de PETISCOS com entrega prevista na semana (qualquer status, menos
+// CANCELADO) — não só as ainda pendentes, pra bater tanto na semana atual quanto
+// numa semana passada já toda recebida.
+//
+// O estoque de domingo vira o ponto de partida da semana seguinte: na primeira vez
+// que uma semana é aberta (sem registro ainda), o Sexta e a Margem 2 são semeados a
+// partir do resultado (Sexta+Entrada−Saída) e da Margem 2 da semana anterior — e já
+// gravados, pra não precisar repetir esse cálculo indefinidamente pra trás a cada
+// nova semana (mesma ideia do _seedInicialFromPrevWeek do Livro Caixa/Carnes).
 //
 // "Contagem" mostra a quantidade lançada na aba Pedido pra essa mesma semana (antes
 // mesmo de o fornecedor ser confirmado) — filtrável por loja ou somada em "Todas as
 // lojas", pelos chips no topo.
+async function _producaoDadosSemana(ids, semanaMonday) {
+  const monday = semanaMonday.toISOString().split('T')[0];
+  const sunday = getSundayOfWeek(semanaMonday).toISOString().split('T')[0];
+  const [baseRes, saida] = await Promise.all([
+    db.from('gn_producao_estoque').select('*').eq('semana_inicio', monday).in('catalogo_id', ids),
+    _fetchTodasPaginas(() => db.from('gn_provisoes').select('catalogo_id,qtd_prevista')
+      .eq('fornecedor','PETISCOS').neq('status','CANCELADO')
+      .gte('data_entrega', monday).lte('data_entrega', sunday)
+      .in('catalogo_id', ids)),
+  ]);
+  if (baseRes.error) throw baseRes.error;
+  const baseMap = {};
+  (baseRes.data||[]).forEach(r => { baseMap[r.catalogo_id] = r; });
+  const saidaMap = {};
+  (saida||[]).forEach(p => { saidaMap[p.catalogo_id] = (saidaMap[p.catalogo_id]||0) + (parseFloat(p.qtd_prevista)||0); });
+  return { baseMap, saidaMap };
+}
+
 async function renderProducao() {
   $('content').innerHTML = '<div class="empty"><div class="spin"></div></div>';
 
@@ -4941,36 +4967,52 @@ async function renderProducao() {
   const semAtiva = S.producaoSemana || getMondayOfWeek();
   const monday = semAtiva.toISOString().split('T')[0];
   const sunday = getSundayOfWeek(semAtiva).toISOString().split('T')[0];
+  const semAnterior = datePlusWeeks(semAtiva, -1);
 
-  let baseRows = [], provAguard = [], pedidoItensSemana = [];
+  let baseMap = {}, saidaMap = {}, pedidoItensSemana = [];
   try {
     const { data: pedidosSemana } = await db.from('gn_pedidos').select('id')
       .or(`semana_inicio.eq.${monday},and(data_pedido.gte.${monday},data_pedido.lte.${sunday})`);
     const pedidoIds = (pedidosSemana || []).map(p => p.id);
 
-    const [r1, aguard, itensSem] = await Promise.all([
-      db.from('gn_producao_estoque').select('*').in('catalogo_id', ids),
-      _fetchTodasPaginas(() => db.from('gn_provisoes').select('catalogo_id,qtd_prevista')
-        .eq('fornecedor','PETISCOS').eq('status','AGUARDANDO')
-        .gte('data_entrega', monday).lte('data_entrega', sunday)
-        .in('catalogo_id', ids)),
+    const [atual, anterior, itensSem] = await Promise.all([
+      _producaoDadosSemana(ids, semAtiva),
+      _producaoDadosSemana(ids, semAnterior),
       pedidoIds.length
         ? _fetchTodasPaginas(() => db.from('gn_pedido_itens').select('catalogo_id,loja_slug,qtd_pedida')
             .in('pedido_id', pedidoIds).in('catalogo_id', ids))
         : Promise.resolve([]),
     ]);
-    if (r1.error) throw r1.error;
-    baseRows = r1.data || []; provAguard = aguard || []; pedidoItensSemana = itensSem || [];
+    baseMap = atual.baseMap; saidaMap = atual.saidaMap; pedidoItensSemana = itensSem || [];
+
+    // Semeia (só quando ainda não existe registro nesta semana) o Sexta a partir do
+    // resultado final da semana anterior, e a Margem 2 também é herdada — só preenche
+    // quem ainda está em branco, nunca sobrescreve o que já foi editado nesta semana.
+    const rowsSeed = [];
+    produtos.forEach(prod => {
+      if (baseMap[prod.id]) return;
+      const prevBase = anterior.baseMap[prod.id];
+      const prevSexta = prevBase ? parseFloat(prevBase.sexta)||0 : 0;
+      const prevEntrada = prevBase ? parseFloat(prevBase.entrada)||0 : 0;
+      const prevSaida = anterior.saidaMap[prod.id] || 0;
+      const estoqueAnterior = prevBase ? (prevSexta + prevEntrada - prevSaida) : 0;
+      const row = {
+        catalogo_id: prod.id, semana_inicio: monday,
+        margem2: prevBase ? (parseFloat(prevBase.margem2)||0) : 0,
+        sexta: estoqueAnterior, entrada: 0,
+        atualizado_em: new Date().toISOString(),
+      };
+      rowsSeed.push(row);
+      baseMap[prod.id] = row;
+    });
+    if (rowsSeed.length) {
+      try { await db.from('gn_producao_estoque').upsert(rowsSeed, { onConflict: 'catalogo_id,semana_inicio' }); }
+      catch (e) { console.error('Erro semeando Produção da semana:', e.message||e); }
+    }
   } catch (e) {
     $('content').innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-texto">Erro ao carregar Produção</div></div>`;
     return;
   }
-
-  const baseMap = {};
-  baseRows.forEach(r => { baseMap[r.catalogo_id] = r; });
-
-  const saidaMap = {};
-  provAguard.forEach(p => { saidaMap[p.catalogo_id] = (saidaMap[p.catalogo_id]||0) + (parseFloat(p.qtd_prevista)||0); });
 
   const contagemMap = {};
   pedidoItensSemana.forEach(it => {
@@ -5050,7 +5092,7 @@ async function renderProducao() {
     ${_semNavHtml}
     <div class="store-tabs" style="margin-bottom:12px">${lojaTabs}</div>
     <div style="font-size:11px;color:var(--muted);margin-bottom:12px">
-      Estoque = Sexta + Entrada − Saída. Saída é puxada automaticamente dos pedidos de PETISCOS ainda aguardando entrega nesta semana.
+      Estoque = Sexta + Entrada − Saída. O Estoque de domingo já entra automaticamente como o Sexta da semana seguinte. Saída soma os pedidos de PETISCOS com entrega prevista nesta semana.
       Contagem mostra o que foi lançado na aba Pedido nesta semana (${lojaLabelAtual}).
     </div>
     ${linhasHtml}
@@ -5066,9 +5108,10 @@ async function _navegarSemanaProducao(delta) {
 
 async function salvarProducaoCampo(catalogoId, campo, valor) {
   const num = parseFloat(String(valor).replace(',','.')) || 0;
-  const payload = { catalogo_id: catalogoId, [campo]: num, atualizado_em: new Date().toISOString() };
+  const monday = (S.producaoSemana || getMondayOfWeek()).toISOString().split('T')[0];
+  const payload = { catalogo_id: catalogoId, semana_inicio: monday, [campo]: num, atualizado_em: new Date().toISOString() };
   const { error } = await db.from('gn_producao_estoque')
-    .upsert(payload, { onConflict: 'catalogo_id' });
+    .upsert(payload, { onConflict: 'catalogo_id,semana_inicio' });
   if (error) { toast('Erro ao salvar: ' + error.message, 'err'); return; }
   // Estoque é calculado (Sexta + Entrada − Saída), não gravado — mudar Margem/Sexta/
   // Entrada precisa refletir na hora, sem esperar recarregar a tela toda.
