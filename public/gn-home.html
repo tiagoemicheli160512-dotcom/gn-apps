@@ -192,6 +192,7 @@
     }
   </style>
 <script src="gn-lojas-config.js"></script>
+<script src="gn-comissoes-calendario.js"></script>
 </head>
 <body>
 
@@ -275,6 +276,8 @@
   <div id="xml-mes-home-card"></div>
 
   <div id="datas-especiais-home-card"></div>
+
+  <div id="escala-dia-home-card"></div>
 
   <div class="mod-list" id="mod-list"></div>
 
@@ -669,6 +672,90 @@ function _renderDatasEspeciaisHome(mostrar) {
   </div>`;
 }
 
+// Card "Escala de Hoje" — puxa os funcionários escalados pra loja ativa no dia atual,
+// direto de gn_comissoes (mesma base usada na aba Escala do app Checklist), sem precisar
+// abrir o app pra conferir quem está trabalhando/de folga/ausente hoje.
+const ESCALA_HOME_PRESENTE_SET = new Set(['PRESENTE','HORISTA','JOVEM APRENDIZ']);
+const ESCALA_HOME_FOLGA_SET = new Set(['FOLGA','BANCO DE HORAS','FÉRIAS','AFASTAMENTO']);
+const ESCALA_HOME_TURNO_COLOR = {MANHÃ:'#f59e0b',TARDE:'#3b82f6',NOITE:'#8b5cf6',MISTO:'#10b981',FOLGA:'#94a3b8','':'#475569'};
+
+function _escalaHomeSemIdx(dataISO) {
+  const dt = new Date(dataISO+'T12:00:00');
+  const d = dt.getDate(), m = dt.getMonth()+1;
+  const idx = (typeof COMISSOES_CAL !== 'undefined' ? COMISSOES_CAL : []).findIndex(w => w.days.some(x => x.d===d && x.m===m));
+  return idx>=0 ? idx : null;
+}
+function _escalaHomeDiaIdx(dataISO) {
+  const dt = new Date(dataISO+'T12:00:00');
+  return (dt.getDay()+6)%7; // Seg=0 ... Dom=6
+}
+
+async function _renderEscalaDiaHome(mostrar, sess, isMasterAtivo) {
+  const el = document.getElementById('escala-dia-home-card');
+  if (!el) return;
+  if (!mostrar || !sess) { el.innerHTML = ''; return; }
+  const loja = (isMasterAtivo && masterLoja) ? masterLoja : sess.loja;
+  const comKey = LOJA_COM_KEY[loja] || loja;
+  const hojeISO = (d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'))(new Date());
+  const idx = _escalaHomeSemIdx(hojeISO);
+  if (idx == null) { el.innerHTML = ''; return; }
+  const diaIdx = _escalaHomeDiaIdx(hojeISO);
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'escalaDia:rows', []);
+  const allData = (rows[0] && rows[0].all_data) || {};
+  const wd = allData[String(idx)];
+  const funcs = ((wd && wd.funcs) || []).filter(f => f.nome && f.nome.trim());
+  if (!funcs.length) { el.innerHTML = ''; return; }
+
+  const trabalhando = [], folga = [], ausente = [];
+  funcs.forEach(f => {
+    const st = (f.dias||[])[diaIdx] || 'PRESENTE';
+    if (ESCALA_HOME_PRESENTE_SET.has(st)) trabalhando.push({...f, st});
+    else if (ESCALA_HOME_FOLGA_SET.has(st)) folga.push({...f, st});
+    else ausente.push({...f, st});
+  });
+  const TURNO_ORD = {'MANHÃ':0,'TARDE':1,'MISTO':2,'NOITE':3,'FOLGA':4,'':5};
+  trabalhando.sort((a,b) => (TURNO_ORD[a.turno||'']??5) - (TURNO_ORD[b.turno||'']??5));
+
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  const linhaFunc = f => {
+    const tc = ESCALA_HOME_TURNO_COLOR[f.turno||''] || '#475569';
+    const turnoTag = f.turno ? `<span style="font-size:9px;background:${tc}22;color:${tc};border-radius:4px;padding:1px 5px;font-weight:700;flex-shrink:0">${esc(f.turno)}</span>` : '';
+    const hd = (f.horario_dias||[])[diaIdx];
+    const horarioStr = (hd && hd.entrada && hd.saida) ? `${hd.entrada}–${hd.saida}` : (f.horario||'');
+    return `<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-top:1px solid rgba(255,255,255,.05)">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:11px;font-weight:700;color:#e2e8f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(f.nome)}</div>
+        <div style="display:flex;gap:5px;align-items:center;margin-top:2px">${turnoTag}${horarioStr?`<span style="font-size:9px;color:rgba(255,255,255,.4)">${esc(horarioStr)}</span>`:''}</div>
+      </div>
+    </div>`;
+  };
+
+  const DSEM = ['Domingo','Segunda','Terça','Quarta','Quinta','Sexta','Sábado'];
+  const hojeDate = new Date();
+
+  el.innerHTML = `<div style="margin:0 16px 14px">
+    <details style="background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-left:3px solid #4ade80;border-radius:14px;padding:2px 0">
+      <summary style="cursor:pointer;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;gap:10px;list-style:none">
+        <div>
+          <div style="font-size:12px;font-weight:800;color:#e2e8f0">📅 Escala de Hoje</div>
+          <div style="font-size:10px;color:rgba(255,255,255,.4);margin-top:2px">${DSEM[hojeDate.getDay()]}, ${String(hojeDate.getDate()).padStart(2,'0')}/${String(hojeDate.getMonth()+1).padStart(2,'0')}</div>
+        </div>
+        <div style="display:flex;gap:5px;flex-shrink:0">
+          <span style="font-size:10px;background:rgba(74,222,128,.15);color:#4ade80;padding:3px 8px;border-radius:8px;font-weight:700">✓ ${trabalhando.length}</span>
+          ${folga.length?`<span style="font-size:10px;background:rgba(6,182,212,.15);color:#22d3ee;padding:3px 8px;border-radius:8px;font-weight:700">🏖 ${folga.length}</span>`:''}
+          ${ausente.length?`<span style="font-size:10px;background:rgba(239,68,68,.15);color:#f87171;padding:3px 8px;border-radius:8px;font-weight:700">⚠ ${ausente.length}</span>`:''}
+        </div>
+      </summary>
+      <div style="padding:0 16px 12px">
+        ${trabalhando.length?`<div style="font-size:9px;font-weight:800;color:rgba(255,255,255,.35);text-transform:uppercase;letter-spacing:.5px;margin-top:6px">Trabalhando</div>${trabalhando.map(linhaFunc).join('')}`:''}
+        ${folga.length?`<div style="font-size:9px;font-weight:800;color:rgba(255,255,255,.35);text-transform:uppercase;letter-spacing:.5px;margin-top:10px">Folga</div>${folga.map(linhaFunc).join('')}`:''}
+        ${ausente.length?`<div style="font-size:9px;font-weight:800;color:rgba(255,255,255,.35);text-transform:uppercase;letter-spacing:.5px;margin-top:10px">Ausente</div>${ausente.map(linhaFunc).join('')}`:''}
+      </div>
+    </details>
+  </div>`;
+}
+
 try {
   const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
   if (s && Date.now() - s.ts < TTL) session = s;
@@ -740,6 +827,7 @@ function _refreshPermUI(sess) {
   loadBadges(sess, isMaster);
   _renderDatasEspeciaisHome(!isMaster || !!masterLoja);
   _renderXmlMesHome(!isMaster || !!masterLoja, sess, isMaster);
+  _renderEscalaDiaHome(!isMaster || !!masterLoja, sess, isMaster);
   _renderBotNav(sess, isMaster);
 }
 
@@ -936,6 +1024,7 @@ function showHome(sess) {
   loadBadges(sess, isMaster);
   _renderDatasEspeciaisHome(!isMaster || !!masterLoja);
   _renderXmlMesHome(!isMaster || !!masterLoja, sess, isMaster);
+  _renderEscalaDiaHome(!isMaster || !!masterLoja, sess, isMaster);
 
   // Health chips: reset when switching lojas
   const hcEl = document.getElementById('health-chips');
