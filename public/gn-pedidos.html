@@ -381,6 +381,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   <div class="sidebar-section">Gestão</div>
   <button class="sidebar-link" data-sidebar-tab="carnes" onclick="setTab('carnes')"><span class="sl-icon">🥩</span>Controle de Carnes</button>
   <button class="sidebar-link" data-sidebar-tab="trios" onclick="setTab('trios')"><span class="sl-icon">🎵</span>Trios / Bandas</button>
+  <button class="sidebar-link" data-sidebar-tab="producao" onclick="setTab('producao')"><span class="sl-icon">🏭</span>Produção</button>
   <button class="sidebar-link" data-sidebar-tab="historico" onclick="setTab('historico')"><span class="sl-icon">📜</span>Histórico</button>
 </nav>
 
@@ -474,6 +475,10 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
     <button class="nav-btn" data-tab="trios" onclick="setTab('trios')">
       <span class="nav-icon">🎵</span>
       <span class="nav-label">Trios</span>
+    </button>
+    <button class="nav-btn" data-tab="producao" onclick="setTab('producao')">
+      <span class="nav-icon">🏭</span>
+      <span class="nav-label">Produção</span>
     </button>
     <button class="nav-btn" data-tab="historico" onclick="setTab('historico')">
       <span class="nav-icon">📜</span>
@@ -1841,6 +1846,7 @@ function renderContent() {
     case 'carnes':      renderCarnesCtrl(); break;
     case 'trios':       renderTrios(); break;
     case 'historico':   renderHistorico(); break;
+    case 'producao':    renderProducao(); break;
   }
 }
 
@@ -4905,6 +4911,118 @@ async function renderHistorico() {
 }
 
 // ═══════════════════════════════════════════════
+// RENDER: PRODUÇÃO (controle de estoque dos itens do fornecedor PETISCOS)
+// ═══════════════════════════════════════════════
+// Margem 2, Estoque, Sexta e Entrada são digitados à mão. Saída é sempre calculada a
+// partir das provisões de PETISCOS ainda AGUARDANDO (pedidos já lançados, prestes a
+// sair da produção). Assim que uma dessas provisões é confirmada (RECEBIDO_OK ou
+// DIVERGENCIA — não importa em qual app: Lojas ou aqui), ela some da Saída e o Estoque
+// já sai descontado automaticamente — sem precisar editar nada à mão, embora o campo
+// continue editável pra corrigir numa contagem física. Não existe nenhum "gancho" preso
+// à ação de confirmar: o desconto é sempre recalculado na hora de exibir a tela,
+// comparando a data da confirmação com a data do último ajuste manual do Estoque —
+// por isso funciona não importa quem confirmou a entrega nem em qual app.
+async function renderProducao() {
+  $('content').innerHTML = '<div class="empty"><div class="spin"></div></div>';
+
+  const produtos = S.catalogo.filter(p => p.ativo && p.fornecedor === 'PETISCOS')
+    .sort((a,b) => (a.item_id||0) - (b.item_id||0));
+
+  if (!produtos.length) {
+    $('content').innerHTML = `<div class="empty"><div class="empty-icon">🏭</div><div class="empty-texto">Nenhum produto ativo do fornecedor PETISCOS no catálogo</div></div>`;
+    return;
+  }
+  const ids = produtos.map(p => p.id);
+
+  let baseRows = [], provAguard = [], provConf = [];
+  try {
+    const [r1, aguard, conf] = await Promise.all([
+      db.from('gn_producao_estoque').select('*').in('catalogo_id', ids),
+      _fetchTodasPaginas(() => db.from('gn_provisoes').select('catalogo_id,qtd_prevista')
+        .eq('fornecedor','PETISCOS').eq('status','AGUARDANDO').in('catalogo_id', ids)),
+      // Sem limite de data — precisa achar TODA confirmação mais nova que o último ajuste
+      // manual do Estoque, mesmo que ele não seja mexido há meses. Paginado (_fetchTodasPaginas)
+      // porque com o tempo isso passa fácil de 1000 linhas.
+      _fetchTodasPaginas(() => db.from('gn_provisoes').select('catalogo_id,qtd_prevista,atualizado_em,gn_recebimentos(qtd_recebida)')
+        .eq('fornecedor','PETISCOS').in('status',['RECEBIDO_OK','DIVERGENCIA']).in('catalogo_id', ids)),
+    ]);
+    if (r1.error) throw r1.error;
+    baseRows = r1.data || []; provAguard = aguard || []; provConf = conf || [];
+  } catch (e) {
+    $('content').innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-texto">Erro ao carregar Produção</div></div>`;
+    return;
+  }
+
+  const baseMap = {};
+  baseRows.forEach(r => { baseMap[r.catalogo_id] = r; });
+
+  const saidaMap = {};
+  provAguard.forEach(p => { saidaMap[p.catalogo_id] = (saidaMap[p.catalogo_id]||0) + (parseFloat(p.qtd_prevista)||0); });
+
+  const confMap = {};
+  provConf.forEach(p => {
+    const rec = Array.isArray(p.gn_recebimentos) ? p.gn_recebimentos[0] : p.gn_recebimentos;
+    const qtd = parseFloat(rec?.qtd_recebida ?? p.qtd_prevista) || 0;
+    (confMap[p.catalogo_id] = confMap[p.catalogo_id] || []).push({ qtd, ts: p.atualizado_em });
+  });
+
+  const linhasHtml = produtos.map(prod => {
+    const base = baseMap[prod.id] || {};
+    const baselineTs = base.estoque_atualizado_em ? new Date(base.estoque_atualizado_em).getTime() : 0;
+    const aDebitar = (confMap[prod.id]||[])
+      .filter(c => c.ts && new Date(c.ts).getTime() > baselineTs)
+      .reduce((s,c) => s + c.qtd, 0);
+    const estoqueAtual = (parseFloat(base.estoque)||0) - aDebitar;
+    const saida = saidaMap[prod.id] || 0;
+
+    const campo = (label, campoNome, valor) => `
+      <div>
+        <div style="font-size:9px;color:var(--muted);text-transform:uppercase;margin-bottom:2px;text-align:center">${label}</div>
+        <input type="number" step="1" class="form-input" style="padding:5px 2px;font-size:12px;text-align:center"
+          value="${valor}" onchange="salvarProducaoCampo('${prod.id}','${campoNome}',this.value)">
+      </div>`;
+
+    return `<div class="prov-item" style="padding:10px 12px">
+      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:8px">${prod.produto}</div>
+      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px">
+        ${campo('Margem 2','margem2', base.margem2||0)}
+        ${campo('Estoque','estoque', estoqueAtual)}
+        ${campo('Sexta','sexta', base.sexta||0)}
+        ${campo('Entrada','entrada', base.entrada||0)}
+        <div>
+          <div style="font-size:9px;color:var(--muted);text-transform:uppercase;margin-bottom:2px;text-align:center">Saída</div>
+          <div style="padding:5px 2px;font-size:12px;text-align:center;font-weight:700;color:${saida>0?'#fbbf24':'var(--muted)'}">${fmtQtd(saida)}</div>
+        </div>
+      </div>
+      ${aDebitar>0 ? `<div style="font-size:10px;color:#4ade80;margin-top:6px">✓ ${fmtQtd(aDebitar)} já descontado do estoque (entregas confirmadas)</div>` : ''}
+    </div>`;
+  }).join('');
+
+  $('content').innerHTML = `
+    <div class="sec-header">
+      <div class="sec-titulo">🏭 Produção</div>
+      <button onclick="renderProducao()" style="padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:none;color:var(--muted);font-size:11px;cursor:pointer">↻ Atualizar</button>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:12px">
+      Saída é puxada automaticamente dos pedidos de PETISCOS ainda aguardando entrega. Assim que a entrega é confirmada, o valor some daqui e já é descontado do Estoque.
+    </div>
+    ${linhasHtml}
+  `;
+}
+
+async function salvarProducaoCampo(catalogoId, campo, valor) {
+  const num = parseFloat(String(valor).replace(',','.')) || 0;
+  const payload = { catalogo_id: catalogoId, [campo]: num, atualizado_em: new Date().toISOString() };
+  // Editar o Estoque na mão é uma contagem física nova — reseta o marco de tempo usado
+  // pra calcular o que já foi descontado automaticamente, senão entregas confirmadas
+  // antes dessa edição seriam descontadas de novo na próxima tela.
+  if (campo === 'estoque') payload.estoque_atualizado_em = new Date().toISOString();
+  const { error } = await db.from('gn_producao_estoque')
+    .upsert(payload, { onConflict: 'catalogo_id' });
+  if (error) toast('Erro ao salvar: ' + error.message, 'err');
+}
+
+// ═══════════════════════════════════════════════
 // INICIALIZAÇÃO
 // ═══════════════════════════════════════════════
 async function iniciarApp() {
@@ -4941,7 +5059,7 @@ async function iniciarApp() {
     const _sess = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
     const abasArr = _sess && _sess.permissoes && _sess.permissoes.pedidos_abas;
     S.abasPermitidas = Array.isArray(abasArr) ? new Set(abasArr) : null;
-    const ALL_TABS = ['pedido','edu','oseas','matheus','catalogo','fornecedores','provisoes','entrega','fichas','faltas-dia','carnes','trios','historico'];
+    const ALL_TABS = ['pedido','edu','oseas','matheus','catalogo','fornecedores','provisoes','entrega','fichas','faltas-dia','carnes','trios','historico','producao'];
     ALL_TABS.forEach(t => {
       const hidden = S.abasPermitidas && !S.abasPermitidas.has(t);
       document.querySelectorAll(`.sidebar-link[data-sidebar-tab="${t}"], .nav-btn[data-tab="${t}"]`).forEach(b => {
