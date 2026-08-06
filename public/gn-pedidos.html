@@ -5047,6 +5047,7 @@ async function renderProducao() {
 
   const lojaLabelAtual = S.producaoLoja ? (S.lojas.find(l=>l.slug_pedido===S.producaoLoja)?.nome_display||S.producaoLoja) : 'todas';
 
+  const rowsData = [];
   const linhasHtml = produtos.map(prod => {
     const base = baseMap[prod.id] || {};
     const margem2 = parseFloat(base.margem2)||0;
@@ -5061,6 +5062,8 @@ async function renderProducao() {
     // Quanto falta produzir pra fechar a margem, a partir da última contagem física
     // (Sexta) — não do Estoque corrente, que já embute a Entrada digitada.
     const aProduzir = Math.max(0, margem2 - sexta);
+
+    rowsData.push({ produto: prod.produto, margem2, estoqueAtual, sexta, entrada, saida, contagem, aProduzir, abaixoMargem });
 
     const campoEdit = (label, campoNome, valor) => `
       <div>
@@ -5092,10 +5095,19 @@ async function renderProducao() {
     </div>`;
   }).join('');
 
+  // Cache pros geradores de relatório (WhatsApp/PDF) lerem sem precisar refazer a busca —
+  // reflete exatamente o que está na tela (semana e loja selecionadas).
+  S._producaoCache = { semFmt: _semFmt, lojaLabel: lojaLabelAtual, rows: rowsData };
+
   $('content').innerHTML = `
     <div class="sec-header">
       <div class="sec-titulo">🏭 Produção</div>
       <button onclick="renderProducao()" style="padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:none;color:var(--muted);font-size:11px;cursor:pointer">↻ Atualizar</button>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+      <button onclick="gerarWppProducao()" style="background:rgba(37,211,102,.12);border:1px solid rgba(37,211,102,.3);border-radius:6px;padding:5px 10px;color:#22c55e;font-size:11px;font-weight:700;cursor:pointer">📲 WhatsApp</button>
+      <button onclick="gerarPDFProducao()" style="background:rgba(192,57,43,.12);border:1px solid rgba(192,57,43,.3);border-radius:6px;padding:5px 10px;color:#e74c3c;font-size:11px;font-weight:700;cursor:pointer">📄 PDF</button>
+      <button onclick="enviarPDFProducaoWpp()" title="Enviar PDF pelo WhatsApp" style="background:rgba(37,211,102,.12);border:1px solid rgba(37,211,102,.3);border-radius:6px;padding:5px 10px;color:#22c55e;font-size:11px;font-weight:700;cursor:pointer">📄📲 PDF no Whats</button>
     </div>
     ${_semNavHtml}
     <div class="store-tabs" style="margin-bottom:12px">${lojaTabs}</div>
@@ -5105,6 +5117,51 @@ async function renderProducao() {
     </div>
     ${linhasHtml}
   `;
+}
+
+// Texto plano (sem markdown) compartilhado entre o PDF "normal" (impressão) e o PDF
+// anexado no WhatsApp — mesmo padrão de _pedidoMsgETitulo().
+function _producaoRelatorioTexto() {
+  const cache = S._producaoCache;
+  if (!cache || !cache.rows.length) return null;
+  const { semFmt, lojaLabel, rows } = cache;
+  let msg = `PRODUÇÃO — ${lojaLabel}\nSemana ${semFmt.num} (${semFmt.periodo})\n`;
+  rows.forEach(r => {
+    msg += `\n${r.produto}\n`;
+    msg += `  Margem 2: ${fmtQtd(r.margem2)} | Estoque: ${fmtQtd(r.estoqueAtual)}${r.abaixoMargem ? ' (abaixo da margem)' : ''}\n`;
+    msg += `  Sexta: ${fmtQtd(r.sexta)} | Entrada: ${fmtQtd(r.entrada)} | Saída: ${fmtQtd(r.saida)} | Contagem: ${fmtQtd(r.contagem)}\n`;
+    if (r.aProduzir > 0) msg += `  Precisa produzir: ${fmtQtd(r.aProduzir)}\n`;
+  });
+  return { msg, titulo: `Produção — ${lojaLabel} — Semana ${semFmt.num}` };
+}
+
+function gerarWppProducao() {
+  const cache = S._producaoCache;
+  if (!cache || !cache.rows.length) { toast('Nenhum item de produção pra enviar.', 'err'); return; }
+  const { semFmt, lojaLabel, rows } = cache;
+  let msg = `🏭 *PRODUÇÃO — ${lojaLabel}*\nSemana ${semFmt.num} (${semFmt.periodo})\n`;
+  const abaixoMargem = rows.filter(r => r.abaixoMargem);
+  rows.forEach(r => {
+    const icon = r.abaixoMargem ? '⚠️' : '✅';
+    msg += `\n${icon} *${r.produto}*\n`;
+    msg += `  Margem 2: ${fmtQtd(r.margem2)} | Estoque: ${fmtQtd(r.estoqueAtual)}\n`;
+    msg += `  Sexta: ${fmtQtd(r.sexta)} | Entrada: ${fmtQtd(r.entrada)} | Saída: ${fmtQtd(r.saida)} | Contagem: ${fmtQtd(r.contagem)}\n`;
+    if (r.aProduzir > 0) msg += `  🔧 Precisa produzir: *${fmtQtd(r.aProduzir)}*\n`;
+  });
+  if (abaixoMargem.length) msg += `\n⚠️ *${abaixoMargem.length} produto${abaixoMargem.length>1?'s':''} abaixo da margem*`;
+  window.open('https://wa.me/?text=' + encodeURIComponent(msg));
+}
+
+function gerarPDFProducao() {
+  const r = _producaoRelatorioTexto();
+  if (!r) { toast('Nenhum item de produção pra enviar.', 'err'); return; }
+  gerarPDF(r.msg, r.titulo);
+}
+
+async function enviarPDFProducaoWpp() {
+  const r = _producaoRelatorioTexto();
+  if (!r) { toast('Nenhum item de produção pra enviar.', 'err'); return; }
+  await _compartilharPdfWpp(r.msg, r.titulo);
 }
 
 async function _navegarSemanaProducao(delta) {
