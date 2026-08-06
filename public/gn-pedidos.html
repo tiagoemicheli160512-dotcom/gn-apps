@@ -4947,7 +4947,7 @@ async function _producaoDadosSemana(ids, semanaMonday) {
   const sunday = getSundayOfWeek(semanaMonday).toISOString().split('T')[0];
   const [baseRes, saida] = await Promise.all([
     db.from('gn_producao_estoque').select('*').eq('semana_inicio', monday).in('catalogo_id', ids),
-    _fetchTodasPaginas(() => db.from('gn_provisoes').select('catalogo_id,qtd_prevista')
+    _fetchTodasPaginas(() => db.from('gn_provisoes').select('catalogo_id,qtd_prevista,loja_slug')
       .eq('fornecedor','PETISCOS').neq('status','CANCELADO')
       .gte('data_entrega', monday).lte('data_entrega', sunday)
       .in('catalogo_id', ids)),
@@ -4956,8 +4956,16 @@ async function _producaoDadosSemana(ids, semanaMonday) {
   const baseMap = {};
   (baseRes.data||[]).forEach(r => { baseMap[r.catalogo_id] = r; });
   const saidaMap = {};
-  (saida||[]).forEach(p => { saidaMap[p.catalogo_id] = (saidaMap[p.catalogo_id]||0) + (parseFloat(p.qtd_prevista)||0); });
-  return { baseMap, saidaMap };
+  // Saída por loja — pro badge que mostra quanto foi só pra loja selecionada na aba
+  // Produção, sem mudar o Estoque (que é do estoque central, soma de todas as lojas).
+  const saidaPorLoja = {};
+  (saida||[]).forEach(p => {
+    const qtd = parseFloat(p.qtd_prevista) || 0;
+    saidaMap[p.catalogo_id] = (saidaMap[p.catalogo_id]||0) + qtd;
+    if (!saidaPorLoja[p.catalogo_id]) saidaPorLoja[p.catalogo_id] = {};
+    saidaPorLoja[p.catalogo_id][p.loja_slug] = (saidaPorLoja[p.catalogo_id][p.loja_slug]||0) + qtd;
+  });
+  return { baseMap, saidaMap, saidaPorLoja };
 }
 
 async function renderProducao() {
@@ -4977,7 +4985,7 @@ async function renderProducao() {
   const sunday = getSundayOfWeek(semAtiva).toISOString().split('T')[0];
   const semAnterior = datePlusWeeks(semAtiva, -1);
 
-  let baseMap = {}, saidaMap = {}, pedidoItensSemana = [];
+  let baseMap = {}, saidaMap = {}, saidaPorLoja = {}, pedidoItensSemana = [];
   try {
     const { data: pedidosSemana } = await db.from('gn_pedidos').select('id')
       .or(`semana_inicio.eq.${monday},and(data_pedido.gte.${monday},data_pedido.lte.${sunday})`);
@@ -4991,7 +4999,7 @@ async function renderProducao() {
             .in('pedido_id', pedidoIds).in('catalogo_id', ids))
         : Promise.resolve([]),
     ]);
-    baseMap = atual.baseMap; saidaMap = atual.saidaMap; pedidoItensSemana = itensSem || [];
+    baseMap = atual.baseMap; saidaMap = atual.saidaMap; saidaPorLoja = atual.saidaPorLoja; pedidoItensSemana = itensSem || [];
 
     // Semeia (só quando ainda não existe registro nesta semana) o Sexta a partir do
     // resultado final da semana anterior, e a Margem 2 também é herdada — só preenche
@@ -5054,6 +5062,9 @@ async function renderProducao() {
     const sexta = parseFloat(base.sexta)||0;
     const entrada = parseFloat(base.entrada)||0;
     const saida = saidaMap[prod.id] || 0;
+    // Saída só da loja selecionada (badge informativo) — não muda o Estoque, que é do
+    // estoque central e reflete a saída somada de todas as lojas.
+    const saidaLojaAtual = S.producaoLoja ? ((saidaPorLoja[prod.id]||{})[S.producaoLoja] || 0) : 0;
     const contagem = contagemMap[prod.id] || 0;
     // Mesma fórmula da planilha original: Estoque = Sexta + Entrada − Saída. Não é
     // digitado — sempre recalculado, pra Entrada (e Saída) refletirem na hora.
@@ -5071,10 +5082,11 @@ async function renderProducao() {
         <input type="number" step="1" class="form-input" style="padding:5px 2px;font-size:12px;text-align:center"
           value="${valor}" onchange="salvarProducaoCampo('${prod.id}','${campoNome}',this.value)">
       </div>`;
-    const campoView = (label, valor, cor) => `
+    const campoView = (label, valor, cor, sub) => `
       <div>
         <div style="font-size:9px;color:var(--muted);text-transform:uppercase;margin-bottom:2px;text-align:center">${label}</div>
         <div style="padding:5px 2px;font-size:12px;text-align:center;font-weight:700;color:${cor}">${fmtQtd(valor)}</div>
+        ${sub ? `<div style="font-size:9px;text-align:center;color:var(--muted)">${sub}</div>` : ''}
       </div>`;
 
     return `<div class="prov-item" style="padding:10px 12px;border-left:3px solid ${abaixoMargem?'#ef4444':'transparent'}">
@@ -5086,7 +5098,7 @@ async function renderProducao() {
       </div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">
         ${campoEdit('Entrada','entrada', entrada)}
-        ${campoView('Saída', saida, saida>0?'#fbbf24':'var(--muted)')}
+        ${campoView('Saída', saida, saida>0?'#fbbf24':'var(--muted)', S.producaoLoja ? `${lojaLabelAtual}: ${fmtQtd(saidaLojaAtual)}` : '')}
         ${campoView('Contagem', contagem, contagem>0?'#60a5fa':'var(--muted)')}
       </div>
       ${aProduzir>0
