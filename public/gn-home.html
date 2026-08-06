@@ -513,6 +513,8 @@ let _dashFatDiaLoja = null;   // {lojaKey: {YYYY-MM-DD: valor}}
 let _dashComDiaLoja = null;   // {lojaKey: Array(7)} — mesmo valor do repique (10% serviço):
 // gn_comissoes.brutos[dia] É o repique do dia, não precisa de uma segunda linha "Rep"
 // duplicando o mesmo número — ver onRepiqueChange() em gn-checklist.html.
+let _dashXmlPendentes = null; // Set de lojas sem o XML fiscal do mês confirmado (ver _mesRefPendenteXmlHome)
+let _dashVisitasAndamento = null; // {lojaKey: [{nome, origem, horaChegada}]} — visitas ainda sem hora_saida hoje
 
 // Mesma lista usada no app Check-list (aba Dados) — duplicada aqui porque cada app
 // é um HTML independente. Também precisa ficar antes de showHome() por causa do
@@ -1846,7 +1848,7 @@ async function _loadDashAll() {
     const trinta = new Date(); trinta.setDate(trinta.getDate()-30);
     const from30 = trinta.toISOString().slice(0,10);
     const _errCb = label => e => { window.gnLogError('dash:'+label, e); _dashLoadHadError = true; };
-    const [fatCur, fatPrv, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia] = await Promise.all([
+    const [fatCur, fatPrv, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows] = await Promise.all([
       _fetchFat(range.dates).catch(e=>{ _errCb('fatCur')(e); return {}; }),
       _fetchFat(prevRange.dates).catch(e=>{ _errCb('fatPrv')(e); return {}; }),
       _fetchFat(range2.dates).catch(e=>{ _errCb('fat2')(e); return {}; }),
@@ -1856,6 +1858,8 @@ async function _loadDashAll() {
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?select=loja,all_data`, H, 'dash:lojasOfRows', []),
       _fetchFatByDay(_dashPer==='sem' ? range.dates : weekRange.dates).catch(e=>{ _errCb('fatDia')(e); return {byDay:{},byLojaDay:{}}; }),
       _fetchComDia(_dashPer==='sem' ? range.dates[0] : weekRange.dates[0]).catch(e=>{ _errCb('comDia')(e); return {totals:Array(7).fill(0),byLoja:{}}; }),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_chk_visitas?data=eq.${hoje}&select=loja,visitante,cargo,hora_chegada,hora_saida`, H, 'dash:visitasChkRows', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_manut_visitas?data=eq.${hoje}&select=loja,oficial,hora_chegada,hora_saida`, H, 'dash:visitasManutRows', []),
     ]);
     _dashFat = fatCur; _dashFatPrev = fatPrv;
     _dashFatDia = fatDia.byDay || {}; _dashFatDiaLoja = fatDia.byLojaDay || {};
@@ -1895,6 +1899,34 @@ async function _loadDashAll() {
     window._chipDetail.dashChk = { title: '📋 Lojas sem checklist hoje',
       lines: LOJAS_LISTA.filter(l=>!_dashChk.has(l)).map(l=>({ nome: LOJA_DISPLAY[l] || l })),
       actionUrl: 'gn-checklist.html', actionLabel: 'Abrir Check-list' };
+
+    // XML do mês — reaproveita lojasOfRows (já buscado pra manutenção oficial) pra achar
+    // quais lojas ainda não confirmaram o envio do XML fiscal do mês de referência.
+    const mesRefXml = _mesRefPendenteXmlHome(new Date());
+    const xmlPend = new Set();
+    (lojasOfRows||[]).forEach(lr=>{
+      const mk=_COM_KEY_TO_LOJA[lr.loja];
+      if(!mk || !LOJAS_LISTA.includes(mk)) return;
+      if((lr.all_data||{}).xml_enviado_mes !== mesRefXml) xmlPend.add(mk);
+    });
+    _dashXmlPendentes = xmlPend;
+    window._chipDetail.dashXml = { title: '📄 Lojas sem XML do mês enviado',
+      lines: [...xmlPend].map(l=>({ nome: LOJA_DISPLAY[l] || l })) };
+
+    // Visitas em andamento — mesma união/filtro de gn_chk_visitas + gn_manut_visitas
+    // usada em _renderHealthChips(), só que agrupada por loja pro feed de alertas.
+    const visitasAndamentoTodas = [
+      ...(visitasChkRows||[])
+        .filter(r=>r.hora_chegada!=='PLAN' && r.loja!=='FOLGA' && r.loja!=='FÉRIAS' && !r.hora_saida)
+        .map(r=>({ loja:_normLoja(r.loja), nome:r.visitante, cargo:r.cargo, horaChegada:r.hora_chegada, origem:'Visitante' })),
+      ...(visitasManutRows||[])
+        .filter(r=>!r.hora_saida)
+        .map(r=>({ loja:_normLoja(r.loja), nome:r.oficial, cargo:'Manutenção', horaChegada:r.hora_chegada, origem:'Manutenção' })),
+    ].filter(r=>LOJAS_LISTA.includes(r.loja));
+    const visitasPorLoja = {};
+    visitasAndamentoTodas.forEach(r=>{ (visitasPorLoja[r.loja]=visitasPorLoja[r.loja]||[]).push(r); });
+    _dashVisitasAndamento = visitasPorLoja;
+
     const old5 = new Date(); old5.setDate(old5.getDate()-5);
     _dashManutCrit = manutTodos.filter(m=>m._data && new Date(m._data+'T00:00:00')<old5).length;
     const spark={}; LOJAS_LISTA.forEach(k=>{spark[k]=[(fat3[k]||0),(fat2[k]||0),(fatPrv[k]||0),(fatCur[k]||0)];});
@@ -1904,6 +1936,7 @@ async function _loadDashAll() {
     _dashLoadHadError = true;
     _dashFat=_dashFat||{}; _dashFatPrev=_dashFatPrev||{};
     _dashManut=_dashManut||{}; _dashChk=_dashChk||new Set();
+    _dashXmlPendentes=_dashXmlPendentes||new Set(); _dashVisitasAndamento=_dashVisitasAndamento||{};
   } finally { _dashLoading=false; _dashLoadedAt=new Date(); }
   renderDashboard();
 }
@@ -2030,6 +2063,9 @@ function _buildAlertsFeed() {
     if(_dashManut&&(_dashManut[k]||0)>0)alerts.push({sev:1,cor:'#f97316',ico:'🔧',msg:`${nome} com ${_dashManut[k]} manut. pendente${_dashManut[k]>1?'s':''}`,sub:'Toque no banner para ver'});
     if(_dashChk&&!_dashChk.has(k))alerts.push({sev:2,cor:'#60a5fa',ico:'📋',msg:`${nome} sem checklist hoje`,sub:'Checklist do dia não enviado'});
     if(!v)alerts.push({sev:3,cor:'rgba(255,255,255,.15)',ico:'⚠️',msg:`${nome} sem faturamento no período`,sub:'Dados não enviados'});
+    if(_dashXmlPendentes&&_dashXmlPendentes.has(k)) alerts.push({sev:2,cor:'#ef4444',ico:'📄',msg:`${nome} sem XML do mês enviado`,sub:'Pendente pra contabilidade'});
+    const visitasLoja=_dashVisitasAndamento?(_dashVisitasAndamento[k]||[]):[];
+    if(visitasLoja.length) alerts.push({sev:4,cor:'#22c55e',ico:'📍',msg:`${nome} com ${visitasLoja.length} visita${visitasLoja.length>1?'s':''} em andamento`,sub:visitasLoja.map(r=>`${r.nome||'?'} (${r.origem}) desde ${r.horaChegada||'?'}`).join(' · ')});
   });
   alerts.sort((a,b)=>a.sev-b.sev);
   if(!alerts.length) return '<div style="padding:24px;text-align:center;font-size:13px;color:#4ade80">✅ Nenhum alerta</div>';
