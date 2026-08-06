@@ -654,6 +654,11 @@ let transferAll  = {};  // lojaKey -> [{id,data,origem,destino,insumo,qtd,motivo
 let pedidoAll    = {};  // lojaKey -> {item_id: {atual, pedido, obs}}
 let provisoesEntrega = []; // entregas pendentes (AGUARDANDO) desta loja
 let provisoesHistorico = []; // entregas já confirmadas desta loja (últimos 30 dias)
+// Itens confirmados nesta sessão da aba Entrega, guardados aqui até o pedido inteiro
+// daquele fornecedor terminar — sem isso, cada item confirmado sumia na hora da lista
+// (foi pro histórico), fazendo a lista "pular" no meio da conferência de um pedido com
+// vários itens. Some sozinho quando o último item do fornecedor é confirmado.
+let _epConfirmadosSessao = {}; // provisao_id -> {...snapshot da provisão, _statusFinal, _qtdRec, _valRec}
 let _entregaItensMap = {}; // id -> itens (para recalc sem JSON no onclick)
 let pedidoCustom = [];  // itens novos criados no app [{item, fornecedor, grupo, subgrupo, produto, und, custo, posIndex}]
 let pedidoRemovidos = []; // IDs (string) de itens removidos da lista
@@ -6842,12 +6847,24 @@ function render() {
         </div>`;
       })()}
       ${(()=>{
-        if(provisoesEntrega.length===0) return `<div class="card" style="padding:16px;text-align:center;color:#475569;font-size:12px">✅ Nenhuma entrega pendente de confirmação</div>`;
+        const idsConfirmadosSessao=Object.keys(_epConfirmadosSessao);
+        if(provisoesEntrega.length===0 && idsConfirmadosSessao.length===0) return `<div class="card" style="padding:16px;text-align:center;color:#475569;font-size:12px">✅ Nenhuma entrega pendente de confirmação</div>`;
         const porForn={};
+        // Itens ainda de fato pendentes (AGUARDANDO)
         provisoesEntrega.forEach(p=>{const f=p.fornecedor||'SEM FORNECEDOR';(porForn[f]=porForn[f]||[]).push(p);});
-        return Object.entries(porForn).sort(([a],[b])=>a.localeCompare(b)).map(([forn,itens])=>{
+        // Itens já confirmados nesta sessão, mas mantidos no grupo (travados) até o
+        // pedido inteiro do fornecedor terminar — não deixa a lista "pular" no meio.
+        idsConfirmadosSessao.forEach(id=>{
+          const snap=_epConfirmadosSessao[id];
+          const f=snap.fornecedor||'SEM FORNECEDOR';
+          (porForn[f]=porForn[f]||[]).push(snap);
+        });
+        const fornsFinalizados=[];
+        const html=Object.entries(porForn).sort(([a],[b])=>a.localeCompare(b)).map(([forn,itens])=>{
           const totalForn=itens.reduce((s,p)=>s+(parseFloat(p.valor_previsto)||0),0);
           const gid='ep_pend_'+forn.replace(/[^a-z0-9]/gi,'_');
+          const pendentesNoGrupo=itens.filter(p=>!p._statusFinal).length;
+          if(pendentesNoGrupo===0) fornsFinalizados.push(...itens.map(p=>p.id));
           const itensHtml=itens.map(prov=>{
             const produto=prov.gn_catalogo?.produto||'—';
             const und=prov.gn_catalogo?.und||'';
@@ -6859,6 +6876,19 @@ function render() {
             const qtdPrev=parseFloat(prov.qtd_prevista)||0;
             const valPrev=parseFloat(prov.valor_previsto)||0;
             const unitPrev=qtdPrev>0?valPrev/qtdPrev:0;
+            if(prov._statusFinal){
+              const cor=prov._statusFinal==='RECEBIDO_OK'?'#4ade80':'#f59e0b';
+              const rotulo=prov._statusFinal==='RECEBIDO_OK'?'✅ Confirmado':'⚠️ Divergência registrada';
+              return `<div style="padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.05);opacity:.6">
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                  <div style="flex:1;min-width:0">
+                    <div style="font-size:12px;font-weight:600;color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-decoration:line-through">${produto}</div>
+                    <div style="font-size:10px;color:${cor};margin-top:2px;font-weight:700">${rotulo} — ${prov._qtdRec} ${und}</div>
+                  </div>
+                  <div style="font-size:12px;font-weight:700;color:${cor};flex-shrink:0;margin-left:8px">R$ ${(prov._valRec||0).toFixed(2).replace('.',',')}</div>
+                </div>
+              </div>`;
+            }
             return `<div style="padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.05)">
               <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
                 <div style="flex:1;min-width:0">
@@ -6889,17 +6919,23 @@ function render() {
               </button>
             </div>`;
           }).join('');
+          const finalizado=pendentesNoGrupo===0;
           return `<div class="ep-grupo aberto" id="${gid}">
-            <div class="ep-grupo-header" onclick="toggleEpGrupo('${gid}')" style="border-left:3px solid #f59e0b">
-              <span class="ep-grupo-nome" style="color:#fbbf24">${forn}</span>
+            <div class="ep-grupo-header" onclick="toggleEpGrupo('${gid}')" style="border-left:3px solid ${finalizado?'#4ade80':'#f59e0b'}">
+              <span class="ep-grupo-nome" style="color:${finalizado?'#4ade80':'#fbbf24'}">${forn}${finalizado?' ✓':''}</span>
               <div style="display:flex;align-items:center;gap:8px">
-                <span style="font-size:12px;font-weight:700;color:#fbbf24">R$ ${totalForn.toFixed(2).replace('.',',')}</span>
+                <span style="font-size:12px;font-weight:700;color:${finalizado?'#4ade80':'#fbbf24'}">R$ ${totalForn.toFixed(2).replace('.',',')}</span>
                 <span class="ep-grupo-chevron">▼</span>
               </div>
             </div>
             <div class="ep-grupo-body">${itensHtml}</div>
           </div>`;
         }).join('');
+        // Limpa os fornecedores já 100% confirmados — só depois de já ter montado o HTML
+        // acima, pra mostrar o grupo "✓ finalizado" pelo menos uma vez antes de sumir
+        // (na próxima renderização, esses itens já não aparecem mais aqui).
+        fornsFinalizados.forEach(id=>{ delete _epConfirmadosSessao[id]; });
+        return html;
       })()}
 
       ${(()=>{
@@ -8057,6 +8093,9 @@ async function confirmarEntrega(id){
       body:JSON.stringify({provisao_id:id,qtd_recebida:qtdRec,valor_recebido:valRec,diferenca_qtd:diff,validado_por})});
     await sbRequest('gn_provisoes?id=eq.'+id,{method:'PATCH',headers:{'Prefer':'return=minimal'},
       body:JSON.stringify({status,atualizado_em:new Date().toISOString()})});
+    // Guarda o item confirmado pra continuar aparecendo (travado, sem inputs) dentro do
+    // grupo do fornecedor até o pedido inteiro terminar — ver _epConfirmadosSessao acima.
+    _epConfirmadosSessao[id]={...prov,_statusFinal:status,_qtdRec:qtdRec,_valRec:valRec};
     showToast(status==='RECEBIDO_OK'?'✅ Entrega confirmada!':'⚠️ Divergência registrada.');
     carregarEntregas(true).then(()=>render());
   }catch(e){showToast('❌ Erro ao confirmar: '+e.message);}
