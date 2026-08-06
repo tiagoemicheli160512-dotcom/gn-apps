@@ -374,6 +374,7 @@ body{background:var(--bg);color:#e8e8f0;font-family:-apple-system,BlinkMacSystem
 const SB_URL = 'https://ncxttwvpafajnilpjbol.supabase.co';
 const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5jeHR0d3ZwYWZham5pbHBqYm9sIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE4NDcyMDEsImV4cCI6MjA5NzQyMzIwMX0.MGDZNGY8GfSzBKAgdR7OhvOeR71i4fj9YseJRhoh5sE';
 const SESSION_KEY = 'gn_manut_v1';
+const OF_DRAFT_KEY = 'gn_manut_of_draft';
 
 const TIPOS = [
   { key:'Estrutura',        icon:'🏗️', cor:'#5c8cf5' },
@@ -542,6 +543,7 @@ async function iniciarApp(){
     if(sbSec) sbSec.style.display='';
     if(sbLnk) sbLnk.style.display='';
   }
+  restaurarRascunhoOf();
   pedirPermissaoNotif();
   await carregarDados();
   setInterval(carregarDados, 120000);
@@ -1566,6 +1568,41 @@ function gerarPDF(texto,titulo){
 function gerarPDFManutencao(){gerarPDF(_buildTextoManutencao(),'GN Manutenção — Relatório');}
 
 // ─── REGISTRAR (OFICIAL) ─────────────────────────────────
+// Tirar a foto abre a câmera nativa e devolve o foco pro navegador — em alguns
+// Android isso derruba a aba por falta de memória e ela recarrega sozinha ao
+// voltar, perdendo o formulário todo. Pra não perder o que já foi preenchido
+// (e a própria foto, já comprimida), guardamos um rascunho em localStorage a
+// cada passo e recuperamos automaticamente no próximo carregamento do app.
+function persistOfDraft(foto){
+  if(!S._ofFormOpen) return;
+  try{
+    localStorage.setItem(OF_DRAFT_KEY, JSON.stringify({
+      loja:$('of-loja')?.value||S._ofLojaSel||'',
+      tipo:$('of-tipo')?.value||S._ofTipoSel||'',
+      prior:$('of-prior')?.value||S._ofPriorSel||'Normal',
+      setor:$('of-setor')?.value||S._ofSetorVal||'',
+      desc:$('of-desc')?.value||S._ofDescVal||'',
+      foto: foto!==undefined?foto:S._ofFotoB64,
+      ts:Date.now(),
+    }));
+  }catch(_){}
+}
+function limparRascunhoOf(){ try{ localStorage.removeItem(OF_DRAFT_KEY); }catch(_){} }
+function restaurarRascunhoOf(){
+  if(!isMaster()) return;
+  try{
+    const raw=localStorage.getItem(OF_DRAFT_KEY);
+    if(!raw) return;
+    const d=JSON.parse(raw);
+    if(!d || (Date.now()-(d.ts||0))>43200000){ localStorage.removeItem(OF_DRAFT_KEY); return; } // descarta rascunho com mais de 12h
+    if(!d.loja && !d.setor && !d.desc && !d.foto) return;
+    S._ofFormOpen=true;
+    S._ofLojaSel=d.loja||''; S._ofTipoSel=d.tipo||''; S._ofPriorSel=d.prior||'Normal';
+    S._ofSetorVal=d.setor||''; S._ofDescVal=d.desc||''; S._ofFotoB64=d.foto||null;
+    S.filtro='Registrar';
+    toast('📋 Recuperamos um rascunho de manutenção que não tinha sido salvo');
+  }catch(_){}
+}
 function renderRegistrarPanel(){
   if(!isMaster()){
     $('lista').innerHTML=`<div class="empty-state"><div class="empty-icon">🔒</div><div>Acesso restrito ao oficial de manutenção</div></div>`;
@@ -1579,6 +1616,7 @@ function renderRegistrarPanel(){
     if(_p) S._ofPriorSel=_p.value;
     if(_s) S._ofSetorVal=_s.value;
     if(_d) S._ofDescVal=_d.value;
+    persistOfDraft();
   }
   const ofAll=S.itens.filter(m=>m._source==='oficial');
   const ofFilt=S.lojaFiltro!=='Todas'?ofAll.filter(m=>m._loja===S.lojaFiltro):ofAll;
@@ -1702,16 +1740,18 @@ function renderRegistrarPanel(){
   const fotoEl=document.getElementById('of-foto');
   if(fotoEl) fotoEl.addEventListener('change',e=>{
     const file=e.target.files[0]; if(!file) return;
+    persistOfDraft(); // salva loja/tipo/setor/descrição já preenchidos antes de processar a foto
     compressImage(file,b64=>{
       S._ofFotoB64=b64;
       const prev=document.getElementById('of-foto-preview');
       if(prev) prev.innerHTML=`<img src="${b64}" style="width:80px;height:80px;object-fit:cover;border-radius:8px">`;
+      persistOfDraft(b64); // e de novo já com a foto — é o passo que mais derruba a aba no Android
     });
   });
 }
 
 function abrirOfForm(){ S._ofFormOpen=true; renderRegistrarPanel(); }
-function cancelOfForm(){ S._ofFormOpen=false; S._ofFotoB64=null; S._ofLojaSel=''; S._ofTipoSel=''; S._ofPriorSel='Normal'; S._ofSetorVal=''; S._ofDescVal=''; renderRegistrarPanel(); }
+function cancelOfForm(){ S._ofFormOpen=false; S._ofFotoB64=null; S._ofLojaSel=''; S._ofTipoSel=''; S._ofPriorSel='Normal'; S._ofSetorVal=''; S._ofDescVal=''; limparRascunhoOf(); renderRegistrarPanel(); }
 
 let _savingOf=false;
 async function salvarRegistro(){
@@ -1748,6 +1788,7 @@ async function salvarRegistro(){
       });
     }
     S._ofFotoB64=null; S._ofFormOpen=false; S._ofLojaSel=''; S._ofTipoSel=''; S._ofPriorSel='Normal'; S._ofSetorVal=''; S._ofDescVal='';
+    limparRascunhoOf();
     const dt=new Date().toISOString().split('T')[0];
     S.itens.push({...newItem, _loja:loja, _data:dt, _dataUltima:dt, _source:'oficial'});
     renderBotNav(); renderLista();
