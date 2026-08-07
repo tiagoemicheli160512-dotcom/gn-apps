@@ -534,6 +534,9 @@ let _dashXmlPendentes = null; // Set de lojas sem o XML fiscal do mês confirmad
 let _dashVisitasAndamento = null; // {lojaKey: [{nome, origem, horaChegada}]} — visitas ainda sem hora_saida hoje
 let _dashEscalaIncompleta = null; // {lojaKey: [{nome, dias:[nomeDia,...]}]} — funcs com horário faltando na escala da semana
 let _dashBancoHorasPendente = null; // {lojaKey: {motivo:'sem_periodo'|'setor_faltando', setores:[...]}}
+let _dashContratosVencendo = null; // {lojaKey: [{nome, fimContrato, dias}]} — contratos vencendo em até 15 dias ou já vencidos
+let _dashManutParada = null; // {lojaKey: count} — manutenções pendentes há mais de 5 dias, por loja
+let _dashCaixaSemConferencia = null; // {lojaKey: [{data, turno}]} — fechamentos de caixa sem conferência registrada, há mais de 3 dias
 
 // Mesma lista usada no app Check-list (aba Dados) — duplicada aqui porque cada app
 // é um HTML independente. Também precisa ficar antes de showHome() por causa do
@@ -1873,7 +1876,7 @@ async function _loadDashAll() {
     const from30 = trinta.toISOString().slice(0,10);
     const _errCb = label => e => { window.gnLogError('dash:'+label, e); _dashLoadHadError = true; };
     const comKeysAll = Object.values(LOJA_COM_KEY).join(',');
-    const [fatCur, fatPrv, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows, comissoesAllRows, bhConfigRows] = await Promise.all([
+    const [fatCur, fatPrv, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows, comissoesAllRows, bhConfigRows, caixaFechadosRows] = await Promise.all([
       _fetchFat(range.dates).catch(e=>{ _errCb('fatCur')(e); return {}; }),
       _fetchFat(prevRange.dates).catch(e=>{ _errCb('fatPrv')(e); return {}; }),
       _fetchFat(range2.dates).catch(e=>{ _errCb('fat2')(e); return {}; }),
@@ -1887,6 +1890,7 @@ async function _loadDashAll() {
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_manut_visitas?data=eq.${hoje}&select=loja,oficial,hora_chegada,hora_saida`, H, 'dash:visitasManutRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=in.(${comKeysAll})&select=loja,all_data`, H, 'dash:comissoesAllRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_banco_horas?mes=eq.CONFIG&select=loja,registros`, H, 'dash:bhConfigRows', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?status=eq.FECHADO&data=gte.${from30}&select=id,loja,data,turno`, H, 'dash:caixaFechadosRows', []),
     ]);
     _dashFat = fatCur; _dashFatPrev = fatPrv;
     _dashFatDia = fatDia.byDay || {}; _dashFatDiaLoja = fatDia.byLojaDay || {};
@@ -1964,7 +1968,9 @@ async function _loadDashAll() {
     const semIdxAtual = _escalaHomeSemIdx(hoje);
     const bhPorLoja = {};
     (bhConfigRows||[]).forEach(r=>{ bhPorLoja[r.loja]=r.registros||{}; });
-    const escalaIncompleta = {}, bancoHorasPendente = {};
+    const escalaIncompleta = {}, bancoHorasPendente = {}, contratosVencendo = {};
+    const limiteContrato = new Date(); limiteContrato.setDate(limiteContrato.getDate()+15);
+    const limiteContratoISO = limiteContrato.toISOString().slice(0,10);
     if (semIdxAtual != null) {
       (comissoesAllRows||[]).forEach(r=>{
         const lk = _COM_KEY_TO_LOJA[r.loja];
@@ -1984,6 +1990,10 @@ async function _loadDashAll() {
             if (!escalaIncompleta[lk]) escalaIncompleta[lk] = [];
             escalaIncompleta[lk].push({ nome: f.nome, dias: diasFaltando });
           }
+          if (f.fim_contrato && !f.encerramento_solicitado && f.fim_contrato <= limiteContratoISO) {
+            if (!contratosVencendo[lk]) contratosVencendo[lk] = [];
+            contratosVencendo[lk].push({ nome: f.nome, fimContrato: f.fim_contrato, vencido: f.fim_contrato < hoje });
+          }
         });
         if (!setoresEmUso.size) return;
         const bh = bhPorLoja[LOJA_TO_CHK_HOME[lk]];
@@ -1998,9 +2008,36 @@ async function _loadDashAll() {
     }
     _dashEscalaIncompleta = escalaIncompleta;
     _dashBancoHorasPendente = bancoHorasPendente;
+    _dashContratosVencendo = contratosVencendo;
 
     const old5 = new Date(); old5.setDate(old5.getDate()-5);
     _dashManutCrit = manutTodos.filter(m=>m._data && new Date(m._data+'T00:00:00')<old5).length;
+    const manutParada = {};
+    manutTodos.forEach(m=>{
+      if (!m._data || new Date(m._data+'T00:00:00')>=old5) return;
+      if (!LOJAS_LISTA.includes(m._loja)) return;
+      manutParada[m._loja] = (manutParada[m._loja]||0)+1;
+    });
+    _dashManutParada = manutParada;
+
+    // Fechamento de caixa sem conferência — cruza gn_caixa_fechamento (status FECHADO)
+    // com gn_lojas.all_data.caixa_conferencias (mesma estrutura usada em gn-rh.html),
+    // dando 3 dias de prazo antes de sinalizar como pendente.
+    const confPorLojaCom = {};
+    (lojasOfRows||[]).forEach(lr=>{ confPorLojaCom[lr.loja] = (lr.all_data||{}).caixa_conferencias || {}; });
+    const old3 = new Date(); old3.setDate(old3.getDate()-3);
+    const old3ISO = old3.toISOString().slice(0,10);
+    const caixaSemConferencia = {};
+    (caixaFechadosRows||[]).forEach(r=>{
+      const lk = _normLoja(r.loja);
+      if (!LOJAS_LISTA.includes(lk) || r.data > old3ISO) return;
+      const comK = LOJA_COM_KEY[lk] || lk;
+      const conf = confPorLojaCom[comK] || {};
+      if (conf[r.id]) return;
+      if (!caixaSemConferencia[lk]) caixaSemConferencia[lk] = [];
+      caixaSemConferencia[lk].push({ data: r.data, turno: r.turno });
+    });
+    _dashCaixaSemConferencia = caixaSemConferencia;
     const spark={}; LOJAS_LISTA.forEach(k=>{spark[k]=[(fat3[k]||0),(fat2[k]||0),(fatPrv[k]||0),(fatCur[k]||0)];});
     _dashSparkData=spark;
   } catch(e) {
@@ -2010,6 +2047,8 @@ async function _loadDashAll() {
     _dashManut=_dashManut||{}; _dashChk=_dashChk||new Set();
     _dashXmlPendentes=_dashXmlPendentes||new Set(); _dashVisitasAndamento=_dashVisitasAndamento||{};
     _dashEscalaIncompleta=_dashEscalaIncompleta||{}; _dashBancoHorasPendente=_dashBancoHorasPendente||{};
+    _dashContratosVencendo=_dashContratosVencendo||{}; _dashManutParada=_dashManutParada||{};
+    _dashCaixaSemConferencia=_dashCaixaSemConferencia||{};
   } finally { _dashLoading=false; _dashLoadedAt=new Date(); }
   renderDashboard();
 }
@@ -2143,6 +2182,12 @@ function _buildAlertsFeed() {
     if(escalaLoja.length) alerts.push({sev:3,cor:'#a78bfa',ico:'🗓️',msg:`${nome} com ${escalaLoja.length} funcionário${escalaLoja.length>1?'s':''} sem horário completo na escala`,sub:escalaLoja.slice(0,3).map(f=>`${f.nome} (${f.dias.join(', ')})`).join(' · ')+(escalaLoja.length>3?` +${escalaLoja.length-3}`:'')});
     const bhPend=_dashBancoHorasPendente?_dashBancoHorasPendente[k]:null;
     if(bhPend) alerts.push({sev:3,cor:'#a78bfa',ico:'⏱️',msg:bhPend.motivo==='sem_periodo'?`${nome} sem banco de horas configurado`:`${nome} sem salário cadastrado pra ${bhPend.setores.length>1?bhPend.setores.length+' setores':bhPend.setores[0]}`,sub:bhPend.motivo==='sem_periodo'?'Período do mês não definido na aba Banco de Horas':bhPend.setores.join(', ')});
+    const contratosLoja=_dashContratosVencendo?(_dashContratosVencendo[k]||[]):[];
+    if(contratosLoja.length){const nVenc=contratosLoja.filter(c=>c.vencido).length;alerts.push({sev:nVenc>0?1:2,cor:nVenc>0?'#f87171':'#f59e0b',ico:'📝',msg:`${nome} com ${contratosLoja.length} contrato${contratosLoja.length>1?'s':''} ${nVenc>0?'vencido(s) ou vencendo':'vencendo'}`,sub:contratosLoja.slice(0,3).map(c=>`${c.nome} (${c.vencido?'venceu em':'vence em'} ${c.fimContrato})`).join(' · ')+(contratosLoja.length>3?` +${contratosLoja.length-3}`:'')});}
+    const manutParadaLoja=_dashManutParada?(_dashManutParada[k]||0):0;
+    if(manutParadaLoja>0) alerts.push({sev:0,cor:'#ef4444',ico:'⏳',msg:`${nome} com ${manutParadaLoja} manutenção${manutParadaLoja>1?'ões':''} parada${manutParadaLoja>1?'s':''} há mais de 5 dias`,sub:'Toque no banner de manutenção pra ver'});
+    const caixaLoja=_dashCaixaSemConferencia?(_dashCaixaSemConferencia[k]||[]):[];
+    if(caixaLoja.length) alerts.push({sev:2,cor:'#38bdf8',ico:'💰',msg:`${nome} com ${caixaLoja.length} fechamento${caixaLoja.length>1?'s':''} de caixa sem conferência`,sub:caixaLoja.slice(0,3).map(c=>`${c.data} (${c.turno})`).join(' · ')+(caixaLoja.length>3?` +${caixaLoja.length-3}`:'')});
   });
   alerts.sort((a,b)=>a.sev-b.sev);
   if(!alerts.length) return '<div style="padding:24px;text-align:center;font-size:13px;color:#4ade80">✅ Nenhum alerta</div>';
