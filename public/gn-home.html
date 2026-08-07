@@ -555,6 +555,7 @@ let _dashFeriasLoading = false;
 let _dashFeriasAno = new Date().getFullYear();
 let _dashFeriasFormAberto = null; // {loja, usuarioId} — pessoa com o form de nova férias aberto
 let _xadrezMovs = []; // [{usuarioId, nome, cargoOriginal, lojaOrigem, lojaDestino}] — movimentos simulados (não gravados)
+let _xadrezValidando = false; // trava o botão "Validar" enquanto grava no Supabase
 let _dashAvaliacaoGerencia = null; // {lojaKey: {usuarioId: {status:'bom'|'regular'|'ruim'|'desligamento', atualizadoEm}}}
 const STATUS_AVAL_GERENCIA = {
   bom:          { cor:'#4ade80', label:'Bom' },
@@ -2580,11 +2581,13 @@ function _buildFeriasPanel(){
 }
 
 // ── XADREZ DE GERÊNCIA ──────────────────────────────────────────────────────
-// Simulador de trocas de gerente/sub-gerente entre lojas — nunca grava nada,
+// Simulador de trocas de gerente/sub-gerente entre lojas. Enquanto não valida,
 // só recalcula em memória (_xadrezMovs) a partir do estado real (_dashGerentes)
 // pra testar cenários e ver o que quebraria: loja sem gerente/sub titular, ou
 // gerente e sub da mesma loja de férias ao mesmo tempo. Reaproveita os mesmos
-// dados já carregados pela aba Férias (_dashGerentes/_dashFeriasGerencia).
+// dados já carregados pela aba Férias (_dashGerentes/_dashFeriasGerencia). Só
+// grava de verdade (atualiza gn_usuarios.loja) quando o usuário clica em
+// "Validar alterações" — ver _xadrezValidar().
 function _feriasDoUsuario(usuarioId){
   const todas=[];
   Object.values(_dashFeriasGerencia||{}).forEach(arr=>{
@@ -2653,6 +2656,40 @@ function _xadrezAddMov(){
 function _xadrezRemoverMov(usuarioId){ _xadrezMovs=_xadrezMovs.filter(mv=>String(mv.usuarioId)!==String(usuarioId)); renderDashboard(); }
 function _xadrezLimpar(){ _xadrezMovs=[]; renderDashboard(); }
 
+// Aplica de fato os movimentos simulados: atualiza a loja de cada pessoa
+// movida em gn_usuarios (fonte real usada por login/permissões/férias), uma
+// por uma, e só recarrega o board depois que tudo confirmou.
+async function _xadrezValidar(){
+  if(_xadrezValidando || !_xadrezMovs.length) return;
+  const n=_xadrezMovs.length;
+  if(!confirm(`Confirma a movimentação de ${n} pessoa${n>1?'s':''}? Isso atualiza a loja de cada uma no cadastro.`)) return;
+  _xadrezValidando=true;
+  renderDashboard();
+  const H={ apikey:SB_KEY, Authorization:'Bearer '+SB_KEY, 'Content-Type':'application/json', Prefer:'return=minimal' };
+  try{
+    const movs=[..._xadrezMovs];
+    const resultados=await Promise.all(movs.map(mv=>
+      fetch(`${SB_URL}/rest/v1/gn_usuarios?id=eq.${encodeURIComponent(mv.usuarioId)}`, { method:'PATCH', headers:H, body:JSON.stringify({loja:mv.lojaDestino}) })
+        .then(res=>({mv, ok:res.ok}))
+        .catch(()=>({mv, ok:false}))
+    ));
+    const falhas=resultados.filter(r=>!r.ok);
+    if(falhas.length){
+      alert(`Não foi possível mover: ${falhas.map(f=>f.mv.nome).join(', ')}. Tente novamente.`);
+      _xadrezMovs=_xadrezMovs.filter(mv=>falhas.some(f=>String(f.mv.usuarioId)===String(mv.usuarioId)));
+    } else {
+      _xadrezMovs=[];
+      alert(`${n} movimentação${n>1?'ões':''} aplicada${n>1?'s':''} com sucesso.`);
+    }
+  }catch(e){
+    window.gnLogError && window.gnLogError('xadrez:_xadrezValidar', e);
+    alert('Erro ao validar as movimentações. Tente novamente.');
+  }
+  _xadrezValidando=false;
+  _dashGerentes=null;
+  await _loadFeriasGerencia();
+}
+
 function _buildXadrezPanel(){
   if(!_dashGerentes){
     return '<div style="padding:28px;text-align:center;color:rgba(255,255,255,.28);font-size:12px">⟳ Carregando…</div>';
@@ -2670,9 +2707,12 @@ function _buildXadrezPanel(){
     <div style="font-size:10px;font-weight:800;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Movimentos simulados</div>
     ${_xadrezMovs.map(mv=>`<div style="display:flex;align-items:center;justify-content:space-between;background:rgba(96,165,250,.08);border:1px solid rgba(96,165,250,.25);border-radius:8px;padding:7px 10px;margin-bottom:5px">
       <span style="font-size:11px;color:#93c5fd">${esc(mv.nome)}: ${esc(LOJA_DISPLAY[mv.lojaOrigem]||mv.lojaOrigem)} → ${esc(LOJA_DISPLAY[mv.lojaDestino]||mv.lojaDestino)}</span>
-      <button onclick="_xadrezRemoverMov('${mv.usuarioId}')" style="background:none;border:none;color:rgba(255,255,255,.4);font-size:13px;cursor:pointer">✕</button>
+      <button onclick="_xadrezRemoverMov('${mv.usuarioId}')" style="background:none;border:none;color:rgba(255,255,255,.4);font-size:13px;cursor:pointer" ${_xadrezValidando?'disabled':''}>✕</button>
     </div>`).join('')}
-    <button onclick="_xadrezLimpar()" style="margin-top:2px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:rgba(255,255,255,.6);border-radius:8px;padding:6px 12px;font-size:11px;cursor:pointer">Limpar simulação</button>
+    <div style="display:flex;gap:8px;margin-top:2px">
+      <button onclick="_xadrezValidar()" ${_xadrezValidando?'disabled':''} style="background:${_xadrezValidando?'rgba(74,222,128,.3)':'#4ade80'};color:#0a2e17;border:none;border-radius:8px;padding:7px 14px;font-size:11px;font-weight:800;cursor:${_xadrezValidando?'default':'pointer'}">${_xadrezValidando?'⟳ Validando…':'✅ Validar alterações'}</button>
+      <button onclick="_xadrezLimpar()" ${_xadrezValidando?'disabled':''} style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:rgba(255,255,255,.6);border-radius:8px;padding:7px 12px;font-size:11px;cursor:pointer">Limpar simulação</button>
+    </div>
   </div>` : '';
 
   const formHtml = pessoasOpts.length ? `<div style="background:#363636;border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:14px;margin-bottom:14px">
