@@ -1796,7 +1796,9 @@ function calcularTotais() {
 
   Object.entries(S.pedidoItens).forEach(([cid, lojas]) => {
     const prod = S.catalogo.find(p => p.id === cid);
-    if (!prod) return;
+    // Na aba Edu/Oseas/Matheus, o total só considera os fornecedores daquela aba —
+    // mesma regra de _fornecedorNoEscopoAtivo usada na listagem de itens.
+    if (!prod || !_fornecedorNoEscopoAtivo(prod.fornecedor)) return;
     Object.entries(lojas).forEach(([loja, item]) => {
       if (item.qtd > 0) {
         // Custo do catálogo manda — o custo gravado no item (custo_unitario) é só um
@@ -1816,8 +1818,11 @@ function totalPedidoGeral() {
 
 function contarItensLoja(lojaSlug) {
   let n = 0;
-  Object.values(S.pedidoItens).forEach(lojas => {
-    if (lojas[lojaSlug]?.qtd > 0) n++;
+  Object.entries(S.pedidoItens).forEach(([cid, lojas]) => {
+    if (lojas[lojaSlug]?.qtd > 0) {
+      const prod = S.catalogo.find(p => p.id === cid);
+      if (prod && _fornecedorNoEscopoAtivo(prod.fornecedor)) n++;
+    }
   });
   return n;
 }
@@ -2070,6 +2075,12 @@ function _fornecedoresDaAbaAtiva() {
   if (S.oseasAtivo) return OSEAS_FORNECEDORES;
   if (S.matheusAtivo) return S.fornecedores.map(f => f.nome).filter(_ehFornecedorMatheus);
   return [];
+}
+// Rótulo curto do comprador ativo — usado nos pedidos gerados (WhatsApp/PDF) pra deixar
+// claro que aquele pedido saiu escopado (ex.: "PEDIDO · 👤 Oseas"), evitando confundir
+// com um pedido geral de todos os fornecedores.
+function _labelCompradorAtivo() {
+  return S.eduAtivo ? ' · 👤 Edu' : S.oseasAtivo ? ' · 👤 Oseas' : S.matheusAtivo ? ' · 👤 Matheus' : '';
 }
 
 // ── URGÊNCIA (raio) — compartilhada com o app Lojas ────────────────────────
@@ -2413,8 +2424,10 @@ function renderPedido() {
   const gruposHtml = S.todosModo ? renderGruposTodos() : renderGruposPorLoja();
   const totalLoja  = S.totaisPorLoja[lojaAtiva] || 0;
   const lojaDisplay = S.lojas.find(l=>l.slug_pedido===lojaAtiva)?.nome_display || '';
+  // Na aba Edu/Oseas/Matheus, os botões de envio (por fornecedor e "Geral"/PDF) só
+  // consideram os fornecedores daquela aba — mesma regra usada na listagem de itens.
   const fornsComItens = [...new Set(
-    S.catalogo.filter(p=>p.ativo).filter(prod=>
+    S.catalogo.filter(p=>p.ativo).filter(prod=>_fornecedorNoEscopoAtivo(prod.fornecedor)).filter(prod=>
       S.todosModo
         ? S.lojas.some(l=>(S.pedidoItens[prod.id]?.[l.slug_pedido]?.qtd||0)>0)
         : (S.pedidoItens[prod.id]?.[lojaAtiva]?.qtd||0)>0
@@ -2423,15 +2436,17 @@ function renderPedido() {
 
   // Fornecedores com itens em QUALQUER loja (para relatórios pós-confirmação)
   const fornsTodasLojas = [...new Set(
-    S.catalogo.filter(p=>p.ativo).filter(prod=>
+    S.catalogo.filter(p=>p.ativo).filter(prod=>_fornecedorNoEscopoAtivo(prod.fornecedor)).filter(prod=>
       S.lojas.some(l=>(S.pedidoItens[prod.id]?.[l.slug_pedido]?.qtd||0)>0)
     ).map(p=>p.fornecedor)
   )].sort();
 
   const _lojaFiltroUrg = S.todosModo ? null : lojaAtiva;
+  const _idsEscopoAtivo = new Set(S.catalogo.filter(p=>_fornecedorNoEscopoAtivo(p.fornecedor)).map(p=>String(p.id)));
+  const _urgEscopo = ids => (ids||[]).filter(id=>_idsEscopoAtivo.has(String(id))).length;
   const urgTotal = _lojaFiltroUrg
-    ? (S.urgenciaTemplate[LOJA_USERKEY_BY_SLUG[_lojaFiltroUrg]] || []).length
-    : S.lojas.reduce((sum,l)=>sum+((S.urgenciaTemplate[LOJA_USERKEY_BY_SLUG[l.slug_pedido]]||[]).length),0);
+    ? _urgEscopo(S.urgenciaTemplate[LOJA_USERKEY_BY_SLUG[_lojaFiltroUrg]])
+    : S.lojas.reduce((sum,l)=>sum+_urgEscopo(S.urgenciaTemplate[LOJA_USERKEY_BY_SLUG[l.slug_pedido]]),0);
 
   // Na aba Edu/Oseas/Matheus, o botão "Confirmar" só considera (e mostra pendência de)
   // fornecedores dessa aba — evita confirmar por engano os do outro comprador.
@@ -3798,9 +3813,11 @@ function gerarWppPedidoForn(fornecedor) {
 function _buildRelatorioFornAllLojas(fornecedor) {
   // Retorna { porForn, totalGeral } com dados de todas as lojas
   const porForn = {};
+  // Sem fornecedor específico ("Pedido Completo"), respeita o escopo da aba
+  // Edu/Oseas/Matheus ativa — mesma regra usada na listagem de itens.
   const prods = fornecedor
     ? S.catalogo.filter(p => p.ativo && p.fornecedor === fornecedor)
-    : S.catalogo.filter(p => p.ativo);
+    : S.catalogo.filter(p => p.ativo && _fornecedorNoEscopoAtivo(p.fornecedor));
   prods.forEach(prod => {
     S.lojas.forEach(loja => {
       const qtd = S.pedidoItens[prod.id]?.[loja.slug_pedido]?.qtd || 0;
@@ -4025,7 +4042,9 @@ function gerarWppPedido() {
   if (!S.pedidoAtual) { toast('Nenhum pedido ativo.', 'err'); return; }
   const sem = formatarSemana(S.semanaAtiva);
   const porForn = {};
-  S.catalogo.filter(p => p.ativo).forEach(prod => {
+  // Na aba Edu/Oseas/Matheus, o pedido gerado (WhatsApp/PDF) só traz os fornecedores
+  // daquela aba — mesma regra usada na listagem de itens (_fornecedorNoEscopoAtivo).
+  S.catalogo.filter(p => p.ativo && _fornecedorNoEscopoAtivo(p.fornecedor)).forEach(prod => {
     if (S.todosModo) {
       S.lojas.forEach(loja => {
         const qtd = S.pedidoItens[prod.id]?.[loja.slug_pedido]?.qtd || 0;
@@ -4044,7 +4063,7 @@ function gerarWppPedido() {
   const fns = Object.keys(porForn).sort();
   if (!fns.length) { toast('Nenhum item com pedido para enviar.', 'err'); return; }
   const titulo = S.todosModo ? 'TODAS AS LOJAS' : (S.lojas.find(l => l.slug_pedido === S.lojaAtiva)?.nome_display || S.lojaAtiva);
-  let msg = `🛒 *PEDIDO — Semana ${sem.num}/${sem.ano}* (${sem.periodo})\n📍 ${titulo}\n`;
+  let msg = `🛒 *PEDIDO${_labelCompradorAtivo()} — Semana ${sem.num}/${sem.ano}* (${sem.periodo})\n📍 ${titulo}\n`;
   let totalGeral = 0;
   fns.forEach(forn => {
     const itens = porForn[forn];
@@ -4085,7 +4104,9 @@ function _pedidoMsgETitulo(){
   if(!S.pedidoAtual) return null;
   const sem=formatarSemana(S.semanaAtiva);
   const porForn={};
-  S.catalogo.filter(p=>p.ativo).forEach(prod=>{
+  // Mesma regra da listagem de itens: na aba Edu/Oseas/Matheus, só os fornecedores
+  // daquela aba entram no PDF/WhatsApp gerado.
+  S.catalogo.filter(p=>p.ativo && _fornecedorNoEscopoAtivo(p.fornecedor)).forEach(prod=>{
     if(S.todosModo){
       S.lojas.forEach(loja=>{
         const qtd=S.pedidoItens[prod.id]?.[loja.slug_pedido]?.qtd||0;
@@ -4102,7 +4123,7 @@ function _pedidoMsgETitulo(){
   const fns=Object.keys(porForn).sort();
   if(!fns.length) return null;
   const titulo=S.todosModo?'TODAS AS LOJAS':(S.lojas.find(l=>l.slug_pedido===S.lojaAtiva)?.nome_display||S.lojaAtiva);
-  let msg=`PEDIDO — Semana ${sem.num}/${sem.ano} (${sem.periodo})\n${titulo}\n`;
+  let msg=`PEDIDO${_labelCompradorAtivo()} — Semana ${sem.num}/${sem.ano} (${sem.periodo})\n${titulo}\n`;
   let totalGeral=0;
   fns.forEach(forn=>{
     const itens=porForn[forn];
@@ -4119,7 +4140,7 @@ function _pedidoMsgETitulo(){
     }
   });
   if(totalGeral>0) msg+=`\nTotal Geral: R$ ${fmt(totalGeral)}`;
-  return { msg, titulo: `Pedido Semana ${sem.num}/${sem.ano}` };
+  return { msg, titulo: `Pedido${_labelCompradorAtivo()} Semana ${sem.num}/${sem.ano}` };
 }
 
 function gerarPDFPedido(){
