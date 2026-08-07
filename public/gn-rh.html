@@ -413,6 +413,7 @@ let S = {
   presencaSemana: null,  // { idx, funcs:[] }
   rhSemana: null,        // Date (segunda-feira)
   rhBusca: '',           // busca por funcionário
+  rhSetorExpandido: new Set(), // setores com a lista de nomes aberta no card "Funcionários por Setor"
   // Comparativo
   compSemana: null,      // Date (segunda-feira)
   compFotos: [],         // [{loja, semana_ini, ocr_brutos, ...}]
@@ -1565,15 +1566,16 @@ function renderRH() {
     </div>`;
   }
 
-  // Funcionários por setor — conta a partir do mesmo roster da escala da
-  // semana (fonte única de "quem trabalha nesta loja"), sem aplicar o filtro
-  // de busca, já que é um resumo da loja inteira.
-  const setorCounts = {};
+  // Funcionários por setor — conta e lista nomes a partir do mesmo roster da
+  // escala da semana (fonte única de "quem trabalha nesta loja"), sem
+  // aplicar o filtro de busca, já que é um resumo da loja inteira.
+  const setorNomes = {};
   escalFuncs.forEach(f => {
     const s = (f.setor||'').trim() || 'Sem setor';
-    setorCounts[s] = (setorCounts[s]||0) + 1;
+    (setorNomes[s] = setorNomes[s] || []).push(f.nome);
   });
-  const setoresOrdenados = Object.entries(setorCounts).sort((a,b) => b[1]-a[1]);
+  Object.values(setorNomes).forEach(arr => arr.sort((a,b) => a.localeCompare(b)));
+  const setoresOrdenados = Object.entries(setorNomes).sort((a,b) => b[1].length-a[1].length);
   // Cache pros geradores de relatório (WhatsApp/PDF) lerem sem refazer a
   // contagem — reflete exatamente o que está no card (loja selecionada).
   S._setorCache = { lojaLabel: S.rhLoja.display, total: escalFuncs.length, setores: setoresOrdenados };
@@ -1588,12 +1590,23 @@ function renderRH() {
         <button onclick="gerarPDFSetor()" style="background:rgba(192,57,43,.12);border:1px solid rgba(192,57,43,.3);border-radius:6px;padding:5px 10px;color:#e74c3c;font-size:11px;font-weight:700;cursor:pointer">📄 PDF</button>
         <button onclick="enviarPDFSetorWpp()" title="Enviar PDF pelo WhatsApp" style="background:rgba(37,211,102,.12);border:1px solid rgba(37,211,102,.3);border-radius:6px;padding:5px 10px;color:#22c55e;font-size:11px;font-weight:700;cursor:pointer">📄📲 PDF no Whats</button>
       </div>
-      <div class="card-body" style="display:flex;flex-wrap:wrap;gap:8px;padding:12px">
-        ${setoresOrdenados.map(([setor,cnt]) => `
-          <div style="background:var(--surf2);border:1px solid var(--border);border-radius:10px;padding:8px 12px;min-width:90px;text-align:center">
-            <div style="font-size:18px;font-weight:800;color:var(--accent)">${cnt}</div>
-            <div style="font-size:10px;color:var(--muted);margin-top:2px">${esc(setor)}</div>
-          </div>`).join('')}
+      <div class="card-body" style="padding:8px 12px 12px">
+        ${setoresOrdenados.map(([setor,nomes]) => {
+          const aberto = S.rhSetorExpandido.has(setor);
+          const setorAttr = setor.replace(/'/g,"\\'");
+          return `<div style="border:1px solid var(--border);border-radius:10px;margin-bottom:6px;overflow:hidden">
+            <div onclick="toggleRhSetor('${setorAttr}')" style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;cursor:pointer;background:var(--surf2)">
+              <span style="font-size:12px;font-weight:700">${esc(setor)}</span>
+              <span style="display:flex;align-items:center;gap:8px">
+                <span style="font-size:14px;font-weight:800;color:var(--accent)">${nomes.length}</span>
+                <span style="font-size:10px;color:var(--muted);display:inline-block;transform:rotate(${aberto?'180deg':'0deg'});transition:transform .15s">▾</span>
+              </span>
+            </div>
+            ${aberto ? `<div style="padding:6px 12px 8px;border-top:1px solid var(--border)">
+              ${nomes.map(n => `<div style="font-size:11px;padding:3px 0;color:var(--text)">${esc(n)}</div>`).join('')}
+            </div>` : ''}
+          </div>`;
+        }).join('')}
       </div>
     </div>` : '';
 
@@ -2450,19 +2463,27 @@ async function _compartilharPdfWpp(msg, titulo){
 }
 
 // ── Relatórios do card "Funcionários por Setor" ────────────────────────────
+// c.setores é [setor, [nomes]] — os relatórios sempre listam quem é de cada
+// setor, independente do que está expandido/fechado na tela.
 function _setorRelatorioTexto(){
   const c=S._setorCache;
   if(!c || !c.setores.length) return null;
-  let msg=`FUNCIONÁRIOS POR SETOR — ${c.lojaLabel}\n\n`;
-  c.setores.forEach(([setor,cnt])=>{ msg+=`${setor}: ${cnt}\n`; });
+  let msg=`FUNCIONÁRIOS POR SETOR — ${c.lojaLabel}\n`;
+  c.setores.forEach(([setor,nomes])=>{
+    msg+=`\n${setor} (${nomes.length})\n`;
+    nomes.forEach(n=>{ msg+=`  - ${n}\n`; });
+  });
   msg+=`\nTotal: ${c.total}`;
   return { msg, titulo:`Funcionários por Setor — ${c.lojaLabel}` };
 }
 function gerarWppSetor(){
   const c=S._setorCache;
   if(!c || !c.setores.length){ toast('Sem dados de setor pra enviar.','err'); return; }
-  let msg=`👥 *FUNCIONÁRIOS POR SETOR — ${c.lojaLabel}*\n\n`;
-  c.setores.forEach(([setor,cnt])=>{ msg+=`• ${setor}: *${cnt}*\n`; });
+  let msg=`👥 *FUNCIONÁRIOS POR SETOR — ${c.lojaLabel}*\n`;
+  c.setores.forEach(([setor,nomes])=>{
+    msg+=`\n*${setor}* (${nomes.length})\n`;
+    nomes.forEach(n=>{ msg+=`  • ${n}\n`; });
+  });
   msg+=`\nTotal: *${c.total}*`;
   window.open('https://wa.me/?text='+encodeURIComponent(msg),'_blank');
 }
@@ -3057,8 +3078,15 @@ function modalMigracaoFoto() {
 async function filtrarRHLoja(comKey) {
   S.rhLoja = LOJAS_COM_TESTE.find(l=>l.comKey===comKey) || LOJAS[0];
   S.rhBusca = '';
+  S.rhSetorExpandido = new Set();
   $('content').innerHTML = `<div class="empty"><div class="spin"></div></div>`;
   await carregarRH(); renderRH();
+}
+
+function toggleRhSetor(setor) {
+  if (S.rhSetorExpandido.has(setor)) S.rhSetorExpandido.delete(setor);
+  else S.rhSetorExpandido.add(setor);
+  renderRH();
 }
 
 async function navegarRHSemana(delta) {
