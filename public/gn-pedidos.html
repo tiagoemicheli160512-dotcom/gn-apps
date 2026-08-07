@@ -4963,9 +4963,21 @@ async function renderHistorico() {
 // "Contagem" mostra a quantidade lançada na aba Pedido pra essa mesma semana (antes
 // mesmo de o fornecedor ser confirmado) — filtrável por loja ou somada em "Todas as
 // lojas", pelos chips no topo.
+// Produção foi zerada (Entrada/Contagem Sexta) pra recomeçar do zero — Saída segue o
+// mesmo espírito: a semana em que isso aconteceu fica sem Saída contabilizada, e o
+// controle passa a valer de verdade a partir da semana seguinte em diante.
+const PRODUCAO_SAIDA_INICIO = '2026-08-10';
+
 async function _producaoDadosSemana(ids, semanaMonday) {
   const monday = semanaMonday.toISOString().split('T')[0];
   const sunday = getSundayOfWeek(semanaMonday).toISOString().split('T')[0];
+  if (monday < PRODUCAO_SAIDA_INICIO) {
+    const baseRes = await db.from('gn_producao_estoque').select('*').eq('semana_inicio', monday).in('catalogo_id', ids);
+    if (baseRes.error) throw baseRes.error;
+    const baseMap = {};
+    (baseRes.data||[]).forEach(r => { baseMap[r.catalogo_id] = r; });
+    return { baseMap, saidaMap: {}, saidaPorLoja: {} };
+  }
   const [baseRes, saida] = await Promise.all([
     db.from('gn_producao_estoque').select('*').eq('semana_inicio', monday).in('catalogo_id', ids),
     _fetchTodasPaginas(() => db.from('gn_provisoes').select('catalogo_id,qtd_prevista,loja_slug')
@@ -4977,8 +4989,8 @@ async function _producaoDadosSemana(ids, semanaMonday) {
   const baseMap = {};
   (baseRes.data||[]).forEach(r => { baseMap[r.catalogo_id] = r; });
   const saidaMap = {};
-  // Saída por loja — pro badge que mostra quanto foi só pra loja selecionada na aba
-  // Produção, sem mudar o Estoque (que é do estoque central, soma de todas as lojas).
+  // Saída por loja — pro campo que mostra quanto foi só pra loja selecionada na aba
+  // Produção, sem mudar o Estoque Real (que é do estoque central, soma de todas as lojas).
   const saidaPorLoja = {};
   (saida||[]).forEach(p => {
     const qtd = parseFloat(p.qtd_prevista) || 0;
@@ -5083,9 +5095,11 @@ async function renderProducao() {
     const sexta = parseFloat(base.sexta)||0;
     const entrada = parseFloat(base.entrada)||0;
     const saida = saidaMap[prod.id] || 0;
-    // Saída só da loja selecionada (badge informativo) — não muda o Estoque, que é do
-    // estoque central e reflete a saída somada de todas as lojas.
+    // Com uma loja selecionada, o campo Saída passa a mostrar só a quantidade enviada
+    // pra ELA (não muda o Estoque Real, que continua sendo do estoque central, soma de
+    // todas as lojas — só o que é exibido no campo Saída muda conforme o filtro).
     const saidaLojaAtual = S.producaoLoja ? ((saidaPorLoja[prod.id]||{})[S.producaoLoja] || 0) : 0;
+    const saidaExibida = S.producaoLoja ? saidaLojaAtual : saida;
     const contagem = contagemMap[prod.id] || 0;
     // Mesma fórmula da planilha original: Estoque = Sexta + Entrada − Saída. Não é
     // digitado — sempre recalculado, pra Entrada (e Saída) refletirem na hora.
@@ -5098,7 +5112,7 @@ async function renderProducao() {
     // (Sexta) — não do Estoque corrente, que já embute a Entrada digitada.
     const aProduzir = Math.max(0, margem2 - sexta);
 
-    rowsData.push({ produto: prod.produto, margem2, estoqueAtual, sexta, entrada, saida, contagem, aProduzir, abaixoMargem });
+    rowsData.push({ produto: prod.produto, margem2, estoqueAtual, sexta, entrada, saida: saidaExibida, contagem, aProduzir, abaixoMargem });
 
     const campoEdit = (label, campoNome, valor) => `
       <div>
@@ -5122,7 +5136,7 @@ async function renderProducao() {
         ${campoEdit('Contagem Sexta','sexta', sexta)}
       </div>
       <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:6px">
-        ${campoView('Saída', saida, saida>0?'#fbbf24':'var(--muted)', S.producaoLoja ? `${lojaLabelAtual}: ${fmtQtd(saidaLojaAtual)}` : '')}
+        ${campoView(S.producaoLoja ? `Saída · ${lojaLabelAtual}` : 'Saída', saidaExibida, saidaExibida>0?'#fbbf24':'var(--muted)')}
         ${campoView('Estoque Real', estoqueAtual, corEstoque)}
       </div>
       ${contagem>0 ? `<div style="margin-top:6px;font-size:9px;color:var(--muted);text-align:center">Qtd. pedida na semana: ${fmtQtd(contagem)}</div>` : ''}
@@ -5149,7 +5163,8 @@ async function renderProducao() {
     ${_semNavHtml}
     <div class="store-tabs" style="margin-bottom:12px">${lojaTabs}</div>
     <div style="font-size:11px;color:var(--muted);margin-bottom:12px">
-      Estoque Real = Contagem Sexta + Entrada − Saída. O Estoque Real de domingo já entra automaticamente como a Contagem Sexta da semana seguinte. Saída soma os pedidos de PETISCOS com entrega prevista nesta semana.
+      Estoque Real = Contagem Sexta + Entrada − Saída (soma de todas as lojas). O Estoque Real de domingo já entra automaticamente como a Contagem Sexta da semana seguinte.
+      Com uma loja selecionada, o campo Saída mostra só a quantidade enviada pra ela.
       🔵 bateu a margem · 🟢 acima da margem · 🔴 abaixo da margem.
     </div>
     ${linhasHtml}
