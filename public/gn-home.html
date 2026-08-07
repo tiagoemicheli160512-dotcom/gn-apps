@@ -554,6 +554,15 @@ let _dashFeriasGerencia = null; // {lojaKey: [{id, usuarioId, nome, cargo, inici
 let _dashFeriasLoading = false;
 let _dashFeriasAno = new Date().getFullYear();
 let _dashFeriasFormAberto = null; // {loja, usuarioId} — pessoa com o form de nova férias aberto
+// Férias da equipe central (Supervisor/Administrador/Mestre) — não são ligados a
+// uma loja física, então não cabem em gn_lojas.all_data.ferias_gerencia (que é
+// por loja). Ficam numa linha sentinela própria (gn_lojas.loja='EQUIPE_CONFIG'),
+// no mesmo padrão da XADREZ_CONFIG usada pelo Xadrez de gerência.
+const CARGOS_EQUIPE_FERIAS = ['supervisor','administrador','mestre'];
+const CARGO_LABEL_EQUIPE = { supervisor:'Supervisor', administrador:'Administrativo', mestre:'Mestre' };
+let _dashEquipeUsuarios = null; // [{id, nome, cargo}] — supervisor/administrador/mestre ativos
+let _dashFeriasEquipe = null;   // [{id, usuarioId, nome, cargo, inicio, fim}]
+let _dashFeriasEquipeFormAberto = null; // usuarioId com o form de nova férias aberto
 let _xadrezMovs = []; // [{usuarioId, nome, cargoOriginal, lojaOrigem, lojaDestino}] — movimentos simulados, persistidos em gn_lojas (XADREZ_CONFIG) até validar ou excluir
 let _xadrezMovsLoaded = false; // já buscou os movimentos pendentes do Supabase nesta sessão?
 let _xadrezValidando = false; // trava o botão "Validar" enquanto grava no Supabase
@@ -2554,6 +2563,127 @@ function _formFeriasHtml(lojaKey, usuarioId){
   </div>`;
 }
 
+// ── FÉRIAS DA EQUIPE CENTRAL (Supervisor/Administrador/Mestre) ─────────────
+// Mesmo padrão de múltiplos períodos com histórico da gerência das lojas,
+// mas essas pessoas não são ligadas a uma loja física — então os períodos
+// ficam numa linha sentinela própria (gn_lojas.loja='EQUIPE_CONFIG'), no
+// mesmo esquema já usado pela XADREZ_CONFIG.
+async function _loadFeriasEquipe(){
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  try{
+    const [userRows, cfgRows] = await Promise.all([
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_usuarios?cargo=in.(${CARGOS_EQUIPE_FERIAS.join(',')})&ativo=eq.true&select=id,nome,cargo&order=nome.asc`, H, 'ferias:equipe:usuarios', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.EQUIPE_CONFIG&select=all_data`, H, 'ferias:equipe:cfg', []),
+    ]);
+    _dashEquipeUsuarios = (userRows||[]).map(u=>({ id:u.id, nome:u.nome, cargo:(u.cargo||'').toLowerCase() }));
+    const arr = cfgRows[0] && cfgRows[0].all_data && cfgRows[0].all_data.ferias_equipe;
+    _dashFeriasEquipe = Array.isArray(arr) ? arr : [];
+  }catch(e){
+    window.gnLogError && window.gnLogError('ferias:_loadFeriasEquipe', e);
+    _dashEquipeUsuarios = _dashEquipeUsuarios || []; _dashFeriasEquipe = _dashFeriasEquipe || [];
+  }
+  renderDashboard();
+}
+
+async function _salvarFeriasEquipe(usuarioId, nome, cargo, inicio, fim){
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+  try{
+    const rowsRes = await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.EQUIPE_CONFIG&select=all_data`, { headers:H });
+    const rows = await rowsRes.json();
+    const allData = (rows[0] && rows[0].all_data) || {};
+    const arr = Array.isArray(allData.ferias_equipe) ? [...allData.ferias_equipe] : [];
+    arr.push({ id:'fereq_'+Date.now()+'_'+Math.random().toString(36).slice(2,6), usuarioId, nome, cargo, inicio, fim });
+    if(!rows.length){
+      await fetch(`${SB_URL}/rest/v1/gn_lojas`, { method:'POST', headers:{...H, Prefer:'return=minimal'}, body:JSON.stringify({loja:'EQUIPE_CONFIG', all_data:{...allData, ferias_equipe:arr}}) });
+    } else {
+      await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.EQUIPE_CONFIG`, { method:'PATCH', headers:{...H, Prefer:'return=minimal'}, body:JSON.stringify({all_data:{...allData, ferias_equipe:arr}}) });
+    }
+    _dashFeriasEquipe = arr;
+  }catch(e){
+    window.gnLogError && window.gnLogError('ferias:_salvarFeriasEquipe', e);
+    alert('Erro ao salvar férias. Tente novamente.');
+  }
+  renderDashboard();
+}
+
+async function _excluirFeriasEquipe(periodoId){
+  if(!confirm('Excluir este período de férias?')) return;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+  try{
+    const rowsRes = await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.EQUIPE_CONFIG&select=all_data`, { headers:H });
+    const rows = await rowsRes.json();
+    const allData = (rows[0] && rows[0].all_data) || {};
+    const arr = (Array.isArray(allData.ferias_equipe) ? allData.ferias_equipe : []).filter(f=>String(f.id)!==String(periodoId));
+    await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.EQUIPE_CONFIG`, { method:'PATCH', headers:{...H, Prefer:'return=minimal'}, body:JSON.stringify({all_data:{...allData, ferias_equipe:arr}}) });
+    _dashFeriasEquipe = arr;
+  }catch(e){
+    window.gnLogError && window.gnLogError('ferias:_excluirFeriasEquipe', e);
+    alert('Erro ao excluir. Tente novamente.');
+  }
+  renderDashboard();
+}
+
+function _abrirFormFeriasEquipe(usuarioId){ _dashFeriasEquipeFormAberto=usuarioId; renderDashboard(); }
+function _fecharFormFeriasEquipe(){ _dashFeriasEquipeFormAberto=null; renderDashboard(); }
+
+async function _confirmarFeriasEquipe(usuarioId){
+  const ini=document.getElementById('ferias-eq-ini-'+usuarioId)?.value;
+  const fim=document.getElementById('ferias-eq-fim-'+usuarioId)?.value;
+  if(!ini || !fim){ alert('Preencha início e fim das férias.'); return; }
+  if(fim<ini){ alert('A data de fim não pode ser antes do início.'); return; }
+  const pessoa=(_dashEquipeUsuarios||[]).find(p=>String(p.id)===String(usuarioId));
+  if(!pessoa){ alert('Pessoa não encontrada.'); return; }
+  _dashFeriasEquipeFormAberto=null;
+  await _salvarFeriasEquipe(pessoa.id, pessoa.nome, pessoa.cargo, ini, fim);
+}
+
+function _formFeriasEquipeHtml(usuarioId){
+  if(String(_dashFeriasEquipeFormAberto)!==String(usuarioId)) return '';
+  return `<div style="display:flex;gap:6px;margin-top:8px;align-items:flex-end;flex-wrap:wrap">
+    <div>
+      <div style="font-size:9px;color:rgba(255,255,255,.4);margin-bottom:2px">Início</div>
+      <input type="date" id="ferias-eq-ini-${usuarioId}" style="background:#484848;border:1px solid rgba(255,255,255,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#fff;font-family:inherit">
+    </div>
+    <div>
+      <div style="font-size:9px;color:rgba(255,255,255,.4);margin-bottom:2px">Fim</div>
+      <input type="date" id="ferias-eq-fim-${usuarioId}" style="background:#484848;border:1px solid rgba(255,255,255,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#fff;font-family:inherit">
+    </div>
+    <button onclick="_confirmarFeriasEquipe('${usuarioId}')" style="background:#FACC15;color:#1a1a1a;border:none;border-radius:8px;padding:7px 12px;font-size:11px;font-weight:800;cursor:pointer">Salvar</button>
+    <button onclick="_fecharFormFeriasEquipe()" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:rgba(255,255,255,.6);border-radius:8px;padding:7px 12px;font-size:11px;cursor:pointer">Cancelar</button>
+  </div>`;
+}
+
+function _buildFeriasEquipePanel(){
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  if(!_dashEquipeUsuarios){
+    return `<div style="background:#363636;border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:14px;margin-bottom:12px;text-align:center;color:rgba(255,255,255,.28);font-size:12px">⟳ Carregando…</div>`;
+  }
+  if(!_dashEquipeUsuarios.length) return '';
+  const linhas = _dashEquipeUsuarios.map(p=>{
+    const periodosAno=(_dashFeriasEquipe||[]).filter(f=>String(f.usuarioId)===String(p.id) && _mesesCobertosFerias(f,_dashFeriasAno).size>0);
+    const cargoLbl = CARGO_LABEL_EQUIPE[p.cargo] || p.cargo;
+    const listaPeriodos=periodosAno.length
+      ? periodosAno.map(f=>`<div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,.04);border-radius:8px;padding:6px 10px;margin-top:4px">
+          <span style="font-size:11px;color:rgba(255,255,255,.7)">${_fmtDataBR(f.inicio)} – ${_fmtDataBR(f.fim)}</span>
+          <button onclick="_excluirFeriasEquipe('${f.id}')" style="background:none;border:none;color:rgba(255,255,255,.3);font-size:14px;cursor:pointer;padding:0 4px">✕</button>
+        </div>`).join('')
+      : `<div style="font-size:10px;color:rgba(255,255,255,.25);margin-top:4px">Nenhuma férias cadastrada em ${_dashFeriasAno}</div>`;
+    return `<div style="margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,.06)">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+        <div style="font-size:12px;font-weight:700;color:#e2e8f0">${esc(p.nome)} <span style="font-size:9px;font-weight:700;color:#FACC15;background:rgba(250,204,21,.12);border-radius:6px;padding:1px 6px;margin-left:4px">${cargoLbl}</span></div>
+        <button onclick="_abrirFormFeriasEquipe('${p.id}')" style="background:rgba(250,204,21,.12);border:1px solid rgba(250,204,21,.3);color:#FDE047;border-radius:8px;padding:4px 10px;font-size:10px;font-weight:700;cursor:pointer">+ Férias</button>
+      </div>
+      ${_barraMesesFerias(periodosAno,_dashFeriasAno)}
+      ${listaPeriodos}
+      ${_formFeriasEquipeHtml(p.id)}
+    </div>`;
+  }).join('');
+  return `<div style="background:#363636;border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:14px;margin-bottom:12px">
+    <div style="font-size:13px;font-weight:800;color:#FDE047">🧑‍💼 Equipe (Supervisor · Administrativo · Mestre)</div>
+    ${linhas}
+  </div>`;
+}
+
 function _buildFeriasPanel(){
   const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
   const anoNav = `<div style="display:flex;align-items:center;justify-content:center;gap:14px;margin-bottom:14px">
@@ -2562,13 +2692,15 @@ function _buildFeriasPanel(){
     <button onclick="_feriasAnoNav(1)" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:8px;padding:6px 12px;font-size:14px;cursor:pointer">›</button>
   </div>`;
 
+  const equipeHtml = _buildFeriasEquipePanel();
+
   if(!_dashGerentes){
-    return anoNav+'<div style="padding:28px;text-align:center;color:rgba(255,255,255,.28);font-size:12px">⟳ Carregando…</div>';
+    return anoNav+equipeHtml+'<div style="padding:28px;text-align:center;color:rgba(255,255,255,.28);font-size:12px">⟳ Carregando…</div>';
   }
 
   const lojasComGerencia = LOJAS_LISTA.filter(k=>(_dashGerentes[k]||[]).length);
   if(!lojasComGerencia.length){
-    return anoNav+'<div style="padding:28px;text-align:center;color:rgba(255,255,255,.28);font-size:12px">🏖️ Nenhum gerente/sub-gerente cadastrado ainda</div>';
+    return anoNav+equipeHtml+'<div style="padding:28px;text-align:center;color:rgba(255,255,255,.28);font-size:12px">🏖️ Nenhum gerente/sub-gerente cadastrado ainda</div>';
   }
 
   const cards = lojasComGerencia.map(k=>{
@@ -2600,7 +2732,7 @@ function _buildFeriasPanel(){
     </div>`;
   }).join('');
 
-  return anoNav+cards;
+  return anoNav+equipeHtml+cards;
 }
 
 // ── XADREZ DE GERÊNCIA ──────────────────────────────────────────────────────
@@ -3154,6 +3286,7 @@ function renderDashboard() {
 function _setDashTab(t){
   _dashTab=t;
   if((t==='ferias'||t==='xadrez')&&!_dashGerentes) _loadFeriasGerencia();
+  if(t==='ferias'&&!_dashEquipeUsuarios) _loadFeriasEquipe();
   if(t==='xadrez'&&!_xadrezMovsLoaded) _loadXadrezPendente();
   renderDashboard();
 }
