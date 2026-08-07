@@ -546,6 +546,13 @@ let _dashFeriasLoading = false;
 let _dashFeriasAno = new Date().getFullYear();
 let _dashFeriasFormAberto = null; // {loja, usuarioId} — pessoa com o form de nova férias aberto
 let _xadrezMovs = []; // [{usuarioId, nome, cargoOriginal, lojaOrigem, lojaDestino}] — movimentos simulados (não gravados)
+let _dashAvaliacaoGerencia = null; // {lojaKey: {usuarioId: {status:'bom'|'regular'|'ruim'|'desligamento', atualizadoEm}}}
+const STATUS_AVAL_GERENCIA = {
+  bom:          { cor:'#4ade80', label:'Bom' },
+  regular:      { cor:'#fbbf24', label:'Regular' },
+  ruim:         { cor:'#f87171', label:'Ruim' },
+  desligamento: { cor:'#71717a', label:'Desligamento' },
+};
 
 // Mesma lista usada no app Check-list (aba Dados) — duplicada aqui porque cada app
 // é um HTML independente. Também precisa ficar antes de showHome() por causa do
@@ -2353,16 +2360,20 @@ async function _loadFeriasGerencia(){
     });
     _dashGerentes = porLoja;
     const feriasPorLoja = {};
+    const avaliacaoPorLoja = {};
     (lojaRows||[]).forEach(lr=>{
       const lk=_COM_KEY_TO_LOJA[lr.loja];
       if(!lk) return;
       const arr=(lr.all_data||{}).ferias_gerencia;
       feriasPorLoja[lk]=Array.isArray(arr)?arr:[];
+      const aval=(lr.all_data||{}).avaliacao_gerencia;
+      avaliacaoPorLoja[lk]=(aval && typeof aval==='object')?aval:{};
     });
     _dashFeriasGerencia = feriasPorLoja;
+    _dashAvaliacaoGerencia = avaliacaoPorLoja;
   }catch(e){
     window.gnLogError && window.gnLogError('ferias:_loadFeriasGerencia', e);
-    _dashGerentes = _dashGerentes||{}; _dashFeriasGerencia = _dashFeriasGerencia||{};
+    _dashGerentes = _dashGerentes||{}; _dashFeriasGerencia = _dashFeriasGerencia||{}; _dashAvaliacaoGerencia = _dashAvaliacaoGerencia||{};
   }
   _dashFeriasLoading = false;
   renderDashboard();
@@ -2412,6 +2423,54 @@ async function _excluirFeriasGerencia(lojaKey, periodoId){
 function _abrirFormFerias(loja, usuarioId){ _dashFeriasFormAberto={loja, usuarioId}; renderDashboard(); }
 function _fecharFormFerias(){ _dashFeriasFormAberto=null; renderDashboard(); }
 function _feriasAnoNav(dir){ _dashFeriasAno+=dir; renderDashboard(); }
+
+// Avaliação de gerente/sub (Bom/Regular/Ruim/Desligamento) — mesmo padrão de
+// gn_lojas.all_data já usado pra férias, manutenção do oficial etc.
+function _avaliacaoDoUsuario(usuarioId){
+  for(const lk of LOJAS_LISTA){
+    const aval=(_dashAvaliacaoGerencia?.[lk]||{})[usuarioId];
+    if(aval) return aval;
+  }
+  return null;
+}
+
+async function _salvarAvaliacaoGerencia(lojaKey, usuarioId, status){
+  const comKey = LOJA_COM_KEY[lojaKey] || lojaKey;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+  try{
+    const rowsRes = await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, { headers:H });
+    const rows = await rowsRes.json();
+    const allData = (rows[0] && rows[0].all_data) || {};
+    const aval = { ...(allData.avaliacao_gerencia||{}) };
+    aval[usuarioId] = { status, atualizadoEm:new Date().toISOString() };
+    if(!rows.length){
+      await fetch(`${SB_URL}/rest/v1/gn_lojas`, { method:'POST', headers:{...H, Prefer:'return=minimal'}, body:JSON.stringify({loja:comKey, all_data:{...allData, avaliacao_gerencia:aval}}) });
+    } else {
+      await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}`, { method:'PATCH', headers:{...H, Prefer:'return=minimal'}, body:JSON.stringify({all_data:{...allData, avaliacao_gerencia:aval}}) });
+    }
+    if(!_dashAvaliacaoGerencia) _dashAvaliacaoGerencia={};
+    _dashAvaliacaoGerencia[lojaKey]=aval;
+  }catch(e){
+    window.gnLogError && window.gnLogError('ferias:_salvarAvaliacaoGerencia', e);
+    alert('Erro ao salvar avaliação. Tente novamente.');
+  }
+  renderDashboard();
+}
+
+function _badgeAvaliacaoHtml(usuarioId){
+  const aval=_avaliacaoDoUsuario(usuarioId);
+  const info=aval?STATUS_AVAL_GERENCIA[aval.status]:null;
+  if(!info) return '';
+  return `<span style="font-size:9px;font-weight:700;color:${info.cor};background:${info.cor}18;border:1px solid ${info.cor}40;border-radius:6px;padding:1px 6px;margin-left:4px">${info.label}</span>`;
+}
+
+function _seletorAvaliacaoHtml(lojaKey, usuarioId){
+  const atual=_avaliacaoDoUsuario(usuarioId)?.status;
+  return `<div style="display:flex;gap:4px;margin-top:6px">${Object.entries(STATUS_AVAL_GERENCIA).map(([key,info])=>`
+    <button onclick="_salvarAvaliacaoGerencia('${lojaKey}','${usuarioId}','${key}')" title="${info.label}"
+      style="flex:1;background:${atual===key?info.cor+'2a':'rgba(255,255,255,.04)'};border:1px solid ${atual===key?info.cor:'rgba(255,255,255,.1)'};color:${atual===key?info.cor:'rgba(255,255,255,.4)'};border-radius:7px;padding:4px 2px;font-size:9px;font-weight:700;cursor:pointer">${info.label}</button>
+  `).join('')}</div>`;
+}
 
 async function _confirmarFerias(loja, usuarioId){
   const ini=document.getElementById('ferias-ini-'+usuarioId)?.value;
@@ -2492,9 +2551,10 @@ function _buildFeriasPanel(){
         : `<div style="font-size:10px;color:rgba(255,255,255,.25);margin-top:4px">Nenhuma férias cadastrada em ${_dashFeriasAno}</div>`;
       return `<div style="margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,.06)">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
-          <div style="font-size:12px;font-weight:700;color:#e2e8f0">${esc(p.nome)} <span style="font-size:9px;font-weight:700;color:#FACC15;background:rgba(250,204,21,.12);border-radius:6px;padding:1px 6px;margin-left:4px">${cargoLbl}</span></div>
+          <div style="font-size:12px;font-weight:700;color:#e2e8f0">${esc(p.nome)} <span style="font-size:9px;font-weight:700;color:#FACC15;background:rgba(250,204,21,.12);border-radius:6px;padding:1px 6px;margin-left:4px">${cargoLbl}</span>${_badgeAvaliacaoHtml(p.id)}</div>
           <button onclick="_abrirFormFerias('${k}','${p.id}')" style="background:rgba(250,204,21,.12);border:1px solid rgba(250,204,21,.3);color:#FDE047;border-radius:8px;padding:4px 10px;font-size:10px;font-weight:700;cursor:pointer">+ Férias</button>
         </div>
+        ${_seletorAvaliacaoHtml(k,p.id)}
         ${_barraMesesFerias(periodosAno,_dashFeriasAno)}
         ${listaPeriodos}
         ${_formFeriasHtml(k,p.id)}
@@ -2542,6 +2602,11 @@ function _checarCoberturaGerencia(board){
     const nome=LOJA_DISPLAY[k]||k;
     if(!gerentes.length) issues.push({loja:k, tipo:'sem_gerente', msg:`${nome} sem gerente titular`});
     if(!subs.length) issues.push({loja:k, tipo:'sem_sub', msg:`${nome} sem sub-gerente`});
+    pessoas.forEach(p=>{
+      const aval=_avaliacaoDoUsuario(p.id);
+      if(aval?.status==='ruim') issues.push({loja:k, tipo:'aval_ruim', msg:`${nome}: ${p.nome} avaliado como Ruim`});
+      if(aval?.status==='desligamento') issues.push({loja:k, tipo:'aval_desligamento', msg:`${nome}: ${p.nome} marcado para desligamento`});
+    });
     gerentes.forEach(g=>{
       const feriasG=_feriasDoUsuario(g.id);
       subs.forEach(s=>{
@@ -2631,7 +2696,7 @@ function _buildXadrezPanel(){
     if(!pessoas.length && !foiAlterada) return '';
     return `<div style="background:#363636;border:1px solid ${foiAlterada?'rgba(96,165,250,.35)':'rgba(255,255,255,.08)'};border-radius:12px;padding:11px 14px;margin-bottom:8px">
       <div style="font-size:12px;font-weight:800;color:${foiAlterada?'#93c5fd':'#FDE047'}">${esc(nome)}${foiAlterada?' 🔀':''}</div>
-      ${pessoas.length?pessoas.map(p=>`<div style="font-size:11px;color:rgba(255,255,255,.7);margin-top:3px">${esc(p.nome)} <span style="font-size:9px;color:rgba(255,255,255,.4)">· ${p.cargo==='gerente'?'Gerente':'Sub-Gerente'}</span></div>`).join(''):`<div style="font-size:10px;color:rgba(255,255,255,.3);margin-top:3px">Ninguém alocado</div>`}
+      ${pessoas.length?pessoas.map(p=>`<div style="font-size:11px;color:rgba(255,255,255,.7);margin-top:3px">${esc(p.nome)} <span style="font-size:9px;color:rgba(255,255,255,.4)">· ${p.cargo==='gerente'?'Gerente':'Sub-Gerente'}</span>${_badgeAvaliacaoHtml(p.id)}</div>`).join(''):`<div style="font-size:10px;color:rgba(255,255,255,.3);margin-top:3px">Ninguém alocado</div>`}
     </div>`;
   }).join('');
 
