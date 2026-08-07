@@ -255,6 +255,7 @@ summary.loja-card-header::-webkit-details-marker{display:none}
 }
 </style>
 <script src="gn-lojas-config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 </head>
 <body>
 
@@ -1573,11 +1574,19 @@ function renderRH() {
     setorCounts[s] = (setorCounts[s]||0) + 1;
   });
   const setoresOrdenados = Object.entries(setorCounts).sort((a,b) => b[1]-a[1]);
+  // Cache pros geradores de relatório (WhatsApp/PDF) lerem sem refazer a
+  // contagem — reflete exatamente o que está no card (loja selecionada).
+  S._setorCache = { lojaLabel: S.rhLoja.display, total: escalFuncs.length, setores: setoresOrdenados };
   const setorHtml = escalFuncs.length ? `
     <div class="card" style="margin-bottom:14px">
       <div class="card-header">
         <span class="card-title">👥 Funcionários por Setor — ${S.rhLoja.display}</span>
         <span style="font-size:11px;color:var(--muted)">${escalFuncs.length} total</span>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;padding:10px 12px 0">
+        <button onclick="gerarWppSetor()" style="background:rgba(37,211,102,.12);border:1px solid rgba(37,211,102,.3);border-radius:6px;padding:5px 10px;color:#22c55e;font-size:11px;font-weight:700;cursor:pointer">📲 WhatsApp</button>
+        <button onclick="gerarPDFSetor()" style="background:rgba(192,57,43,.12);border:1px solid rgba(192,57,43,.3);border-radius:6px;padding:5px 10px;color:#e74c3c;font-size:11px;font-weight:700;cursor:pointer">📄 PDF</button>
+        <button onclick="enviarPDFSetorWpp()" title="Enviar PDF pelo WhatsApp" style="background:rgba(37,211,102,.12);border:1px solid rgba(37,211,102,.3);border-radius:6px;padding:5px 10px;color:#22c55e;font-size:11px;font-weight:700;cursor:pointer">📄📲 PDF no Whats</button>
       </div>
       <div class="card-body" style="display:flex;flex-wrap:wrap;gap:8px;padding:12px">
         ${setoresOrdenados.map(([setor,cnt]) => `
@@ -2391,6 +2400,82 @@ function gerarPDF(texto,titulo){
   if(w){w.document.write(html);w.document.close();}
 }
 function gerarPDFRH(){gerarPDF(_buildTextoRH(),'GN Operações — Relatório');}
+
+// Converte um texto simples num PDF de verdade (multi-página, fonte monoespaçada),
+// usando jsPDF — necessário pra ter um arquivo real pra anexar no WhatsApp (o botão
+// de PDF "normal" só abre a janela de impressão do navegador, sem gerar um Blob).
+// Mesmo padrão usado em gn-pedidos.html/gn-checklist.html.
+function _textoParaPdfBlob(texto, titulo){
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit:'pt', format:'a4' });
+  const marginX=40, topo=56, lineHeight=13;
+  const pageHeight=doc.internal.pageSize.getHeight();
+  const maxWidth=doc.internal.pageSize.getWidth()-marginX*2;
+  doc.setFont('helvetica','bold'); doc.setFontSize(13);
+  doc.text(titulo, marginX, 36);
+  doc.setFont('courier','normal'); doc.setFontSize(9);
+  let y=topo;
+  texto.split('\n').forEach(linha=>{
+    const partes=doc.splitTextToSize(linha||' ', maxWidth);
+    partes.forEach(p=>{
+      if(y>pageHeight-40){ doc.addPage(); y=40; }
+      doc.text(p, marginX, y);
+      y+=lineHeight;
+    });
+  });
+  return doc.output('blob');
+}
+
+// Gera o PDF (a partir de msg/titulo) e abre o compartilhamento nativo do dispositivo
+// pra enviar direto pelo WhatsApp. Sem suporte a compartilhar arquivo (ex.: desktop),
+// baixa o PDF e abre o WhatsApp com um texto pra anexar manualmente.
+async function _compartilharPdfWpp(msg, titulo){
+  try{
+    const blob=_textoParaPdfBlob(msg, titulo);
+    const file=new File([blob], titulo.replace(/\s+/g,'_')+'.pdf', { type:'application/pdf' });
+    if(navigator.canShare && navigator.canShare({ files:[file] })){
+      await navigator.share({ files:[file], title:titulo, text:titulo });
+      return;
+    }
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url; a.download=file.name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 10000);
+    toast('📄 PDF baixado — anexe no WhatsApp manualmente.');
+    window.open('https://wa.me/?text='+encodeURIComponent(titulo));
+  }catch(e){
+    if(e && e.name==='AbortError') return; // usuário cancelou o share sheet
+    toast('⚠️ Erro ao gerar PDF: '+(e.message||e), 'err');
+  }
+}
+
+// ── Relatórios do card "Funcionários por Setor" ────────────────────────────
+function _setorRelatorioTexto(){
+  const c=S._setorCache;
+  if(!c || !c.setores.length) return null;
+  let msg=`FUNCIONÁRIOS POR SETOR — ${c.lojaLabel}\n\n`;
+  c.setores.forEach(([setor,cnt])=>{ msg+=`${setor}: ${cnt}\n`; });
+  msg+=`\nTotal: ${c.total}`;
+  return { msg, titulo:`Funcionários por Setor — ${c.lojaLabel}` };
+}
+function gerarWppSetor(){
+  const c=S._setorCache;
+  if(!c || !c.setores.length){ toast('Sem dados de setor pra enviar.','err'); return; }
+  let msg=`👥 *FUNCIONÁRIOS POR SETOR — ${c.lojaLabel}*\n\n`;
+  c.setores.forEach(([setor,cnt])=>{ msg+=`• ${setor}: *${cnt}*\n`; });
+  msg+=`\nTotal: *${c.total}*`;
+  window.open('https://wa.me/?text='+encodeURIComponent(msg),'_blank');
+}
+function gerarPDFSetor(){
+  const r=_setorRelatorioTexto();
+  if(!r){ toast('Sem dados de setor pra enviar.','err'); return; }
+  gerarPDF(r.msg, r.titulo);
+}
+async function enviarPDFSetorWpp(){
+  const r=_setorRelatorioTexto();
+  if(!r){ toast('Sem dados de setor pra enviar.','err'); return; }
+  await _compartilharPdfWpp(r.msg, r.titulo);
+}
 
 // ══════════════════════════════════════════════
 // ACTIONS — FINANCEIRO
