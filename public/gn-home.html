@@ -545,6 +545,7 @@ let _dashFeriasGerencia = null; // {lojaKey: [{id, usuarioId, nome, cargo, inici
 let _dashFeriasLoading = false;
 let _dashFeriasAno = new Date().getFullYear();
 let _dashFeriasFormAberto = null; // {loja, usuarioId} — pessoa com o form de nova férias aberto
+let _xadrezMovs = []; // [{usuarioId, nome, cargoOriginal, lojaOrigem, lojaDestino}] — movimentos simulados (não gravados)
 
 // Mesma lista usada no app Check-list (aba Dados) — duplicada aqui porque cada app
 // é um HTML independente. Também precisa ficar antes de showHome() por causa do
@@ -2508,6 +2509,135 @@ function _buildFeriasPanel(){
   return anoNav+cards;
 }
 
+// ── XADREZ DE GERÊNCIA ──────────────────────────────────────────────────────
+// Simulador de trocas de gerente/sub-gerente entre lojas — nunca grava nada,
+// só recalcula em memória (_xadrezMovs) a partir do estado real (_dashGerentes)
+// pra testar cenários e ver o que quebraria: loja sem gerente/sub titular, ou
+// gerente e sub da mesma loja de férias ao mesmo tempo. Reaproveita os mesmos
+// dados já carregados pela aba Férias (_dashGerentes/_dashFeriasGerencia).
+function _feriasDoUsuario(usuarioId){
+  const todas=[];
+  Object.values(_dashFeriasGerencia||{}).forEach(arr=>{
+    (arr||[]).forEach(f=>{ if(String(f.usuarioId)===String(usuarioId)) todas.push(f); });
+  });
+  return todas;
+}
+
+function _boardGerenciaSimulado(){
+  const board={};
+  LOJAS_LISTA.forEach(k=>{ board[k]=[...(_dashGerentes[k]||[])]; });
+  _xadrezMovs.forEach(mv=>{
+    if(board[mv.lojaOrigem]) board[mv.lojaOrigem]=board[mv.lojaOrigem].filter(p=>String(p.id)!==String(mv.usuarioId));
+    if(board[mv.lojaDestino]) board[mv.lojaDestino]=[...board[mv.lojaDestino], {id:mv.usuarioId, nome:mv.nome, cargo:mv.cargoOriginal}];
+  });
+  return board;
+}
+
+function _checarCoberturaGerencia(board){
+  const issues=[];
+  LOJAS_LISTA.forEach(k=>{
+    const pessoas=board[k]||[];
+    const gerentes=pessoas.filter(p=>p.cargo==='gerente');
+    const subs=pessoas.filter(p=>p.cargo==='sub_gerente');
+    const nome=LOJA_DISPLAY[k]||k;
+    if(!gerentes.length) issues.push({loja:k, tipo:'sem_gerente', msg:`${nome} sem gerente titular`});
+    if(!subs.length) issues.push({loja:k, tipo:'sem_sub', msg:`${nome} sem sub-gerente`});
+    gerentes.forEach(g=>{
+      const feriasG=_feriasDoUsuario(g.id);
+      subs.forEach(s=>{
+        const feriasS=_feriasDoUsuario(s.id);
+        feriasG.forEach(fg=>{
+          feriasS.forEach(fs=>{
+            if(fg.inicio<=fs.fim && fs.inicio<=fg.fim){
+              issues.push({loja:k, tipo:'ferias_sobrepostas', msg:`${nome}: ${g.nome} e ${s.nome} de férias ao mesmo tempo (${_fmtDataBR(fg.inicio)}–${_fmtDataBR(fg.fim)} × ${_fmtDataBR(fs.inicio)}–${_fmtDataBR(fs.fim)})`});
+            }
+          });
+        });
+      });
+    });
+  });
+  return issues;
+}
+
+function _xadrezAddMov(){
+  const usuarioId=document.getElementById('xadrez-pessoa')?.value;
+  const lojaDestino=document.getElementById('xadrez-destino')?.value;
+  if(!usuarioId || !lojaDestino) return;
+  const boardAtual=_xadrezMovs.length ? _boardGerenciaSimulado() : _dashGerentes;
+  let pessoa=null, lojaOrigem=null;
+  LOJAS_LISTA.forEach(k=>{
+    const found=(boardAtual[k]||[]).find(p=>String(p.id)===String(usuarioId));
+    if(found){ pessoa=found; lojaOrigem=k; }
+  });
+  if(!pessoa){ alert('Pessoa não encontrada.'); return; }
+  if(lojaOrigem===lojaDestino){ alert('Selecione uma loja diferente da atual.'); return; }
+  _xadrezMovs=_xadrezMovs.filter(mv=>String(mv.usuarioId)!==String(usuarioId));
+  _xadrezMovs.push({ usuarioId:pessoa.id, nome:pessoa.nome, cargoOriginal:pessoa.cargo, lojaOrigem, lojaDestino });
+  renderDashboard();
+}
+function _xadrezRemoverMov(usuarioId){ _xadrezMovs=_xadrezMovs.filter(mv=>String(mv.usuarioId)!==String(usuarioId)); renderDashboard(); }
+function _xadrezLimpar(){ _xadrezMovs=[]; renderDashboard(); }
+
+function _buildXadrezPanel(){
+  if(!_dashGerentes){
+    return '<div style="padding:28px;text-align:center;color:rgba(255,255,255,.28);font-size:12px">⟳ Carregando…</div>';
+  }
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  const simAtiva = _xadrezMovs.length>0;
+  const board = simAtiva ? _boardGerenciaSimulado() : _dashGerentes;
+  const issues = _checarCoberturaGerencia(board);
+
+  const pessoasOpts=[];
+  LOJAS_LISTA.forEach(k=>{ (board[k]||[]).forEach(p=>pessoasOpts.push({...p, loja:k})); });
+  pessoasOpts.sort((a,b)=>(a.nome||'').localeCompare(b.nome||''));
+
+  const movsHtml = simAtiva ? `<div style="margin-bottom:14px">
+    <div style="font-size:10px;font-weight:800;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Movimentos simulados</div>
+    ${_xadrezMovs.map(mv=>`<div style="display:flex;align-items:center;justify-content:space-between;background:rgba(96,165,250,.08);border:1px solid rgba(96,165,250,.25);border-radius:8px;padding:7px 10px;margin-bottom:5px">
+      <span style="font-size:11px;color:#93c5fd">${esc(mv.nome)}: ${esc(LOJA_DISPLAY[mv.lojaOrigem]||mv.lojaOrigem)} → ${esc(LOJA_DISPLAY[mv.lojaDestino]||mv.lojaDestino)}</span>
+      <button onclick="_xadrezRemoverMov('${mv.usuarioId}')" style="background:none;border:none;color:rgba(255,255,255,.4);font-size:13px;cursor:pointer">✕</button>
+    </div>`).join('')}
+    <button onclick="_xadrezLimpar()" style="margin-top:2px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:rgba(255,255,255,.6);border-radius:8px;padding:6px 12px;font-size:11px;cursor:pointer">Limpar simulação</button>
+  </div>` : '';
+
+  const formHtml = pessoasOpts.length ? `<div style="background:#363636;border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:14px;margin-bottom:14px">
+    <div style="font-size:12px;font-weight:800;color:#e2e8f0;margin-bottom:10px">🔀 Simular movimentação</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+      <div style="flex:1;min-width:160px">
+        <div style="font-size:9px;color:rgba(255,255,255,.4);margin-bottom:3px">Pessoa</div>
+        <select id="xadrez-pessoa" style="width:100%;background:#484848;border:1px solid rgba(255,255,255,.12);border-radius:8px;padding:7px 8px;font-size:11px;color:#fff;font-family:inherit">
+          ${pessoasOpts.map(p=>`<option value="${p.id}">${esc(p.nome)} — ${p.cargo==='gerente'?'Gerente':'Sub'} — ${esc(LOJA_DISPLAY[p.loja]||p.loja)}</option>`).join('')}
+        </select>
+      </div>
+      <div style="flex:1;min-width:140px">
+        <div style="font-size:9px;color:rgba(255,255,255,.4);margin-bottom:3px">Nova loja</div>
+        <select id="xadrez-destino" style="width:100%;background:#484848;border:1px solid rgba(255,255,255,.12);border-radius:8px;padding:7px 8px;font-size:11px;color:#fff;font-family:inherit">
+          ${LOJAS_LISTA.map(k=>`<option value="${k}">${esc(LOJA_DISPLAY[k]||k)}</option>`).join('')}
+        </select>
+      </div>
+      <button onclick="_xadrezAddMov()" style="background:#FACC15;color:#1a1a1a;border:none;border-radius:8px;padding:8px 14px;font-size:11px;font-weight:800;cursor:pointer;white-space:nowrap">Simular</button>
+    </div>
+  </div>` : '';
+
+  const issuesHtml = issues.length ? `<div style="margin-bottom:14px">
+    <div style="font-size:10px;font-weight:800;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">${simAtiva?'⚠ Atenção na simulação':'⚠ Atenção na situação atual'}</div>
+    ${issues.map(is=>`<div style="background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.22);border-left:3px solid #f87171;border-radius:8px;padding:8px 10px;margin-bottom:5px;font-size:11px;color:#fca5a5">${esc(is.msg)}</div>`).join('')}
+  </div>` : `<div style="background:rgba(74,222,128,.08);border:1px solid rgba(74,222,128,.22);border-radius:10px;padding:10px 12px;margin-bottom:14px;font-size:11px;color:#86efac">✅ ${simAtiva?'Simulação sem pendências de cobertura':'Todas as lojas com gerente e sub-gerente, sem sobreposição de férias'}</div>`;
+
+  const boardHtml = LOJAS_LISTA.map(k=>{
+    const pessoas=board[k]||[];
+    const nome=LOJA_DISPLAY[k]||k;
+    const foiAlterada = _xadrezMovs.some(mv=>mv.lojaOrigem===k||mv.lojaDestino===k);
+    if(!pessoas.length && !foiAlterada) return '';
+    return `<div style="background:#363636;border:1px solid ${foiAlterada?'rgba(96,165,250,.35)':'rgba(255,255,255,.08)'};border-radius:12px;padding:11px 14px;margin-bottom:8px">
+      <div style="font-size:12px;font-weight:800;color:${foiAlterada?'#93c5fd':'#FDE047'}">${esc(nome)}${foiAlterada?' 🔀':''}</div>
+      ${pessoas.length?pessoas.map(p=>`<div style="font-size:11px;color:rgba(255,255,255,.7);margin-top:3px">${esc(p.nome)} <span style="font-size:9px;color:rgba(255,255,255,.4)">· ${p.cargo==='gerente'?'Gerente':'Sub-Gerente'}</span></div>`).join(''):`<div style="font-size:10px;color:rgba(255,255,255,.3);margin-top:3px">Ninguém alocado</div>`}
+    </div>`;
+  }).join('');
+
+  return formHtml+movsHtml+issuesHtml+boardHtml;
+}
+
 function _buildAlertsFeed() {
   const fat=_dashFat, fatP=_dashFatPrev, metas=_dashMetas;
   const alerts=[];
@@ -2800,6 +2930,9 @@ function renderDashboard() {
   } else if (_dashTab==='ferias') {
     content = _buildFeriasPanel();
 
+  } else if (_dashTab==='xadrez') {
+    content = _buildXadrezPanel();
+
   } else { // ⚙ Metas
     const perLabel=_dashPer==='sem'?'semana':'mês';
     content=`
@@ -2832,14 +2965,15 @@ function renderDashboard() {
         <button class="dash-tab${_dashTab==='fat'?' on':''}" onclick="_setDashTab('fat')">↓ Faturamento</button>
         <button class="dash-tab${_dashTab==='att'?' on':''}" onclick="_setDashTab('att')">⚠ Atenção</button>
         <button class="dash-tab${_dashTab==='ferias'?' on':''}" onclick="_setDashTab('ferias')">🏖 Férias</button>
+        <button class="dash-tab${_dashTab==='xadrez'?' on':''}" onclick="_setDashTab('xadrez')">🔀 Xadrez</button>
         <button class="dash-tab${_dashTab==='metas'?' on':''}" onclick="_setDashTab('metas')">⚙ Metas</button>
       </div>
-      ${(_dashTab!=='metas'&&_dashTab!=='ferias')?periodRow:''}
+      ${(_dashTab!=='metas'&&_dashTab!=='ferias'&&_dashTab!=='xadrez')?periodRow:''}
       ${content}
     </div>`;
 }
 
-function _setDashTab(t){ _dashTab=t; if(t==='ferias'&&!_dashGerentes) _loadFeriasGerencia(); renderDashboard(); }
+function _setDashTab(t){ _dashTab=t; if((t==='ferias'||t==='xadrez')&&!_dashGerentes) _loadFeriasGerencia(); renderDashboard(); }
 function _navToAtt(){ const el=document.getElementById('dash-section'); if(el)el.scrollIntoView({behavior:'smooth'}); _setDashTab('att'); }
 function _setPer(p){ _dashPer=p; _dashFat=null; _dashFatPrev=null; _dashFatDia=null; _dashComDia=null; _dashFatDiaLoja=null; _dashComDiaLoja=null; _dashRelSel.clear(); renderDashboard(); _loadDashAll(); }
 function _toggleDashSel(k){ if(_dashRelSel.has(k)) _dashRelSel.delete(k); else _dashRelSel.add(k); renderDashboard(); }
