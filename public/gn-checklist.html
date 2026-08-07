@@ -981,6 +981,7 @@
   <button class="sidebar-link" id="sidebar-btn-banda" onclick="switchTab('banda',this)" data-sidebar-tab="banda"><span class="sl-icon">🎸</span>Banda</button>
   <button class="sidebar-link" id="sidebar-btn-vendas" onclick="switchTab('vendas',this)" data-sidebar-tab="vendas"><span class="sl-icon">🍽️</span>Vendas</button>
   <button class="sidebar-link" id="sidebar-btn-escala" onclick="switchTab('escala',this)" data-sidebar-tab="escala"><span class="sl-icon">📅</span>Escala</button>
+  <button class="sidebar-link" id="sidebar-btn-ferias" onclick="switchTab('ferias',this)" data-sidebar-tab="ferias"><span class="sl-icon">🏖</span>Férias</button>
   <button class="sidebar-link" onclick="switchTab('gestao',this)" data-sidebar-tab="gestao"><span class="sl-icon">📊</span>Gestão</button>
 </nav>
 
@@ -1022,6 +1023,7 @@
     <button class="tab-btn" id="tab-btn-banda" onclick="switchTab('banda',this)">🎸 Banda</button>
     <button class="tab-btn" id="tab-btn-vendas" onclick="switchTab('vendas',this)">🍽️ Vendas</button>
     <button class="tab-btn" id="tab-btn-escala" onclick="switchTab('escala',this)">📅 Escala</button>
+    <button class="tab-btn" id="tab-btn-ferias" onclick="switchTab('ferias',this)">🏖 Férias</button>
     <button class="tab-btn" onclick="switchTab('gestao',this)">📊 Gestão</button>
   </div>
 </div>
@@ -1855,6 +1857,16 @@
   <div id="escala-container"></div>
   <!-- Salários por Setor -->
   <div id="card-salarios-setor" style="margin-top:14px;"></div>
+</div>
+
+<!-- ===================== ABA FÉRIAS ===================== -->
+<div id="tab-ferias" class="tab-content" style="max-width:640px;margin:0 auto;padding:14px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+    <div style="font-size:14px;font-weight:700;">🏖 Férias dos Funcionários</div>
+    <button class="btn-secondary" onclick="openRelModal('ferias')" style="font-size:10px;padding:5px 10px;">📄 Relatório</button>
+  </div>
+  <div style="font-size:10px;color:#64748b;margin-bottom:10px;">Períodos cadastrados aqui marcam automaticamente "FÉRIAS" na Escala pra todas as semanas do intervalo.</div>
+  <div id="ferias-container"></div>
 </div>
 
 <!-- ===================== ABA VENDAS ===================== -->
@@ -5585,6 +5597,225 @@ function removeComissoesFunc(i,btnEl){
 }
 
 // =============================================
+// FÉRIAS (histórico multi-período, todos os funcionários da loja)
+// =============================================
+// Guarda um histórico de períodos de férias por funcionário, separado do par
+// único ferias_ini/ferias_fim da aba Dados (que continua existindo, só como
+// referência rápida). Fica em gn_comissoes.all_data.ferias_geral — uma lista
+// simples por loja, independente de semana. Cada período, ao ser salvo,
+// marca "FÉRIAS" na Escala em TODAS as semanas do intervalo (não só a semana
+// aberta no momento), usando o nome como identificador do funcionário.
+let feriasGeralData = null;   // [{id, nome, setor, inicio, fim, criadoEm}]
+let feriasGeralLoading = false;
+let feriasAno = new Date().getFullYear();
+let feriasFormAberto = null;  // nome do funcionário com o form de novo período aberto
+
+function _semanaIdxDeData(dataISO){
+  const dt=new Date(dataISO+'T12:00:00');
+  return COMISSOES_CAL.findIndex(w=>w.days.some(x=>x.d===dt.getDate() && x.m===(dt.getMonth()+1)));
+}
+
+// Marca (ou desmarca) FÉRIAS na Escala em todas as semanas cobertas pelo
+// período, achando o funcionário pelo nome em cada semana. Não persiste —
+// só muta o `allData` em memória; quem chama faz o PATCH.
+function _aplicarFeriasNaEscala(allData, nomeAlvo, inicioISO, fimISO, marcar){
+  const nomeNorm=(nomeAlvo||'').trim().toLowerCase();
+  if(!nomeNorm || !inicioISO || !fimISO) return;
+  const ini=new Date(inicioISO+'T12:00:00'), fim=new Date(fimISO+'T12:00:00');
+  if(fim<ini) return;
+  const posIni=_semanaIdxDeData(inicioISO), posFim=_semanaIdxDeData(fimISO);
+  if(posIni===-1||posFim===-1) return;
+  const iniY=ini.getFullYear();
+  let pos=posIni, guard=0;
+  while(guard++<COMISSOES_CAL.length){
+    const sem=COMISSOES_CAL[pos];
+    const wd=getComissoesWD(allData,pos);
+    const fi=wd.funcs.findIndex(f=>(f.nome||'').trim().toLowerCase()===nomeNorm);
+    if(fi!==-1){
+      const func={...wd.funcs[fi]};
+      const novos=[...func.dias];
+      sem.days.forEach((day,di)=>{
+        const mm=String(day.m).padStart(2,'0'), dd=String(day.d).padStart(2,'0');
+        let dt=new Date(`${iniY}-${mm}-${dd}T12:00:00`);
+        if(dt<ini) dt=new Date(`${iniY+1}-${mm}-${dd}T12:00:00`);
+        if(dt>=ini && dt<=fim){
+          if(marcar) novos[di]='FÉRIAS';
+          else if(novos[di]==='FÉRIAS') novos[di]='PRESENTE';
+        }
+      });
+      func.dias=novos;
+      const funcs=[...wd.funcs]; funcs[fi]=func;
+      allData[String(pos)]={...wd, funcs};
+    }
+    if(pos===posFim) break;
+    pos=(pos+1)%COMISSOES_CAL.length;
+  }
+}
+
+async function loadFeriasGeral(){
+  if(!LOJA) return;
+  feriasGeralLoading=true;
+  renderFeriasStore();
+  try{
+    const allData=await fetchComissoesAllData(comissoesLojaKey());
+    feriasGeralData=Array.isArray(allData.ferias_geral)?allData.ferias_geral:[];
+  }catch(e){
+    console.error('Erro ao carregar férias:', e.message||e);
+    feriasGeralData=[];
+  }
+  feriasGeralLoading=false;
+  renderFeriasStore();
+}
+
+async function salvarFeriasGeral(nome, setor){
+  const key=_feriasFormKey(nome);
+  const ini=document.getElementById('ferias-ini-'+key)?.value;
+  const fim=document.getElementById('ferias-fim-'+key)?.value;
+  if(!ini || !fim){ showToast('Preencha início e fim.','error'); return; }
+  if(fim<ini){ showToast('Fim não pode ser antes do início.','error'); return; }
+  feriasFormAberto=null;
+  try{
+    const allData=await fetchComissoesAllData(comissoesLojaKey());
+    const lista=Array.isArray(allData.ferias_geral)?[...allData.ferias_geral]:[];
+    lista.push({ id:'fer_'+Date.now()+'_'+Math.random().toString(36).slice(2,6), nome, setor:setor||'', inicio:ini, fim, criadoEm:new Date().toISOString() });
+    allData.ferias_geral=lista;
+    _aplicarFeriasNaEscala(allData, nome, ini, fim, true);
+    await patchComissoesAllData(comissoesLojaKey(), allData);
+    feriasGeralData=lista;
+    // A semana aberta agora pode ter mudado — recarrega pra refletir na Escala
+    if(comissoesWeekIdx!=null) loadComissoesData();
+    showToast('🏖 Férias salvas e marcadas na Escala');
+  }catch(e){
+    console.error('Erro ao salvar férias:', e.message||e);
+    showToast('⚠️ Erro ao salvar férias','error');
+  }
+  renderFeriasStore();
+}
+
+async function excluirFeriasGeral(periodoId){
+  if(!confirm('Excluir este período? Os dias marcados como FÉRIAS na Escala voltam pra PRESENTE.')) return;
+  try{
+    const allData=await fetchComissoesAllData(comissoesLojaKey());
+    const lista=Array.isArray(allData.ferias_geral)?[...allData.ferias_geral]:[];
+    const idx=lista.findIndex(f=>f.id===periodoId);
+    if(idx===-1) return;
+    const periodo=lista[idx];
+    lista.splice(idx,1);
+    allData.ferias_geral=lista;
+    _aplicarFeriasNaEscala(allData, periodo.nome, periodo.inicio, periodo.fim, false);
+    await patchComissoesAllData(comissoesLojaKey(), allData);
+    feriasGeralData=lista;
+    if(comissoesWeekIdx!=null) loadComissoesData();
+    showToast('Período excluído');
+  }catch(e){
+    console.error('Erro ao excluir férias:', e.message||e);
+    showToast('⚠️ Erro ao excluir','error');
+  }
+  renderFeriasStore();
+}
+
+function _feriasFormKey(nome){ return (nome||'').replace(/[^a-zA-Z0-9]/g,'_'); }
+function abrirFormFerias(nome){ feriasFormAberto=nome; renderFeriasStore(); }
+function fecharFormFerias(){ feriasFormAberto=null; renderFeriasStore(); }
+function feriasAnoNav(dir){ feriasAno+=dir; renderFeriasStore(); }
+
+function _mesesCobertosFeriasChk(periodo, ano){
+  const meses=new Set();
+  const ini=new Date(periodo.inicio+'T12:00:00'), fim=new Date(periodo.fim+'T12:00:00');
+  let d=new Date(ini.getFullYear(), ini.getMonth(), 1);
+  const fimMes=new Date(fim.getFullYear(), fim.getMonth(), 1);
+  while(d<=fimMes){
+    if(d.getFullYear()===ano) meses.add(d.getMonth());
+    d.setMonth(d.getMonth()+1);
+  }
+  return meses;
+}
+function _barraMesesFeriasChk(periodos, ano){
+  const MESES_ABR=['J','F','M','A','M','J','J','A','S','O','N','D'];
+  const cobertos=new Set();
+  periodos.forEach(p=>{ _mesesCobertosFeriasChk(p,ano).forEach(m=>cobertos.add(m)); });
+  return `<div style="display:flex;gap:2px;margin-top:6px">${MESES_ABR.map((m,i)=>`<div style="flex:1;text-align:center;font-size:8px;font-weight:800;padding:3px 0;border-radius:3px;background:${cobertos.has(i)?'var(--gn-color,#E8580A)':'rgba(255,255,255,.06)'};color:${cobertos.has(i)?'#fff':'rgba(255,255,255,.25)'}">${m}</div>`).join('')}</div>`;
+}
+function _fmtDataBRChk(iso){ if(!iso) return '—'; const [y,m,d]=iso.split('-'); return `${d}/${m}/${y}`; }
+
+function renderFeriasStore(){
+  const container=document.getElementById('ferias-container');
+  if(!container) return;
+  const anoNav=`<div style="display:flex;align-items:center;justify-content:center;gap:14px;margin-bottom:14px">
+    <button onclick="feriasAnoNav(-1)" style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);color:#e2e8f0;border-radius:8px;padding:6px 12px;font-size:14px;cursor:pointer">‹</button>
+    <span style="font-size:14px;font-weight:800;color:#e2e8f0">${feriasAno}</span>
+    <button onclick="feriasAnoNav(1)" style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);color:#e2e8f0;border-radius:8px;padding:6px 12px;font-size:14px;cursor:pointer">›</button>
+  </div>`;
+
+  if(feriasGeralLoading || !comissoesWD){
+    container.innerHTML=anoNav+'<div style="text-align:center;padding:30px;color:#888;font-size:12px;">⟳ Carregando…</div>';
+    return;
+  }
+  const funcs=comissoesWD.funcs.filter(f=>f.nome && f.nome.trim());
+  if(!funcs.length){
+    container.innerHTML=anoNav+'<div style="text-align:center;padding:30px;color:#888;font-size:12px;">Nenhum funcionário cadastrado.</div>';
+    return;
+  }
+  const lista=feriasGeralData||[];
+  const cards=funcs.map(f=>{
+    const nome=f.nome.trim();
+    const nomeEsc=nome.replace(/'/g,"\\'");
+    const periodosTodos=lista.filter(p=>(p.nome||'').trim().toLowerCase()===nome.toLowerCase());
+    const periodosAno=periodosTodos.filter(p=>_mesesCobertosFeriasChk(p,feriasAno).size>0).sort((a,b)=>a.inicio.localeCompare(b.inicio));
+    const listaPeriodos=periodosAno.length
+      ? periodosAno.map(p=>`<div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,.03);border-radius:8px;padding:6px 10px;margin-top:4px">
+          <span style="font-size:11px;color:#94a3b8">${_fmtDataBRChk(p.inicio)} – ${_fmtDataBRChk(p.fim)}</span>
+          <button onclick="excluirFeriasGeral('${p.id}')" style="background:none;border:none;color:rgba(255,255,255,.3);font-size:14px;cursor:pointer;padding:0 4px">✕</button>
+        </div>`).join('')
+      : `<div style="font-size:10px;color:#475569;margin-top:4px">Nenhuma férias em ${feriasAno}</div>`;
+    const key=_feriasFormKey(nome);
+    const formHtml=feriasFormAberto===nome ? `<div style="display:flex;gap:6px;margin-top:8px;align-items:flex-end;flex-wrap:wrap">
+        <div>
+          <div style="font-size:9px;color:#64748b;margin-bottom:2px">Início</div>
+          <input type="date" id="ferias-ini-${key}" style="background:#1a1a1a;border:1px solid rgba(255,255,255,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#fff;font-family:inherit">
+        </div>
+        <div>
+          <div style="font-size:9px;color:#64748b;margin-bottom:2px">Fim</div>
+          <input type="date" id="ferias-fim-${key}" style="background:#1a1a1a;border:1px solid rgba(255,255,255,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#fff;font-family:inherit">
+        </div>
+        <button onclick="salvarFeriasGeral('${nomeEsc}','${(f.setor||'').replace(/'/g,"\\'")}')" style="background:var(--gn-color,#E8580A);color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:11px;font-weight:800;cursor:pointer">Salvar</button>
+        <button onclick="fecharFormFerias()" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#94a3b8;border-radius:8px;padding:7px 12px;font-size:11px;cursor:pointer">Cancelar</button>
+      </div>` : '';
+    return `<div style="background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:12px 14px;margin-bottom:10px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+        <div style="font-size:12px;font-weight:700;color:#e2e8f0">${escHtml(nome)}${f.setor?` <span style="font-size:9px;font-weight:700;color:var(--gn-color,#E8580A);background:rgba(232,88,10,.12);border-radius:6px;padding:1px 6px;margin-left:4px">${escHtml(f.setor)}</span>`:''}</div>
+        <div style="display:flex;gap:6px">
+          ${periodosTodos.length?`<button onclick="enviarFeriasIndividualWpp('${nomeEsc}')" title="Enviar relatório individual" style="background:none;border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:4px 8px;color:#94a3b8;font-size:11px;cursor:pointer">📲</button>`:''}
+          <button onclick="abrirFormFerias('${nomeEsc}')" style="background:rgba(232,88,10,.12);border:1px solid rgba(232,88,10,.3);color:var(--gn-color,#E8580A);border-radius:8px;padding:4px 10px;font-size:10px;font-weight:700;cursor:pointer">+ Férias</button>
+        </div>
+      </div>
+      ${_barraMesesFeriasChk(periodosAno,feriasAno)}
+      ${listaPeriodos}
+      ${formHtml}
+    </div>`;
+  }).join('');
+  container.innerHTML=anoNav+cards;
+}
+
+function enviarFeriasIndividualWpp(nome){
+  const lista=(feriasGeralData||[]).filter(p=>(p.nome||'').trim().toLowerCase()===nome.trim().toLowerCase()).sort((a,b)=>a.inicio.localeCompare(b.inicio));
+  if(!lista.length){ showToast('Sem períodos de férias pra esse funcionário.','error'); return; }
+  let txt=`🏖 *FÉRIAS — ${nome}*\n🏪 GN ${lojaDisp(LOJA)}\n\n`;
+  lista.forEach(p=>{ txt+=`${_fmtDataBRChk(p.inicio)} – ${_fmtDataBRChk(p.fim)}\n`; });
+  txt+='\n_GN Operações_';
+  window.open('https://wa.me/?text='+encodeURIComponent(txt),'_blank');
+}
+
+function buildRelatorioFerias(){
+  let txt=`🏖 RELATÓRIO DE FÉRIAS\n🏪 GN ${lojaDisp(LOJA)}\n📆 Ano: ${feriasAno}\n\n`;
+  const lista=(feriasGeralData||[]).filter(p=>_mesesCobertosFeriasChk(p,feriasAno).size>0).sort((a,b)=>a.inicio.localeCompare(b.inicio));
+  if(!lista.length) return txt+'Nenhuma férias cadastrada neste ano.\n\n_GN Operações_';
+  lista.forEach(p=>{ txt+=`👤 ${p.nome}${p.setor?` (${p.setor})`:''}\n   ${_fmtDataBRChk(p.inicio)} – ${_fmtDataBRChk(p.fim)}\n`; });
+  txt+='\n_GN Operações_';
+  return txt;
+}
+
+// =============================================
 // RENDER GENÉRICO DE CHECKLIST (abertura/checklist/fechamento)
 // =============================================
 function renderCheckGroup(stateKey, setorMap, containerId, countId){
@@ -6596,6 +6827,7 @@ function switchTab(tab,btn){
   if(tab==='banda') { _reparentBandaHojeCard(); carregarBandaTab(false); }
   if(tab==='vendas'){ renderVendasTab(); refreshVendasFromSupabase(); }
   if(tab==='escala') renderEscala();
+  if(tab==='ferias') loadFeriasGeral();
   if(tab==='gestao') renderGestao();
 }
 
@@ -6608,7 +6840,7 @@ function openRelModal(tipo){
   const content=document.getElementById('rel-content');
   const title=document.getElementById('rel-title');
   const _gestaoRelTitulo=_gestaoView==='semanal'?'📊 Relatório Semanal':_gestaoView==='diario'?'📋 Relatório Diário':'📊 Relatório de Gestão';
-  const titulos={geral:'Relatório Geral',abertura:'Relatório de Abertura',checklist:'Relatório Check-list',fechamento:'Relatório de Fechamento',carnes:'Relatório de Carnes',faltas:'Relatório de Insumos',manutencao:'Relatório de Manutenção',supervisao:'🎯 Relatório de Visita','supervisao-cozinha':'🧼 Relatório Cozinha (IVISA-RIO)',visitas:'📍 Relatório de Visitas',banco:'⏱ Banco de Horas',fichas:'📋 Fichas Técnicas',caixa:'💵 Livro Caixa',historico:'📅 Histórico de Operações',escala:'📅 Escala de Funcionários',vendas:'🍽️ Vendas do Dia',gestao:_gestaoRelTitulo};
+  const titulos={geral:'Relatório Geral',abertura:'Relatório de Abertura',checklist:'Relatório Check-list',fechamento:'Relatório de Fechamento',carnes:'Relatório de Carnes',faltas:'Relatório de Insumos',manutencao:'Relatório de Manutenção',supervisao:'🎯 Relatório de Visita','supervisao-cozinha':'🧼 Relatório Cozinha (IVISA-RIO)',visitas:'📍 Relatório de Visitas',banco:'⏱ Banco de Horas',fichas:'📋 Fichas Técnicas',caixa:'💵 Livro Caixa',historico:'📅 Histórico de Operações',escala:'📅 Escala de Funcionários',ferias:'🏖 Relatório de Férias',vendas:'🍽️ Vendas do Dia',gestao:_gestaoRelTitulo};
   title.textContent=titulos[tipo]||'Relatório';
   if(tipo==='escala'){
     _escalaRelPeriodo = escalaModo;
@@ -6631,7 +6863,7 @@ function gerarPDF(texto, titulo){
   if(w){w.document.write(html);w.document.close();}
 }
 function gerarRelPDF(){
-  const titulos={geral:'Relatório Geral',abertura:'Relatório de Abertura',checklist:'Relatório Check-list',fechamento:'Relatório de Fechamento',carnes:'Relatório de Carnes',faltas:'Relatório de Insumos',manutencao:'Relatório de Manutenção',supervisao:'Relatório de Visita','supervisao-cozinha':'Relatório Cozinha (IVISA-RIO)',visitas:'Relatório de Visitas',banco:'Banco de Horas',fichas:'Fichas Técnicas',caixa:'Livro Caixa',historico:'Histórico de Operações',escala:'Escala de Funcionários',vendas:'Vendas do Dia',banda:'Relatório Banda',gestao:_gestaoView==='semanal'?'Relatório Semanal de Gestão':_gestaoView==='diario'?'Relatório Diário de Gestão':'Relatório de Gestão'};
+  const titulos={geral:'Relatório Geral',abertura:'Relatório de Abertura',checklist:'Relatório Check-list',fechamento:'Relatório de Fechamento',carnes:'Relatório de Carnes',faltas:'Relatório de Insumos',manutencao:'Relatório de Manutenção',supervisao:'Relatório de Visita','supervisao-cozinha':'Relatório Cozinha (IVISA-RIO)',visitas:'Relatório de Visitas',banco:'Banco de Horas',fichas:'Fichas Técnicas',caixa:'Livro Caixa',historico:'Histórico de Operações',escala:'Escala de Funcionários',ferias:'Relatório de Férias',vendas:'Vendas do Dia',banda:'Relatório Banda',gestao:_gestaoView==='semanal'?'Relatório Semanal de Gestão':_gestaoView==='diario'?'Relatório Diário de Gestão':'Relatório de Gestão'};
   const titulo=titulos[relModalType]||'Relatório GN';
   const txt=buildRelatorio(relModalType);
   gerarPDF(txt,titulo);
@@ -6681,6 +6913,7 @@ function buildRelatorio(tipo){
   if(tipo==='caixa')     return buildRelatorioCaixa(cab);
   if(tipo==='historico') return buildRelatorioHistorico(cab);
   if(tipo==='escala')    return buildRelatorioEscala(cab);
+  if(tipo==='ferias')    return buildRelatorioFerias();
   if(tipo==='vendas')    return buildRelatorioVendas(cab);
   if(tipo==='banda')     return _bandaRelTxt;
   if(tipo==='dados')     return buildRelatorio('geral');

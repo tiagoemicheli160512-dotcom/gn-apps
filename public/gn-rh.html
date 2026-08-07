@@ -319,6 +319,10 @@ summary.loja-card-header::-webkit-details-marker{display:none}
       <span class="nav-icon">📅</span>
       <span class="nav-label">Boletos</span>
     </button>
+    <button class="nav-btn" data-tab="ferias" onclick="setTab('ferias')">
+      <span class="nav-icon">🏖</span>
+      <span class="nav-label">Férias</span>
+    </button>
     <button class="nav-btn" onclick="window.location.href='/gn-comissoes-mestra.html'">
       <span class="nav-icon">👑</span>
       <span class="nav-label">Mestra</span>
@@ -430,6 +434,10 @@ let S = {
   // Boletos/Vencimentos
   vencimentosData: [],   // [{lojaChk, lojaDisplay, fornecedor, nf, dataNF, vencimento, diff, total}]
   vencLoja: '',          // '' = todas
+  // Férias (todos os funcionários, cadastradas no app Check-list > aba Férias)
+  feriasData: [],        // [{id, nome, setor, inicio, fim, lojaChk, lojaDisplay}]
+  feriasLoja: '',         // '' = todas
+  feriasBusca: '',
 };
 
 // ══════════════════════════════════════════════
@@ -1862,6 +1870,28 @@ async function carregarVencimentos() {
 }
 
 // ══════════════════════════════════════════════
+// DATA — FÉRIAS (todos os funcionários, todas as lojas)
+// ══════════════════════════════════════════════
+// Fonte: gn_comissoes.all_data.ferias_geral, a mesma lista mantida pela aba
+// Férias do app Check-list — aqui só lemos e consolidamos por loja.
+async function carregarFerias() {
+  const { data, error } = await db.from('gn_comissoes')
+    .select('loja,all_data')
+    .in('loja', LOJAS.map(l => l.comKey));
+  if (error) throw error;
+
+  const itens = [];
+  (data || []).forEach(row => {
+    const lojaObj = LOJAS.find(l => l.comKey === row.loja);
+    if (!lojaObj) return;
+    const lista = Array.isArray(row.all_data?.ferias_geral) ? row.all_data.ferias_geral : [];
+    lista.forEach(p => itens.push({ ...p, lojaChk: lojaObj.chkKey, lojaDisplay: lojaObj.display }));
+  });
+  itens.sort((a, b) => (a.inicio || '').localeCompare(b.inicio || ''));
+  S.feriasData = itens;
+}
+
+// ══════════════════════════════════════════════
 // RENDER — AVARIAS (Tab 5)
 // ══════════════════════════════════════════════
 function renderAvarias() {
@@ -2109,6 +2139,7 @@ function renderContent() {
       if (S.tab === 'avarias')     { await carregarAvarias();     renderAvarias();      }
       if (S.tab === 'dossie')      { await carregarDossie();      renderDossie();       }
       if (S.tab === 'vencimentos'){ await carregarVencimentos(); renderVencimentos();  }
+      if (S.tab === 'ferias')     { await carregarFerias();      renderFerias();       }
     } catch(e) {
       $('content').innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-text">Erro ao carregar: ${e.message}</div></div>`;
     }
@@ -3741,6 +3772,65 @@ function renderVencimentos() {
 }
 
 // ══════════════════════════════════════════════
+// RENDER — FÉRIAS (Tab 8)
+// ══════════════════════════════════════════════
+function filtrarFeriasLoja(chkKey) {
+  S.feriasLoja = chkKey;
+  renderFerias();
+}
+
+function renderFerias() {
+  const lojaFiltros = [
+    `<button class="ftab${S.feriasLoja===''?' ativo':''}" onclick="filtrarFeriasLoja('')">Todas</button>`,
+    ...LOJAS_COM_TESTE.map(l => `<button class="ftab${S.feriasLoja===l.chkKey?' ativo':''}" onclick="filtrarFeriasLoja('${l.chkKey}')">${l.display}</button>`)
+  ].join('');
+
+  const buscaQ = (S.feriasBusca || '').toLowerCase().trim();
+  let itens = S.feriasLoja ? S.feriasData.filter(it => it.lojaChk === S.feriasLoja) : S.feriasData;
+  if (buscaQ) itens = itens.filter(it => (it.nome || '').toLowerCase().includes(buscaQ));
+
+  const hojeISO = isoDate(new Date());
+  const emFeriasHoje = itens.filter(it => it.inicio <= hojeISO && it.fim >= hojeISO);
+  const futuras = itens.filter(it => it.inicio > hojeISO);
+  const passadas = itens.filter(it => it.fim < hojeISO).sort((a,b) => b.fim.localeCompare(a.fim));
+
+  const row = (it, cor) => `<div style="display:flex;justify-content:space-between;align-items:flex-start;padding:8px 12px;border-bottom:1px solid var(--border)">
+    <div style="flex:1;min-width:0">
+      <div style="font-size:12px;font-weight:700">${esc(it.nome)}</div>
+      <div style="font-size:10px;color:var(--muted)">${esc(it.lojaDisplay)}${it.setor?' · '+esc(it.setor):''}</div>
+    </div>
+    <div style="text-align:right;flex-shrink:0;margin-left:10px">
+      <div style="font-size:12px;font-weight:800;color:${cor}">${fmtBRShort(it.inicio)} – ${fmtBRShort(it.fim)}</div>
+    </div>
+  </div>`;
+  const bloco = (label, cor, lista) => lista.length ? `<div class="card" style="margin-bottom:10px;padding:0;overflow:hidden">
+    <div style="font-size:10px;font-weight:800;color:${cor};text-transform:uppercase;letter-spacing:.5px;padding:8px 12px;background:${cor}18">${label} · ${lista.length}</div>
+    ${lista.map(it=>row(it,cor)).join('')}
+  </div>` : '';
+
+  const content = itens.length === 0
+    ? `<div class="empty"><div class="empty-icon">🏖</div><div class="empty-text">Nenhuma férias cadastrada${S.feriasLoja?' para esta loja':''}.<br>Cadastradas no app Check-list, aba Férias.</div></div>`
+    : `${bloco('🏖 Em férias hoje', 'var(--teal)', emFeriasHoje)}
+       ${bloco('📅 Próximas', 'var(--accent)', futuras)}
+       ${bloco('✅ Já concluídas', 'var(--muted)', passadas)}`;
+
+  $('content').innerHTML = `
+    <div class="sec-header">
+      <div class="sec-title">Férias</div>
+    </div>
+    <div class="filter-row">${lojaFiltros}</div>
+    <input type="search" placeholder="Buscar funcionário..." value="${(S.feriasBusca||'').replace(/"/g,'&quot;')}"
+      oninput="S.feriasBusca=this.value;renderFerias()"
+      style="width:100%;box-sizing:border-box;margin:10px 0;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surf2);color:var(--text);font-size:12px">
+    <div class="stat-row">
+      <div class="stat"><div class="stat-val">${emFeriasHoje.length}</div><div class="stat-lbl">Em férias hoje</div></div>
+      <div class="stat"><div class="stat-val">${futuras.length}</div><div class="stat-lbl">Próximas</div></div>
+      <div class="stat"><div class="stat-val">${itens.length}</div><div class="stat-lbl">Total no período</div></div>
+    </div>
+    ${content}`;
+}
+
+// ══════════════════════════════════════════════
 // LOGIN + INIT
 // ══════════════════════════════════════════════
 // ── CONTROLE DE HORÁRIO DE ACESSO (cargo rh) ─────────────────────
@@ -3870,7 +3960,7 @@ async function iniciarApp() {
 
   // Ir para a primeira aba permitida
   const primeiraAba = S.abasPermitidas
-    ? (['operacoes','financeiro','rh','comparativo','avarias','dossie','vencimentos'].find(t => S.abasPermitidas.has(t)) || 'operacoes')
+    ? (['operacoes','financeiro','rh','comparativo','avarias','dossie','vencimentos','ferias'].find(t => S.abasPermitidas.has(t)) || 'operacoes')
     : 'operacoes';
   setTab(primeiraAba);
 
