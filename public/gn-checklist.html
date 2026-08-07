@@ -899,8 +899,8 @@
 <div id="sup-lock">
   <div class="sup-lock-card">
     <div style="font-size:28px;margin-bottom:12px;">🎯</div>
-    <div style="font-size:15px;font-weight:800;color:var(--t1);margin-bottom:4px;">Acesso Supervisor</div>
-    <div style="font-size:12px;color:var(--t3);margin-bottom:20px;">Entre com credenciais de supervisor</div>
+    <div id="sup-lock-title" style="font-size:15px;font-weight:800;color:var(--t1);margin-bottom:4px;">Acesso Supervisor</div>
+    <div id="sup-lock-sub" style="font-size:12px;color:var(--t3);margin-bottom:20px;">Entre com credenciais de supervisor</div>
     <div class="login-error" id="sup-error">Acesso negado — cargo não autorizado</div>
     <div style="display:flex;flex-direction:column;gap:10px;text-align:left;">
       <div>
@@ -2416,7 +2416,8 @@ function applySemana(inicio, fim){
 let usuarioLogado = null;
 let supDesbloqueado = false;
 let _supLockMode = 'access'; // 'access' | 'reabrir'
-let _supLockAlvo = 'salao'; // 'salao' | 'cozinha' — qual checklist o cadeado de senha está protegendo
+let _supLockAlvo = 'salao'; // 'salao' | 'cozinha' | 'visitas' — o que o cadeado de senha está protegendo
+const CARGOS_VISITAS = ['supervisor','mestre']; // só esses cargos dão entrada/saída na aba Visitas
 
 // DATAS_ESPECIAIS_BASE também precisa vir antes do init IIFE: renderAll() (chamado
 // sincronamente por ele em alguns ramos) já popula o card de lembrete da aba Dados,
@@ -6585,7 +6586,10 @@ function switchTab(tab,btn){
   }
   if(tab==='dados') { _reparentBandaHojeCard(); _preencherBandaDiaFromAgenda(); _renderDatasEspeciaisReminder('datas-especiais-dados-card'); }
   if(tab==='historico') loadHistorico();
-  if(tab==='visitas'){ switchVisitasView(_visitasView||'hoje'); }
+  if(tab==='visitas'){
+    if(usuarioLogado && CARGOS_VISITAS.includes(usuarioLogado.cargo)) switchVisitasView(_visitasView||'hoje');
+    else openVisitasLock();
+  }
   if(tab==='caixa') { renderLivroCaixa(); renderResumoMensalCaixa(); }
   if(tab==='fichas') carregarFichas(false);
   if(tab==='banco') carregarBancoHoras(false);
@@ -7646,6 +7650,7 @@ function reabrirVisita(){
   }
   // Caso contrário, exige login de supervisor
   _supLockMode = 'reabrir';
+  _setSupLockTexto('Acesso Supervisor', 'Entre com credenciais de supervisor');
   document.getElementById('sup-error').classList.remove('visible');
   document.getElementById('sup-user').value = '';
   document.getElementById('sup-pass').value = '';
@@ -7667,6 +7672,7 @@ function reabrirVisitaCozinha(){
     return;
   }
   _supLockMode = 'reabrir';
+  _setSupLockTexto('Acesso Supervisor', 'Entre com credenciais de supervisor');
   document.getElementById('sup-error').classList.remove('visible');
   document.getElementById('sup-user').value = '';
   document.getElementById('sup-pass').value = '';
@@ -9620,6 +9626,12 @@ function logout(){
 }
 
 // Proteção da aba supervisão
+function _setSupLockTexto(titulo, sub){
+  const t = document.getElementById('sup-lock-title'), s = document.getElementById('sup-lock-sub');
+  if(t) t.textContent = titulo;
+  if(s) s.textContent = sub;
+}
+
 function openSupervisorLock(){
   _supLockAlvo = 'salao';
   // Se já é supervisor/administrador logado, vai direto
@@ -9628,6 +9640,7 @@ function openSupervisorLock(){
     renderSupervisao();
     return;
   }
+  _setSupLockTexto('Acesso Supervisor', 'Entre com credenciais de supervisor');
   document.getElementById('sup-error').classList.remove('visible');
   document.getElementById('sup-user').value='';
   document.getElementById('sup-pass').value='';
@@ -9643,6 +9656,24 @@ function openSupervisorLockCoz(){
     renderSupervisaoCozinha();
     return;
   }
+  _setSupLockTexto('Acesso Supervisor', 'Entre com credenciais de supervisor');
+  document.getElementById('sup-error').classList.remove('visible');
+  document.getElementById('sup-user').value='';
+  document.getElementById('sup-pass').value='';
+  document.getElementById('sup-lock').classList.add('visible');
+  setTimeout(()=>document.getElementById('sup-user').focus(),200);
+}
+
+// Proteção da aba Visitas — mesmo cadeado, mas liberado só pra supervisor/mestre
+// (não pra qualquer cargo com acesso ao Check-list). Não afeta a aba Manutenção,
+// que tem seu próprio fluxo de entrada/saída separado (gn_manut_visitas).
+function openVisitasLock(){
+  _supLockAlvo = 'visitas';
+  if(usuarioLogado && CARGOS_VISITAS.includes(usuarioLogado.cargo)){
+    switchVisitasView(_visitasView||'hoje');
+    return;
+  }
+  _setSupLockTexto('Acesso Visitas', 'Entre com credenciais de supervisor ou mestre');
   document.getElementById('sup-error').classList.remove('visible');
   document.getElementById('sup-user').value='';
   document.getElementById('sup-pass').value='';
@@ -9654,8 +9685,11 @@ function closeSupervisorLock(){
   document.getElementById('sup-lock').classList.remove('visible');
   const wasReabrir = _supLockMode === 'reabrir';
   _supLockMode = 'access';
+  const autorizado = _supLockAlvo === 'visitas'
+    ? !!(usuarioLogado && CARGOS_VISITAS.includes(usuarioLogado.cargo))
+    : supDesbloqueado;
   // Voltar para aba dados se não desbloqueou (só no modo acesso normal)
-  if(!supDesbloqueado && !wasReabrir){
+  if(!autorizado && !wasReabrir){
     switchTab('dados', document.querySelector('.tab-btn'));
   }
 }
@@ -9665,6 +9699,7 @@ async function doSupLogin(){
   const pass  = document.getElementById('sup-pass').value;
   const errEl = document.getElementById('sup-error');
   errEl.classList.remove('visible');
+  const cargosAlvo = _supLockAlvo === 'visitas' ? CARGOS_VISITAS : CARGOS_SUPERVISAO;
 
   try{
     const {data,error} = await sb.from('gn_usuarios')
@@ -9672,7 +9707,7 @@ async function doSupLogin(){
       .ilike('nome', user)
       .eq('senha', pass)
       .eq('ativo', true)
-      .or(CARGOS_SUPERVISAO.map(c=>'cargo.ilike.'+c).join(','))
+      .or(cargosAlvo.map(c=>'cargo.ilike.'+c).join(','))
       .single();
 
     if(error || !data){
@@ -9680,10 +9715,16 @@ async function doSupLogin(){
       errEl.classList.add('visible'); return;
     }
 
-    supDesbloqueado = true;
     if(data.cargo) data.cargo = data.cargo.toLowerCase();
+    supDesbloqueado = CARGOS_SUPERVISAO.includes(data.cargo);
     usuarioLogado = data;
     document.getElementById('sup-lock').classList.remove('visible');
+
+    if(_supLockAlvo === 'visitas'){
+      showToast('📍 Acesso liberado — ' + data.nome.split(' ')[0], 'info');
+      switchVisitasView(_visitasView||'hoje');
+      return;
+    }
 
     const alvoCoz = _supLockAlvo === 'cozinha';
     if(_supLockMode === 'reabrir'){
