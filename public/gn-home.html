@@ -549,6 +549,7 @@ let _dashContratosVencendo = null; // {lojaKey: [{nome, fimContrato, dias}]} —
 let _dashManutParada = null; // {lojaKey: count} — manutenções pendentes há mais de 5 dias, por loja
 let _dashCaixaSemConferencia = null; // {lojaKey: [{data, turno}]} — fechamentos de caixa sem conferência registrada, há mais de 3 dias
 let _dashVisitasHoje = null; // {lojaKey: [{nome, cargo, status:'planejada'|'andamento'|'concluida'}]} — visitas do dia (Calendário de Visitas)
+let _dashFeriasTodas = null; // [{id, usuarioId, nome, cargo, inicio, fim, origem}] — férias de gerência+equipe, carregado por _loadDashAll pro card do topo
 let _dashGerentes = null; // {lojaKey: [{id, nome, cargo}]} — gerentes/sub-gerentes ativos por loja (gn_usuarios)
 let _dashFeriasGerencia = null; // {lojaKey: [{id, usuarioId, nome, cargo, inicio, fim}]} — períodos de férias (gn_lojas.all_data.ferias_gerencia)
 let _dashFeriasLoading = false;
@@ -2087,6 +2088,24 @@ async function _loadDashAll() {
       if(!mk || !Array.isArray(items)) return;
       items.forEach(m=>manutOficiais.push({...m, _loja:mk, _data:m.created_at?m.created_at.split('T')[0]:hoje}));
     });
+    // Férias de gerência/sub-gerência das lojas (gn_lojas.all_data.ferias_gerencia)
+    // e da Equipe central — Supervisor/Administrador/Mestre (linha sentinela
+    // EQUIPE_CONFIG) — reaproveita o mesmo lojasOfRows já buscado acima, sem
+    // request extra. Usado pelo card "Férias chegando" no topo do Painel.
+    const feriasTodas=[];
+    (lojasOfRows||[]).forEach(lr=>{
+      if(lr.loja==='EQUIPE_CONFIG'){
+        const arr=lr.all_data?.ferias_equipe;
+        if(Array.isArray(arr)) arr.forEach(f=>feriasTodas.push({...f, origem: CARGO_LABEL_EQUIPE[f.cargo]||f.cargo}));
+        return;
+      }
+      const lk=_COM_KEY_TO_LOJA[lr.loja];
+      if(!lk || !LOJAS_LISTA.includes(lk)) return;
+      const arr=lr.all_data?.ferias_gerencia;
+      if(Array.isArray(arr)) arr.forEach(f=>feriasTodas.push({...f, origem: LOJA_DISPLAY[lk]||lk}));
+    });
+    _dashFeriasTodas = feriasTodas;
+
     const manutTodos=[...manutDedup, ...manutOficiais].filter(m=>m.status!=='Resolvido');
     const byManut = {}; LOJAS_LISTA.forEach(k=>{byManut[k]=0;});
     manutTodos.forEach(m=>{ if(Object.prototype.hasOwnProperty.call(byManut,m._loja)) byManut[m._loja]++; });
@@ -2349,6 +2368,30 @@ function _buildTableView(sorted) {
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>
+  </div>`;
+}
+
+// Card "🏖 Férias chegando" — fica no topo do Painel de Gestão, acima do card de
+// Visitas do Dia, avisando quando falta uma semana (ou já começou) pra férias de
+// gerência/sub-gerência das lojas ou da Equipe (Supervisor/Administrador/Mestre).
+// Usa _dashFeriasTodas (já carregado por _loadDashAll, sem request extra) e
+// _statusFeriasInfo — mesmo critério de "urgente" (≤7 dias) usado na aba Férias.
+function _buildFeriasUmaSemanaCard(){
+  if(!_dashFeriasTodas) return '';
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  const relevantes = _dashFeriasTodas
+    .map(f=>({...f, _info:_statusFeriasInfo(f)}))
+    .filter(f=>f._info.tipo==='andamento'||f._info.tipo==='urgente')
+    .sort((a,b)=>a._info.diasAte-b._info.diasAte);
+  if(!relevantes.length) return '';
+  const itens = relevantes.map(f=>{
+    const info=f._info;
+    const quando = info.tipo==='andamento' ? 'hoje' : `em ${info.diasAte}d`;
+    return `<span style="display:inline-flex;align-items:center;gap:4px;background:${info.cor}18;border:1px solid ${info.cor}40;border-radius:20px;padding:3px 9px;font-size:10px;font-weight:700;color:${info.cor};margin:2px 4px 2px 0">${info.emoji} ${esc(f.nome)} · ${esc(f.origem)} · ${quando}</span>`;
+  }).join('');
+  return `<div style="background:rgba(250,204,21,.05);border:1px solid rgba(250,204,21,.2);border-left:3px solid #FACC15;border-radius:14px;padding:14px 16px;margin:0 0 14px">
+    <div style="font-size:12px;font-weight:800;color:#e2e8f0;margin-bottom:10px">🏖 Férias chegando</div>
+    ${itens}
   </div>`;
 }
 
@@ -3333,6 +3376,7 @@ function renderDashboard() {
           <div style="font-size:10px;color:rgba(255,255,255,.3);margin-top:1px">Visão consolidada · todas as lojas${updTxt?` · atualizado às ${updTxt}`:''}${_dashLoadHadError?' · <span style="color:#fbbf24">⚠️ alguns dados podem estar desatualizados</span>':''}</div>
         </div>
       </div>
+      ${_buildFeriasUmaSemanaCard()}
       ${_buildVisitasHojeCard()}
       <div class="dash-tabs">
         <button class="dash-tab${_dashTab==='fat'?' on':''}" onclick="_setDashTab('fat')">↓ Faturamento</button>
