@@ -1699,6 +1699,11 @@ let _visSupDe  = (()=>{ const h=new Date(); return `${h.getFullYear()}-${String(
 let _visSupAte = (()=>{ const h=new Date(); const u=new Date(h.getFullYear(),h.getMonth()+1,0); return `${h.getFullYear()}-${String(h.getMonth()+1).padStart(2,'0')}-${String(u.getDate()).padStart(2,'0')}`; })();
 let _visSupLojaFiltro = null;
 let _visSupData = [];
+let _visSupView = 'relatorio'; // 'calendario' | 'relatorio' | 'cobertura' — abas do modal Visitas
+let _visCalMes = (()=>{ const h=new Date(); return `${h.getFullYear()}-${String(h.getMonth()+1).padStart(2,'0')}`; })();
+let _visCalData = [];
+let _visCalDiaSel = null;
+let _coberturaVisData = null; // null = ainda não carregado nesta sessão
 
 function _calcDuracaoMin(chegada, saida) {
   if (!chegada || !saida || chegada === 'PLAN') return null;
@@ -1720,10 +1725,27 @@ async function abrirVisitasSupervisor() {
   document.getElementById('visitas-sup-overlay').classList.add('open');
   if (!_visSupList.length) await _carregarSupervisoresList();
   _renderVisitasSupContent();
-  if (_visSupSelecionado) _carregarVisitasSupData();
+  if (_visSupView === 'cobertura') { if (!_coberturaVisData) await _carregarCoberturaVisitas(); }
+  else if (_visSupSelecionado) {
+    if (_visSupView === 'calendario') await _carregarVisCalendario();
+    else await _carregarVisitasSupData();
+  }
 }
 function fecharVisitasSupervisor() {
   document.getElementById('visitas-sup-overlay').classList.remove('open');
+}
+
+// Alterna entre as abas Calendário/Relatório/Cobertura do modal Visitas —
+// mesmo padrão do switchVisitasView() do app Checklist, adaptado pra visão
+// de gestão (Cobertura é global, não depende de supervisor selecionado).
+function _setVisSupView(view) {
+  _visSupView = view;
+  _renderVisitasSupContent();
+  if (view === 'cobertura') { if (!_coberturaVisData) _carregarCoberturaVisitas(); }
+  else if (_visSupSelecionado) {
+    if (view === 'calendario') _carregarVisCalendario();
+    else _carregarVisitasSupData();
+  }
 }
 
 async function _carregarSupervisoresList() {
@@ -1734,11 +1756,24 @@ async function _carregarSupervisoresList() {
   } catch(e) { _visSupList = []; }
 }
 
+// Chips de seleção de supervisor — compartilhado entre as abas Relatório e
+// Calendário (Cobertura não depende de supervisor, é uma visão global).
+function _visSupChipsHtml() {
+  return _visSupList.length
+    ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px">${_visSupList.map(u => {
+        const ativo = _visSupSelecionado === u.nome;
+        return `<button onclick="_selecionarSupervisorVis('${u.nome.replace(/'/g,"\\'")}')" style="padding:6px 12px;border-radius:20px;border:1px solid ${ativo?'#6366f1':'rgba(255,255,255,.15)'};background:${ativo?'rgba(99,102,241,.25)':'transparent'};color:${ativo?'#a5b4fc':'rgba(255,255,255,.6)'};font-size:12px;font-weight:700;cursor:pointer;font-family:inherit">${u.nome}</button>`;
+      }).join('')}</div>`
+    : `<div style="text-align:center;padding:20px;color:rgba(255,255,255,.35);font-size:12px">Nenhum usuário com cargo supervisor cadastrado.</div>`;
+}
+
 async function _selecionarSupervisorVis(nome) {
   _visSupSelecionado = nome;
   _visSupLojaFiltro = null;
+  _visCalDiaSel = null;
   _renderVisitasSupContent();
-  await _carregarVisitasSupData();
+  if (_visSupView === 'calendario') await _carregarVisCalendario();
+  else await _carregarVisitasSupData();
 }
 
 async function _carregarVisitasSupData() {
@@ -1768,20 +1803,32 @@ function _visSupMesRapido(delta) {
   _carregarVisitasSupData();
 }
 
+// Monta o conteúdo do modal Visitas: seletor de aba (Calendário/Relatório/
+// Cobertura) + o corpo da aba ativa. A aba Relatório é a tela que já existia
+// (_renderVisRelatorioTab, sem nenhuma mudança de comportamento) — Calendário
+// e Cobertura são novas, espelhando as abas equivalentes do app Checklist.
 function _renderVisitasSupContent() {
   const el = document.getElementById('visitas-sup-content');
   if (!el) return;
 
-  const chipsSupervisor = _visSupList.length
-    ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px">${_visSupList.map(u => {
-        const ativo = _visSupSelecionado === u.nome;
-        return `<button onclick="_selecionarSupervisorVis('${u.nome.replace(/'/g,"\\'")}')" style="padding:6px 12px;border-radius:20px;border:1px solid ${ativo?'#6366f1':'rgba(255,255,255,.15)'};background:${ativo?'rgba(99,102,241,.25)':'transparent'};color:${ativo?'#a5b4fc':'rgba(255,255,255,.6)'};font-size:12px;font-weight:700;cursor:pointer;font-family:inherit">${u.nome}</button>`;
-      }).join('')}</div>`
-    : `<div style="text-align:center;padding:20px;color:rgba(255,255,255,.35);font-size:12px">Nenhum usuário com cargo supervisor cadastrado.</div>`;
+  const tabs = [['calendario','📅 Calendário'],['relatorio','📊 Relatório'],['cobertura','🗺️ Cobertura']];
+  const switcherHtml = `<div style="display:flex;gap:6px;margin-bottom:14px;overflow-x:auto;-webkit-overflow-scrolling:touch">${tabs.map(([v,lbl]) => {
+    const ativo = _visSupView === v;
+    return `<button onclick="_setVisSupView('${v}')" style="flex:1;padding:7px 0;border-radius:8px;border:1px solid ${ativo?'#6366f1':'rgba(255,255,255,.1)'};background:${ativo?'rgba(99,102,241,.25)':'rgba(255,255,255,.04)'};color:${ativo?'#a5b4fc':'#94a3b8'};font-size:11px;font-weight:700;font-family:inherit;cursor:pointer;white-space:nowrap">${lbl}</button>`;
+  }).join('')}</div>`;
+
+  const body = _visSupView === 'calendario' ? _renderVisCalendarioTab()
+    : _visSupView === 'cobertura' ? _renderVisCoberturaTab()
+    : _renderVisRelatorioTab();
+
+  el.innerHTML = switcherHtml + body;
+}
+
+function _renderVisRelatorioTab() {
+  const chipsSupervisor = _visSupChipsHtml();
 
   if (!_visSupSelecionado) {
-    el.innerHTML = chipsSupervisor;
-    return;
+    return chipsSupervisor;
   }
 
   const reaisAll = _visSupData.filter(v => v.loja!=='FOLGA' && v.loja!=='FÉRIAS' && v.hora_chegada!=='PLAN');
@@ -1876,7 +1923,199 @@ function _renderVisitasSupContent() {
     html += `<div style="text-align:center;padding:20px;color:rgba(255,255,255,.35);font-size:12px">Nenhuma visita registrada nesse período.</div>`;
   }
 
-  el.innerHTML = html;
+  return html;
+}
+
+// ── Aba Calendário (dentro do modal Visitas) ───────────────────────────────
+// Calendário mensal de visitas do supervisor selecionado — mesma lógica do
+// renderVisitasCalendario() do app Checklist, mas só leitura (sem planejar
+// visita, marcar folga/férias ou editar observação, que são ações do próprio
+// supervisor no dia a dia, não da visão de gestão).
+async function _carregarVisCalendario() {
+  if (!_visSupSelecionado) return;
+  const [ano, mes] = _visCalMes.split('-').map(Number);
+  const inicio = `${_visCalMes}-01`;
+  const ultimoDia = new Date(ano, mes, 0).getDate();
+  const fim = `${_visCalMes}-${String(ultimoDia).padStart(2,'0')}`;
+  try {
+    const url = `${SB_URL}/rest/v1/gn_chk_visitas?visitante=eq.${encodeURIComponent(_visSupSelecionado)}&data=gte.${inicio}&data=lte.${fim}&order=data.asc,hora_chegada.asc&select=*`;
+    const res = await fetch(url, { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } });
+    _visCalData = res.ok ? await res.json() : [];
+  } catch(e) { _visCalData = []; }
+  _renderVisitasSupContent();
+}
+
+function _visCalNav(delta) {
+  const [ano, mes] = _visCalMes.split('-').map(Number);
+  const d = new Date(ano, mes-1+delta, 1);
+  _visCalMes = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+  _visCalDiaSel = null;
+  _carregarVisCalendario();
+}
+
+function _mostrarDiaVisCal(dataStr) {
+  _visCalDiaSel = (_visCalDiaSel === dataStr) ? null : dataStr;
+  _renderVisitasSupContent();
+}
+
+function _renderVisCalendarioTab() {
+  const chipsSupervisor = _visSupChipsHtml();
+  if (!_visSupSelecionado) {
+    return chipsSupervisor + `<div style="text-align:center;padding:20px;color:rgba(255,255,255,.35);font-size:12px">Selecione um supervisor acima pra ver o calendário.</div>`;
+  }
+
+  const [ano, mes] = _visCalMes.split('-').map(Number);
+  const ultimoDia = new Date(ano, mes, 0).getDate();
+  const primeiroDia = new Date(ano, mes-1, 1).getDay(); // 0=Dom
+  const meses = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+  const diasNome = ['D','S','T','Q','Q','S','S'];
+
+  const porData = {};
+  _visCalData.forEach(v => { if (!porData[v.data]) porData[v.data] = []; porData[v.data].push(v); });
+
+  const porLoja = {};
+  _visCalData.filter(v => v.loja!=='FOLGA' && v.loja!=='FÉRIAS' && v.hora_chegada!=='PLAN').forEach(v => { porLoja[v.loja] = (porLoja[v.loja]||0)+1; });
+  const nFolga  = _visCalData.filter(v => v.loja==='FOLGA').length;
+  const nFerias = _visCalData.filter(v => v.loja==='FÉRIAS').length;
+
+  let html = chipsSupervisor;
+  html += `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+    <button onclick="_visCalNav(-1)" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:6px 12px;color:#e2e8f0;cursor:pointer;font-size:14px">‹</button>
+    <div style="font-size:13px;font-weight:700;color:#e2e8f0">${meses[mes-1]} ${ano}</div>
+    <button onclick="_visCalNav(1)" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:6px 12px;color:#e2e8f0;cursor:pointer;font-size:14px">›</button>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:2px;margin-bottom:4px">
+    ${diasNome.map(d=>`<div style="text-align:center;font-size:9px;font-weight:700;color:rgba(255,255,255,.4);padding:4px 0;text-transform:uppercase">${d}</div>`).join('')}
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:3px">`;
+
+  for (let i=0; i<primeiroDia; i++) html += `<div style="height:56px"></div>`;
+
+  const hoje = new Date().toISOString().split('T')[0];
+  for (let d=1; d<=ultimoDia; d++) {
+    const dataStr = `${_visCalMes}-${String(d).padStart(2,'0')}`;
+    const visitas = porData[dataStr] || [];
+    const isHoje = dataStr === hoje;
+    const isSel = dataStr === _visCalDiaSel;
+    const reais = visitas.filter(v => v.loja!=='FOLGA' && v.loja!=='FÉRIAS' && v.hora_chegada!=='PLAN');
+    const ausencia = visitas.find(v => v.loja==='FOLGA' || v.loja==='FÉRIAS');
+    let cellBg = 'rgba(255,255,255,.03)', cellBorder = 'rgba(255,255,255,.1)';
+    if (isSel) { cellBg='rgba(251,191,36,.12)'; cellBorder='#fbbf24'; }
+    else if (ausencia?.loja==='FOLGA') { cellBg='rgba(6,182,212,.1)'; cellBorder=isHoje?'#6366f1':'rgba(6,182,212,.3)'; }
+    else if (ausencia?.loja==='FÉRIAS') { cellBg='rgba(14,165,233,.1)'; cellBorder=isHoje?'#6366f1':'rgba(14,165,233,.3)'; }
+    else if (reais.length > 0) { cellBg='rgba(99,102,241,.15)'; cellBorder=isHoje?'#6366f1':'rgba(99,102,241,.4)'; }
+    else if (isHoje) { cellBorder = '#6366f1'; }
+
+    const lojasUnicas = [...new Set(reais.map(v=>v.loja))];
+    const extraLojas = lojasUnicas.length - 2;
+    const lojasPills = [
+      ...lojasUnicas.slice(0,2).map(l=>`<div style="background:${COR_LOJA[_normLoja(l)]||'#888'};border-radius:3px;padding:1px 3px;font-size:6.5px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:calc(100% - 4px);margin-top:1px">${l}</div>`),
+      ...(extraLojas > 0 ? [`<div style="background:rgba(255,255,255,.15);border-radius:3px;padding:1px 3px;font-size:6px;font-weight:700;color:#e2e8f0;margin-top:1px">+${extraLojas}</div>`] : []),
+      ...(ausencia ? [`<div style="background:${ausencia.loja==='FOLGA'?'#06b6d4':'#0ea5e9'};border-radius:3px;padding:1px 3px;font-size:6.5px;font-weight:700;color:#fff;margin-top:1px">${ausencia.loja==='FOLGA'?'🌴':'✈️'}</div>`] : []),
+    ].join('');
+
+    html += `<div onclick="_mostrarDiaVisCal('${dataStr}')" style="border-radius:8px;padding:4px 2px;background:${cellBg};border:2px solid ${cellBorder};cursor:pointer;height:56px;overflow:hidden;display:flex;flex-direction:column;align-items:center;box-sizing:border-box">
+      <div style="font-size:11px;font-weight:${isHoje||isSel?'800':'600'};color:${isSel?'#fbbf24':isHoje?'#a5b4fc':(reais.length||ausencia)?'#e2e8f0':'rgba(255,255,255,.4)'}">${d}</div>
+      ${lojasPills}
+    </div>`;
+  }
+  html += `</div>`;
+
+  const temResumo = Object.keys(porLoja).length > 0 || nFolga > 0 || nFerias > 0;
+  if (temResumo) {
+    const ausenciaPills = [
+      ...(nFolga  ? [`<div style="background:rgba(6,182,212,.15);border:1px solid rgba(6,182,212,.4);border-radius:8px;padding:6px 10px;display:flex;align-items:center;gap:6px"><span style="font-size:13px">🌴</span><span style="font-size:11px;font-weight:700;color:#67e8f9">Folga</span><span style="font-size:11px;color:rgba(255,255,255,.4)">${nFolga} dia${nFolga>1?'s':''}</span></div>`] : []),
+      ...(nFerias ? [`<div style="background:rgba(14,165,233,.15);border:1px solid rgba(14,165,233,.4);border-radius:8px;padding:6px 10px;display:flex;align-items:center;gap:6px"><span style="font-size:13px">✈️</span><span style="font-size:11px;font-weight:700;color:#7dd3fc">Férias</span><span style="font-size:11px;color:rgba(255,255,255,.4)">${nFerias} dia${nFerias>1?'s':''}</span></div>`] : []),
+    ].join('');
+    html += `<div style="margin-top:14px;border-top:1px solid rgba(255,255,255,.08);padding-top:12px">
+      <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,.6);margin-bottom:8px">Resumo do mês</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
+        ${Object.entries(porLoja).sort((a,b)=>b[1]-a[1]).map(([l,n])=>`<div style="background:${COR_LOJA[_normLoja(l)]||'#888'}22;border:1px solid ${COR_LOJA[_normLoja(l)]||'#888'}66;border-radius:8px;padding:6px 10px;display:flex;align-items:center;gap:6px">
+          <div style="width:8px;height:8px;border-radius:50%;background:${COR_LOJA[_normLoja(l)]||'#888'};flex-shrink:0"></div>
+          <span style="font-size:11px;font-weight:700;color:#e2e8f0">${l}</span>
+          <span style="font-size:11px;color:rgba(255,255,255,.4)">${n} visita${n>1?'s':''}</span>
+        </div>`).join('')}
+        ${ausenciaPills}
+      </div>
+    </div>`;
+  } else {
+    html += `<div style="text-align:center;padding:20px;color:rgba(255,255,255,.35);font-size:12px">Nenhuma visita neste mês</div>`;
+  }
+
+  if (_visCalDiaSel) html += _visCalDetalheHtml(_visCalDiaSel);
+  return html;
+}
+
+function _visCalDetalheHtml(dataStr) {
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  const [a,m,d] = dataStr.split('-');
+  const dsem = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'][new Date(dataStr+'T12:00').getDay()];
+  const visitas = _visCalData.filter(v => v.data === dataStr);
+  const reais = visitas.filter(v => v.loja!=='FOLGA' && v.loja!=='FÉRIAS' && v.hora_chegada!=='PLAN');
+  const ausencia = visitas.find(v => v.loja==='FOLGA' || v.loja==='FÉRIAS');
+
+  let html = `<div style="margin-top:10px;background:rgba(255,255,255,.04);border:2px solid #fbbf24;border-radius:12px;padding:12px">
+    <div style="font-size:11px;font-weight:700;color:#fbbf24;margin-bottom:10px">${dsem}, ${d}/${m}/${a}</div>`;
+  if (!reais.length && !ausencia) {
+    html += `<div style="font-size:11px;color:rgba(255,255,255,.4);text-align:center;padding:6px 0">Sem visita registrada neste dia.</div>`;
+  }
+  reais.forEach(v => {
+    const dur = _calcDuracaoMin(v.hora_chegada, v.hora_saida);
+    html += `<div style="border-left:3px solid ${COR_LOJA[_normLoja(v.loja)]||'#888'};padding:8px 10px;margin-bottom:8px;background:rgba(255,255,255,.03);border-radius:0 8px 8px 0">
+      <div style="font-size:12px;font-weight:700;color:#e2e8f0">${LOJA_DISPLAY[_normLoja(v.loja)]||v.loja}</div>
+      <div style="font-size:11px;color:rgba(255,255,255,.5);margin-top:2px">📍 ${v.hora_chegada} → ${v.hora_saida||'em andamento'}${dur?' · '+_fmtDuracao(dur):''}</div>
+      ${v.obs ? `<div style="font-size:10px;color:rgba(255,255,255,.4);margin-top:4px">${esc(v.obs)}</div>` : ''}
+    </div>`;
+  });
+  if (ausencia) {
+    const cor = ausencia.loja==='FOLGA' ? '#06b6d4' : '#0ea5e9';
+    html += `<div style="background:${cor}15;border:1px solid ${cor}44;border-radius:8px;padding:8px 12px">
+      <span style="font-size:12px;font-weight:700;color:${cor}">${ausencia.loja==='FOLGA'?'🌴 Folga':'✈️ Férias'}</span>
+    </div>`;
+  }
+  html += `</div>`;
+  return html;
+}
+
+// ── Aba Cobertura (dentro do modal Visitas) ────────────────────────────────
+// Última visita real por loja nos últimos 90 dias, qualquer supervisor —
+// mesma lógica do renderVisitasCobertura() do app Checklist, só que olhando
+// pra rede toda em vez de uma loja só.
+async function _carregarCoberturaVisitas() {
+  const desde = new Date(); desde.setDate(desde.getDate() - 90);
+  const desdeStr = desde.toISOString().split('T')[0];
+  try {
+    const url = `${SB_URL}/rest/v1/gn_chk_visitas?hora_chegada=neq.PLAN&loja=neq.FOLGA&loja=neq.${encodeURIComponent('FÉRIAS')}&data=gte.${desdeStr}&order=data.desc&select=loja,data,visitante,hora_chegada`;
+    const res = await fetch(url, { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } });
+    _coberturaVisData = res.ok ? await res.json() : [];
+  } catch(e) { _coberturaVisData = []; }
+  _renderVisitasSupContent();
+}
+
+function _renderVisCoberturaTab() {
+  if (_coberturaVisData === null) {
+    return `<div style="text-align:center;padding:30px;color:rgba(255,255,255,.35);font-size:12px">Carregando…</div>`;
+  }
+  const hojeStr = new Date().toISOString().split('T')[0];
+  const porLoja = {};
+  _coberturaVisData.forEach(v => { if (!porLoja[v.loja]) porLoja[v.loja] = v; });
+  const linhas = GN_LOJAS.map(l => l.userKey).map(loja => {
+    const ultima = porLoja[loja];
+    const dias = ultima ? Math.round((new Date(hojeStr+'T12:00') - new Date(ultima.data+'T12:00')) / 86400000) : null;
+    return { loja, ultima, dias };
+  }).sort((a,b) => (b.dias===null?9999:b.dias) - (a.dias===null?9999:a.dias) || a.loja.localeCompare(b.loja));
+  const cor = d => d===null ? '#f87171' : d>14 ? '#f87171' : d>7 ? '#fbbf24' : '#4ade80';
+  const lbl = d => d===null ? 'Sem visita (90d)' : d===0 ? 'Hoje' : d===1 ? '1 dia atrás' : `${d} dias atrás`;
+
+  return `<div style="font-size:10px;color:rgba(255,255,255,.4);margin-bottom:10px">Última visita real registrada por loja, olhando os últimos 90 dias (qualquer supervisor).</div>
+    ${linhas.map(l => `
+      <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:10px 12px;margin-bottom:6px">
+        <div>
+          <div style="font-size:12px;font-weight:700;color:#e2e8f0">${LOJA_DISPLAY[_normLoja(l.loja)]||l.loja}</div>
+          <div style="font-size:10px;color:rgba(255,255,255,.4);margin-top:1px">${l.ultima ? (l.ultima.data.split('-').reverse().join('/')+' · '+l.ultima.visitante) : 'Sem visitas nos últimos 90 dias'}</div>
+        </div>
+        <div style="font-size:11px;font-weight:800;color:${cor(l.dias)};white-space:nowrap">${lbl(l.dias)}</div>
+      </div>`).join('')}`;
 }
 
 // ── DASHBOARD ────────────────────────────────────────────────────────────────
