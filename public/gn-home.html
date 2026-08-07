@@ -532,6 +532,8 @@ let _dashComDiaLoja = null;   // {lojaKey: Array(7)} — mesmo valor do repique 
 // duplicando o mesmo número — ver onRepiqueChange() em gn-checklist.html.
 let _dashXmlPendentes = null; // Set de lojas sem o XML fiscal do mês confirmado (ver _mesRefPendenteXmlHome)
 let _dashVisitasAndamento = null; // {lojaKey: [{nome, origem, horaChegada}]} — visitas ainda sem hora_saida hoje
+let _dashEscalaIncompleta = null; // {lojaKey: [{nome, dias:[nomeDia,...]}]} — funcs com horário faltando na escala da semana
+let _dashBancoHorasPendente = null; // {lojaKey: {motivo:'sem_periodo'|'setor_faltando', setores:[...]}}
 
 // Mesma lista usada no app Check-list (aba Dados) — duplicada aqui porque cada app
 // é um HTML independente. Também precisa ficar antes de showHome() por causa do
@@ -1870,7 +1872,8 @@ async function _loadDashAll() {
     const trinta = new Date(); trinta.setDate(trinta.getDate()-30);
     const from30 = trinta.toISOString().slice(0,10);
     const _errCb = label => e => { window.gnLogError('dash:'+label, e); _dashLoadHadError = true; };
-    const [fatCur, fatPrv, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows] = await Promise.all([
+    const comKeysAll = Object.values(LOJA_COM_KEY).join(',');
+    const [fatCur, fatPrv, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows, comissoesAllRows, bhConfigRows] = await Promise.all([
       _fetchFat(range.dates).catch(e=>{ _errCb('fatCur')(e); return {}; }),
       _fetchFat(prevRange.dates).catch(e=>{ _errCb('fatPrv')(e); return {}; }),
       _fetchFat(range2.dates).catch(e=>{ _errCb('fat2')(e); return {}; }),
@@ -1882,6 +1885,8 @@ async function _loadDashAll() {
       _fetchComDia(_dashPer==='sem' ? range.dates[0] : weekRange.dates[0]).catch(e=>{ _errCb('comDia')(e); return {totals:Array(7).fill(0),byLoja:{}}; }),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_chk_visitas?data=eq.${hoje}&select=loja,visitante,cargo,hora_chegada,hora_saida`, H, 'dash:visitasChkRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_manut_visitas?data=eq.${hoje}&select=loja,oficial,hora_chegada,hora_saida`, H, 'dash:visitasManutRows', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=in.(${comKeysAll})&select=loja,all_data`, H, 'dash:comissoesAllRows', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_banco_horas?mes=eq.CONFIG&select=loja,registros`, H, 'dash:bhConfigRows', []),
     ]);
     _dashFat = fatCur; _dashFatPrev = fatPrv;
     _dashFatDia = fatDia.byDay || {}; _dashFatDiaLoja = fatDia.byLojaDay || {};
@@ -1949,6 +1954,51 @@ async function _loadDashAll() {
     visitasAndamentoTodas.forEach(r=>{ (visitasPorLoja[r.loja]=visitasPorLoja[r.loja]||[]).push(r); });
     _dashVisitasAndamento = visitasPorLoja;
 
+    // Cadastro & Escala — funcionários sem horário completo (entrada/saída) nos dias em
+    // que trabalham na semana atual, e lojas sem o banco de horas do mês configurado ou
+    // sem salário cadastrado pra algum setor que tem gente escalada. Mesma base de dados
+    // das abas Escala/Banco de Horas do Check-list (gn_comissoes / gn_banco_horas),
+    // só que consolidada aqui pra todas as lojas de uma vez.
+    const LOJA_TO_CHK_HOME = Object.fromEntries(GN_LOJAS.map(l=>[l.userKey,l.chkKey]));
+    const DIAS_SEM_HOME = ['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
+    const semIdxAtual = _escalaHomeSemIdx(hoje);
+    const bhPorLoja = {};
+    (bhConfigRows||[]).forEach(r=>{ bhPorLoja[r.loja]=r.registros||{}; });
+    const escalaIncompleta = {}, bancoHorasPendente = {};
+    if (semIdxAtual != null) {
+      (comissoesAllRows||[]).forEach(r=>{
+        const lk = _COM_KEY_TO_LOJA[r.loja];
+        if (!lk || !LOJAS_LISTA.includes(lk)) return;
+        const wd = (r.all_data||{})[String(semIdxAtual)];
+        const funcs = ((wd && wd.funcs) || []).filter(f=>f.nome && f.nome.trim());
+        const setoresEmUso = new Set();
+        funcs.forEach(f=>{
+          if (f.setor && f.setor.trim()) setoresEmUso.add(f.setor.trim());
+          const diasFaltando = [];
+          (f.dias||[]).forEach((st,d)=>{
+            if (!ESCALA_HOME_PRESENTE_SET.has(st)) return;
+            const hd = (f.horario_dias||[])[d];
+            if (!hd || !hd.entrada || !hd.saida) diasFaltando.push(DIAS_SEM_HOME[d]);
+          });
+          if (diasFaltando.length) {
+            if (!escalaIncompleta[lk]) escalaIncompleta[lk] = [];
+            escalaIncompleta[lk].push({ nome: f.nome, dias: diasFaltando });
+          }
+        });
+        if (!setoresEmUso.size) return;
+        const bh = bhPorLoja[LOJA_TO_CHK_HOME[lk]];
+        if (!bh || !bh.periodo_inicio || !bh.periodo_fim || hoje < bh.periodo_inicio || hoje > bh.periodo_fim) {
+          bancoHorasPendente[lk] = { motivo: 'sem_periodo' };
+        } else {
+          const salariosSetor = bh.salariosSetor || {};
+          const setoresFaltando = [...setoresEmUso].filter(s => !(parseFloat(salariosSetor[s]) > 0));
+          if (setoresFaltando.length) bancoHorasPendente[lk] = { motivo: 'setor_faltando', setores: setoresFaltando };
+        }
+      });
+    }
+    _dashEscalaIncompleta = escalaIncompleta;
+    _dashBancoHorasPendente = bancoHorasPendente;
+
     const old5 = new Date(); old5.setDate(old5.getDate()-5);
     _dashManutCrit = manutTodos.filter(m=>m._data && new Date(m._data+'T00:00:00')<old5).length;
     const spark={}; LOJAS_LISTA.forEach(k=>{spark[k]=[(fat3[k]||0),(fat2[k]||0),(fatPrv[k]||0),(fatCur[k]||0)];});
@@ -1959,6 +2009,7 @@ async function _loadDashAll() {
     _dashFat=_dashFat||{}; _dashFatPrev=_dashFatPrev||{};
     _dashManut=_dashManut||{}; _dashChk=_dashChk||new Set();
     _dashXmlPendentes=_dashXmlPendentes||new Set(); _dashVisitasAndamento=_dashVisitasAndamento||{};
+    _dashEscalaIncompleta=_dashEscalaIncompleta||{}; _dashBancoHorasPendente=_dashBancoHorasPendente||{};
   } finally { _dashLoading=false; _dashLoadedAt=new Date(); }
   renderDashboard();
 }
@@ -2088,6 +2139,10 @@ function _buildAlertsFeed() {
     if(_dashXmlPendentes&&_dashXmlPendentes.has(k)) alerts.push({sev:2,cor:'#ef4444',ico:'📄',msg:`${nome} sem XML do mês enviado`,sub:'Pendente pra contabilidade'});
     const visitasLoja=_dashVisitasAndamento?(_dashVisitasAndamento[k]||[]):[];
     if(visitasLoja.length) alerts.push({sev:4,cor:'#22c55e',ico:'📍',msg:`${nome} com ${visitasLoja.length} visita${visitasLoja.length>1?'s':''} em andamento`,sub:visitasLoja.map(r=>`${r.nome||'?'} (${r.origem}) desde ${r.horaChegada||'?'}`).join(' · ')});
+    const escalaLoja=_dashEscalaIncompleta?(_dashEscalaIncompleta[k]||[]):[];
+    if(escalaLoja.length) alerts.push({sev:3,cor:'#a78bfa',ico:'🗓️',msg:`${nome} com ${escalaLoja.length} funcionário${escalaLoja.length>1?'s':''} sem horário completo na escala`,sub:escalaLoja.slice(0,3).map(f=>`${f.nome} (${f.dias.join(', ')})`).join(' · ')+(escalaLoja.length>3?` +${escalaLoja.length-3}`:'')});
+    const bhPend=_dashBancoHorasPendente?_dashBancoHorasPendente[k]:null;
+    if(bhPend) alerts.push({sev:3,cor:'#a78bfa',ico:'⏱️',msg:bhPend.motivo==='sem_periodo'?`${nome} sem banco de horas configurado`:`${nome} sem salário cadastrado pra ${bhPend.setores.length>1?bhPend.setores.length+' setores':bhPend.setores[0]}`,sub:bhPend.motivo==='sem_periodo'?'Período do mês não definido na aba Banco de Horas':bhPend.setores.join(', ')});
   });
   alerts.sort((a,b)=>a.sev-b.sev);
   if(!alerts.length) return '<div style="padding:24px;text-align:center;font-size:13px;color:#4ade80">✅ Nenhum alerta</div>';
