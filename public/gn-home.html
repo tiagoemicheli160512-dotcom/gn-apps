@@ -540,6 +540,11 @@ let _dashContratosVencendo = null; // {lojaKey: [{nome, fimContrato, dias}]} —
 let _dashManutParada = null; // {lojaKey: count} — manutenções pendentes há mais de 5 dias, por loja
 let _dashCaixaSemConferencia = null; // {lojaKey: [{data, turno}]} — fechamentos de caixa sem conferência registrada, há mais de 3 dias
 let _dashVisitasHoje = null; // {lojaKey: [{nome, cargo, status:'planejada'|'andamento'|'concluida'}]} — visitas do dia (Calendário de Visitas)
+let _dashGerentes = null; // {lojaKey: [{id, nome, cargo}]} — gerentes/sub-gerentes ativos por loja (gn_usuarios)
+let _dashFeriasGerencia = null; // {lojaKey: [{id, usuarioId, nome, cargo, inicio, fim}]} — períodos de férias (gn_lojas.all_data.ferias_gerencia)
+let _dashFeriasLoading = false;
+let _dashFeriasAno = new Date().getFullYear();
+let _dashFeriasFormAberto = null; // {loja, usuarioId} — pessoa com o form de nova férias aberto
 
 // Mesma lista usada no app Check-list (aba Dados) — duplicada aqui porque cada app
 // é um HTML independente. Também precisa ficar antes de showHome() por causa do
@@ -2326,6 +2331,183 @@ function _buildVisitasHojeCard(){
   </div>`;
 }
 
+// ── FÉRIAS & GERÊNCIA ───────────────────────────────────────────────────────
+// Planejamento anual de férias de gerentes/sub-gerentes por loja. Gerentes/subs
+// vêm de gn_usuarios (cargo+loja já é a fonte confiável de quem administra cada
+// loja); os períodos de férias em si ficam em gn_lojas.all_data.ferias_gerencia
+// (mesmo padrão já usado pra manut_oficial_items/caixa_conferencias/xml_enviado_mes).
+async function _loadFeriasGerencia(){
+  if(_dashFeriasLoading) return;
+  _dashFeriasLoading = true;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  try{
+    const [gerRows, lojaRows] = await Promise.all([
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_usuarios?or=(cargo.ilike.gerente,cargo.ilike.sub_gerente)&ativo=eq.true&select=id,nome,cargo,loja&order=nome.asc`, H, 'ferias:gerentes', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?select=loja,all_data`, H, 'ferias:lojas', []),
+    ]);
+    const porLoja = {};
+    (gerRows||[]).forEach(u=>{
+      if(!LOJAS_LISTA.includes(u.loja)) return;
+      (porLoja[u.loja]=porLoja[u.loja]||[]).push({ id:u.id, nome:u.nome, cargo:(u.cargo||'').toLowerCase() });
+    });
+    _dashGerentes = porLoja;
+    const feriasPorLoja = {};
+    (lojaRows||[]).forEach(lr=>{
+      const lk=_COM_KEY_TO_LOJA[lr.loja];
+      if(!lk) return;
+      const arr=(lr.all_data||{}).ferias_gerencia;
+      feriasPorLoja[lk]=Array.isArray(arr)?arr:[];
+    });
+    _dashFeriasGerencia = feriasPorLoja;
+  }catch(e){
+    window.gnLogError && window.gnLogError('ferias:_loadFeriasGerencia', e);
+    _dashGerentes = _dashGerentes||{}; _dashFeriasGerencia = _dashFeriasGerencia||{};
+  }
+  _dashFeriasLoading = false;
+  renderDashboard();
+}
+
+async function _salvarFeriasGerencia(lojaKey, usuarioId, nome, cargo, inicio, fim){
+  const comKey = LOJA_COM_KEY[lojaKey] || lojaKey;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+  try{
+    const rowsRes = await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, { headers:H });
+    const rows = await rowsRes.json();
+    const allData = (rows[0] && rows[0].all_data) || {};
+    const arr = Array.isArray(allData.ferias_gerencia) ? [...allData.ferias_gerencia] : [];
+    arr.push({ id:'fer_'+Date.now()+'_'+Math.random().toString(36).slice(2,6), usuarioId, nome, cargo, inicio, fim });
+    if(!rows.length){
+      await fetch(`${SB_URL}/rest/v1/gn_lojas`, { method:'POST', headers:{...H, Prefer:'return=minimal'}, body:JSON.stringify({loja:comKey, all_data:{...allData, ferias_gerencia:arr}}) });
+    } else {
+      await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}`, { method:'PATCH', headers:{...H, Prefer:'return=minimal'}, body:JSON.stringify({all_data:{...allData, ferias_gerencia:arr}}) });
+    }
+    if(!_dashFeriasGerencia) _dashFeriasGerencia={};
+    _dashFeriasGerencia[lojaKey]=arr;
+  }catch(e){
+    window.gnLogError && window.gnLogError('ferias:_salvarFeriasGerencia', e);
+    alert('Erro ao salvar férias. Tente novamente.');
+  }
+  renderDashboard();
+}
+
+async function _excluirFeriasGerencia(lojaKey, periodoId){
+  if(!confirm('Excluir este período de férias?')) return;
+  const comKey = LOJA_COM_KEY[lojaKey] || lojaKey;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+  try{
+    const rowsRes = await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, { headers:H });
+    const rows = await rowsRes.json();
+    const allData = (rows[0] && rows[0].all_data) || {};
+    const arr = (Array.isArray(allData.ferias_gerencia)?allData.ferias_gerencia:[]).filter(f=>String(f.id)!==String(periodoId));
+    await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}`, { method:'PATCH', headers:{...H, Prefer:'return=minimal'}, body:JSON.stringify({all_data:{...allData, ferias_gerencia:arr}}) });
+    if(_dashFeriasGerencia) _dashFeriasGerencia[lojaKey]=arr;
+  }catch(e){
+    window.gnLogError && window.gnLogError('ferias:_excluirFeriasGerencia', e);
+    alert('Erro ao excluir. Tente novamente.');
+  }
+  renderDashboard();
+}
+
+function _abrirFormFerias(loja, usuarioId){ _dashFeriasFormAberto={loja, usuarioId}; renderDashboard(); }
+function _fecharFormFerias(){ _dashFeriasFormAberto=null; renderDashboard(); }
+function _feriasAnoNav(dir){ _dashFeriasAno+=dir; renderDashboard(); }
+
+async function _confirmarFerias(loja, usuarioId){
+  const ini=document.getElementById('ferias-ini-'+usuarioId)?.value;
+  const fim=document.getElementById('ferias-fim-'+usuarioId)?.value;
+  if(!ini || !fim){ alert('Preencha início e fim das férias.'); return; }
+  if(fim<ini){ alert('A data de fim não pode ser antes do início.'); return; }
+  const pessoa=(_dashGerentes[loja]||[]).find(p=>String(p.id)===String(usuarioId));
+  if(!pessoa){ alert('Pessoa não encontrada.'); return; }
+  _dashFeriasFormAberto=null;
+  await _salvarFeriasGerencia(loja, pessoa.id, pessoa.nome, pessoa.cargo, ini, fim);
+}
+
+function _fmtDataBR(iso){ if(!iso) return '—'; const [y,m,d]=iso.split('-'); return `${d}/${m}/${y}`; }
+
+function _mesesCobertosFerias(periodo, ano){
+  const meses=new Set();
+  const ini=new Date(periodo.inicio+'T12:00:00'), fim=new Date(periodo.fim+'T12:00:00');
+  let d=new Date(ini.getFullYear(), ini.getMonth(), 1);
+  const fimMes=new Date(fim.getFullYear(), fim.getMonth(), 1);
+  while(d<=fimMes){
+    if(d.getFullYear()===ano) meses.add(d.getMonth());
+    d.setMonth(d.getMonth()+1);
+  }
+  return meses;
+}
+
+function _barraMesesFerias(periodos, ano){
+  const MESES_ABR=['J','F','M','A','M','J','J','A','S','O','N','D'];
+  const cobertos=new Set();
+  periodos.forEach(p=>{ _mesesCobertosFerias(p, ano).forEach(m=>cobertos.add(m)); });
+  return `<div style="display:flex;gap:2px;margin-top:6px">${MESES_ABR.map((m,i)=>`<div style="flex:1;text-align:center;font-size:8px;font-weight:800;padding:3px 0;border-radius:3px;background:${cobertos.has(i)?'#FACC15':'rgba(255,255,255,.06)'};color:${cobertos.has(i)?'#1a1a1a':'rgba(255,255,255,.25)'}">${m}</div>`).join('')}</div>`;
+}
+
+function _formFeriasHtml(lojaKey, usuarioId){
+  if(!_dashFeriasFormAberto || _dashFeriasFormAberto.loja!==lojaKey || String(_dashFeriasFormAberto.usuarioId)!==String(usuarioId)) return '';
+  return `<div style="display:flex;gap:6px;margin-top:8px;align-items:flex-end;flex-wrap:wrap">
+    <div>
+      <div style="font-size:9px;color:rgba(255,255,255,.4);margin-bottom:2px">Início</div>
+      <input type="date" id="ferias-ini-${usuarioId}" style="background:#484848;border:1px solid rgba(255,255,255,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#fff;font-family:inherit">
+    </div>
+    <div>
+      <div style="font-size:9px;color:rgba(255,255,255,.4);margin-bottom:2px">Fim</div>
+      <input type="date" id="ferias-fim-${usuarioId}" style="background:#484848;border:1px solid rgba(255,255,255,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#fff;font-family:inherit">
+    </div>
+    <button onclick="_confirmarFerias('${lojaKey}','${usuarioId}')" style="background:#FACC15;color:#1a1a1a;border:none;border-radius:8px;padding:7px 12px;font-size:11px;font-weight:800;cursor:pointer">Salvar</button>
+    <button onclick="_fecharFormFerias()" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:rgba(255,255,255,.6);border-radius:8px;padding:7px 12px;font-size:11px;cursor:pointer">Cancelar</button>
+  </div>`;
+}
+
+function _buildFeriasPanel(){
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  const anoNav = `<div style="display:flex;align-items:center;justify-content:center;gap:14px;margin-bottom:14px">
+    <button onclick="_feriasAnoNav(-1)" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:8px;padding:6px 12px;font-size:14px;cursor:pointer">‹</button>
+    <span style="font-size:14px;font-weight:800;color:#FDE047">${_dashFeriasAno}</span>
+    <button onclick="_feriasAnoNav(1)" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;border-radius:8px;padding:6px 12px;font-size:14px;cursor:pointer">›</button>
+  </div>`;
+
+  if(!_dashGerentes){
+    return anoNav+'<div style="padding:28px;text-align:center;color:rgba(255,255,255,.28);font-size:12px">⟳ Carregando…</div>';
+  }
+
+  const lojasComGerencia = LOJAS_LISTA.filter(k=>(_dashGerentes[k]||[]).length);
+  if(!lojasComGerencia.length){
+    return anoNav+'<div style="padding:28px;text-align:center;color:rgba(255,255,255,.28);font-size:12px">🏖️ Nenhum gerente/sub-gerente cadastrado ainda</div>';
+  }
+
+  const cards = lojasComGerencia.map(k=>{
+    const nome=LOJA_DISPLAY[k]||k;
+    const pessoas=_dashGerentes[k]||[];
+    const linhasPessoas=pessoas.map(p=>{
+      const periodosAno=(_dashFeriasGerencia?.[k]||[]).filter(f=>f.usuarioId===p.id && _mesesCobertosFerias(f,_dashFeriasAno).size>0);
+      const cargoLbl=p.cargo==='gerente'?'Gerente':'Sub-Gerente';
+      const listaPeriodos=periodosAno.length
+        ? periodosAno.map(f=>`<div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,.04);border-radius:8px;padding:6px 10px;margin-top:4px">
+            <span style="font-size:11px;color:rgba(255,255,255,.7)">${_fmtDataBR(f.inicio)} – ${_fmtDataBR(f.fim)}</span>
+            <button onclick="_excluirFeriasGerencia('${k}','${f.id}')" style="background:none;border:none;color:rgba(255,255,255,.3);font-size:14px;cursor:pointer;padding:0 4px">✕</button>
+          </div>`).join('')
+        : `<div style="font-size:10px;color:rgba(255,255,255,.25);margin-top:4px">Nenhuma férias cadastrada em ${_dashFeriasAno}</div>`;
+      return `<div style="margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,.06)">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+          <div style="font-size:12px;font-weight:700;color:#e2e8f0">${esc(p.nome)} <span style="font-size:9px;font-weight:700;color:#FACC15;background:rgba(250,204,21,.12);border-radius:6px;padding:1px 6px;margin-left:4px">${cargoLbl}</span></div>
+          <button onclick="_abrirFormFerias('${k}','${p.id}')" style="background:rgba(250,204,21,.12);border:1px solid rgba(250,204,21,.3);color:#FDE047;border-radius:8px;padding:4px 10px;font-size:10px;font-weight:700;cursor:pointer">+ Férias</button>
+        </div>
+        ${_barraMesesFerias(periodosAno,_dashFeriasAno)}
+        ${listaPeriodos}
+        ${_formFeriasHtml(k,p.id)}
+      </div>`;
+    }).join('');
+    return `<div style="background:#363636;border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:14px;margin-bottom:12px">
+      <div style="font-size:13px;font-weight:800;color:#FDE047">${esc(nome)}</div>
+      ${linhasPessoas}
+    </div>`;
+  }).join('');
+
+  return anoNav+cards;
+}
+
 function _buildAlertsFeed() {
   const fat=_dashFat, fatP=_dashFatPrev, metas=_dashMetas;
   const alerts=[];
@@ -2615,6 +2797,9 @@ function renderDashboard() {
     if(!fat){ content='<div style="padding:28px;text-align:center;color:rgba(255,255,255,.28);font-size:12px">⟳ Carregando…</div>'; }
     else { content=manutBanner+_buildAlertsFeed(); }
 
+  } else if (_dashTab==='ferias') {
+    content = _buildFeriasPanel();
+
   } else { // ⚙ Metas
     const perLabel=_dashPer==='sem'?'semana':'mês';
     content=`
@@ -2646,14 +2831,15 @@ function renderDashboard() {
       <div class="dash-tabs">
         <button class="dash-tab${_dashTab==='fat'?' on':''}" onclick="_setDashTab('fat')">↓ Faturamento</button>
         <button class="dash-tab${_dashTab==='att'?' on':''}" onclick="_setDashTab('att')">⚠ Atenção</button>
+        <button class="dash-tab${_dashTab==='ferias'?' on':''}" onclick="_setDashTab('ferias')">🏖 Férias</button>
         <button class="dash-tab${_dashTab==='metas'?' on':''}" onclick="_setDashTab('metas')">⚙ Metas</button>
       </div>
-      ${_dashTab!=='metas'?periodRow:''}
+      ${(_dashTab!=='metas'&&_dashTab!=='ferias')?periodRow:''}
       ${content}
     </div>`;
 }
 
-function _setDashTab(t){ _dashTab=t; renderDashboard(); }
+function _setDashTab(t){ _dashTab=t; if(t==='ferias'&&!_dashGerentes) _loadFeriasGerencia(); renderDashboard(); }
 function _navToAtt(){ const el=document.getElementById('dash-section'); if(el)el.scrollIntoView({behavior:'smooth'}); _setDashTab('att'); }
 function _setPer(p){ _dashPer=p; _dashFat=null; _dashFatPrev=null; _dashFatDia=null; _dashComDia=null; _dashFatDiaLoja=null; _dashComDiaLoja=null; _dashRelSel.clear(); renderDashboard(); _loadDashAll(); }
 function _toggleDashSel(k){ if(_dashRelSel.has(k)) _dashRelSel.delete(k); else _dashRelSel.add(k); renderDashboard(); }
