@@ -554,7 +554,8 @@ let _dashFeriasGerencia = null; // {lojaKey: [{id, usuarioId, nome, cargo, inici
 let _dashFeriasLoading = false;
 let _dashFeriasAno = new Date().getFullYear();
 let _dashFeriasFormAberto = null; // {loja, usuarioId} — pessoa com o form de nova férias aberto
-let _xadrezMovs = []; // [{usuarioId, nome, cargoOriginal, lojaOrigem, lojaDestino}] — movimentos simulados (não gravados)
+let _xadrezMovs = []; // [{usuarioId, nome, cargoOriginal, lojaOrigem, lojaDestino}] — movimentos simulados, persistidos em gn_lojas (XADREZ_CONFIG) até validar ou excluir
+let _xadrezMovsLoaded = false; // já buscou os movimentos pendentes do Supabase nesta sessão?
 let _xadrezValidando = false; // trava o botão "Validar" enquanto grava no Supabase
 let _dashAvaliacaoGerencia = null; // {lojaKey: {usuarioId: {status:'bom'|'regular'|'ruim'|'desligamento', atualizadoEm}}}
 const STATUS_AVAL_GERENCIA = {
@@ -2581,13 +2582,16 @@ function _buildFeriasPanel(){
 }
 
 // ── XADREZ DE GERÊNCIA ──────────────────────────────────────────────────────
-// Simulador de trocas de gerente/sub-gerente entre lojas. Enquanto não valida,
-// só recalcula em memória (_xadrezMovs) a partir do estado real (_dashGerentes)
-// pra testar cenários e ver o que quebraria: loja sem gerente/sub titular, ou
-// gerente e sub da mesma loja de férias ao mesmo tempo. Reaproveita os mesmos
-// dados já carregados pela aba Férias (_dashGerentes/_dashFeriasGerencia). Só
-// grava de verdade (atualiza gn_usuarios.loja) quando o usuário clica em
-// "Validar alterações" — ver _xadrezValidar().
+// Simulador de trocas de gerente/sub-gerente entre lojas. Os movimentos
+// propostos (_xadrezMovs) ficam salvos em gn_lojas (linha sentinela
+// XADREZ_CONFIG, num campo próprio — não a MASTER_CONFIG usada pelo app
+// Lojas, que é sobrescrita inteira a cada sync) e recalculam em memória o
+// board (_boardGerenciaSimulado) a partir do estado real (_dashGerentes) pra
+// testar cenários: loja sem gerente/sub titular, ou gerente e sub da mesma
+// loja de férias ao mesmo tempo. Reaproveita os mesmos dados já carregados
+// pela aba Férias (_dashGerentes/_dashFeriasGerencia). Só grava de verdade
+// (atualiza gn_usuarios.loja) quando o usuário clica em "Validar alterações"
+// — ver _xadrezValidar().
 function _feriasDoUsuario(usuarioId){
   const todas=[];
   Object.values(_dashFeriasGerencia||{}).forEach(arr=>{
@@ -2637,7 +2641,7 @@ function _checarCoberturaGerencia(board){
   return issues;
 }
 
-function _xadrezAddMov(){
+async function _xadrezAddMov(){
   const usuarioId=document.getElementById('xadrez-pessoa')?.value;
   const lojaDestino=document.getElementById('xadrez-destino')?.value;
   if(!usuarioId || !lojaDestino) return;
@@ -2651,10 +2655,46 @@ function _xadrezAddMov(){
   if(lojaOrigem===lojaDestino){ alert('Selecione uma loja diferente da atual.'); return; }
   _xadrezMovs=_xadrezMovs.filter(mv=>String(mv.usuarioId)!==String(usuarioId));
   _xadrezMovs.push({ usuarioId:pessoa.id, nome:pessoa.nome, cargoOriginal:pessoa.cargo, lojaOrigem, lojaDestino });
+  await _salvarXadrezPendente();
+}
+async function _xadrezRemoverMov(usuarioId){ _xadrezMovs=_xadrezMovs.filter(mv=>String(mv.usuarioId)!==String(usuarioId)); await _salvarXadrezPendente(); }
+async function _xadrezLimpar(){ _xadrezMovs=[]; await _salvarXadrezPendente(); }
+
+// Busca os movimentos pendentes salvos (uma vez por sessão) — assim eles
+// continuam abertos mesmo se a página for atualizada, até serem validados
+// ou excluídos.
+async function _loadXadrezPendente(){
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  try{
+    const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.XADREZ_CONFIG&select=all_data`, H, 'xadrez:pendente', []);
+    const movimentos = rows[0] && rows[0].all_data && rows[0].all_data.movimentos;
+    _xadrezMovs = Array.isArray(movimentos) ? movimentos : [];
+  }catch(e){
+    window.gnLogError && window.gnLogError('xadrez:_loadXadrezPendente', e);
+  }
+  _xadrezMovsLoaded = true;
   renderDashboard();
 }
-function _xadrezRemoverMov(usuarioId){ _xadrezMovs=_xadrezMovs.filter(mv=>String(mv.usuarioId)!==String(usuarioId)); renderDashboard(); }
-function _xadrezLimpar(){ _xadrezMovs=[]; renderDashboard(); }
+
+// Grava o estado atual de _xadrezMovs numa linha sentinela própria
+// (XADREZ_CONFIG) — separada da MASTER_CONFIG do app Lojas, que é
+// sobrescrita por inteiro a cada sincronização e apagaria isso aqui.
+async function _salvarXadrezPendente(){
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+  try{
+    const rowsRes = await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.XADREZ_CONFIG&select=all_data`, { headers:H });
+    const rows = await rowsRes.json();
+    if(!rows.length){
+      await fetch(`${SB_URL}/rest/v1/gn_lojas`, { method:'POST', headers:{...H, Prefer:'return=minimal'}, body:JSON.stringify({loja:'XADREZ_CONFIG', all_data:{movimentos:_xadrezMovs}}) });
+    } else {
+      await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.XADREZ_CONFIG`, { method:'PATCH', headers:{...H, Prefer:'return=minimal'}, body:JSON.stringify({all_data:{movimentos:_xadrezMovs}}) });
+    }
+  }catch(e){
+    window.gnLogError && window.gnLogError('xadrez:_salvarXadrezPendente', e);
+    alert('Erro ao salvar a simulação. Tente novamente.');
+  }
+  renderDashboard();
+}
 
 // Aplica de fato os movimentos simulados: atualiza a loja de cada pessoa
 // movida em gn_usuarios (fonte real usada por login/permissões/férias), uma
@@ -2687,11 +2727,12 @@ async function _xadrezValidar(){
   }
   _xadrezValidando=false;
   _dashGerentes=null;
+  await _salvarXadrezPendente();
   await _loadFeriasGerencia();
 }
 
 function _buildXadrezPanel(){
-  if(!_dashGerentes){
+  if(!_dashGerentes || !_xadrezMovsLoaded){
     return '<div style="padding:28px;text-align:center;color:rgba(255,255,255,.28);font-size:12px">⟳ Carregando…</div>';
   }
   const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
@@ -3088,7 +3129,12 @@ function renderDashboard() {
     </div>`;
 }
 
-function _setDashTab(t){ _dashTab=t; if((t==='ferias'||t==='xadrez')&&!_dashGerentes) _loadFeriasGerencia(); renderDashboard(); }
+function _setDashTab(t){
+  _dashTab=t;
+  if((t==='ferias'||t==='xadrez')&&!_dashGerentes) _loadFeriasGerencia();
+  if(t==='xadrez'&&!_xadrezMovsLoaded) _loadXadrezPendente();
+  renderDashboard();
+}
 function _navToAtt(){ const el=document.getElementById('dash-section'); if(el)el.scrollIntoView({behavior:'smooth'}); _setDashTab('att'); }
 function _setPer(p){ _dashPer=p; _dashFat=null; _dashFatPrev=null; _dashFatDia=null; _dashComDia=null; _dashFatDiaLoja=null; _dashComDiaLoja=null; _dashRelSel.clear(); renderDashboard(); _loadDashAll(); }
 function _toggleDashSel(k){ if(_dashRelSel.has(k)) _dashRelSel.delete(k); else _dashRelSel.add(k); renderDashboard(); }
