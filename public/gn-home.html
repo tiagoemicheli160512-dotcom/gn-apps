@@ -265,6 +265,8 @@
 
   <div id="dash-section" style="display:none"></div>
 
+  <div id="pendencias-loja-home-card"></div>
+
   <!-- Banner de permissão de notificações — aparece só se não concedida -->
   <div id="notif-banner" style="display:none;align-items:center;gap:10px;background:rgba(250,204,21,.10);border:1px solid rgba(250,204,21,.22);border-radius:12px;padding:11px 14px;margin:0 16px 14px;font-size:13px;color:rgba(255,255,255,.72)">
     <span style="font-size:20px;flex-shrink:0">🔔</span>
@@ -780,6 +782,122 @@ async function _renderEscalaDiaHome(mostrar, sess, isMasterAtivo) {
   </div>`;
 }
 
+// Card "Pendências desta loja" — mesma versão do feed de alertas do Painel de Gestão
+// (⚠ Atenção), só que escopada a uma única loja e com fetches próprios, pra aparecer
+// logo no início do Home de cada loja (staff normal e mestre navegando a loja).
+async function _renderPendenciasLojaHome(mostrar, sess, isMasterAtivo) {
+  const el = document.getElementById('pendencias-loja-home-card');
+  if (!el) return;
+  if (!mostrar || !sess) { el.innerHTML = ''; return; }
+  const loja = (isMasterAtivo && masterLoja) ? masterLoja : sess.loja;
+  if (!LOJAS_LISTA.includes(loja)) { el.innerHTML = ''; return; }
+  const comKey = LOJA_COM_KEY[loja] || loja;
+  const chkKey = LOJA_DB_KEY[loja] || loja;
+  const hoje = (d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'))(new Date());
+  const trinta = new Date(); trinta.setDate(trinta.getDate()-30);
+  const from30 = trinta.toISOString().slice(0,10);
+  const old5 = new Date(); old5.setDate(old5.getDate()-5);
+  const old3 = new Date(); old3.setDate(old3.getDate()-3);
+  const old3ISO = old3.toISOString().slice(0,10);
+  const limiteContrato = new Date(); limiteContrato.setDate(limiteContrato.getDate()+15);
+  const limiteContratoISO = limiteContrato.toISOString().slice(0,10);
+  const semIdxAtual = _escalaHomeSemIdx(hoje);
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+
+  try {
+    const [comRows, bhRows, lojaRows, chkManutRows, caixaRows] = await Promise.all([
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'pendLoja:com', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_banco_horas?loja=eq.${encodeURIComponent(chkKey)}&mes=eq.CONFIG&select=registros`, H, 'pendLoja:bh', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'pendLoja:lojas', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${from30}&select=data_operacao,manutencao&order=data_operacao.desc`, H, 'pendLoja:chk', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?loja=eq.${encodeURIComponent(loja)}&status=eq.FECHADO&data=gte.${from30}&select=id,data,turno`, H, 'pendLoja:caixa', []),
+    ]);
+
+    const escalaIncompleta = [], contratosVencendo = [];
+    let bancoHorasPendente = null;
+    if (semIdxAtual != null) {
+      const allData = (comRows[0] && comRows[0].all_data) || {};
+      const wd = allData[String(semIdxAtual)];
+      const funcs = ((wd && wd.funcs) || []).filter(f=>f.nome && f.nome.trim());
+      const DIAS_SEM = ['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
+      const setoresEmUso = new Set();
+      funcs.forEach(f=>{
+        if (f.setor && f.setor.trim()) setoresEmUso.add(f.setor.trim());
+        const diasFaltando = [];
+        (f.dias||[]).forEach((st,d)=>{
+          if (!ESCALA_HOME_PRESENTE_SET.has(st)) return;
+          const hd = (f.horario_dias||[])[d];
+          if (!hd || !hd.entrada || !hd.saida) diasFaltando.push(DIAS_SEM[d]);
+        });
+        if (diasFaltando.length) escalaIncompleta.push({ nome: f.nome, dias: diasFaltando });
+        if (f.fim_contrato && !f.encerramento_solicitado && f.fim_contrato <= limiteContratoISO) {
+          contratosVencendo.push({ nome: f.nome, fimContrato: f.fim_contrato, vencido: f.fim_contrato < hoje });
+        }
+      });
+      if (setoresEmUso.size) {
+        const bh = (bhRows[0] && bhRows[0].registros) || null;
+        if (!bh || !bh.periodo_inicio || !bh.periodo_fim || hoje < bh.periodo_inicio || hoje > bh.periodo_fim) {
+          bancoHorasPendente = { motivo: 'sem_periodo' };
+        } else {
+          const salariosSetor = bh.salariosSetor || {};
+          const setoresFaltando = [...setoresEmUso].filter(s => !(parseFloat(salariosSetor[s]) > 0));
+          if (setoresFaltando.length) bancoHorasPendente = { motivo: 'setor_faltando', setores: setoresFaltando };
+        }
+      }
+    }
+
+    const _newestManut = new Map(), _oldestManut = new Map();
+    (chkManutRows||[]).forEach(row=>{
+      if (!Array.isArray(row.manutencao)) return;
+      row.manutencao.forEach(m=>{
+        if (!m) return;
+        const k = `${m.setor}|${m.tipo}|${(m.descricao||'').trim().toLowerCase()}`;
+        const withMeta = {...m, _data: row.data_operacao};
+        if (!_newestManut.has(k)) _newestManut.set(k, withMeta);
+        _oldestManut.set(k, withMeta);
+      });
+    });
+    const manutChk = [..._newestManut.entries()].map(([k,newest])=>({...newest, _data:_oldestManut.get(k)._data}));
+    const lojaAllData = (lojaRows[0] && lojaRows[0].all_data) || {};
+    const manutOficiais = (Array.isArray(lojaAllData.manut_oficial_items) ? lojaAllData.manut_oficial_items : [])
+      .map(m=>({...m, _data: m.created_at ? m.created_at.split('T')[0] : hoje}));
+    const manutTodos = [...manutChk, ...manutOficiais].filter(m=>m.status!=='Resolvido');
+    const manutParada = manutTodos.filter(m=>m._data && new Date(m._data+'T00:00:00')<old5).length;
+
+    const confMap = lojaAllData.caixa_conferencias || {};
+    const caixaSemConferencia = (caixaRows||[])
+      .filter(r=>r.data<=old3ISO && !confMap[r.id])
+      .map(r=>({ data: r.data, turno: r.turno }));
+
+    const itens = [];
+    if (manutParada>0) itens.push({cor:'#ef4444', ico:'⏳', msg:`${manutParada} manutenção${manutParada>1?'ões':''} parada${manutParada>1?'s':''} há mais de 5 dias`});
+    if (contratosVencendo.length) {
+      const nVenc = contratosVencendo.filter(c=>c.vencido).length;
+      itens.push({cor:nVenc>0?'#f87171':'#f59e0b', ico:'📝', msg:`${contratosVencendo.length} contrato${contratosVencendo.length>1?'s':''} ${nVenc>0?'vencido(s) ou vencendo':'vencendo'}`,
+        sub: contratosVencendo.slice(0,3).map(c=>`${esc(c.nome)} (${c.vencido?'venceu em':'vence em'} ${c.fimContrato})`).join(' · ')+(contratosVencendo.length>3?` +${contratosVencendo.length-3}`:'')});
+    }
+    if (caixaSemConferencia.length) itens.push({cor:'#38bdf8', ico:'💰', msg:`${caixaSemConferencia.length} fechamento${caixaSemConferencia.length>1?'s':''} de caixa sem conferência`,
+      sub: caixaSemConferencia.slice(0,3).map(c=>`${c.data} (${c.turno})`).join(' · ')+(caixaSemConferencia.length>3?` +${caixaSemConferencia.length-3}`:'')});
+    if (escalaIncompleta.length) itens.push({cor:'#a78bfa', ico:'🗓️', msg:`${escalaIncompleta.length} funcionário${escalaIncompleta.length>1?'s':''} sem horário completo na escala`,
+      sub: escalaIncompleta.slice(0,3).map(f=>`${esc(f.nome)} (${f.dias.join(', ')})`).join(' · ')+(escalaIncompleta.length>3?` +${escalaIncompleta.length-3}`:'')});
+    if (bancoHorasPendente) itens.push({cor:'#a78bfa', ico:'⏱️', msg: bancoHorasPendente.motivo==='sem_periodo' ? 'Banco de horas do mês não configurado' : `Sem salário cadastrado pra ${bancoHorasPendente.setores.length>1?bancoHorasPendente.setores.length+' setores':bancoHorasPendente.setores[0]}`});
+
+    if (!itens.length) { el.innerHTML = ''; return; }
+
+    el.innerHTML = `<div style="background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.18);border-left:3px solid #ef4444;border-radius:14px;padding:14px 16px;margin:0 16px 14px">
+      <div style="font-size:12px;font-weight:800;color:#e2e8f0;margin-bottom:8px">🔔 Pendências desta loja</div>
+      ${itens.map(it=>`<div style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-top:1px solid rgba(255,255,255,.06)">
+        <span style="font-size:13px;flex-shrink:0">${it.ico}</span>
+        <div style="min-width:0"><div style="font-size:11px;font-weight:700;color:${it.cor}">${it.msg}</div>${it.sub?`<div style="font-size:9px;color:rgba(255,255,255,.4);margin-top:2px">${it.sub}</div>`:''}</div>
+      </div>`).join('')}
+    </div>`;
+  } catch(e) {
+    window.gnLogError && window.gnLogError('pendLoja:_renderPendenciasLojaHome', e);
+    el.innerHTML = '';
+  }
+}
+
 try {
   const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
   if (s && Date.now() - s.ts < TTL) session = s;
@@ -852,6 +970,7 @@ function _refreshPermUI(sess) {
   // Re-render module list and reload badges (permissions may have changed)
   renderModules(sess, isMaster);
   loadBadges(sess, isMaster);
+  _renderPendenciasLojaHome(!isMaster || !!masterLoja, sess, isMaster);
   _renderDatasEspeciaisHome(!isMaster || !!masterLoja);
   _renderXmlMesHome(!isMaster || !!masterLoja, sess, isMaster);
   _renderEscalaDiaHome(!isMaster || !!masterLoja, sess, isMaster);
@@ -1051,6 +1170,7 @@ function showHome(sess) {
 
   renderModules(sess, isMaster);
   loadBadges(sess, isMaster);
+  _renderPendenciasLojaHome(!isMaster || !!masterLoja, sess, isMaster);
   _renderDatasEspeciaisHome(!isMaster || !!masterLoja);
   _renderXmlMesHome(!isMaster || !!masterLoja, sess, isMaster);
   _renderEscalaDiaHome(!isMaster || !!masterLoja, sess, isMaster);
