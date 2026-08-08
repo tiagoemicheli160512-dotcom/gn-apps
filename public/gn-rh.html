@@ -324,6 +324,10 @@ summary.loja-card-header::-webkit-details-marker{display:none}
       <span class="nav-icon">🏖</span>
       <span class="nav-label">Férias</span>
     </button>
+    <button class="nav-btn" data-tab="auditoria" onclick="setTab('auditoria')">
+      <span class="nav-icon">📜</span>
+      <span class="nav-label">Auditoria</span>
+    </button>
     <button class="nav-btn" onclick="window.location.href='/gn-comissoes-mestra.html'">
       <span class="nav-icon">👑</span>
       <span class="nav-label">Mestra</span>
@@ -442,6 +446,9 @@ let S = {
   feriasData: [],        // [{id, nome, setor, inicio, fim, lojaChk, lojaDisplay}]
   feriasLoja: '',         // '' = todas
   feriasBusca: '',
+  // Auditoria
+  auditoriaData: [],     // rows from gn_rh_auditoria
+  audLoja: '',           // '' = todas
 };
 
 // ══════════════════════════════════════════════
@@ -1842,12 +1849,98 @@ async function marcarOkComp(lojaChkKey, ini) {
     allData.compOk[ini] = true;
     const { error: errUpd } = await db.from('gn_lojas').upsert({ loja: lojaObj.comKey, all_data: allData }, { onConflict: 'loja' });
     if (errUpd) throw errUpd;
+    _logAuditoriaRH('MARCAR_OK_COMPARATIVO', lojaObj.comKey, { ini });
     toast('✅ Marcado como OK!', 'ok');
   } catch(e) {
     delete S.compOk[key];
     renderComparativo();
     toast('Erro ao salvar: ' + (e.message || e), 'err');
   }
+}
+
+// ══════════════════════════════════════════════
+// AUDITORIA
+// ══════════════════════════════════════════════
+const AUD_ACOES_RH = {
+  CONFIRMAR_AVARIA:        { icon: '✅', label: 'Confirmou pagamento de avaria (RH)', cor: 'var(--green)' },
+  EXCLUIR_FOTO_GORJETA:    { icon: '🗑️', label: 'Excluiu foto de gorjeta',            cor: 'var(--red)' },
+  SALVAR_CONFERENCIA:      { icon: '💰', label: 'Finalizou conferência de caixa',      cor: 'var(--amber)' },
+  MARCAR_OK_COMPARATIVO:   { icon: '✅', label: 'Marcou comparativo como OK',          cor: 'var(--green)' },
+  EDITAR_CONTRATO_DOSSIE:  { icon: '✏️', label: 'Editou data de contrato (Dossiê)',    cor: 'var(--amber)' },
+};
+
+function _lojaDisplayRH(key) {
+  const l = LOJAS.find(x => x.comKey === key || x.chkKey === key || x.userKey === key);
+  return l ? l.display : (key || '—');
+}
+
+async function _logAuditoriaRH(acao, loja, detalhes) {
+  try {
+    await db.from('gn_rh_auditoria').insert({
+      loja: _lojaDisplayRH(loja),
+      usuario: S.usuario?.nome || 'RH',
+      acao, detalhes: detalhes || null,
+    });
+  } catch(e) { console.error('Erro ao registrar auditoria:', e.message || e); }
+}
+
+function _fmtDetalhesAuditoriaRH(acao, d) {
+  if (!d) return '';
+  try {
+    if (acao === 'CONFIRMAR_AVARIA')       return `${d.insumo || ''} — ${fmtR(d.valor || 0)}`;
+    if (acao === 'EXCLUIR_FOTO_GORJETA')   return `Semana de ${d.semanaIni || ''}`;
+    if (acao === 'SALVAR_CONFERENCIA')     return d.temDivergencia ? '⚠️ Com divergência' : '✅ Sem divergência';
+    if (acao === 'MARCAR_OK_COMPARATIVO')  return `Semana de ${d.ini || ''}`;
+    if (acao === 'EDITAR_CONTRATO_DOSSIE') return `${d.nome || ''} — ${d.campo === 'inicio_contrato' ? 'Início' : 'Fim'}: ${d.valorAntigo || '—'} → ${d.valor || '—'}`;
+  } catch(e) {}
+  return '';
+}
+
+async function carregarAuditoria() {
+  try {
+    let q = db.from('gn_rh_auditoria').select('*').order('criado_em', { ascending: false }).limit(150);
+    if (S.audLoja) q = q.eq('loja', S.audLoja);
+    const { data, error } = await q;
+    if (error) throw error;
+    S.auditoriaData = data || [];
+  } catch(e) { S.auditoriaData = []; }
+}
+
+function filtrarAudLoja(display) {
+  S.audLoja = display;
+  $('content').innerHTML = `<div class="empty"><div class="spin"></div></div>`;
+  carregarAuditoria().then(renderAuditoria);
+}
+
+function renderAuditoria() {
+  const lojaFiltros = [
+    `<button class="ftab${S.audLoja===''?' ativo':''}" onclick="filtrarAudLoja('')">Todas</button>`,
+    ...LOJAS.map(l => `<button class="ftab${S.audLoja===l.display?' ativo':''}" onclick="filtrarAudLoja('${l.display}')">${l.display}</button>`)
+  ].join('');
+
+  const rows = S.auditoriaData;
+  const itensHtml = rows.length === 0
+    ? `<div class="empty"><div class="empty-icon">📭</div><div class="empty-text">Nenhum registro ainda.</div></div>`
+    : rows.map(r => {
+        const meta = AUD_ACOES_RH[r.acao] || { icon: '•', label: r.acao, cor: 'var(--muted)' };
+        const dt = new Date(r.criado_em).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+        const detalheStr = _fmtDetalhesAuditoriaRH(r.acao, r.detalhes);
+        return `<div class="card" style="margin-bottom:8px;padding:10px 12px">
+          <div style="font-size:12px;font-weight:700;color:${meta.cor}">${meta.icon} ${meta.label}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">${esc(r.loja || '—')}</div>
+          ${detalheStr ? `<div style="font-size:11px;color:var(--text);margin-top:2px">${esc(detalheStr)}</div>` : ''}
+          <div style="font-size:10px;color:var(--muted);margin-top:3px">👤 ${esc(r.usuario || '—')} · ${dt}</div>
+        </div>`;
+      }).join('');
+
+  $('content').innerHTML = `
+    <div class="sec-header">
+      <div class="sec-title">Auditoria — Quem fez o quê</div>
+    </div>
+    <div class="filter-row">${lojaFiltros}</div>
+    <div style="font-size:11px;color:var(--muted);margin:8px 0 12px">${rows.length} registro${rows.length !== 1 ? 's' : ''}</div>
+    ${itensHtml}
+  `;
 }
 
 // ══════════════════════════════════════════════
@@ -2230,6 +2323,7 @@ async function confirmarAvariaRH(lojaKey, avId) {
       .eq('loja', lojaKey);
     if (e2) throw e2;
 
+    _logAuditoriaRH('CONFIRMAR_AVARIA', lojaKey, { insumo: av.insumo, valor: av.valorTotal });
     toast('✅ Pagamento confirmado pelo RH!', 'ok');
     await carregarAvarias();
     renderAvarias();
@@ -2250,6 +2344,7 @@ function renderContent() {
       if (S.tab === 'dossie')      { await carregarDossie();      renderDossie();       }
       if (S.tab === 'vencimentos'){ await carregarVencimentos(); renderVencimentos();  }
       if (S.tab === 'ferias')     { await carregarFerias();      renderFerias();       }
+      if (S.tab === 'auditoria')  { await carregarAuditoria();   renderAuditoria();    }
     } catch(e) {
       $('content').innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-text">Erro ao carregar: ${e.message}</div></div>`;
     }
@@ -2778,6 +2873,7 @@ async function excluirFoto(loja, semanaIni) {
   const { error } = await db.from('gn_comissao_foto')
     .delete().eq('loja', loja).eq('semana_ini', semanaIni);
   if (error) { toast('Erro ao excluir', 'err'); return; }
+  _logAuditoriaRH('EXCLUIR_FOTO_GORJETA', loja, { semanaIni });
   toast('Foto removida', 'ok');
   fecharModal();
   await carregarFinanceiro(); renderFinanceiro();
@@ -3115,6 +3211,7 @@ async function salvarConferencia(fechId, lojaUserKey) {
 
     if (!S.caixaConferencias) S.caixaConferencias = {};
     S.caixaConferencias[fechId] = conferencia;
+    _logAuditoriaRH('SALVAR_CONFERENCIA', comKey, { temDivergencia: temDivergencia });
 
     var resultEl = document.getElementById('conf-result-' + safeId);
     if (resultEl) {
@@ -3688,10 +3785,12 @@ async function updDossContrato(nome, campo, valor) {
   const newAllData = JSON.parse(JSON.stringify(allData));
   const idx = newAllData[targetKey].funcs.findIndex(f => f.nome?.trim() === nome);
   if (idx < 0) { toast('Funcionário não encontrado', 'err'); return; }
+  const valorAntigo = newAllData[targetKey].funcs[idx][campo];
   newAllData[targetKey].funcs[idx][campo] = valor;
   const { error } = await db.from('gn_comissoes').update({ all_data: newAllData }).eq('loja', S.dossLoja.comKey);
   if (error) { toast('Erro ao salvar: ' + error.message, 'err'); return; }
   S.dossComData = newAllData;
+  _logAuditoriaRH('EDITAR_CONTRATO_DOSSIE', S.dossLoja.comKey, { nome, campo, valor, valorAntigo });
   renderDossie();
   toast('Salvo ✓', 'ok');
 }
@@ -4355,7 +4454,7 @@ async function iniciarApp() {
 
   // Ir para a primeira aba permitida
   const primeiraAba = S.abasPermitidas
-    ? (['operacoes','financeiro','rh','comparativo','avarias','dossie','vencimentos','ferias'].find(t => S.abasPermitidas.has(t)) || 'operacoes')
+    ? (['operacoes','financeiro','rh','comparativo','avarias','dossie','vencimentos','ferias','auditoria'].find(t => S.abasPermitidas.has(t)) || 'operacoes')
     : 'operacoes';
   setTab(primeiraAba);
 
