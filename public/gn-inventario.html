@@ -168,6 +168,7 @@ body{background:var(--bg);color:#e8e8f0;font-family:-apple-system,BlinkMacSystem
   <button class="sidebar-link active" id="sl-inventario" onclick="setTab('inventario')"><span class="sl-icon">📦</span>Inventário</button>
   <button class="sidebar-link" id="sl-marketing" onclick="setTab('marketing')"><span class="sl-icon">📣</span>Marketing</button>
   <button class="sidebar-link" id="sl-relatorio" onclick="setTab('relatorio')"><span class="sl-icon">📊</span>Relatório</button>
+  <button class="sidebar-link" id="sl-auditoria" onclick="setTab('auditoria')"><span class="sl-icon">📜</span>Auditoria</button>
 </nav>
 
 <!-- LOGIN -->
@@ -217,6 +218,10 @@ body{background:var(--bg);color:#e8e8f0;font-family:-apple-system,BlinkMacSystem
     <button class="bot-tab" id="tab-rel" onclick="setTab('relatorio')">
       <span class="ti">📊</span>
       <span>Relatório</span>
+    </button>
+    <button class="bot-tab" id="tab-aud" onclick="setTab('auditoria')">
+      <span class="ti">📜</span>
+      <span>Auditoria</span>
     </button>
   </nav>
 </div>
@@ -408,8 +413,8 @@ function onFabClick(){
 
 function render(){
   // Bottom nav highlight
-  ['inv','mkt','rel'].forEach(k=>{
-    const t={inv:'inventario',mkt:'marketing',rel:'relatorio'}[k];
+  ['inv','mkt','rel','aud'].forEach(k=>{
+    const t={inv:'inventario',mkt:'marketing',rel:'relatorio',aud:'auditoria'}[k];
     $('tab-'+k)?.classList.toggle('sel',S.tab===t);
   });
   // Badge de alertas na aba Inventário
@@ -422,7 +427,7 @@ function render(){
     if(slInv){ slInv.innerHTML=`<span class="sl-icon">📦</span>Inventário${badge}`; slInv.classList.toggle('active',S.tab==='inventario'); }
   }
   // Sidebar highlight (others)
-  ['marketing','relatorio'].forEach(t=>{
+  ['marketing','relatorio','auditoria'].forEach(t=>{
     document.getElementById('sl-'+t)?.classList.toggle('active',S.tab===t);
   });
   // FAB on inventory or marketing list
@@ -442,6 +447,8 @@ function render(){
   } else if(S.tab==='marketing'){
     if(S.view==='addMkt') renderAddMktItem(c);
     else renderMarketing(c);
+  } else if(S.tab==='auditoria'){
+    renderAuditoria(c);
   } else {
     renderRelatorio(c);
   }
@@ -550,9 +557,11 @@ function addItem(){
 
 function delItem(id){
   if(!confirm('Excluir este item e todo seu histórico de saídas?')) return;
+  const item=S.data.items.find(i=>i.id===id);
   S.data.items=S.data.items.filter(i=>i.id!==id);
   S.data.saidas=S.data.saidas.filter(s=>s.item_id!==id);
   saveData(); toast('Excluído'); render();
+  if(item) _logAuditoriaInv('EXCLUIR_ITEM',{item:item.nome});
 }
 
 // ─── MARKETING ───────────────────────────────────────────
@@ -640,10 +649,12 @@ function addMktItem(){
 
 function delMktItem(id){
   if(!confirm('Excluir este item e todo seu histórico de saídas?')) return;
+  const item=(S.data.mktCustomItems||[]).find(m=>m.id===id);
   S.data.mktCustomItems=(S.data.mktCustomItems||[]).filter(m=>m.id!==id);
   S.data.mktSaidas=S.data.mktSaidas.filter(s=>s.item!==id);
   delete S.data.mkt[id];
   saveData(); toast('Excluído'); render();
+  if(item) _logAuditoriaInv('EXCLUIR_ITEM_MKT',{item:item.nome});
 }
 
 function mktAdj(key,delta,idx){
@@ -713,20 +724,24 @@ function confirmarSaida(){
   const obs=($('s-obs')?.value||'').trim();
   if(!qty||qty<1){ toast('Quantidade inválida'); return; }
 
+  let itemNome='';
   if(ctx.type==='inv'){
     const item=S.data.items[ctx.ref];
     if(!item){ toast('Item não encontrado'); return; }
     if(qty>item.quantidade){ toast(`Máximo: ${item.quantidade}`); return; }
     item.quantidade-=qty;
+    itemNome=item.nome;
     S.data.saidas.push({id:uid(),item_id:item.id,item_nome:item.nome,setor:item.setor,quantidade:qty,obs,data:nowISO(),usuario:S.usuario.nome});
   } else {
     const key=ctx.ref;
     const avail=S.data.mkt[key]||0;
     if(qty>avail){ toast(`Máximo: ${avail}`); return; }
     S.data.mkt[key]=avail-qty;
+    itemNome=key;
     S.data.mktSaidas.push({id:uid(),item:key,quantidade:qty,obs,data:nowISO(),usuario:S.usuario.nome});
   }
   saveData(); S.saidaCtx=null; toast('✅ Saída registrada!'); render();
+  _logAuditoriaInv('SAIDA_ITEM',{item:itemNome,quantidade:qty,obs});
 }
 
 // ─── HISTÓRICO ───────────────────────────────────────────
@@ -778,21 +793,25 @@ function renderHistPanel(c){
 
 function delSaida(type,id){
   if(!confirm('Excluir este registro? A quantidade será restaurada.')) return;
+  let itemNome='', qtdRestaurada=0;
   if(type==='inv'){
     const s=S.data.saidas.find(x=>x.id===id);
     if(s){
       const item=S.data.items.find(i=>i.id===s.item_id);
       if(item) item.quantidade+=s.quantidade;
+      itemNome=s.item_nome; qtdRestaurada=s.quantidade;
       S.data.saidas=S.data.saidas.filter(x=>x.id!==id);
     }
   } else {
     const s=S.data.mktSaidas.find(x=>x.id===id);
     if(s){
       S.data.mkt[s.item]=(S.data.mkt[s.item]||0)+s.quantidade;
+      itemNome=s.item; qtdRestaurada=s.quantidade;
       S.data.mktSaidas=S.data.mktSaidas.filter(x=>x.id!==id);
     }
   }
   saveData(); toast('Excluído'); render();
+  if(itemNome) _logAuditoriaInv('EXCLUIR_SAIDA',{item:itemNome,quantidade:qtdRestaurada});
 }
 
 // ─── ENTRADA ─────────────────────────────────────────────
@@ -840,6 +859,7 @@ function confirmarEntrada(){
   item.quantidade+=qty;
   S.data.entradas.push({id:uid(),item_id:item.id,item_nome:item.nome,setor:item.setor,quantidade:qty,obs,data:nowISO(),usuario:S.usuario.nome});
   saveData(); S.entradaCtx=null; toast('✅ Entrada registrada!'); render();
+  _logAuditoriaInv('ENTRADA_ITEM',{item:item.nome,quantidade:qty,obs});
 }
 
 // ─── EDITAR ITEM ─────────────────────────────────────────
@@ -893,10 +913,12 @@ function saveEditItem(){
   const qty=Math.max(0,parseInt($('ed-qty')?.value,10)||0);
   const minimo=Math.max(0,parseInt($('ed-min')?.value,10)||0);
   if(!nome){ toast('Nome obrigatório'); return; }
+  const qtyAntigo=item.quantidade;
   item.nome=nome; item.setor=setor; item.quantidade=qty; item.minimo=minimo;
   S.setor=setor;
   saveData(); S.view='list'; S.editCtx=null;
   toast('✅ Item atualizado!'); render();
+  if(qty!==qtyAntigo) _logAuditoriaInv('EDITAR_ITEM',{item:nome,qty_antigo:qtyAntigo,qty_novo:qty});
 }
 
 // ─── RELATÓRIO ───────────────────────────────────────────
@@ -1026,6 +1048,74 @@ function gerarPDF(texto,titulo){
   if(w){w.document.write(html);w.document.close();}
 }
 function gerarPDFInventario(){gerarPDF(_buildTextoInventario(),`GN Inventário — ${S.usuario?.loja||'Loja'}`);}
+
+// ─── AUDITORIA (quem fez o quê) ────────────────────────────
+// Log central de ações sensíveis (exclusões, edições diretas, entradas e
+// saídas), pra ter rastro de quem fez o quê e quando — mesmo padrão do
+// Histórico de Ações do app Estoque. As entradas/saídas por item já ficam
+// gravadas no histórico próprio de cada item (com usuário e data); aqui é
+// a visão central, cruzando todos os itens de uma vez.
+const AUD_ACOES_INV = {
+  ENTRADA_ITEM:    { icon: '➕', label: 'Registrou entrada',        cor: '#4ade80' },
+  SAIDA_ITEM:       { icon: '➖', label: 'Registrou saída',          cor: '#f59e0b' },
+  EXCLUIR_SAIDA:    { icon: '🗑️', label: 'Excluiu registro de saída', cor: '#f87171' },
+  EXCLUIR_ITEM:     { icon: '🗑️', label: 'Excluiu item do inventário', cor: '#f87171' },
+  EXCLUIR_ITEM_MKT: { icon: '🗑️', label: 'Excluiu item de marketing', cor: '#f87171' },
+  EDITAR_ITEM:      { icon: '✏️', label: 'Editou item diretamente',  cor: '#60a5fa' },
+};
+
+async function _logAuditoriaInv(acao, detalhes){
+  try{
+    await sb('gn_inv_auditoria',{method:'POST',body:{
+      loja: S.usuario?.loja || null, usuario: S.usuario?.nome || 'SISTEMA', acao, detalhes: detalhes || null
+    }});
+  }catch(e){ console.error('Erro ao registrar auditoria:', e.message||e); }
+}
+
+function _fmtDetalhesAuditoriaInv(acao, d){
+  if(!d) return '';
+  try{
+    if(acao==='ENTRADA_ITEM' || acao==='SAIDA_ITEM') return `${d.item||''}${d.quantidade?' — '+d.quantidade+' un.':''}${d.obs?' ('+d.obs+')':''}`;
+    if(acao==='EXCLUIR_SAIDA')    return `${d.item||''} — ${d.quantidade||0} un. restaurada(s)`;
+    if(acao==='EXCLUIR_ITEM')     return d.item||'';
+    if(acao==='EXCLUIR_ITEM_MKT') return d.item||'';
+    if(acao==='EDITAR_ITEM')      return `${d.item||''} — qtd ${d.qty_antigo}→${d.qty_novo}`;
+  }catch(e){}
+  return '';
+}
+
+async function renderAuditoria(c){
+  c.innerHTML=`<div class="content"><div style="text-align:center;padding:30px;color:var(--mut);font-size:12px">Carregando...</div></div>`;
+  let rows=[];
+  try{
+    rows=await sb(`gn_inv_auditoria?loja=eq.${encodeURIComponent(S.usuario?.loja||'')}&order=criado_em.desc&limit=150`);
+  }catch(e){
+    c.innerHTML=`<div class="content"><div style="text-align:center;padding:30px;color:var(--erro);font-size:12px">⚠️ Erro ao carregar auditoria.</div></div>`;
+    return;
+  }
+  const itensHtml = rows.length===0
+    ? `<div style="text-align:center;padding:40px;color:var(--mut);font-size:12px">📭 Nenhum registro ainda.</div>`
+    : rows.map(r=>{
+        const meta=AUD_ACOES_INV[r.acao]||{icon:'•',label:r.acao,cor:'var(--mut)'};
+        const dt=new Date(r.criado_em).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+        const det=_fmtDetalhesAuditoriaInv(r.acao,r.detalhes);
+        return `<div class="hist-item" style="flex-direction:column;align-items:flex-start;gap:2px">
+          <div style="font-size:12px;font-weight:700;color:${meta.cor}">${meta.icon} ${meta.label}</div>
+          ${det?`<div style="font-size:11px;color:#e8e8f0">${esc(det)}</div>`:''}
+          <div style="font-size:10px;color:var(--mut)">👤 ${esc(r.usuario||'—')} · ${dt}</div>
+        </div>`;
+      }).join('');
+  c.innerHTML=`
+    <div class="content">
+      <div class="form-card" style="padding:0;overflow:hidden">
+        <div style="padding:12px 12px 0;display:flex;align-items:center;justify-content:space-between">
+          <div style="font-size:11px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.5px">📜 Auditoria — Quem fez o quê (${rows.length})</div>
+          <button class="hist-del" onclick="renderAuditoria($('app-content'))" title="Atualizar">🔄</button>
+        </div>
+        ${itensHtml}
+      </div>
+    </div>`;
+}
 
 // ─── INIT ────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded',()=>{
