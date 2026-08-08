@@ -660,6 +660,10 @@ let provisoesHistorico = []; // entregas já confirmadas desta loja (últimos 30
 // (foi pro histórico), fazendo a lista "pular" no meio da conferência de um pedido com
 // vários itens. Some sozinho quando o último item do fornecedor é confirmado.
 let _epConfirmadosSessao = {}; // provisao_id -> {...snapshot da provisão, _statusFinal, _qtdRec, _valRec}
+// Cards de fornecedor da aba Entrega começam fechados (só mostram o resumo de status);
+// esse Set guarda quais o usuário abriu, pra continuar aberto entre re-renders (ex: ao
+// confirmar um item do fornecedor, o render() seguinte não deve fechar o card de novo).
+let _epGruposAbertos = new Set();
 // Fila de confirmações de entrega ainda não sincronizadas com a nuvem — grava no aparelho
 // na hora que a loja confirma (mesmo padrão de resiliência do autoSave/sbPush da Contagem),
 // pra internet ruim (ex.: Bangu) não perder a confirmação se a rede cair no meio do tap.
@@ -2313,7 +2317,7 @@ function _iniciarVigiaHorario() {
 function prevWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana, -7); checklistFat = null; checklistVendasItens = null; if(tab==="vendas") loadChecklistFat(); render(); }
 function nextWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana,  7); checklistFat = null; checklistVendasItens = null; if(tab==="vendas") loadChecklistFat(); render(); }
 function irParaSemana(isoStr) { semana = new Date(isoStr); tab = "relatorio"; render(); }
-function changeLoja(v) { if (lojaForcada) return; loja = v; tab = "home"; checklistFat = null; checklistVendasItens = null; render(); _epProcessarFila(); _pedSyncFilaProcessar(); }
+function changeLoja(v) { if (lojaForcada) return; loja = v; tab = "home"; checklistFat = null; checklistVendasItens = null; _epGruposAbertos.clear(); render(); _epProcessarFila(); _pedSyncFilaProcessar(); }
 function carregarPermissaoLoja() {
   try {
     var s = JSON.parse(localStorage.getItem('gn_session_v1') || 'null');
@@ -7123,13 +7127,21 @@ function render() {
             </div>`;
           }).join('');
           const finalizado=pendentesNoGrupo===0;
-          return `<div class="ep-grupo aberto" id="${gid}">
-            <div class="ep-grupo-header" onclick="toggleEpGrupo('${gid}')" style="border-left:3px solid ${finalizado?'#4ade80':'#f59e0b'}">
-              <span class="ep-grupo-nome" style="color:${finalizado?'#4ade80':'#fbbf24'}">${forn}${finalizado?' ✓':''}</span>
-              <div style="display:flex;align-items:center;gap:8px">
-                <span style="font-size:12px;font-weight:700;color:${finalizado?'#4ade80':'#fbbf24'}">R$ ${totalForn.toFixed(2).replace('.',',')}</span>
-                <span class="ep-grupo-chevron">▼</span>
+          const badgesHtml=_epStatusBadges({
+            aReceber: itens.filter(p=>!p._statusFinal).length,
+            recebido: itens.filter(p=>p._statusFinal==='RECEBIDO_OK').length,
+            divergencia: itens.filter(p=>p._statusFinal==='DIVERGENCIA').length,
+          });
+          return `<div class="ep-grupo${_epGruposAbertos.has(gid)?' aberto':''}" id="${gid}">
+            <div class="ep-grupo-header" onclick="toggleEpGrupo('${gid}')" style="border-left:3px solid ${finalizado?'#4ade80':'#f59e0b'};flex-direction:column;align-items:stretch;gap:5px">
+              <div style="display:flex;align-items:center;justify-content:space-between">
+                <span class="ep-grupo-nome" style="color:${finalizado?'#4ade80':'#fbbf24'}">${forn}${finalizado?' ✓':''}</span>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span style="font-size:12px;font-weight:700;color:${finalizado?'#4ade80':'#fbbf24'}">R$ ${totalForn.toFixed(2).replace('.',',')}</span>
+                  <span class="ep-grupo-chevron">▼</span>
+                </div>
               </div>
+              ${badgesHtml?`<div style="display:flex;gap:5px;flex-wrap:wrap">${badgesHtml}</div>`:''}
             </div>
             <div class="ep-grupo-body">${itensHtml}</div>
           </div>`;
@@ -7153,6 +7165,11 @@ function render() {
           },0);
           const gid='ep_hist_'+forn.replace(/[^a-z0-9]/gi,'_');
           const cor=hasDiverg?'#f59e0b':'#059669';
+          const badgesHtml=_epStatusBadges({
+            recebido: itens.filter(p=>p.status==='RECEBIDO_OK').length,
+            divergencia: itens.filter(p=>p.status==='DIVERGENCIA').length,
+            devolvido: itens.filter(p=>p.status==='DEVOLVIDO').length,
+          });
           const itensHtml=itens.map(prov=>{
             const produto=prov.gn_catalogo?.produto||'—';
             const und=prov.gn_catalogo?.und||'';
@@ -7161,28 +7178,34 @@ function render() {
             const qtdRec=parseFloat(rec?.qtd_recebida??prov.qtd_prevista)||0;
             const valRec=parseFloat(rec?.valor_recebido??prov.valor_previsto)||0;
             const validadoPor=rec?.validado_por||'';
+            const isDevolvido=prov.status==='DEVOLVIDO';
             const isDiverg=prov.status==='DIVERGENCIA';
+            const corItem=isDevolvido?'#a78bfa':(isDiverg?'#fbbf24':'#34d399');
+            const rotuloItem=isDevolvido?'↩️ Devolvido':(isDiverg?'⚠️ Divergência':'✅ Recebido');
             return `<div style="padding:10px 14px;border-bottom:1px solid rgba(255,255,255,.04)">
               <div style="display:flex;justify-content:space-between;align-items:flex-start">
                 <div style="flex:1;min-width:0">
-                  <div style="font-size:11px;color:${isDiverg?'#fbbf24':'#34d399'};font-weight:700">${isDiverg?'⚠️ Divergência':'✅ Recebido'}</div>
+                  <div style="font-size:11px;color:${corItem};font-weight:700">${rotuloItem}</div>
                   <div style="font-size:12px;color:#e2e8f0;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${produto}</div>
                   <div style="font-size:10px;color:#64748b;margin-top:1px">👤 ${validadoPor||'—'}${recTs?' · '+recTs:''}</div>
                 </div>
                 <div style="text-align:right;flex-shrink:0;margin-left:8px">
-                  <div style="font-size:13px;font-weight:800;color:${isDiverg?'#fbbf24':'#34d399'}">R$ ${valRec.toFixed(2).replace('.',',')}</div>
+                  <div style="font-size:13px;font-weight:800;color:${corItem}">R$ ${valRec.toFixed(2).replace('.',',')}</div>
                   <div style="font-size:11px;color:#64748b">${qtdRec} ${und}</div>
                 </div>
               </div>
             </div>`;
           }).join('');
-          return `<div class="ep-grupo aberto" id="${gid}" style="border-color:${cor}33">
-            <div class="ep-grupo-header" onclick="toggleEpGrupo('${gid}')" style="border-left:3px solid ${cor}">
-              <span class="ep-grupo-nome" style="color:${cor}">${forn}</span>
-              <div style="display:flex;align-items:center;gap:8px">
-                <span style="font-size:12px;font-weight:700;color:${cor}">R$ ${totalForn.toFixed(2).replace('.',',')}</span>
-                <span class="ep-grupo-chevron">▼</span>
+          return `<div class="ep-grupo${_epGruposAbertos.has(gid)?' aberto':''}" id="${gid}" style="border-color:${cor}33">
+            <div class="ep-grupo-header" onclick="toggleEpGrupo('${gid}')" style="border-left:3px solid ${cor};flex-direction:column;align-items:stretch;gap:5px">
+              <div style="display:flex;align-items:center;justify-content:space-between">
+                <span class="ep-grupo-nome" style="color:${cor}">${forn}</span>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span style="font-size:12px;font-weight:700;color:${cor}">R$ ${totalForn.toFixed(2).replace('.',',')}</span>
+                  <span class="ep-grupo-chevron">▼</span>
+                </div>
               </div>
+              ${badgesHtml?`<div style="display:flex;gap:5px;flex-wrap:wrap">${badgesHtml}</div>`:''}
             </div>
             <div class="ep-grupo-body">${itensHtml}</div>
           </div>`;
@@ -8214,7 +8237,24 @@ aplicarDefaults();
 /* ── ENTREGAS (lê gn_provisoes via slug da loja) ──────── */
 function toggleEpGrupo(id) {
   const el = document.getElementById(id);
-  if (el) el.classList.toggle('aberto');
+  if (!el) return;
+  el.classList.toggle('aberto');
+  if (el.classList.contains('aberto')) _epGruposAbertos.add(id); else _epGruposAbertos.delete(id);
+}
+
+// Resumo de status (a receber / recebido / divergência / devolvido) mostrado no
+// cabeçalho do card de fornecedor, mesmo fechado — antes o card só mostrava o
+// nome e o total em R$, era preciso abrir pra saber a situação de cada item.
+function _epStatusBadges(counts) {
+  const defs = [
+    ['aReceber', '⏳', 'a receber', '#f59e0b'],
+    ['recebido', '✅', 'recebido', '#4ade80'],
+    ['divergencia', '⚠️', 'divergência', '#f59e0b'],
+    ['devolvido', '↩️', 'devolvido', '#a78bfa'],
+  ];
+  return defs.filter(([k]) => counts[k] > 0).map(([k, ic, lbl, cor]) =>
+    `<span style="font-size:9px;font-weight:800;color:${cor};background:${cor}22;border-radius:20px;padding:2px 7px;white-space:nowrap">${ic} ${counts[k]} ${lbl}</span>`
+  ).join('');
 }
 
 // Dispara a cada tecla digitada no campo de busca de fornecedor (Entrega). Só reage quando
@@ -8228,7 +8268,7 @@ function pularParaFornecedorEntrega(valorDigitado) {
   const gid = 'ep_pend_'+forn.replace(/[^a-z0-9]/gi,'_');
   const el = document.getElementById(gid);
   if (!el) return;
-  if (!el.classList.contains('aberto')) el.classList.add('aberto');
+  if (!el.classList.contains('aberto')) { el.classList.add('aberto'); _epGruposAbertos.add(gid); }
   el.scrollIntoView({behavior:'smooth', block:'start'});
   el.style.transition = 'box-shadow .3s';
   el.style.boxShadow = '0 0 0 2px #fbbf24';
@@ -8242,7 +8282,7 @@ async function carregarEntregas(silent) {
     const slug=LOJA_SLUG[loja]||loja.toLowerCase().replace(/ /g,'_');
     const [rowsPend,rowsHist]=await Promise.all([
       sbRequest('gn_provisoes?loja_slug=eq.'+slug+'&status=eq.AGUARDANDO&select=*,gn_catalogo(produto,und),gn_pedidos(data_pedido)&order=data_entrega',{method:'GET'}),
-      sbRequest('gn_provisoes?loja_slug=eq.'+slug+'&status=in.(RECEBIDO_OK,DIVERGENCIA)&select=*,gn_catalogo(produto,und),gn_pedidos(data_pedido),gn_recebimentos(qtd_recebida,valor_recebido,validado_por,diferenca_qtd)&order=data_entrega.desc&limit=30',{method:'GET'})
+      sbRequest('gn_provisoes?loja_slug=eq.'+slug+'&status=in.(RECEBIDO_OK,DIVERGENCIA,DEVOLVIDO)&select=*,gn_catalogo(produto,und),gn_pedidos(data_pedido),gn_recebimentos(qtd_recebida,valor_recebido,validado_por,diferenca_qtd)&order=data_entrega.desc&limit=30',{method:'GET'})
     ]);
     provisoesEntrega=rowsPend||[];
     provisoesHistorico=rowsHist||[];
