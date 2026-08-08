@@ -547,6 +547,7 @@ hr.div{border:none;border-top:1px solid var(--bd);margin:12px 0}
   <button class="sidebar-link" data-sidebar-tab="saldo" onclick="setTab('saldo')"><span class="sl-icon">💰</span>Saldo Pool</button>
   <button class="sidebar-link" data-sidebar-tab="backup" onclick="setTab('backup')"><span class="sl-icon">💾</span>Dados</button>
   <button class="sidebar-link" data-sidebar-tab="log" onclick="setTab('log')"><span class="sl-icon">📋</span>Log</button>
+  <button class="sidebar-link" data-sidebar-tab="auditoria" onclick="setTab('auditoria')"><span class="sl-icon">📜</span>Auditoria</button>
 </nav>
 
 <div id="seletor-loja" style="display:none;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;padding:32px 20px;gap:18px;background:radial-gradient(ellipse at 50% 0%,rgba(242,100,25,.08) 0%,transparent 60%),#080810;overflow-y:auto">
@@ -1029,8 +1030,10 @@ function removerFuncionario(i, btnEl){
   wd2._lastEdit = Date.now();
   state.allData[String(state.semIdx)]=wd2;
   sv('allData',state.allData);
-  const entry={ts:new Date().toLocaleString('pt-BR'),usuario:usuarioAtual,semana:'S'+String(CAL[state.semIdx]?.num||'?').padStart(2,'0'),desc:'Funcionário removido'};
+  const semanaLabel='S'+String(CAL[state.semIdx]?.num||'?').padStart(2,'0');
+  const entry={ts:new Date().toLocaleString('pt-BR'),usuario:usuarioAtual,semana:semanaLabel,desc:'Funcionário removido'};
   logEntries.unshift(entry);
+  _logAuditoriaCom('EXCLUIR_FUNCIONARIO',{nome:nomeAtual,semana:semanaLabel});
   if(logEntries.length>100) logEntries=logEntries.slice(0,100);
   sv('log',logEntries);
   if(state.visibleSlots) delete state.visibleSlots[i];
@@ -1104,7 +1107,7 @@ function renderPool(ct){
     ${fHtml}</div>`;
 }
 function updDist(v){ const wd={...getWD(state.semIdx),dist:v}; setWD(state.semIdx,wd); renderPool(document.getElementById('content')); }
-function updVDist(v){ const val=parseBRL(v); const wd={...getWD(state.semIdx),vDist:val}; setWD(state.semIdx,wd); renderPool(document.getElementById('content')); }
+function updVDist(v){ const val=parseBRL(v); const wd={...getWD(state.semIdx),vDist:val}; setWD(state.semIdx,wd); renderPool(document.getElementById('content')); _logAuditoriaCom('ALTERAR_VALOR_DISTRIBUIR',{semana:'S'+String(CAL[state.semIdx]?.num||'?').padStart(2,'0'),valor:val}); }
 
 // ── TAB RESUMO MENSAL ─────────────────────────────────────────────────────
 function renderResumo(ct){
@@ -1517,15 +1520,18 @@ function confirmarSaida(i){
   saidas.push({valor:val,motivo:motEl.value.trim(),obs:obsEl?obsEl.value.trim():'',data:hoje});
   const saldoSaida=saidas.reduce((s,x)=>s+(parseFloat(x.valor)||0),0);
   setWD(i,{...wd,saidas,saldoSaida,motivo:saidas.map(s=>s.motivo).filter(Boolean).join('; ')});
+  _logAuditoriaCom('CONFIRMAR_SAIDA',{semana:'S'+String(CAL[i]?.num||'?').padStart(2,'0'),valor:val,motivo:motEl.value.trim()});
   renderSaldo(document.getElementById('content'));
 }
 function removeSaida(i,idx){
   if(!confirm('Excluir esta saída?')) return;
   const wd=getWD(i);
   const saidas=getSaidasWD(wd).slice();
+  const saidaExcluida=saidas[idx];
   saidas.splice(idx,1);
   const saldoSaida=saidas.reduce((s,x)=>s+(parseFloat(x.valor)||0),0);
   setWD(i,{...wd,saidas,saldoSaida,motivo:saidas.map(s=>s.motivo).filter(Boolean).join('; ')});
+  _logAuditoriaCom('EXCLUIR_SAIDA',{semana:'S'+String(CAL[i]?.num||'?').padStart(2,'0'),valor:saidaExcluida?.valor||0,motivo:saidaExcluida?.motivo||''});
   renderSaldo(document.getElementById('content'));
 }
 
@@ -2293,6 +2299,7 @@ function importarDados(){
     if(typeof data!=='object')throw new Error('Formato inválido');
     state.allData=data;sv('allData',state.allData);
     st.className='bk-status ok';st.textContent='✓ Dados restaurados!';
+    _logAuditoriaCom('IMPORTAR_BACKUP',{});
     showToast('✓ Restaurado!');setTimeout(()=>render(),1500);
   }catch(e){st.className='bk-status err';st.textContent='❌ JSON inválido.';}
 }
@@ -2302,7 +2309,7 @@ function limparDados(btnEl){
     btnEl.innerHTML='⚠️ Toque de novo p/ confirmar';
     setTimeout(()=>{if(btnEl.dataset.confirmando){delete btnEl.dataset.confirmando;btnEl.innerHTML=orig;}},3000);return;
   }
-  state.allData={};sv('allData',{});showToast('✓ Dados apagados');render();
+  state.allData={};sv('allData',{});_logAuditoriaCom('LIMPAR_DADOS',{});showToast('✓ Dados apagados');render();
 }
 
 function renderLog(ct){
@@ -2325,12 +2332,82 @@ function renderLog(ct){
     ${rows}</div>`;
 }
 
+// ── AUDITORIA ─────────────────────────────────────────────────────
+const AUD_ACOES_COM = {
+  EXCLUIR_FUNCIONARIO:    { icon: '🗑️', label: 'Removeu funcionário',            cor: '#f87171' },
+  CONFIRMAR_SAIDA:        { icon: '💸', label: 'Registrou saída do pool',         cor: '#fbbf24' },
+  EXCLUIR_SAIDA:          { icon: '🗑️', label: 'Excluiu saída do pool',           cor: '#f87171' },
+  ALTERAR_VALOR_DISTRIBUIR:{ icon: '✏️', label: 'Alterou valor manual a distribuir', cor: '#fbbf24' },
+  LIMPAR_DADOS:           { icon: '⚠️', label: 'Apagou todos os dados da loja',   cor: '#f87171' },
+  IMPORTAR_BACKUP:        { icon: '📥', label: 'Restaurou backup (sobrescreveu dados)', cor: '#f87171' },
+};
+
+async function _logAuditoriaCom(acao, detalhes){
+  try{
+    await fetch(`${SB_URL}/rest/v1/gn_comissoes_auditoria`,{
+      method:'POST',
+      headers:{apikey:SB_ANON,Authorization:'Bearer '+SB_ANON,'Content-Type':'application/json',Prefer:'return=minimal'},
+      body:JSON.stringify({ loja:LOJA, usuario:usuarioAtual||'SISTEMA', acao, detalhes: detalhes||null }),
+    });
+  }catch(e){ console.error('Erro ao registrar auditoria:', e.message||e); }
+}
+
+function _fmtDetalhesAuditoriaCom(acao, d){
+  if(!d) return '';
+  try{
+    if(acao==='EXCLUIR_FUNCIONARIO')     return `${d.nome||''} — ${d.semana||''}`;
+    if(acao==='CONFIRMAR_SAIDA')         return `${d.semana||''} — ${fmtBRL(d.valor||0)} · ${d.motivo||''}`;
+    if(acao==='EXCLUIR_SAIDA')           return `${d.semana||''} — ${fmtBRL(d.valor||0)} · ${d.motivo||''}`;
+    if(acao==='ALTERAR_VALOR_DISTRIBUIR')return `${d.semana||''} — ${fmtBRL(d.valor||0)}`;
+    if(acao==='LIMPAR_DADOS')            return 'Todos os lançamentos da loja foram apagados';
+    if(acao==='IMPORTAR_BACKUP')         return 'Dados sobrescritos a partir de backup colado';
+  }catch(e){}
+  return '';
+}
+
+let auditoriaComItems=[];
+async function carregarAuditoriaCom(){
+  try{
+    const r=await fetch(`${SB_URL}/rest/v1/gn_comissoes_auditoria?loja=eq.${LOJA}&order=criado_em.desc&limit=150`,{headers:{apikey:SB_ANON,Authorization:'Bearer '+SB_ANON}});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    auditoriaComItems=await r.json();
+  }catch(e){ auditoriaComItems=[]; }
+}
+
+function renderAuditoriaCom(ct){
+  ct.innerHTML=`<div class="pad"><div class="empty"><div class="ei">⏳</div>Carregando auditoria...</div></div>`;
+  carregarAuditoriaCom().then(()=>_renderAuditoriaComList(ct));
+}
+
+function _renderAuditoriaComList(ct){
+  const rows=auditoriaComItems.length
+    ?auditoriaComItems.map(r=>{
+      const meta=AUD_ACOES_COM[r.acao]||{icon:'•',label:r.acao,cor:'var(--gy)'};
+      const dt=new Date(r.criado_em).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+      const detalheStr=_fmtDetalhesAuditoriaCom(r.acao,r.detalhes);
+      return `<div class="log-item">
+        <div style="font-weight:700;color:${meta.cor}">${meta.icon} ${meta.label}</div>
+        ${detalheStr?`<div style="font-size:11px;color:var(--gy);margin-top:2px">${escapeHtml(detalheStr)}</div>`:''}
+        <div style="font-size:10px;color:var(--gy2);margin-top:3px">👤 ${escapeHtml(r.usuario||'—')} · ${dt}</div>
+      </div>`;
+    }).join('')
+    :`<div class="empty"><div class="ei">📭</div>Nenhum registro ainda</div>`;
+  ct.innerHTML=`<div class="pad">
+    <div class="row-sb" style="margin-bottom:10px">
+      <div class="sec-title" style="margin:0">◄ Auditoria — Quem fez o quê</div>
+      <button onclick="renderAuditoriaCom(document.getElementById('content'))" style="background:var(--bl);color:#fff;border:none;padding:6px 12px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer">↓ Atualizar</button>
+    </div>
+    <div style="font-size:11px;color:var(--gy);margin-bottom:10px">${auditoriaComItems.length} registro${auditoriaComItems.length!==1?'s':''} desta loja</div>
+    ${rows}</div>`;
+}
+
 // ── RENDER CENTRAL ────────────────────────────────────────────────
 const TABS=[
   {id:'semana',label:'Semana'},{id:'funcs',label:'Funcionários'},
   {id:'pool',label:'Pool'},{id:'resumo',label:'Resumo Mensal'},
   {id:'relatorio',label:'Relatório'},{id:'whatsapp',label:'📲 WhatsApp'},
   {id:'saldo',label:'Saldo Pool'},{id:'backup',label:'💾 Dados'},{id:'log',label:'📋 Log'},
+  {id:'auditoria',label:'📜 Auditoria'},
 ];
 function render(){
   const sem=CAL[state.semIdx]||CAL[0];
@@ -2350,6 +2427,7 @@ function render(){
   else if(state.tab==='saldo') renderSaldo(ct);
   else if(state.tab==='backup') renderBackup(ct);
   else if(state.tab==='log') renderLog(ct);
+  else if(state.tab==='auditoria') renderAuditoriaCom(ct);
 }
 function setTab(t){if(abasPermitidas&&!abasPermitidas.includes(t))return;state.tab=t;sv('tab',t);document.querySelectorAll('.sidebar-link').forEach(l=>l.classList.remove('active'));const sl=document.querySelector(`.sidebar-link[data-sidebar-tab="${t}"]`);if(sl)sl.classList.add('active');render();}
 function setSemIdx(i){state.semIdx=Math.max(0,Math.min(CAL.length-1,i));sv('semIdx',state.semIdx);render();}
