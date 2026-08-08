@@ -1296,47 +1296,40 @@ function _verificarAutoAlertaEntregas() {
 }
 
 /* ── ALERTAS DE NOTA FISCAL ABAIXO DO PREVISTO ─────────────────────────
-   Cruza as provisões (entregas atrasadas OU já confirmadas como recebidas
-   nos últimos 7 dias) com as notas lançadas na aba Entrada, por fornecedor
-   + janela de datas em torno da entrega. Aponta quando não tem nota
-   nenhuma lançada pra aquela entrega, ou quando o valor lançado é menor
-   que o valor previsto — sinal de nota ainda não digitada por completo. */
+   Cruza as provisões da semana vigente (entregas previstas dentro da
+   semana selecionada — mesmo parâmetro `semana`/lojaKey() já usado em
+   todo o app) com as notas lançadas na aba Entrada dessa mesma semana,
+   por fornecedor. Aponta quando não tem nota nenhuma lançada pro
+   fornecedor, ou quando o valor lançado é menor que o previsto — sinal
+   de nota ainda não digitada por completo. */
 function getAvisosNotaFiscal() {
+  const segIni = wkKey(semana);
+  const domFim = wkKey(new Date(semana.getFullYear(), semana.getMonth(), semana.getDate() + 6));
+  const naSemana = p => p.data_entrega && p.data_entrega >= segIni && p.data_entrega <= domFim;
+
   const hoje = wkKey(new Date());
-  const atrasadas = provisoesEntrega.filter(p => p.data_entrega && (p.data_entrega_fim || p.data_entrega) < hoje);
-  const recentesRecebidas = provisoesHistorico.filter(p => {
-    if (p.status !== 'RECEBIDO_OK' && p.status !== 'DIVERGENCIA') return false;
-    if (!p.atualizado_em) return false;
-    const dias = (Date.now() - new Date(p.atualizado_em).getTime()) / 86400000;
-    return dias >= 0 && dias <= 7;
-  });
-  const candidatas = [...atrasadas, ...recentesRecebidas];
+  const atrasadas = provisoesEntrega.filter(p => naSemana(p) && (p.data_entrega_fim || p.data_entrega) < hoje);
+  const recebidas = provisoesHistorico.filter(p => (p.status === 'RECEBIDO_OK' || p.status === 'DIVERGENCIA') && naSemana(p));
+  const candidatas = [...atrasadas, ...recebidas];
   if (!candidatas.length) return [];
 
-  // Agrupa por fornecedor + data prevista de entrega — mesma entrega = mesma nota
+  // Agrupa por fornecedor — dentro da semana vigente, itens do mesmo fornecedor = mesma nota
   const grupos = {};
   candidatas.forEach(p => {
-    if (!p.data_entrega) return;
     const fornDisp = (p.fornecedor || 'Sem fornecedor').trim();
-    const key = fornDisp.toUpperCase() + '|' + p.data_entrega;
-    if (!grupos[key]) grupos[key] = { fornecedor: fornDisp, data: p.data_entrega, valorPrevisto: 0 };
+    const key = fornDisp.toUpperCase();
+    if (!grupos[key]) grupos[key] = { fornecedor: fornDisp, valorPrevisto: 0 };
     grupos[key].valorPrevisto += parseFloat(p.valor_previsto) || 0;
   });
 
-  // Todas as notas lançadas desta loja (todas as semanas em memória)
-  const todasEntradas = [];
-  Object.keys(entradasAll).forEach(k => {
-    if (k.startsWith(loja + '|')) todasEntradas.push(...(entradasAll[k] || []));
-  });
+  // Notas lançadas na semana vigente — mesma chave (lojaKey) usada em toda a Entrada
+  const entradasSemana = entradasAll[lojaKey()] || [];
 
   const avisos = [];
   Object.values(grupos).forEach(g => {
     const fornNorm = g.fornecedor.toUpperCase();
-    const de = new Date(g.data + 'T00:00:00'); de.setDate(de.getDate() - 3);
-    const ate = new Date();
-    const lancado = todasEntradas
-      .filter(e => (e.fornecedor||'').trim().toUpperCase() === fornNorm && e.dataNF)
-      .filter(e => { const d = new Date(e.dataNF+'T00:00:00'); return d >= de && d <= ate; })
+    const lancado = entradasSemana
+      .filter(e => (e.fornecedor||'').trim().toUpperCase() === fornNorm)
       .reduce((s,e) => s + (parseFloat(e.qtd)||0) * (parseFloat(e.custoUnit)||0), 0);
     if (lancado === 0) {
       avisos.push({ ...g, lancado, tipo: 'sem_nota' });
@@ -1353,12 +1346,11 @@ function gerarMsgAlertaNotaFiscal() {
   const agora = new Date();
   const dt = agora.toLocaleDateString('pt-BR')+' '+agora.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
   const fR = v => Number(v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
-  const fmtD = d => d ? new Date(d+'T12:00:00').toLocaleDateString('pt-BR') : '—';
-  let msg = '🧾 *NOTA FISCAL PENDENTE — '+lojaDisp(loja)+'*\n📅 '+dt+'\n\n';
+  let msg = '🧾 *NOTA FISCAL PENDENTE — '+lojaDisp(loja)+'*\n📅 '+dt+' (semana vigente)\n\n';
   av.forEach(a => {
     msg += a.tipo==='sem_nota'
-      ? '▪️ *'+a.fornecedor+'* — nenhuma nota lançada\n   Previsto: R$ '+fR(a.valorPrevisto)+' | Entrega: '+fmtD(a.data)+'\n'
-      : '▪️ *'+a.fornecedor+'* — nota abaixo do previsto\n   Lançado: R$ '+fR(a.lancado)+' de R$ '+fR(a.valorPrevisto)+' previstos | Entrega: '+fmtD(a.data)+'\n';
+      ? '▪️ *'+a.fornecedor+'* — nenhuma nota lançada\n   Previsto: R$ '+fR(a.valorPrevisto)+'\n'
+      : '▪️ *'+a.fornecedor+'* — nota abaixo do previsto\n   Lançado: R$ '+fR(a.lancado)+' de R$ '+fR(a.valorPrevisto)+' previstos\n';
   });
   msg += '\n⚠️ Conferir lançamento de nota na aba Entrada.';
   return msg;
