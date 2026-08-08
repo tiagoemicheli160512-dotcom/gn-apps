@@ -3898,6 +3898,46 @@ async function _sincronizarComPedidos(produtosSync) {
   return { contagens: contagens.length, itens: itens.length, erros, naoSincronizados };
 }
 
+/* Sincroniza Ped.ant (ul_pedido) no app Pedidos assim que uma nota é lançada — sem
+   esperar a loja confirmar o pedido da semana. confirmarPedido/_sincronizarComPedidos
+   só rodam uma vez por semana e usam a semana ANTERIOR; isso aqui atualiza pro valor
+   mais atual, somando tudo que já foi lançado na Entrada nesta semana. Atualiza só a
+   última contagem que já existe pro item — nunca cria linha nova: se criasse uma linha
+   com a data de hoje, o app Pedidos passaria a considerá-la "a mais recente" (ordena
+   por data_contagem desc) e o Est.vig sumiria pra esse item até a loja recontar (ver
+   carregarContagens em gn-pedidos.html). Roda em segundo plano; falha em silêncio —
+   a sincronização via confirmarPedido continua existindo como reforço/backup. */
+async function _syncUlPedidoAposNota(insumosAfetados) {
+  try {
+    await _carregarCatalogo();
+    const lojaSlug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+    const entPorInsumo = getEntradasPorInsumo();
+    for (const insumo of insumosAfetados) {
+      const prod = getProdutosPedidoOrdenados().find(p => {
+        const idStr = String(p.item);
+        const dest = mapeamentoPedido[idStr] || p.produto.trim().toUpperCase();
+        return dest === insumo;
+      });
+      if (!prod) continue;
+      const catalogoId = _resolverCatalogoId(prod);
+      if (!catalogoId) continue;
+      const novoUlPedido = entPorInsumo[insumo] || 0;
+      try {
+        const rows = await sbRequest(
+          'gn_contagens_pedido?catalogo_id=eq.' + catalogoId + '&loja_slug=eq.' + lojaSlug + '&select=data_contagem&order=data_contagem.desc&limit=1',
+          { method: 'GET' }
+        );
+        const ultima = rows && rows[0];
+        if (!ultima) continue; // nunca foi contado nesta loja ainda — nada pra atualizar
+        await sbRequest(
+          'gn_contagens_pedido?catalogo_id=eq.' + catalogoId + '&loja_slug=eq.' + lojaSlug + '&data_contagem=eq.' + ultima.data_contagem,
+          { method: 'PATCH', headers: { 'Prefer': 'return=minimal' }, body: JSON.stringify({ ul_pedido: novoUlPedido }) }
+        );
+      } catch(e) {}
+    }
+  } catch(e) {}
+}
+
 async function confirmarPedido(modo) {
   // modo: 'urgencia' (contagem rápida, envia pedido) | 'final' (fecha semana + Excel)
 
@@ -4465,6 +4505,7 @@ function _continuarSalvarNota(dataNF, nf, fornecedor, vencimentos, itensValidos)
     salvos++;
   });
   if (mapeamentosNovos) sbPushMasterConfig();
+  _syncUlPedidoAposNota([...new Set(itensValidos.map(item => item.insumo))]);
 
   showToast('✅ ' + salvos + ' item(s) da NF salvos! Estoque atualizado.');
 
