@@ -1980,6 +1980,18 @@ function getFator(insumo) {
   return fatoresConversao[insumo] || 1;
 }
 
+// Fator de conversão do Pedido (Cx → UN) — diferente do getFator() acima, que é um valor
+// livre editado por cada loja (pensado pra Entrada/Contagem de insumo). Aqui a fonte é
+// sempre o catálogo central (gn_catalogo.und + und_por_caixa, definido pelo setor de
+// Compras no app Estoque e Pedido), pra evitar que um produto simples (ex.: Polpa em KG)
+// acabe multiplicado por um fator de outro contexto só porque o nome bate com algum
+// insumo — foi exatamente isso que causou pedidos saindo errados.
+function getFatorPedido(prod) {
+  if (!prod) return 1;
+  if (prod.und !== 'CX' && prod.und !== 'BB') return 1;
+  return parseFloat(prod.und_por_caixa) || 1;
+}
+
 function setFator(insumo, fator) {
   const f = parseFloat(fator);
   if (!insumo) return;
@@ -3420,18 +3432,23 @@ function adicionarLinhaFicha() {
 /* ═══════════ PEDIDO DE REPOSIÇÃO ═══════════ */
 /* ═══════════ GESTÃO DE ITENS DO PEDIDO ═══════════ */
 function adicionarItemPedido(dados) {
-  // dados: {fornecedor, grupo, subgrupo, produto, und, custo}
+  // dados: {fornecedor, grupo, subgrupo, produto, und, custo, und_por_caixa}
   if (!dados.produto || !dados.produto.trim()) { showToast("⚠️ Nome do produto obrigatório."); return false; }
   const prods = getProdutosPedidoOrdenados();
   const id = "C" + Date.now(); // prefixo C = custom, nunca colide com IDs numéricos
+  const undNovo = (dados.und||"UN").trim().toUpperCase();
   const novoItem = {
     item: id,
     fornecedor: (dados.fornecedor||"").trim().toUpperCase(),
     grupo: (dados.grupo||"GERAL").trim().toUpperCase(),
     subgrupo: (dados.subgrupo||"GERAL").trim().toUpperCase(),
     produto: dados.produto.trim().toUpperCase(),
-    und: (dados.und||"UN").trim().toUpperCase(),
+    und: undNovo,
     custo: parseFloat(dados.custo)||0,
+    // Só relevante quando und é CX/BB — é isso que define quantas UND valem cada "1"
+    // digitado no Pedido (ver getFatorPedido). Pra outras unidades (KG, UND, etc.) o
+    // valor digitado já é a quantidade real, sem nenhuma conversão.
+    und_por_caixa: (undNovo === 'CX' || undNovo === 'BB') ? (parseFloat(dados.und_por_caixa) || null) : null,
     posIndex: prods.length, // inserir no final da lista
     isCustom: true
   };
@@ -3533,7 +3550,7 @@ function abrirModalNovoProdutoPedido() {
         </div>
         <div>
           <label style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase">Unidade</label>
-          <select id="npUnd" class="inp-full" style="background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.15);border-radius:11px;padding:7px 8px;color:#fff">
+          <select id="npUnd" class="inp-full" onchange="document.getElementById('npUndCxWrap').style.display=(this.value==='CX'||this.value==='BB')?'':'none'" style="background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.15);border-radius:11px;padding:7px 8px;color:#fff">
             ${["KG","UN","CX","PCT","SC","BB","UND","LT","RL","FD"].map(u=>`<option style="background:#3a3a3a">${u}</option>`).join("")}
           </select>
         </div>
@@ -3541,6 +3558,10 @@ function abrirModalNovoProdutoPedido() {
           <label style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase">Custo R$</label>
           <input id="npCusto" class="inp-full" type="number" step="0.01" min="0" placeholder="0,00"/>
         </div>
+      </div>
+      <div id="npUndCxWrap" style="display:none">
+        <label style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase">Quantas UND tem 1 caixa? <span style="color:#64748b;font-weight:400;text-transform:none">(pra não contar errado ao pedir)</span></label>
+        <input id="npUndPorCx" class="inp-full" type="number" step="1" min="1" placeholder="ex: 12"/>
       </div>
       <button onclick="(function(){
         const dados = {
@@ -3550,6 +3571,7 @@ function abrirModalNovoProdutoPedido() {
           fornecedor: document.getElementById('npFornecedor').value,
           und: document.getElementById('npUnd').value,
           custo: document.getElementById('npCusto').value,
+          und_por_caixa: document.getElementById('npUndPorCx').value,
         };
         if(adicionarItemPedido(dados)){
           document.getElementById('modalNovoProduto').remove();
@@ -3584,10 +3606,8 @@ function campoComBadge(valor, badge, badgeCor, bgExtra, oninputAttr) {
 
 function getTotalUn(itemId, prodNome) {
   const entry = (pedidoAll[lojaKey()]||{})[itemId] || {};
-  // Usar o insumo MAPEADO para buscar o fator (é onde o fator está configurado)
-  const idStr = String(itemId);
-  const insumoParaFator = mapeamentoPedido[idStr] || prodNome.trim().toUpperCase();
-  const fator = getFator(insumoParaFator);
+  const prod = PRODUTOS_PEDIDO.find(x => x.item === itemId) || { produto: prodNome };
+  const fator = getFatorPedido(prod);
   const cx  = parseFloat(entry.cx)  || 0;
   const und = parseFloat(entry.und) || 0;
   return (cx * fator) + und;
@@ -3643,9 +3663,7 @@ async function abrirConferenciaSync() {
   const itens = PRODUTOS_PEDIDO
     .map(prod => {
       const entry = (pedidoAll[kAlvo]||{})[prod.item] || {};
-      const idStr = String(prod.item);
-      const insumoParaFator = mapeamentoPedido[idStr] || prod.produto.trim().toUpperCase();
-      const fator = getFator(insumoParaFator);
+      const fator = getFatorPedido(prod);
       const local = ((parseFloat(entry.cx)||0) * fator) + (parseFloat(entry.und)||0);
       if (local <= 0) { semContagem.push(prod); return null; }
       const catalogoId = _resolverCatalogoId(prod);
@@ -3757,7 +3775,7 @@ async function _carregarCatalogo() {
 async function _sincronizarProdutosPedidoComCatalogo() {
   try {
     const rows = await sbRequest(
-      'gn_catalogo?ativo=eq.true&select=item_id,fornecedor,grupo,subgrupo,produto,und,custo&order=grupo,fornecedor,produto',
+      'gn_catalogo?ativo=eq.true&select=item_id,fornecedor,grupo,subgrupo,produto,und,custo,und_por_caixa&order=grupo,fornecedor,produto',
       { method: 'GET' }
     );
     const atualizados = (rows || [])
@@ -3770,6 +3788,7 @@ async function _sincronizarProdutosPedidoComCatalogo() {
         produto: r.produto,
         und: r.und,
         custo: Number(r.custo) || 0,
+        und_por_caixa: r.und_por_caixa != null ? Number(r.und_por_caixa) : null,
       }));
     if (atualizados.length) {
       PRODUTOS_PEDIDO.length = 0;
@@ -4032,7 +4051,7 @@ async function confirmarPedido(modo) {
     const insumoMapeado2 = mapeamentoPedido[idStr2];
     const nomeUpper2 = prod.produto.trim().toUpperCase();
     const destino2 = insumoMapeado2 || nomeUpper2;
-    const fator2 = getFator(insumoMapeado2 || nomeUpper2);
+    const fator2 = getFatorPedido(prod);
     pedidoAnterior[destino2] = (pedidoAnterior[destino2] || 0) + (cxAnt * fator2 + undAnt);
   });
 
@@ -4049,7 +4068,7 @@ async function confirmarPedido(modo) {
     const idStr      = String(prod.item);
     const nomeUpper  = prod.produto.trim().toUpperCase();
     const insumoMapeado  = mapeamentoPedido[idStr];
-    const fator      = getFator(insumoMapeado || nomeUpper);
+    const fator      = getFatorPedido(prod);
     const cx         = parseFloat(entry.cx)  || 0;
     const und        = parseFloat(entry.und) || 0;
     const qtdBase    = (cx * fator) + und;
@@ -4265,9 +4284,7 @@ async function gerarExcelPedido() {
         grupoAtual = prod.grupo;
       }
       const entry = p[prod.item] || {};
-      const idStrX = String(prod.item);
-      const insumoParaFatorX = mapeamentoPedido[idStrX] || prod.produto.trim().toUpperCase();
-      const fatorX = getFator(insumoParaFatorX);
+      const fatorX = getFatorPedido(prod);
       const cxVal  = parseFloat(entry.cx)  || 0;
       const undVal = parseFloat(entry.und) || 0;
       const totalUn = cxVal * fatorX + undVal;
@@ -4306,8 +4323,7 @@ async function gerarExcelPedido() {
       const pcx2 = parseFloat(entry.pedidoCx)  || 0;
       const pund2 = parseFloat(entry.pedidoUnd) || 0;
       if (!cx2 && !und2 && !pcx2 && !pund2) return; // só itens preenchidos
-      const idStrR = String(prod.item);
-      const fatorR = getFator(mapeamentoPedido[idStrR] || prod.produto.trim().toUpperCase());
+      const fatorR = getFatorPedido(prod);
       const totR = cx2 * fatorR + und2;
       resumoRows.push([
         prod.item, prod.fornecedor, prod.grupo, prod.subgrupo,
@@ -4796,7 +4812,7 @@ function gerarRelatorioGruposWpp() {
     prods.forEach(prod => {
       const idStr = String(prod.item);
       const insumoKey = mapeamentoPedido[idStr] || prod.produto.trim().toUpperCase();
-      const fator = getFator(insumoKey);
+      const fator = getFatorPedido(prod);
       const entry = pedido[prod.item] || {};
       const cx = parseFloat(entry.cx || entry.atual) || 0;
       const und = parseFloat(entry.und) || 0;
@@ -6908,7 +6924,7 @@ function render() {
               ${prod.fornecedor}${prod.subgrupo?' · '+prod.subgrupo:''}${prod.custo>0?' · R$'+prod.custo.toFixed(2):''}
               ${(function(){
                 const mapa = getMapeamento(prod.item);
-                const fator = getFator(prod.produto.trim().toUpperCase());
+                const fator = getFatorPedido(prod);
                 if (!mapa && fator <= 1) return '';
                 const entryVal = (getPedido()[prod.item]||{}).atual || 0;
                 const totalUn = entryVal * fator;
