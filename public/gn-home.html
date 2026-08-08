@@ -840,14 +840,17 @@ async function _renderPendenciasLojaHome(mostrar, sess, isMasterAtivo) {
   const semIdxAtual = _escalaHomeSemIdx(hoje);
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
   const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  const lojaSlug = (GN_LOJAS.find(l=>l.userKey===loja)||{}).lojaSlug || '';
 
   try {
-    const [comRows, bhRows, lojaRows, chkManutRows, caixaRows] = await Promise.all([
+    const [comRows, bhRows, lojaRows, chkManutRows, caixaRows, provAguardando, provHist] = await Promise.all([
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'pendLoja:com', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_banco_horas?loja=eq.${encodeURIComponent(chkKey)}&mes=eq.CONFIG&select=registros`, H, 'pendLoja:bh', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'pendLoja:lojas', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${from30}&select=data_operacao,manutencao&order=data_operacao.desc`, H, 'pendLoja:chk', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?loja=eq.${encodeURIComponent(loja)}&status=eq.FECHADO&data=gte.${from30}&select=id,data,turno`, H, 'pendLoja:caixa', []),
+      lojaSlug ? window.gnFetchJson(`${SB_URL}/rest/v1/gn_provisoes?loja_slug=eq.${encodeURIComponent(lojaSlug)}&status=eq.AGUARDANDO&select=fornecedor,valor_previsto,data_entrega,data_entrega_fim`, H, 'pendLoja:provAg', []) : [],
+      lojaSlug ? window.gnFetchJson(`${SB_URL}/rest/v1/gn_provisoes?loja_slug=eq.${encodeURIComponent(lojaSlug)}&status=in.(RECEBIDO_OK,DIVERGENCIA)&select=fornecedor,valor_previsto,data_entrega,status,atualizado_em&order=data_entrega.desc&limit=30`, H, 'pendLoja:provHist', []) : [],
     ]);
 
     const escalaIncompleta = [], contratosVencendo = [];
@@ -929,6 +932,39 @@ async function _renderPendenciasLojaHome(mostrar, sess, isMasterAtivo) {
     if (escalaIncompleta.length) itens.push({cor:'#a78bfa', ico:'🗓️', msg:`${escalaIncompleta.length} funcionário${escalaIncompleta.length>1?'s':''} sem horário completo na escala`,
       sub: escalaIncompleta.slice(0,3).map(f=>`${esc(f.nome)} (${f.dias.join(', ')})`).join(' · ')+(escalaIncompleta.length>3?` +${escalaIncompleta.length-3}`:'')});
     if (bancoHorasPendente) itens.push({cor:'#a78bfa', ico:'⏱️', msg: bancoHorasPendente.motivo==='sem_periodo' ? 'Banco de horas do mês não configurado' : `Sem salário cadastrado pra ${bancoHorasPendente.setores.length>1?bancoHorasPendente.setores.length+' setores':bancoHorasPendente.setores[0]}`});
+
+    // Notas fiscais pendentes/abaixo do previsto — cruza as provisões da semana vigente
+    // (mesmo parâmetro `semana` usado no app Lojas) com as notas já lançadas na aba
+    // Entrada daquele app, que ficam sincronizadas dentro de gn_lojas.all_data.entradasAll.
+    const seg = new Date(); seg.setDate(seg.getDate() - (seg.getDay()===0?6:seg.getDay()-1)); seg.setHours(0,0,0,0);
+    const wkFmt = d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+    const segIni = wkFmt(seg);
+    const domD = new Date(seg); domD.setDate(domD.getDate()+6);
+    const domFim = wkFmt(domD);
+    const naSemana = p => p.data_entrega && p.data_entrega >= segIni && p.data_entrega <= domFim;
+    const atrasadasNF = (provAguardando||[]).filter(p => naSemana(p) && (p.data_entrega_fim||p.data_entrega) < hoje);
+    const recebidasNF = (provHist||[]).filter(p => (p.status==='RECEBIDO_OK'||p.status==='DIVERGENCIA') && naSemana(p));
+    const candidatasNF = [...atrasadasNF, ...recebidasNF];
+    if (candidatasNF.length) {
+      const gruposForn = {};
+      candidatasNF.forEach(p=>{
+        const fornDisp=(p.fornecedor||'Sem fornecedor').trim();
+        const key=fornDisp.toUpperCase();
+        if(!gruposForn[key]) gruposForn[key]={fornecedor:fornDisp, valorPrevisto:0};
+        gruposForn[key].valorPrevisto += parseFloat(p.valor_previsto)||0;
+      });
+      const entradasSemana = (lojaAllData.entradasAll && lojaAllData.entradasAll[loja+'|'+segIni]) || [];
+      const notaAvisos = [];
+      Object.values(gruposForn).forEach(g=>{
+        const fornNorm=g.fornecedor.toUpperCase();
+        const lancado = entradasSemana.filter(e=>(e.fornecedor||'').trim().toUpperCase()===fornNorm)
+          .reduce((s,e)=>s+(parseFloat(e.qtd)||0)*(parseFloat(e.custoUnit)||0),0);
+        if (lancado===0) notaAvisos.push({fornecedor:g.fornecedor, tipo:'sem_nota'});
+        else if (lancado < g.valorPrevisto*0.98) notaAvisos.push({fornecedor:g.fornecedor, tipo:'abaixo'});
+      });
+      if (notaAvisos.length) itens.push({cor:'#a78bfa', ico:'🧾', msg:`${notaAvisos.length} fornecedor${notaAvisos.length>1?'es':''} sem nota lançada corretamente`,
+        sub: notaAvisos.slice(0,3).map(a=>esc(a.fornecedor)+(a.tipo==='sem_nota'?' (sem nota)':' (abaixo do previsto)')).join(' · ')+(notaAvisos.length>3?` +${notaAvisos.length-3}`:'')});
+    }
 
     if (!itens.length) { el.innerHTML = ''; return; }
 
