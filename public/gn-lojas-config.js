@@ -15,7 +15,7 @@ window.GN_LOJAS = [
   { display:'Guarulhos',      userKey:'GUARULHOS',     chkKey:'Guarulhos',      comKey:'GUARULHOS',    lojaSlug:'guarulhos',      trioSlug:'guarulhos',    cor:'#1e40af' },
   // Operação independente (cardápio e gorjetas próprios), gerida pelo grupo — mesmo
   // controle das demais lojas.
-  { display:'Maglia',         userKey:'MAGLIA',        chkKey:'Maglia',         comKey:'MAGLIA',       lojaSlug:'maglia',         trioSlug:'maglia',       cor:'#a21caf' },
+  { display:'Maglia',         userKey:'MAGLIA',        chkKey:'Maglia',         comKey:'MAGLIA',       lojaSlug:'maglia',         trioSlug:'maglia',       cor:'#059669' },
 ];
 
 // Slug usado em gn_trios_agenda a partir do comKey — helper compartilhado

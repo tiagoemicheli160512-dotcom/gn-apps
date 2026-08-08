@@ -452,6 +452,13 @@ const LOJAS_TODAS = GN_LOJAS.map(l=>l.userKey);
 let LOJAS_LISTA = LOJAS_TODAS;
 let _lojasRestritas = false; // true quando a sessão é de um supervisor com rota de lojas cadastrada
 
+// Maglia é operação independente (gestão do grupo, cardápio e gorjetas próprios) — aparece
+// individualmente em todo lugar (ranking, tabela, card, relatório), mas nunca soma junto
+// com as demais lojas nos totais consolidados de faturamento (Faturamento Total, chip do
+// resumo diário, PDF/WhatsApp). Centralizado aqui pra não espalhar a mesma checagem.
+const LOJA_FORA_CONSOLIDADO = 'MAGLIA';
+function _lojasFatConsolidado(lista) { return (lista || LOJAS_LISTA).filter(k => k !== LOJA_FORA_CONSOLIDADO); }
+
 // Cargo supervisor só enxerga/abre as lojas cadastradas na rota dele (permissoes.lojas_supervisor,
 // definido no app Usuários). Sem rota cadastrada, mantém acesso a todas (comportamento anterior,
 // evita travar contas antigas até o mestre configurar a rota). Cargo mestre sempre vê tudo.
@@ -1598,7 +1605,7 @@ async function _renderHealthChips() {
     });
     const visitasAndamento = (visitasRows || []).filter(r => !r.horaSaida);
 
-    const fatTotal = fatData ? LOJAS_LISTA.reduce((s,k) => s + (fatData[k]||0), 0) : null;
+    const fatTotal = fatData ? _lojasFatConsolidado().reduce((s,k) => s + (fatData[k]||0), 0) : null;
 
     const totalLojas = LOJAS_LISTA.length;
     const cxOk  = LOJAS_LISTA.filter(l => lojasComCaixa.has(l)).length;
@@ -2270,8 +2277,8 @@ async function _fetchFatByDay(dates) {
   const byDay = {}, byLojaDay = {};
   (rows || []).forEach(r => {
     const v = (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0);
-    byDay[r.data_operacao] = (byDay[r.data_operacao] || 0) + v;
     const lk = _normLoja(r.loja);
+    if (lk !== LOJA_FORA_CONSOLIDADO) byDay[r.data_operacao] = (byDay[r.data_operacao] || 0) + v;
     if (LOJAS_LISTA.includes(lk)) {
       if (!byLojaDay[lk]) byLojaDay[lk] = {};
       byLojaDay[lk][r.data_operacao] = (byLojaDay[lk][r.data_operacao] || 0) + v;
@@ -2556,8 +2563,9 @@ function _sparkSVG(vals) {
 function _buildKPIRow() {
   if(!_dashFat) return `<div class="kpi-row">${['Faturamento','Variação','% Média Meta','CHK Hoje'].map(lbl=>`<div class="kpi-tile"><div class="kpi-tile-lbl">${lbl}</div><div class="kpi-tile-val" style="color:rgba(0,0,0,.2)">—</div></div>`).join('')}</div>`;
   const fat=_dashFat, fatP=_dashFatPrev;
-  const total=LOJAS_LISTA.reduce((s,k)=>s+(fat[k]||0),0);
-  const totalP=fatP?LOJAS_LISTA.reduce((s,k)=>s+(fatP[k]||0),0):0;
+  const lojasConsolidado=_lojasFatConsolidado();
+  const total=lojasConsolidado.reduce((s,k)=>s+(fat[k]||0),0);
+  const totalP=fatP?lojasConsolidado.reduce((s,k)=>s+(fatP[k]||0),0):0;
   const delta=totalP>0?Math.round((total-totalP)/totalP*100):null;
   const dStr=delta===null?'—':(delta>=0?'+':'')+delta+'%';
   const dClr=delta===null?'rgba(0,0,0,.3)':delta>=0?'#4ade80':'#f87171';
@@ -3918,7 +3926,9 @@ function _gerarRelatorio() {
     const meta = _dashMetas[k]||0;
     const manut= _dashManut?(_dashManut[k]||0):0;
     const chkOk= _dashChk?_dashChk.has(k):null;
-    total += v;
+    // Soma no Total do relatório, exceto Maglia — a menos que o usuário a selecione
+    // manualmente na lista (aí é escolha explícita, não o consolidado padrão).
+    if (_dashRelSel.size > 0 || k !== LOJA_FORA_CONSOLIDADO) total += v;
     lojasDados.push({ k, v, vP, meta, manut, chkOk, nome: LOJA_DISPLAY[k]||k });
   });
   lojasDados.sort((a,b) => b.v - a.v);
