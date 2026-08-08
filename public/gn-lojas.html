@@ -2313,7 +2313,7 @@ function _iniciarVigiaHorario() {
 function prevWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana, -7); checklistFat = null; checklistVendasItens = null; if(tab==="vendas") loadChecklistFat(); render(); }
 function nextWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana,  7); checklistFat = null; checklistVendasItens = null; if(tab==="vendas") loadChecklistFat(); render(); }
 function irParaSemana(isoStr) { semana = new Date(isoStr); tab = "relatorio"; render(); }
-function changeLoja(v) { if (lojaForcada) return; loja = v; tab = "home"; checklistFat = null; checklistVendasItens = null; render(); _epProcessarFila(); }
+function changeLoja(v) { if (lojaForcada) return; loja = v; tab = "home"; checklistFat = null; checklistVendasItens = null; render(); _epProcessarFila(); _pedSyncFilaProcessar(); }
 function carregarPermissaoLoja() {
   try {
     var s = JSON.parse(localStorage.getItem('gn_session_v1') || 'null');
@@ -3839,6 +3839,45 @@ async function carregarPedidoOficial() {
   } catch(e) {}
 }
 
+// Fila de sincronização com o app Pedidos (contagens + itens do pedido) que falhou ao
+// confirmar — grava localmente e tenta de novo em segundo plano, mesmo padrão de
+// resiliência já usado no Confirmar Entrega (_epProcessarFila). Seguro reprocessar um
+// mesmo lote várias vezes porque _sincronizarComPedidos só faz upsert (idempotente) em
+// gn_contagens_pedido e gn_pedido_itens — nunca duplica.
+const PED_SYNC_FILA_KEY = 'gn_ped_sync_fila_pendente';
+let _pedSyncFila = {}; // { [loja]: [ produtosParaSync, ... ] }
+let _pedSyncRetryTimer = null;
+function _pedSyncFilaCarregar() {
+  try { _pedSyncFila = JSON.parse(localStorage.getItem(PED_SYNC_FILA_KEY) || '{}'); }
+  catch(e) { _pedSyncFila = {}; }
+}
+function _pedSyncFilaSalvar() {
+  try { localStorage.setItem(PED_SYNC_FILA_KEY, JSON.stringify(_pedSyncFila)); } catch(e) {}
+}
+function _pedSyncFilaAdicionar(produtosParaSync) {
+  if (!_pedSyncFila[loja]) _pedSyncFila[loja] = [];
+  _pedSyncFila[loja].push(produtosParaSync);
+  _pedSyncFilaSalvar();
+  _pedSyncFilaProcessar();
+}
+async function _pedSyncFilaProcessar() {
+  if (_pedSyncRetryTimer) { clearTimeout(_pedSyncRetryTimer); _pedSyncRetryTimer=null; }
+  const fila = _pedSyncFila[loja] || [];
+  if (!fila.length) return;
+  let houveErro=false;
+  for (const lote of [...fila]) {
+    try {
+      const r = await _sincronizarComPedidos(lote);
+      if (r && r.erros > 0) throw new Error('erros='+r.erros);
+      _pedSyncFila[loja] = (_pedSyncFila[loja]||[]).filter(x => x !== lote);
+      _pedSyncFilaSalvar();
+    } catch(e) {
+      houveErro = true;
+    }
+  }
+  if (houveErro) _pedSyncRetryTimer = setTimeout(_pedSyncFilaProcessar, 8000);
+}
+
 async function _sincronizarComPedidos(produtosSync) {
   // produtosSync: [{prod, cx, und, pedidoCx, pedidoUnd, fator}]
   await _carregarCatalogo();
@@ -4061,13 +4100,18 @@ async function confirmarPedido(modo) {
   if (sbSyncTimer) { clearTimeout(sbSyncTimer); sbSyncTimer = null; }
   autoSave();
 
-  // 4. Enviar ao app Pedidos ANTES de avançar semana (usa semana atual como referência)
+  // 4. Enviar ao app Pedidos ANTES de avançar semana (usa semana atual como referência).
+  // Se falhar (rede caiu na hora), guarda o mesmo lote numa fila local que tenta de
+  // novo em segundo plano — sem isso, esse pedido nunca mais chegava ao app Pedidos
+  // a não ser que a loja confirmasse tudo de novo do zero.
   let syncResult = null;
   if (produtosParaSync.length > 0) {
     try {
       syncResult = await _sincronizarComPedidos(produtosParaSync);
+      if (syncResult && syncResult.erros > 0) _pedSyncFilaAdicionar(produtosParaSync);
     } catch(e) {
-      syncResult = { contagens: 0, itens: 0, erros: 1 };
+      syncResult = { contagens: 0, itens: 0, erros: 1, naoSincronizados: [] };
+      _pedSyncFilaAdicionar(produtosParaSync);
     }
   }
 
@@ -8397,7 +8441,12 @@ _epFilaCarregar();
 _epProcessarFila();
 // Reforço extra: assim que a conexão voltar, tenta sincronizar na hora em vez de esperar
 // o retry de 8s em andamento.
-window.addEventListener('online', () => { _epProcessarFila(); });
+window.addEventListener('online', () => { _epProcessarFila(); _pedSyncFilaProcessar(); });
+
+// Mesma recuperação, pra fila de sincronização com o app Pedidos (contagens + itens do
+// pedido confirmados que não chegaram a sincronizar).
+_pedSyncFilaCarregar();
+_pedSyncFilaProcessar();
 
 /* ═══════════ SENHA MESTRE — CORREÇÃO DE ENTRADAS ═══════════ */
 

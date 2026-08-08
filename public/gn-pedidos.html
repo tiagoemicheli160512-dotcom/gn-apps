@@ -1309,6 +1309,19 @@ async function carregarEntregasConfirmadas() {
 // ═══════════════════════════════════════════════
 // SUPABASE — MUTATIONS
 // ═══════════════════════════════════════════════
+// Tenta uma operação assíncrona algumas vezes com espera crescente antes de desistir —
+// cobre quedas passageiras de conexão sem precisar de fila persistida. Só deve ser usada
+// em passos que são seguros de repetir (idempotentes, ou uma inserção única que ou falha
+// inteira ou não roda de novo — ver chamadas em _confirmarFornecedoresSelecionados).
+async function _tentarComRetry(fn, tentativas=3, esperaMs=1500) {
+  let ultimoErro=null;
+  for (let i=0; i<tentativas; i++) {
+    try { return await fn(); }
+    catch(e) { ultimoErro=e; if (i<tentativas-1) await new Promise(r=>setTimeout(r, esperaMs*(i+1))); }
+  }
+  throw ultimoErro;
+}
+
 // ─── FILA OFFLINE ─────────────────────────────────────────────
 function _ppKey(){ return 'gn_ped_pend_'+(S.pedidoAtual?.id||''); }
 function _ppLoad(){ try{ return JSON.parse(localStorage.getItem(_ppKey())||'{}'); }catch(_){ return {}; } }
@@ -1567,17 +1580,39 @@ async function _confirmarFornecedoresSelecionados() {
       });
     });
 
-    // 3. Inserir provisões em batches
-    let erros = 0;
-    for (let i = 0; i < provisoes.length; i += 50) {
-      const { error } = await db.from('gn_provisoes').insert(provisoes.slice(i, i + 50));
-      if (error) { console.error('Erro provisão batch:', error.message); erros++; }
+    // 3. Inserir provisões por fornecedor — cada fornecedor é tratado como uma unidade:
+    // internet instável (ex.: loja com conexão ruim, ou o próprio comprador em rede
+    // fraca) tenta de novo automaticamente (_tentarComRetry) antes de desistir, e só
+    // marca aquele fornecedor como confirmado se as provisões dele realmente foram
+    // gravadas — sem isso, uma falha de rede no meio do batch travava a edição do
+    // fornecedor (marcado como "confirmado") sem nenhuma provisão existir de verdade,
+    // e a entrega dele nunca aparecia pra ninguém confirmar recebimento.
+    const porFornecedor = {};
+    provisoes.forEach(p => { (porFornecedor[p.fornecedor] = porFornecedor[p.fornecedor] || []).push(p); });
+
+    const fornsOk = [], fornsComErro = [];
+    for (const forn of selecionados) {
+      const itensForn = porFornecedor[forn] || [];
+      if (!itensForn.length) { fornsOk.push(forn); continue; } // nada com qtd>0 pra esse fornecedor
+      try {
+        for (let i = 0; i < itensForn.length; i += 50) {
+          const lote = itensForn.slice(i, i + 50);
+          await _tentarComRetry(async () => {
+            const { error } = await db.from('gn_provisoes').insert(lote);
+            if (error) throw error;
+          });
+        }
+        fornsOk.push(forn);
+      } catch (e) {
+        console.error('Erro ao gerar provisões de ' + forn + ':', e.message || e);
+        fornsComErro.push(forn);
+      }
     }
 
-    // 4. Marca os fornecedores selecionados como confirmados localmente — se algum estava
-    // liberado pra uma 2ª rodada (fornecedoresReabertos), essa rodada acabou de ser
-    // confirmada também, então volta a ficar travado (confirmado) normalmente.
-    fornsSet.forEach(f => { S.fornecedoresConfirmados.add(f); S.fornecedoresReabertos.delete(f); });
+    // 4. Marca como confirmados só os fornecedores que realmente tiveram as provisões
+    // geradas — os com erro continuam pendentes (voltam a aparecer em "Confirmar
+    // Pedido" pra tentar de novo, sem duplicar o que já foi criado).
+    fornsOk.forEach(f => { S.fornecedoresConfirmados.add(f); S.fornecedoresReabertos.delete(f); });
 
     // 5. Se todos os fornecedores com itens já estão confirmados, finaliza o pedido —
     // um fornecedor ainda reaberto pra 2ª rodada (de outro comprador, fora deste confirm)
@@ -1585,19 +1620,30 @@ async function _confirmarFornecedoresSelecionados() {
     const aindaPendentes = _fornecedoresComItensPedido().filter(f => !S.fornecedoresConfirmados.has(f) || S.fornecedoresReabertos.has(f));
     if (aindaPendentes.length === 0) {
       const semIsoStr = S.semanaAtiva.toISOString().split('T')[0];
-      const { error: errPed } = await db.from('gn_pedidos')
-        .update({ status: 'CONFIRMADO', semana_inicio: semIsoStr, atualizado_em: new Date().toISOString() })
-        .eq('id', S.pedidoAtual.id);
-      if (errPed) throw errPed;
-      S.pedidoAtual.status = 'CONFIRMADO';
+      try {
+        await _tentarComRetry(async () => {
+          const { error: errPed } = await db.from('gn_pedidos')
+            .update({ status: 'CONFIRMADO', semana_inicio: semIsoStr, atualizado_em: new Date().toISOString() })
+            .eq('id', S.pedidoAtual.id);
+          if (errPed) throw errPed;
+        });
+        S.pedidoAtual.status = 'CONFIRMADO';
+      } catch (e) {
+        console.error('Erro ao marcar pedido como CONFIRMADO:', e.message || e);
+        toast('⚠️ Fornecedores confirmados, mas não deu pra fechar o pedido (sem conexão). Tente confirmar de novo em instantes.', 'err');
+      }
     }
 
-    if (erros > 0) {
-      toast(`Fornecedores confirmados com ${erros} erro(s) nas provisões. Verifique o console.`, 'err');
-    } else {
-      toast(`✓ ${selecionados.length} fornecedor${selecionados.length>1?'es':''} confirmado${selecionados.length>1?'s':''}! ${provisoes.length} provisões geradas.${aindaPendentes.length>0?' '+aindaPendentes.length+' fornecedor(es) ainda em aberto.':''}`, 'ok');
+    if (fornsComErro.length > 0) {
+      alert('⚠️ ATENÇÃO — ' + fornsComErro.length + ' fornecedor(es) NÃO foram confirmados (falha de conexão, mesmo após tentar de novo):\n\n'
+        + fornsComErro.join('\n') + '\n\nOs itens desses fornecedores continuam liberados pra edição. Tente confirmar de novo assim que a conexão melhorar.');
     }
-    _logAuditoria('CONFIRMAR_FORNECEDOR', { fornecedores: selecionados, provisoes_geradas: provisoes.length }, { pedido_id: S.pedidoAtual.id });
+    if (fornsOk.length > 0) {
+      toast(`✓ ${fornsOk.length} fornecedor${fornsOk.length>1?'es':''} confirmado${fornsOk.length>1?'s':''}!${aindaPendentes.length>0?' '+aindaPendentes.length+' fornecedor(es) ainda em aberto.':''}`, 'ok');
+    }
+    if (fornsOk.length > 0) {
+      _logAuditoria('CONFIRMAR_FORNECEDOR', { fornecedores: fornsOk, provisoes_geradas: porFornecedor && fornsOk.reduce((s,f)=>s+(porFornecedor[f]?.length||0),0) }, { pedido_id: S.pedidoAtual.id });
+    }
 
     // 6. Atualizar estado local e re-renderizar
     calcularTotais();
