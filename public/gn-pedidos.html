@@ -211,6 +211,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .s-ok{background:#E9F7EF;color:var(--text)}
 .s-div{background:#F7F1E9;color:var(--text)}
 .s-cancel{background:#F5EAEA;color:var(--text)}
+.s-devolvido{background:#EFE9F7;color:var(--text)}
 
 /* ── MODAL ── */
 .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;display:none;align-items:flex-end;justify-content:center}
@@ -653,6 +654,7 @@ let S = {
   pedFiltro: '',    // '' | 'urgencia' | 'vazios' | 'preenchidos'
   urgenciaTemplate: {}, // userKey (mesma chave de gn_lojas.loja) -> [item_id_string, ...]
   gruposAbertos: new Set(['BEBIDAS','PROTEÍNA','PRODUÇÃO']),
+  provGruposAbertos: new Set(), // loja/fornecedor abertos na aba Provisões — começam fechados
 
   // Filtros catálogo
   catBusca: '',
@@ -1267,7 +1269,7 @@ async function carregarProvisoes() {
   const qConf = pedidoIds.length
     ? _fetchTodasPaginas(() => {
         let q = db.from('gn_provisoes').select(SEL)
-          .in('status', ['RECEBIDO_OK', 'DIVERGENCIA'])
+          .in('status', ['RECEBIDO_OK', 'DIVERGENCIA', 'DEVOLVIDO'])
           .in('pedido_id', pedidoIds)
           .order('data_entrega', {ascending:true}).order('fornecedor').order('id');
         if (S.provLoja) q = q.eq('loja_slug', S.provLoja);
@@ -2633,7 +2635,9 @@ function setModo(todos) {
 
 function toggleEpGrupoProvisao(id) {
   const el = document.getElementById(id);
-  if (el) el.classList.toggle('aberto');
+  if (!el) return;
+  el.classList.toggle('aberto');
+  if (el.classList.contains('aberto')) S.provGruposAbertos.add(id); else S.provGruposAbertos.delete(id);
 }
 
 // Dispara a cada tecla digitada no campo de busca de fornecedor (Provisões). Só reage
@@ -2645,12 +2649,32 @@ function pularParaFornecedorProvisao(valorDigitado) {
   const gid = 'prov_forn_'+nome.replace(/[^a-z0-9]/gi,'_');
   const el = document.getElementById(gid);
   if (!el) return;
-  if (!el.classList.contains('aberto')) el.classList.add('aberto');
+  if (!el.classList.contains('aberto')) { el.classList.add('aberto'); S.provGruposAbertos.add(gid); }
   el.scrollIntoView({behavior:'smooth', block:'start'});
   el.style.transition = 'box-shadow .3s';
   el.style.boxShadow = '0 0 0 2px #fbbf24';
   setTimeout(()=>{ el.style.boxShadow=''; }, 1500);
   const input = document.getElementById('prov-forn-jump');
+  if (input) { input.value=''; input.blur(); }
+}
+
+// Mesma ideia do pularParaFornecedorProvisao, só que pro card de loja — usado quando
+// "Todas as lojas" está selecionado, já que aí o agrupamento principal passa a ser por loja.
+function pularParaLojaProvisao(valorDigitado) {
+  const nome = (valorDigitado||'').trim();
+  if (!nome) return;
+  const loja = S.lojas.find(l=>l.nome_display===nome);
+  const slug = loja ? loja.slug_pedido : (nome==='SEM LOJA' ? '' : null);
+  if (slug===null) return;
+  const gid = 'prov_loja_'+String(slug||'sem_loja').replace(/[^a-z0-9]/gi,'_');
+  const el = document.getElementById(gid);
+  if (!el) return;
+  if (!el.classList.contains('aberto')) { el.classList.add('aberto'); S.provGruposAbertos.add(gid); }
+  el.scrollIntoView({behavior:'smooth', block:'start'});
+  el.style.transition = 'box-shadow .3s';
+  el.style.boxShadow = '0 0 0 2px #fbbf24';
+  setTimeout(()=>{ el.style.boxShadow=''; }, 1500);
+  const input = document.getElementById('prov-loja-jump');
   if (input) { input.value=''; input.blur(); }
 }
 
@@ -3481,6 +3505,111 @@ async function salvarNovoFornecedor() {
 // ═══════════════════════════════════════════════
 // RENDER: PROVISÕES
 // ═══════════════════════════════════════════════
+
+// Resumo de status (a receber / recebido / divergência / devolvido / cancelado) mostrado
+// no cabeçalho dos cards de loja/fornecedor, mesmo fechados — antes só dava pra saber a
+// situação de cada item abrindo o card.
+function _provStatusBadges(itens) {
+  const defs = [
+    ['AGUARDANDO', '⏳', 'a receber', '#e8850a'],
+    ['RECEBIDO_OK', '✅', 'recebido', '#1f9d55'],
+    ['DIVERGENCIA', '⚠️', 'divergência', '#e8850a'],
+    ['DEVOLVIDO', '↩️', 'devolvido', '#7c3aed'],
+    ['CANCELADO', '🗑️', 'cancelado', '#94a3b8'],
+  ];
+  return defs.map(([st, ic, lbl, cor]) => {
+    const n = itens.filter(p => p.status === st).length;
+    if (!n) return '';
+    return `<span style="font-size:9px;font-weight:800;color:${cor};background:${cor}1a;border-radius:20px;padding:2px 7px;white-space:nowrap">${ic} ${n} ${lbl}</span>`;
+  }).filter(Boolean).join('');
+}
+
+function _provItemHtml(p, showLoja) {
+  const statusMap = {
+    'AGUARDANDO': '<span class="status-badge s-aguardando">AGUARDANDO</span>',
+    'RECEBIDO_OK': '<span class="status-badge s-ok">RECEBIDO ✓</span>',
+    'DIVERGENCIA': '<span class="status-badge s-div">DIVERGÊNCIA</span>',
+    'DEVOLVIDO': '<span class="status-badge s-devolvido">DEVOLVIDO</span>',
+    'CANCELADO': '<span class="status-badge s-cancel">CANCELADO</span>',
+  };
+  const lojaDisplay = S.lojas.find(l=>l.slug_pedido===p.loja_slug)?.nome_display || p.loja_slug;
+  const _rec = Array.isArray(p.gn_recebimentos) ? p.gn_recebimentos[0] : p.gn_recebimentos;
+  const _recTs = p.atualizado_em ? new Date(p.atualizado_em).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
+  const _recPor = _rec?.validado_por || '';
+  const _isConfirmed = p.status === 'RECEBIDO_OK' || p.status === 'DIVERGENCIA' || p.status === 'DEVOLVIDO';
+  return `<div class="prov-item">
+    <div class="prov-item-header">
+      <div>
+        ${showLoja?`<div style="font-size:11px;color:var(--muted)">${lojaDisplay}</div>`:''}
+        <div class="prov-produto">${p.gn_catalogo?.produto || '—'}</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+        ${statusMap[p.status] || p.status}
+        ${p.status==='AGUARDANDO' ? `<div style="display:flex;gap:4px">
+          <button class="btn-sm btn-outline" style="font-size:10px;padding:4px 8px" onclick="modalEditarEntrega('${p.id}')" title="Editar data/período de entrega">✏️</button>
+          <button class="btn-sm btn-success" style="font-size:10px;padding:4px 10px" onclick="modalValidar('${p.id}')">Validar</button>
+        </div>` : ''}
+      </div>
+    </div>
+    ${(()=>{const und=p.gn_catalogo?.und||'un';const qtd=parseFloat(p.qtd_prevista)||0;const tot=parseFloat(p.valor_previsto)||0;const unit=qtd>0?tot/qtd:0;
+      const entregaTxt=p.data_entrega_fim&&p.data_entrega_fim!==p.data_entrega?`${p.data_entrega} a ${p.data_entrega_fim}`:p.data_entrega;
+      return`<div class="prov-detalhes">
+      <div class="prov-det">Qtd: <span class="val">${fmtQtd(qtd)} ${und}</span></div>
+      ${unit>0?`<div class="prov-det">Unit.: <span class="val">R$ ${fmt(unit)}/${und}</span></div>`:''}
+      <div class="prov-det">Total: <span class="val">R$ ${fmt(tot)}</span></div>
+      ${entregaTxt?`<div class="prov-det">Entrega: <span class="val">${entregaTxt}</span></div>`:''}
+    </div>`;})()}
+    ${_isConfirmed && (_recPor||_recTs) ? `<div style="margin-top:5px;padding-top:5px;border-top:1px solid rgba(0,0,0,.06);font-size:10px;color:var(--muted);display:flex;align-items:center;gap:4px">
+      <span>👤</span><span style="color:var(--text);font-weight:600">${_recPor||'—'}</span>${_recTs?`<span>·</span><span>${_recTs}</span>`:''}
+    </div>` : ''}
+  </div>`;
+}
+
+function _provFornGrupoHtml(forn, itens, gid, showLoja) {
+  const totalForn = itens.reduce((a,p)=>a+(parseFloat(p.valor_previsto)||0),0);
+  const itensHtml = itens.map(p => _provItemHtml(p, showLoja)).join('');
+  const badgesHtml = _provStatusBadges(itens);
+  return `<div class="grupo-bloco${S.provGruposAbertos.has(gid)?' aberto':''}" id="${gid}" style="margin-bottom:8px">
+    <div class="grupo-header" onclick="toggleEpGrupoProvisao('${gid}')" style="flex-direction:column;align-items:stretch;gap:5px">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <span class="grupo-nome">${forn}</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="num" style="font-size:12px">R$ ${fmt(totalForn)}</span>
+          <span class="grupo-chevron">▼</span>
+        </div>
+      </div>
+      ${badgesHtml?`<div style="display:flex;gap:5px;flex-wrap:wrap">${badgesHtml}</div>`:''}
+    </div>
+    <div class="grupo-body">${itensHtml}</div>
+  </div>`;
+}
+
+// Card de loja (usado quando "Todas as lojas" está selecionado) — agrupa por fornecedor
+// por dentro, no mesmo padrão de card fechado usado na aba Entrega do app Lojas.
+function _provLojaGrupoHtml(lojaSlug, itens) {
+  const lojaDisplay = S.lojas.find(l=>l.slug_pedido===lojaSlug)?.nome_display || lojaSlug || 'SEM LOJA';
+  const totalLoja = itens.reduce((a,p)=>a+(parseFloat(p.valor_previsto)||0),0);
+  const badgesHtml = _provStatusBadges(itens);
+  const porFornLoja = {};
+  itens.forEach(p => { const f=p.fornecedor||'SEM FORNECEDOR'; (porFornLoja[f]=porFornLoja[f]||[]).push(p); });
+  const gid = 'prov_loja_'+String(lojaSlug||'sem_loja').replace(/[^a-z0-9]/gi,'_');
+  const fornsHtml = Object.entries(porFornLoja).sort(([a],[b])=>a.localeCompare(b))
+    .map(([forn, its]) => _provFornGrupoHtml(forn, its, gid+'_'+forn.replace(/[^a-z0-9]/gi,'_'), false)).join('');
+  return `<div class="grupo-bloco${S.provGruposAbertos.has(gid)?' aberto':''}" id="${gid}" style="margin-bottom:10px;border-width:1.5px">
+    <div class="grupo-header" onclick="toggleEpGrupoProvisao('${gid}')" style="flex-direction:column;align-items:stretch;gap:5px;background:var(--surface2)">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <span class="grupo-nome" style="font-size:13px">🏪 ${lojaDisplay}</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="num" style="font-size:13px">R$ ${fmt(totalLoja)}</span>
+          <span class="grupo-chevron">▼</span>
+        </div>
+      </div>
+      ${badgesHtml?`<div style="display:flex;gap:5px;flex-wrap:wrap">${badgesHtml}</div>`:''}
+    </div>
+    <div class="grupo-body" style="padding:8px">${fornsHtml}</div>
+  </div>`;
+}
+
 async function renderProvisoes() {
   $('content').innerHTML = '<div class="empty"><div class="spin"></div></div>';
   await Promise.all([carregarProvisoes(), carregarProvisoesPendentes()]);
@@ -3497,6 +3626,7 @@ async function renderProvisoes() {
     {v:'AGUARDANDO',l:'Aguardando'},
     {v:'RECEBIDO_OK',l:'Recebido ✓'},
     {v:'DIVERGENCIA',l:'Divergência'},
+    {v:'DEVOLVIDO',l:'Devolvido'},
     {v:'CANCELADO',l:'Cancelado'},
   ];
   const statusChips = STATUS_OPTS.map(o=>
@@ -3529,74 +3659,53 @@ async function renderProvisoes() {
 
   const totalValor = provisoesFilt.reduce((a,p) => a + (parseFloat(p.valor_previsto)||0), 0);
 
-  // Campo pra digitar o fornecedor e pular direto pro grupo dele — mesmo mecanismo já
-  // usado na aba Entrega do app Lojas, útil aqui porque com muitos fornecedores (ordem
-  // alfabética) rolar a tela até achar o certo era o principal atrito.
+  // Campo pra digitar o fornecedor (ou, em "Todas as lojas", a loja) e pular direto pro
+  // grupo — mesmo mecanismo já usado na aba Entrega do app Lojas, útil aqui porque com
+  // muitos fornecedores/lojas (ordem alfabética) rolar a tela até achar o certo era o
+  // principal atrito.
   const fornsProv = Object.keys(por_forn).sort((a,b) => a.localeCompare(b));
-  const fornBuscaHtml = fornsProv.length > 1 ? `
+  const fornBuscaHtml = (S.provLoja && fornsProv.length > 1) ? `
     <div style="margin-bottom:10px">
       <input list="prov-forn-datalist" id="prov-forn-jump" placeholder="🔍 Digite o fornecedor pra pular direto..." autocomplete="off"
         oninput="pularParaFornecedorProvisao(this.value)"
         style="width:100%;background:var(--card2);border:1px solid var(--border);border-radius:10px;color:var(--text);padding:9px 10px;font-size:12px;font-weight:600;box-sizing:border-box">
       <datalist id="prov-forn-datalist">${fornsProv.map(f=>`<option value="${escapeHtml(f)}">`).join('')}</datalist>
     </div>` : '';
+  const lojasComProvisao = [...new Set(provisoesFilt.map(p=>p.loja_slug||''))]
+    .map(slug => S.lojas.find(l=>l.slug_pedido===slug)?.nome_display || slug || 'SEM LOJA')
+    .sort((a,b) => a.localeCompare(b));
+  const lojaBuscaHtml = (!S.provLoja && lojasComProvisao.length > 1) ? `
+    <div style="margin-bottom:10px">
+      <input list="prov-loja-datalist" id="prov-loja-jump" placeholder="🔍 Digite a loja pra pular direto..." autocomplete="off"
+        oninput="pularParaLojaProvisao(this.value)"
+        style="width:100%;background:var(--card2);border:1px solid var(--border);border-radius:10px;color:var(--text);padding:9px 10px;font-size:12px;font-weight:600;box-sizing:border-box">
+      <datalist id="prov-loja-datalist">${lojasComProvisao.map(l=>`<option value="${escapeHtml(l)}">`).join('')}</datalist>
+    </div>` : '';
 
   const provHtml = Object.keys(por_forn).length === 0
     ? `<div class="empty"><div class="empty-icon">📬</div><div class="empty-texto">${S.provStatus?'Nenhuma provisão com esse status':'Nenhuma provisão encontrada'}</div></div>`
-    : Object.entries(por_forn).sort(([a],[b])=>a.localeCompare(b)).map(([forn, itens]) => {
-        const totalForn = itens.reduce((a,p)=>a+(parseFloat(p.valor_previsto)||0),0);
-        const itensHtml = itens.map(p => {
-          const statusMap = {
-            'AGUARDANDO': '<span class="status-badge s-aguardando">AGUARDANDO</span>',
-            'RECEBIDO_OK': '<span class="status-badge s-ok">RECEBIDO ✓</span>',
-            'DIVERGENCIA': '<span class="status-badge s-div">DIVERGÊNCIA</span>',
-            'CANCELADO': '<span class="status-badge s-cancel">CANCELADO</span>',
-          };
-          const lojaDisplay = S.lojas.find(l=>l.slug_pedido===p.loja_slug)?.nome_display || p.loja_slug;
-          const _rec = Array.isArray(p.gn_recebimentos) ? p.gn_recebimentos[0] : p.gn_recebimentos;
-          const _recTs = p.atualizado_em ? new Date(p.atualizado_em).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
-          const _recPor = _rec?.validado_por || '';
-          const _isConfirmed = p.status === 'RECEBIDO_OK' || p.status === 'DIVERGENCIA';
-          return `<div class="prov-item">
-            <div class="prov-item-header">
-              <div>
-                <div style="font-size:11px;color:var(--muted)">${lojaDisplay}</div>
-                <div class="prov-produto">${p.gn_catalogo?.produto || '—'}</div>
-              </div>
-              <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
-                ${statusMap[p.status] || p.status}
-                ${p.status==='AGUARDANDO' ? `<div style="display:flex;gap:4px">
-                  <button class="btn-sm btn-outline" style="font-size:10px;padding:4px 8px" onclick="modalEditarEntrega('${p.id}')" title="Editar data/período de entrega">✏️</button>
-                  <button class="btn-sm btn-success" style="font-size:10px;padding:4px 10px" onclick="modalValidar('${p.id}')">Validar</button>
-                </div>` : ''}
-              </div>
-            </div>
-            ${(()=>{const und=p.gn_catalogo?.und||'un';const qtd=parseFloat(p.qtd_prevista)||0;const tot=parseFloat(p.valor_previsto)||0;const unit=qtd>0?tot/qtd:0;
-              const entregaTxt=p.data_entrega_fim&&p.data_entrega_fim!==p.data_entrega?`${p.data_entrega} a ${p.data_entrega_fim}`:p.data_entrega;
-              return`<div class="prov-detalhes">
-              <div class="prov-det">Qtd: <span class="val">${fmtQtd(qtd)} ${und}</span></div>
-              ${unit>0?`<div class="prov-det">Unit.: <span class="val">R$ ${fmt(unit)}/${und}</span></div>`:''}
-              <div class="prov-det">Total: <span class="val">R$ ${fmt(tot)}</span></div>
-              ${entregaTxt?`<div class="prov-det">Entrega: <span class="val">${entregaTxt}</span></div>`:''}
-            </div>`;})()}
-            ${_isConfirmed && (_recPor||_recTs) ? `<div style="margin-top:5px;padding-top:5px;border-top:1px solid rgba(0,0,0,.06);font-size:10px;color:var(--muted);display:flex;align-items:center;gap:4px">
-              <span>👤</span><span style="color:var(--text);font-weight:600">${_recPor||'—'}</span>${_recTs?`<span>·</span><span>${_recTs}</span>`:''}
-            </div>` : ''}
-          </div>`;
-        }).join('');
-
-        const _gid='prov_forn_'+forn.replace(/[^a-z0-9]/gi,'_');
-        return `<div class="grupo-bloco aberto" id="${_gid}" style="margin-bottom:8px">
-          <div class="grupo-header" onclick="toggleEpGrupoProvisao('${_gid}')">
-            <span class="grupo-nome">${forn}</span>
-            <div style="display:flex;align-items:center;gap:8px">
-              <span class="num" style="font-size:12px">R$ ${fmt(totalForn)}</span>
-              <span class="grupo-chevron">▼</span>
-            </div>
-          </div>
-          <div class="grupo-body">${itensHtml}</div>
-        </div>`;
-      }).join('');
+    : S.provLoja
+      // Loja já filtrada pelas abas acima — mantém o agrupamento simples por fornecedor.
+      ? Object.entries(por_forn).sort(([a],[b])=>a.localeCompare(b))
+          .map(([forn, itens]) => _provFornGrupoHtml(forn, itens, 'prov_forn_'+forn.replace(/[^a-z0-9]/gi,'_'), false))
+          .join('')
+      // "Todas as lojas" — agrupa por loja primeiro (cada card fechado mostra o resumo de
+      // status), e por fornecedor dentro de cada loja.
+      : (() => {
+          const porLoja = {};
+          provisoesFilt.forEach(p => { const l=p.loja_slug||''; (porLoja[l]=porLoja[l]||[]).push(p); });
+          const ordemLojas = S.lojas.map(l=>l.slug_pedido);
+          return Object.keys(porLoja)
+            .sort((a,b) => {
+              const ia=ordemLojas.indexOf(a), ib=ordemLojas.indexOf(b);
+              if (ia===-1 && ib===-1) return a.localeCompare(b);
+              if (ia===-1) return 1;
+              if (ib===-1) return -1;
+              return ia-ib;
+            })
+            .map(slug => _provLojaGrupoHtml(slug, porLoja[slug]))
+            .join('');
+        })();
 
   const bannerAtrasadas = S.provisoesAtrasadas.length ? `
     <div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.35);border-radius:var(--r);padding:12px 14px;margin-bottom:12px">
@@ -3680,6 +3789,7 @@ async function renderProvisoes() {
     <div class="store-tabs" style="margin-bottom:8px">${lojaTabs}</div>
     <div class="store-tabs" style="margin-bottom:8px">${compradorChips}</div>
     <div class="store-tabs" style="margin-bottom:12px">${statusChips}</div>
+    ${lojaBuscaHtml}
     ${fornBuscaHtml}
     ${provHtml}
 
@@ -3802,7 +3912,7 @@ function gerarWppProvisoes() {
         const subLoja = itensLoja.reduce((a,p)=>a+(parseFloat(p.valor_previsto)||0),0);
         msg += `  📍 *${lojaNome}* — R$ ${fmt(subLoja)}\n`;
         itensLoja.forEach(p => {
-          const icon = p.status === 'RECEBIDO_OK' ? '✅' : p.status === 'DIVERGENCIA' ? '⚠️' : '⏳';
+          const icon = p.status === 'RECEBIDO_OK' ? '✅' : p.status === 'DIVERGENCIA' ? '⚠️' : p.status === 'DEVOLVIDO' ? '↩️' : '⏳';
           const dt = p.data_entrega ? ` (${p.data_entrega})` : '';
           msg += `    ${icon} ${p.gn_catalogo?.produto || '—'}: ${fmtQtd(p.qtd_prevista)} ${p.gn_catalogo?.und || ''} R$ ${fmt(p.valor_previsto)}${dt}\n`;
           total += parseFloat(p.valor_previsto) || 0;
@@ -3811,7 +3921,7 @@ function gerarWppProvisoes() {
     } else {
       itens.forEach(p => {
         const lojaNome = S.lojas.find(l => l.slug_pedido === p.loja_slug)?.nome_display || p.loja_slug;
-        const icon = p.status === 'RECEBIDO_OK' ? '✅' : p.status === 'DIVERGENCIA' ? '⚠️' : '⏳';
+        const icon = p.status === 'RECEBIDO_OK' ? '✅' : p.status === 'DIVERGENCIA' ? '⚠️' : p.status === 'DEVOLVIDO' ? '↩️' : '⏳';
         const dt = p.data_entrega ? ` (${p.data_entrega})` : '';
         msg += `  ${icon} ${lojaNome} — ${p.gn_catalogo?.produto || '—'}: ${fmtQtd(p.qtd_prevista)} ${p.gn_catalogo?.und || ''} R$ ${fmt(p.valor_previsto)}${dt}\n`;
         total += parseFloat(p.valor_previsto) || 0;
@@ -3969,7 +4079,7 @@ function gerarWppProvisoesForn(fornecedor) {
   let total=0;
   itens.forEach(p=>{
     const loja=S.lojas.find(l=>l.slug_pedido===p.loja_slug)?.nome_display||p.loja_slug;
-    const icon=p.status==='RECEBIDO_OK'?'✅':p.status==='DIVERGENCIA'?'⚠️':'⏳';
+    const icon=p.status==='RECEBIDO_OK'?'✅':p.status==='DIVERGENCIA'?'⚠️':p.status==='DEVOLVIDO'?'↩️':'⏳';
     const dt=p.data_entrega?` (${p.data_entrega})`:'';
     msg+=`${icon} ${loja} — ${p.gn_catalogo?.produto||'—'}: ${fmtQtd(p.qtd_prevista)} ${p.gn_catalogo?.und||''} R$ ${fmt(p.valor_previsto)}${dt}\n`;
     total+=parseFloat(p.valor_previsto)||0;
@@ -4277,7 +4387,7 @@ function gerarPDFProvisoes(){
         const subLoja = itensLoja.reduce((a,p)=>a+(parseFloat(p.valor_previsto)||0),0);
         msg += `  ${lojaNome} — R$ ${fmt(subLoja)}\n`;
         itensLoja.forEach(p => {
-          const icon = p.status === 'RECEBIDO_OK' ? '✅' : p.status === 'DIVERGENCIA' ? '⚠️' : '⏳';
+          const icon = p.status === 'RECEBIDO_OK' ? '✅' : p.status === 'DIVERGENCIA' ? '⚠️' : p.status === 'DEVOLVIDO' ? '↩️' : '⏳';
           const dt = p.data_entrega ? ` (${p.data_entrega})` : '';
           msg += `    ${icon} ${p.gn_catalogo?.produto || '—'}: ${fmtQtd(p.qtd_prevista)} ${p.gn_catalogo?.und || ''} R$ ${fmt(p.valor_previsto)}${dt}\n`;
           total += parseFloat(p.valor_previsto) || 0;
@@ -4286,7 +4396,7 @@ function gerarPDFProvisoes(){
     } else {
       itens.forEach(p=>{
         const lojaNome=S.lojas.find(l=>l.slug_pedido===p.loja_slug)?.nome_display||p.loja_slug;
-        const icon=p.status==='RECEBIDO_OK'?'✅':p.status==='DIVERGENCIA'?'⚠️':'⏳';
+        const icon=p.status==='RECEBIDO_OK'?'✅':p.status==='DIVERGENCIA'?'⚠️':p.status==='DEVOLVIDO'?'↩️':'⏳';
         const dt=p.data_entrega?` (${p.data_entrega})`:'';
         msg+=`  ${icon} ${lojaNome} — ${p.gn_catalogo?.produto||'—'}: ${fmtQtd(p.qtd_prevista)} ${p.gn_catalogo?.und||''} R$ ${fmt(p.valor_previsto)}${dt}\n`;
         total+=parseFloat(p.valor_previsto)||0;
