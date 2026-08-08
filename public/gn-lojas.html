@@ -1295,6 +1295,87 @@ function _verificarAutoAlertaEntregas() {
   if (alertasWpp.length) dispararAlertasEntregasAtrasadas();
 }
 
+/* ── ALERTAS DE NOTA FISCAL ABAIXO DO PREVISTO ─────────────────────────
+   Cruza as provisões (entregas atrasadas OU já confirmadas como recebidas
+   nos últimos 7 dias) com as notas lançadas na aba Entrada, por fornecedor
+   + janela de datas em torno da entrega. Aponta quando não tem nota
+   nenhuma lançada pra aquela entrega, ou quando o valor lançado é menor
+   que o valor previsto — sinal de nota ainda não digitada por completo. */
+function getAvisosNotaFiscal() {
+  const hoje = wkKey(new Date());
+  const atrasadas = provisoesEntrega.filter(p => p.data_entrega && (p.data_entrega_fim || p.data_entrega) < hoje);
+  const recentesRecebidas = provisoesHistorico.filter(p => {
+    if (p.status !== 'RECEBIDO_OK' && p.status !== 'DIVERGENCIA') return false;
+    if (!p.atualizado_em) return false;
+    const dias = (Date.now() - new Date(p.atualizado_em).getTime()) / 86400000;
+    return dias >= 0 && dias <= 7;
+  });
+  const candidatas = [...atrasadas, ...recentesRecebidas];
+  if (!candidatas.length) return [];
+
+  // Agrupa por fornecedor + data prevista de entrega — mesma entrega = mesma nota
+  const grupos = {};
+  candidatas.forEach(p => {
+    if (!p.data_entrega) return;
+    const fornDisp = (p.fornecedor || 'Sem fornecedor').trim();
+    const key = fornDisp.toUpperCase() + '|' + p.data_entrega;
+    if (!grupos[key]) grupos[key] = { fornecedor: fornDisp, data: p.data_entrega, valorPrevisto: 0 };
+    grupos[key].valorPrevisto += parseFloat(p.valor_previsto) || 0;
+  });
+
+  // Todas as notas lançadas desta loja (todas as semanas em memória)
+  const todasEntradas = [];
+  Object.keys(entradasAll).forEach(k => {
+    if (k.startsWith(loja + '|')) todasEntradas.push(...(entradasAll[k] || []));
+  });
+
+  const avisos = [];
+  Object.values(grupos).forEach(g => {
+    const fornNorm = g.fornecedor.toUpperCase();
+    const de = new Date(g.data + 'T00:00:00'); de.setDate(de.getDate() - 3);
+    const ate = new Date();
+    const lancado = todasEntradas
+      .filter(e => (e.fornecedor||'').trim().toUpperCase() === fornNorm && e.dataNF)
+      .filter(e => { const d = new Date(e.dataNF+'T00:00:00'); return d >= de && d <= ate; })
+      .reduce((s,e) => s + (parseFloat(e.qtd)||0) * (parseFloat(e.custoUnit)||0), 0);
+    if (lancado === 0) {
+      avisos.push({ ...g, lancado, tipo: 'sem_nota' });
+    } else if (lancado < g.valorPrevisto * 0.98) {
+      avisos.push({ ...g, lancado, tipo: 'abaixo' });
+    }
+  });
+  avisos.sort((a,b) => (b.valorPrevisto-b.lancado) - (a.valorPrevisto-a.lancado));
+  return avisos;
+}
+function gerarMsgAlertaNotaFiscal() {
+  const av = getAvisosNotaFiscal();
+  if (!av.length) return '';
+  const agora = new Date();
+  const dt = agora.toLocaleDateString('pt-BR')+' '+agora.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+  const fR = v => Number(v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const fmtD = d => d ? new Date(d+'T12:00:00').toLocaleDateString('pt-BR') : '—';
+  let msg = '🧾 *NOTA FISCAL PENDENTE — '+lojaDisp(loja)+'*\n📅 '+dt+'\n\n';
+  av.forEach(a => {
+    msg += a.tipo==='sem_nota'
+      ? '▪️ *'+a.fornecedor+'* — nenhuma nota lançada\n   Previsto: R$ '+fR(a.valorPrevisto)+' | Entrega: '+fmtD(a.data)+'\n'
+      : '▪️ *'+a.fornecedor+'* — nota abaixo do previsto\n   Lançado: R$ '+fR(a.lancado)+' de R$ '+fR(a.valorPrevisto)+' previstos | Entrega: '+fmtD(a.data)+'\n';
+  });
+  msg += '\n⚠️ Conferir lançamento de nota na aba Entrada.';
+  return msg;
+}
+function dispararAlertasNotaFiscal() {
+  const msg = gerarMsgAlertaNotaFiscal();
+  if (!msg) { showToast('✅ Nenhuma pendência de nota fiscal.'); return; }
+  if (!alertasWpp.length) { abrirModalContatosAlerta(); return; }
+  alertasWpp.forEach((c, i) => {
+    setTimeout(() => {
+      const num = (c.numero||'').replace(/\D/g,'');
+      window.open('https://wa.me/'+num+'?text='+encodeURIComponent(msg), '_blank');
+      showToast('📲 '+c.nome+' — WhatsApp aberto');
+    }, i * 1800);
+  });
+}
+
 function _podeCfgMinimos() {
   try {
     const cargo = usuarioAtual ? usuarioAtual.cargo : null;
@@ -5688,6 +5769,23 @@ function render() {
             <span style="font-size:10px;color:#f59e0b;flex-shrink:0;margin-left:8px;font-weight:700">📅 ${p.data_entrega_fim || p.data_entrega}</span>
           </div>`).join('')}
           ${at.length>5?`<div style="font-size:10px;color:#94a3b8;margin-top:6px;text-align:center">+${at.length-5} mais → aba Entrega</div>`:''}
+        </div>`;
+      })()}
+
+      ${(function(){
+        const av = getAvisosNotaFiscal();
+        if (!av.length) return '';
+        const fR = v => Number(v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+        return `<div style="background:rgba(139,92,246,.1);border:1px solid rgba(139,92,246,.3);border-radius:14px;padding:14px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:6px">
+            <div style="font-size:13px;font-weight:800;color:#c4b5fd">🧾 Nota Fiscal Pendente (${av.length})</div>
+            <button onclick="dispararAlertasNotaFiscal()" style="background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);border-radius:10px;padding:6px 12px;color:#4ade80;font-size:11px;font-weight:800;cursor:pointer;white-space:nowrap">${alertasWpp.length ? '📲 Alertar ('+alertasWpp.length+')' : '📲 Configurar Contatos'}</button>
+          </div>
+          ${av.slice(0,5).map(a=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid rgba(139,92,246,.15)">
+            <span style="font-size:11px;color:#c4b5fd;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${a.fornecedor} — ${a.tipo==='sem_nota'?'sem nota lançada':'nota abaixo do previsto'}</span>
+            <span style="font-size:10px;color:#a78bfa;flex-shrink:0;margin-left:8px;font-weight:700">R$ ${fR(a.lancado)} / ${fR(a.valorPrevisto)}</span>
+          </div>`).join('')}
+          ${av.length>5?`<div style="font-size:10px;color:#94a3b8;margin-top:6px;text-align:center">+${av.length-5} mais</div>`:''}
         </div>`;
       })()}
 
