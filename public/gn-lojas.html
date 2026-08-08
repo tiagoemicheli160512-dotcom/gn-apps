@@ -660,6 +660,21 @@ let provisoesHistorico = []; // entregas já confirmadas desta loja (últimos 30
 // (foi pro histórico), fazendo a lista "pular" no meio da conferência de um pedido com
 // vários itens. Some sozinho quando o último item do fornecedor é confirmado.
 let _epConfirmadosSessao = {}; // provisao_id -> {...snapshot da provisão, _statusFinal, _qtdRec, _valRec}
+// Fila de confirmações de entrega ainda não sincronizadas com a nuvem — grava no aparelho
+// na hora que a loja confirma (mesmo padrão de resiliência do autoSave/sbPush da Contagem),
+// pra internet ruim (ex.: Bangu) não perder a confirmação se a rede cair no meio do tap.
+// { [loja]: [{id, qtdRec, valRec, diff, status, validado_por, ts, prov}] }
+const EP_FILA_KEY = 'gn_entrega_fila_pendente';
+let _epFilaPendente = {};
+let _epFilaEmVoo = new Set(); // ids sendo enviados agora — evita reenvio concorrente
+let _epFilaRetryTimer = null;
+function _epFilaCarregar() {
+  try { _epFilaPendente = JSON.parse(localStorage.getItem(EP_FILA_KEY) || '{}'); }
+  catch(e) { _epFilaPendente = {}; }
+}
+function _epFilaSalvar() {
+  try { localStorage.setItem(EP_FILA_KEY, JSON.stringify(_epFilaPendente)); } catch(e) {}
+}
 let _entregaItensMap = {}; // id -> itens (para recalc sem JSON no onclick)
 let pedidoCustom = [];  // itens novos criados no app [{item, fornecedor, grupo, subgrupo, produto, und, custo, posIndex}]
 let pedidoRemovidos = []; // IDs (string) de itens removidos da lista
@@ -2298,7 +2313,7 @@ function _iniciarVigiaHorario() {
 function prevWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana, -7); checklistFat = null; checklistVendasItens = null; if(tab==="vendas") loadChecklistFat(); render(); }
 function nextWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana,  7); checklistFat = null; checklistVendasItens = null; if(tab==="vendas") loadChecklistFat(); render(); }
 function irParaSemana(isoStr) { semana = new Date(isoStr); tab = "relatorio"; render(); }
-function changeLoja(v) { if (lojaForcada) return; loja = v; tab = "home"; checklistFat = null; checklistVendasItens = null; render(); }
+function changeLoja(v) { if (lojaForcada) return; loja = v; tab = "home"; checklistFat = null; checklistVendasItens = null; render(); _epProcessarFila(); }
 function carregarPermissaoLoja() {
   try {
     var s = JSON.parse(localStorage.getItem('gn_session_v1') || 'null');
@@ -6991,8 +7006,11 @@ function render() {
         const idsConfirmadosSessao=Object.keys(_epConfirmadosSessao);
         if(provisoesEntrega.length===0 && idsConfirmadosSessao.length===0) return `<div class="card" style="padding:16px;text-align:center;color:#475569;font-size:12px">✅ Nenhuma entrega pendente de confirmação</div>`;
         const porForn={};
-        // Itens ainda de fato pendentes (AGUARDANDO)
-        provisoesEntrega.forEach(p=>{const f=p.fornecedor||'SEM FORNECEDOR';(porForn[f]=porForn[f]||[]).push(p);});
+        // Itens ainda de fato pendentes (AGUARDANDO) — exclui os já confirmados nesta
+        // sessão (mesmo que ainda aguardando sincronizar): sem isso, o item aparecia
+        // duplicado (uma vez como pendente vindo de provisoesEntrega, que só é atualizado
+        // quando carregarEntregas() reconsulta a nuvem, e outra vez já confirmado/travado).
+        provisoesEntrega.forEach(p=>{if(_epConfirmadosSessao[p.id])return;const f=p.fornecedor||'SEM FORNECEDOR';(porForn[f]=porForn[f]||[]).push(p);});
         // Itens já confirmados nesta sessão, mas mantidos no grupo (travados) até o
         // pedido inteiro do fornecedor terminar — não deixa a lista "pular" no meio.
         idsConfirmadosSessao.forEach(id=>{
@@ -7018,8 +7036,8 @@ function render() {
             const valPrev=parseFloat(prov.valor_previsto)||0;
             const unitPrev=qtdPrev>0?valPrev/qtdPrev:0;
             if(prov._statusFinal){
-              const cor=prov._statusFinal==='RECEBIDO_OK'?'#4ade80':'#f59e0b';
-              const rotulo=prov._statusFinal==='RECEBIDO_OK'?'✅ Confirmado':'⚠️ Divergência registrada';
+              const cor=prov._syncPendente?'#f59e0b':(prov._statusFinal==='RECEBIDO_OK'?'#4ade80':'#f59e0b');
+              const rotulo=(prov._statusFinal==='RECEBIDO_OK'?'✅ Confirmado':'⚠️ Divergência registrada')+(prov._syncPendente?' · ⏳ sincronizando…':'');
               return `<div style="padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.05);opacity:.6">
                 <div style="display:flex;justify-content:space-between;align-items:center">
                   <div style="flex:1;min-width:0">
@@ -8218,7 +8236,7 @@ async function carregarCorrecoesSetor(silent) {
     if(!silent) render();
   }catch(e){}
 }
-async function confirmarEntrega(id){
+function confirmarEntrega(id){
   const prov=provisoesEntrega.find(p=>p.id===id);
   if(!prov) return;
   const qtdEl=document.getElementById('ep_qtd_'+id);
@@ -8229,17 +8247,56 @@ async function confirmarEntrega(id){
   const diff=qtdRec-qtdPrev;
   const status=Math.abs(diff)<0.01?'RECEBIDO_OK':'DIVERGENCIA';
   const validado_por=(usuarioAtual&&usuarioAtual.nome)||loja;
-  try{
-    await sbRequest('gn_recebimentos',{method:'POST',headers:{'Prefer':'return=minimal'},
-      body:JSON.stringify({provisao_id:id,qtd_recebida:qtdRec,valor_recebido:valRec,diferenca_qtd:diff,validado_por})});
-    await sbRequest('gn_provisoes?id=eq.'+id,{method:'PATCH',headers:{'Prefer':'return=minimal'},
-      body:JSON.stringify({status,atualizado_em:new Date().toISOString()})});
-    // Guarda o item confirmado pra continuar aparecendo (travado, sem inputs) dentro do
-    // grupo do fornecedor até o pedido inteiro terminar — ver _epConfirmadosSessao acima.
-    _epConfirmadosSessao[id]={...prov,_statusFinal:status,_qtdRec:qtdRec,_valRec:valRec};
-    showToast(status==='RECEBIDO_OK'?'✅ Entrega confirmada!':'⚠️ Divergência registrada.');
+
+  // 1) Grava na hora no aparelho, sem depender da rede — mesmo padrão de resiliência
+  // já usado na Contagem (autoSave local + retry em segundo plano).
+  if(!_epFilaPendente[loja]) _epFilaPendente[loja]=[];
+  _epFilaPendente[loja]=_epFilaPendente[loja].filter(x=>x.id!==id); // evita duplicar se reconfirmar
+  _epFilaPendente[loja].push({id,qtdRec,valRec,diff,status,validado_por,ts:Date.now(),prov});
+  _epFilaSalvar();
+
+  // 2) Trava o item na tela como confirmado (mas sinalizando "sincronizando") — usuário
+  // não precisa esperar a rede pra seguir conferindo o resto do pedido.
+  _epConfirmadosSessao[id]={...prov,_statusFinal:status,_qtdRec:qtdRec,_valRec:valRec,_syncPendente:true};
+  showToast(status==='RECEBIDO_OK'?'✅ Confirmado! Sincronizando…':'⚠️ Divergência registrada! Sincronizando…');
+  render();
+
+  // 3) Tenta enviar pra nuvem em segundo plano, com retry automático se a rede falhar.
+  _epProcessarFila();
+}
+
+// Envia a fila de confirmações de entrega pendentes pra nuvem. Roda em segundo plano —
+// falha em silêncio (sem toast de erro repetido) e tenta de novo em 8s, igual ao sbPush()
+// da Contagem. Só reconsulta carregarEntregas() quando a fila inteira estiver limpa, pra
+// não recarregar a lista no meio de um lote com itens ainda pendentes.
+async function _epProcessarFila(){
+  if(_epFilaRetryTimer){ clearTimeout(_epFilaRetryTimer); _epFilaRetryTimer=null; }
+  const fila=_epFilaPendente[loja]||[];
+  if(!fila.length) return;
+  let houveErro=false;
+  for(const item of [...fila]){
+    if(_epFilaEmVoo.has(item.id)) continue;
+    _epFilaEmVoo.add(item.id);
+    try{
+      await sbRequest('gn_recebimentos',{method:'POST',headers:{'Prefer':'return=minimal'},
+        body:JSON.stringify({provisao_id:item.id,qtd_recebida:item.qtdRec,valor_recebido:item.valRec,diferenca_qtd:item.diff,validado_por:item.validado_por})});
+      await sbRequest('gn_provisoes?id=eq.'+item.id,{method:'PATCH',headers:{'Prefer':'return=minimal'},
+        body:JSON.stringify({status:item.status,atualizado_em:new Date().toISOString()})});
+      _epFilaPendente[loja]=(_epFilaPendente[loja]||[]).filter(x=>x.id!==item.id);
+      _epFilaSalvar();
+      if(_epConfirmadosSessao[item.id]) _epConfirmadosSessao[item.id]._syncPendente=false;
+      render();
+    }catch(e){
+      houveErro=true;
+    }finally{
+      _epFilaEmVoo.delete(item.id);
+    }
+  }
+  if(houveErro){
+    _epFilaRetryTimer=setTimeout(_epProcessarFila,8000);
+  } else {
     carregarEntregas(true).then(()=>render());
-  }catch(e){showToast('❌ Erro ao confirmar: '+e.message);}
+  }
 }
 function gerarWppEntregas(){
   if(!provisoesEntrega.length){showToast('Nenhuma entrega pendente.');return;}
@@ -8330,6 +8387,17 @@ if ('serviceWorker' in navigator) {
 }
 carregarEntregas(true);
 carregarCorrecoesSetor(true);
+
+// Recupera confirmações de entrega que ficaram pendentes de sincronizar (ex.: app fechado
+// com internet ruim antes do retry terminar) e já tenta reenviar assim que a sessão carrega.
+_epFilaCarregar();
+(_epFilaPendente[loja]||[]).forEach(item => {
+  _epConfirmadosSessao[item.id] = { ...item.prov, _statusFinal: item.status, _qtdRec: item.qtdRec, _valRec: item.valRec, _syncPendente: true };
+});
+_epProcessarFila();
+// Reforço extra: assim que a conexão voltar, tenta sincronizar na hora em vez de esperar
+// o retry de 8s em andamento.
+window.addEventListener('online', () => { _epProcessarFila(); });
 
 /* ═══════════ SENHA MESTRE — CORREÇÃO DE ENTRADAS ═══════════ */
 
