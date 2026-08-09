@@ -2655,6 +2655,73 @@ function _buildTendenciaChart() {
   </div>`;
 }
 
+// Índice de saúde de uma loja (0-100) — extraído do card de ranking (aba
+// Faturamento) pra ser reaproveitado também na Central de BI, sem duplicar a
+// fórmula. Mesmo cálculo de antes: 50pts faturamento vs meta (ou vs a loja
+// líder, se ainda sem meta), 30pts checklist enviado hoje, 20pts sem
+// manutenção pendente (desconta 4pts por item pendente).
+function _calcIndiceSaude(v, meta, maxVal, chkOk, manut) {
+  const baseFat = meta>0 ? Math.min(1,(v||0)/meta) : (maxVal>0 ? (v||0)/maxVal : 0);
+  return Math.max(0, Math.min(100, Math.round(baseFat*50 + (chkOk===true?30:0) + Math.max(0,20-manut*4))));
+}
+
+// Central de BI — visão consolidada cruzando os sinais que o dashboard já
+// carrega (faturamento, meta, checklist, manutenção, contratos vencendo,
+// alertas) numa tela só, em vez de espalhados pelas outras abas. Não busca
+// nada novo no Supabase — só rearranja o que _loadDashAll() já trouxe.
+function _buildBiTab(fat, maxVal, loading) {
+  if (loading) return '<div style="padding:28px;text-align:center;color:rgba(0,0,0,.28);font-size:12px">⟳ Carregando…</div>';
+  const lojasConsolidado = _lojasFatConsolidado();
+  const totalFat = lojasConsolidado.reduce((s,k)=>s+(fat[k]||0),0);
+  const totalManut = _dashManut ? Object.values(_dashManut).reduce((s,n)=>s+n,0) : 0;
+  const chkOkCount = _dashChk ? LOJAS_LISTA.filter(k=>_dashChk.has(k)).length : 0;
+  const alertasAtivos = _computeAlertas();
+  const contratosTotal = _dashContratosVencendo ? Object.values(_dashContratosVencendo).reduce((s,arr)=>s+((arr&&arr.length)||0),0) : 0;
+
+  const linhas = LOJAS_LISTA.map(k=>{
+    const v = fat[k]||0;
+    const meta = _dashMetas[k]||0;
+    const chkOk = _dashChk ? _dashChk.has(k) : null;
+    const manut = _dashManut ? (_dashManut[k]||0) : 0;
+    const saude = _calcIndiceSaude(v, meta, maxVal, chkOk, manut);
+    const metaPct = meta>0 ? Math.round(v/meta*100) : null;
+    return { k, nome: LOJA_DISPLAY[k]||k, v, metaPct, saude, chkOk, manut };
+  }).sort((a,b)=>b.saude-a.saude);
+
+  const saudeMedia = linhas.length ? Math.round(linhas.reduce((s,l)=>s+l.saude,0)/linhas.length) : 0;
+
+  const kpi = (lbl,val,clr) => `<div style="text-align:center"><div style="font-size:9px;color:rgba(0,0,0,.35);margin-bottom:2px">${lbl}</div><div style="font-size:15px;font-weight:800;color:${clr||'#1A1D23'}">${val}</div></div>`;
+
+  const linhasHtml = linhas.map(l=>{
+    const saudeCor = l.saude>=80?'#22c55e':l.saude>=50?'#f59e0b':'#ef4444';
+    return `<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:#FFFFFF;border:1px solid rgba(0,0,0,.08);border-radius:10px;margin-bottom:6px">
+      <span style="width:8px;height:8px;border-radius:50%;background:${COR_LOJA[l.k]||'#888'};flex-shrink:0;display:inline-block"></span>
+      <span style="font-size:11px;font-weight:700;color:rgba(0,0,0,.7);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${l.nome}</span>
+      <span style="font-size:10px;color:rgba(0,0,0,.4);width:64px;text-align:right;flex-shrink:0">${_fmtBRLs(l.v)}</span>
+      <span style="font-size:10px;color:rgba(0,0,0,.4);width:38px;text-align:right;flex-shrink:0">${l.metaPct===null?'—':l.metaPct+'%'}</span>
+      <span style="font-size:10px;flex-shrink:0" title="Checklist hoje">${l.chkOk===true?'✅':l.chkOk===false?'⚠':'—'}</span>
+      <span style="font-size:9px;flex-shrink:0;width:24px;text-align:right;color:${l.manut>0?'#f97316':'rgba(0,0,0,.25)'}" title="Manutenções pendentes">🔧${l.manut||0}</span>
+      <span style="font-size:12px;font-weight:800;color:${saudeCor};width:28px;text-align:right;flex-shrink:0">${l.saude}</span>
+    </div>`;
+  }).join('');
+
+  return `
+    <div class="cons-card" style="margin-bottom:12px">
+      <div class="cons-ttl">VISÃO GERAL · REDE</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:8px">
+        ${kpi('Faturamento', _fmtBRLs(totalFat))}
+        ${kpi('Saúde média', saudeMedia, saudeMedia>=80?'#22c55e':saudeMedia>=50?'#f59e0b':'#ef4444')}
+        ${kpi('Checklist hoje', chkOkCount+'/'+LOJAS_LISTA.length)}
+        ${kpi('Alertas ativos', alertasAtivos.length, alertasAtivos.length>0?'#f59e0b':'#22c55e')}
+        ${kpi('Manutenções pend.', totalManut, totalManut>0?'#f97316':undefined)}
+        ${kpi('Contratos vencendo', contratosTotal, contratosTotal>0?'#f87171':undefined)}
+      </div>
+    </div>
+    <div style="font-size:10px;font-weight:700;color:rgba(0,0,0,.4);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Comparativo por loja · ordenado por saúde</div>
+    ${linhasHtml}
+  `;
+}
+
 function _buildKPIRow() {
   if(!_dashFat) return `<div class="kpi-row">${['Faturamento','Variação','% Média Meta','CHK Hoje'].map(lbl=>`<div class="kpi-tile"><div class="kpi-tile-lbl">${lbl}</div><div class="kpi-tile-val" style="color:rgba(0,0,0,.2)">—</div></div>`).join('')}</div>`;
   const fat=_dashFat, fatP=_dashFatPrev;
@@ -3849,8 +3916,7 @@ function renderDashboard() {
         // Atenção) — é só um resumo rápido pra comparar lojas de relance.
         let saude=null;
         if(!loading){
-          const baseFat=meta>0?Math.min(1,(v||0)/meta):(maxVal>0?(v||0)/maxVal:0);
-          saude=Math.max(0,Math.min(100,Math.round(baseFat*50+(chkOk===true?30:0)+Math.max(0,20-manut*4))));
+          saude=_calcIndiceSaude(v, meta, maxVal, chkOk, manut);
         }
         const saudeCor=saude===null?'':saude>=80?'#22c55e':saude>=50?'#f59e0b':'#ef4444';
         const saudeBadge=saude===null?'':`<span title="Índice de saúde (faturamento vs meta + checklist + manutenção)" style="font-size:9px;font-weight:800;color:${saudeCor}">● ${saude}</span>`;
@@ -3900,6 +3966,9 @@ function renderDashboard() {
   } else if (_dashTab==='xadrez') {
     content = _buildXadrezPanel();
 
+  } else if (_dashTab==='bi') {
+    content = _buildBiTab(fat, maxVal, loading);
+
   } else { // ⚙ Metas
     const perLabel=_dashPer==='sem'?'semana':'mês';
     content=`
@@ -3934,6 +4003,7 @@ function renderDashboard() {
         <button class="dash-tab${_dashTab==='att'?' on':''}" onclick="_setDashTab('att')">⚠ Atenção</button>
         <button class="dash-tab${_dashTab==='ferias'?' on':''}" onclick="_setDashTab('ferias')">🏖 Férias</button>
         <button class="dash-tab${_dashTab==='xadrez'?' on':''}" onclick="_setDashTab('xadrez')">🔀 Xadrez</button>
+        <button class="dash-tab${_dashTab==='bi'?' on':''}" onclick="_setDashTab('bi')">📊 BI</button>
         <button class="dash-tab${_dashTab==='metas'?' on':''}" onclick="_setDashTab('metas')">⚙ Metas</button>
       </div>
       ${(_dashTab!=='metas'&&_dashTab!=='ferias'&&_dashTab!=='xadrez')?periodRow:''}
