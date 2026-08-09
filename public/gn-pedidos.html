@@ -3014,7 +3014,7 @@ async function salvarCustoLote(id, valor) {
   if (error) { toast('⚠️ Erro ao salvar: ' + error.message, 'err'); return; }
   const idx = S.catalogo.findIndex(p => p.id === id);
   if (idx >= 0) S.catalogo[idx].custo = custo;
-  _logAuditoria('ALTERAR_CUSTO_CATALOGO', { produto: idx>=0?S.catalogo[idx].produto:null, custo_antigo: custoAntigo, custo_novo: custo }, { catalogo_id: id });
+  _logAuditoria('ALTERAR_CUSTO_CATALOGO', { produto: idx>=0?S.catalogo[idx].produto:null, custo_antigo: custoAntigo, custo_novo: custo }, { catalogo_id: id, fornecedor: idx>=0?S.catalogo[idx].fornecedor:null });
 }
 
 // ── Importar "Und por Cx" a partir do que já existe no app Lojas ──────────────
@@ -3337,11 +3337,52 @@ function editarProduto(id) {
     </div>
     <div class="modal-acoes">
       <button class="btn-sm btn-danger" onclick="excluirProduto('${id}')">Excluir</button>
+      <button class="btn-sm btn-outline" onclick="abrirHistoricoPreco('${id}')">📈 Histórico de preço</button>
       <button class="btn-sm btn-outline" onclick="$('modal-bg').classList.remove('ativo')">Cancelar</button>
       <button class="btn-sm btn-orange" onclick="salvarEdicaoProduto('${id}')">Salvar</button>
     </div>
   `);
   _undPedidoOnChange();
+}
+
+// Histórico de preço de um produto do catálogo — lê os registros que a própria
+// alteração de custo (salvarEdicaoProduto/salvarCustoLote) já grava em
+// gn_auditoria_pedidos (ALTERAR_CUSTO_CATALOGO). Não é uma tabela nova nem um
+// cálculo novo, só uma tela pra ver o que já fica registrado a cada reajuste.
+async function abrirHistoricoPreco(id) {
+  const p = S.catalogo.find(x => x.id === id);
+  if (!p) return;
+  abrirModal(`
+    <div class="modal-titulo">
+      Histórico de preço — ${p.produto}
+      <button class="modal-close" onclick="$('modal-bg').classList.remove('ativo')">×</button>
+    </div>
+    <div id="hist-preco-lista" style="font-size:12px;color:var(--muted)">Carregando...</div>
+    <div class="modal-acoes">
+      <button class="btn-sm btn-outline" onclick="editarProduto('${id}')">← Voltar</button>
+    </div>
+  `);
+  const el = $('hist-preco-lista');
+  try {
+    const { data, error } = await db.from('gn_auditoria_pedidos')
+      .select('criado_em,usuario,fornecedor,detalhes')
+      .eq('catalogo_id', id).eq('acao', 'ALTERAR_CUSTO_CATALOGO')
+      .order('criado_em', { ascending: false }).limit(30);
+    if (error) throw error;
+    if (!data || !data.length) { el.innerHTML = 'Nenhuma alteração de custo registrada ainda pra este produto.'; return; }
+    const fmtR = v => v == null ? '—' : 'R$ ' + Number(v).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    el.innerHTML = data.map(r => {
+      const dt = new Date(r.criado_em);
+      const dtStr = dt.toLocaleDateString('pt-BR') + ' ' + dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+      const d = r.detalhes || {};
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
+        <div><b>${fmtR(d.custo_antigo)} → ${fmtR(d.custo_novo)}</b><div style="font-size:10px;color:var(--muted);margin-top:2px">${r.usuario || '—'}${r.fornecedor ? ' · ' + r.fornecedor : ''}</div></div>
+        <div style="font-size:10px;color:var(--muted);white-space:nowrap;margin-left:8px">${dtStr}</div>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    el.innerHTML = 'Erro ao carregar histórico.';
+  }
 }
 
 async function salvarEdicaoProduto(id) {
@@ -3366,7 +3407,7 @@ async function salvarEdicaoProduto(id) {
   const idx = S.catalogo.findIndex(p => p.id === id);
   if (idx >= 0) Object.assign(S.catalogo[idx], { produto, grupo, subgrupo, fornecedor, und, custo, und_por_caixa: undPorCaixa });
   if (custo !== custoAntigo) {
-    _logAuditoria('ALTERAR_CUSTO_CATALOGO', { produto, custo_antigo: custoAntigo, custo_novo: custo }, { catalogo_id: id });
+    _logAuditoria('ALTERAR_CUSTO_CATALOGO', { produto, custo_antigo: custoAntigo, custo_novo: custo }, { catalogo_id: id, fornecedor });
   }
   $('modal-bg').classList.remove('ativo');
   toast('Produto atualizado!','ok');
