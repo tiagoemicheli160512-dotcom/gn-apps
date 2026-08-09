@@ -317,6 +317,7 @@
 <div class="picker-overlay" id="senha-overlay" onclick="if(event.target===this)fecharTrocarSenha()">
   <div class="picker-sheet" style="max-width:340px;border-radius:20px;margin:auto">
     <div class="picker-title">Trocar login e senha</div>
+    <div id="ts-forcada-msg" style="display:none;margin:0 4px 12px;padding:9px 12px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.22);border-radius:9px;font-size:12px;color:#1A1D23">🔒 Sua senha completou 90 dias — defina uma nova para continuar.</div>
     <div style="padding:0 4px 12px">
       <label class="ts-lbl">Nome de usuário</label>
       <input id="ts-nome" class="ts-inp" type="text" placeholder="Seu nome" autocomplete="off">
@@ -330,7 +331,7 @@
       <div id="ts-err" style="color:#1A1D23;font-size:12px;margin-top:8px;min-height:16px"></div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:0 4px">
-      <button class="pick-cancel" onclick="fecharTrocarSenha()">Cancelar</button>
+      <button class="pick-cancel" id="ts-cancel-btn" onclick="fecharTrocarSenha()">Cancelar</button>
       <button id="ts-btn" style="padding:12px;background:var(--cor);border:none;border-radius:10px;color:#1a1a1a;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit" onclick="salvarTrocarSenha()">Salvar</button>
     </div>
   </div>
@@ -1184,6 +1185,7 @@ async function doLogin() {
     if (!data || !data.length) {
       errEl.textContent = '❌ Nome ou senha incorretos.';
       btn.textContent = 'Entrar →'; btn.disabled = false;
+      _registrarTentativaFalha(nome);
       return;
     }
     const u = data[0];
@@ -1201,7 +1203,7 @@ async function doLogin() {
     }
     const unico = _appUnicoPermitido(session);
     if (unico) navTo(unico.url);
-    else showHome(session);
+    else { showHome(session); if (_senhaExpirada(u.senha_alterada_em)) abrirTrocarSenha(true); }
   } catch(e) {
     errEl.textContent = '⚠️ Erro de conexão. Tente novamente.';
     btn.textContent = 'Entrar →'; btn.disabled = false;
@@ -1736,6 +1738,32 @@ async function _loadLojaHealthChips(loja) {
     el.innerHTML = chip('💵 Hoje: —', 'rgba(0,0,0,.07)', 'rgba(0,0,0,.3)')
                  + chip('📅 Semana: —', 'rgba(0,0,0,.07)', 'rgba(0,0,0,.3)');
   }
+}
+
+// Senha vencida (90 dias) — força troca antes de liberar o uso do app.
+function _senhaExpirada(dataStr) {
+  if (!dataStr) return true;
+  const dias = (Date.now() - new Date(dataStr).getTime()) / 86400000;
+  return dias >= 90;
+}
+
+// Registra em gn_login_tentativas, só pra controle — não interfere na resposta
+// já mostrada ao usuário (nome ou senha incorretos). Faz uma segunda consulta,
+// só por nome, pra classificar o motivo sem expor no login se o problema foi
+// usuário inexistente/inativo ou senha errada.
+function _registrarTentativaFalha(nome) {
+  fetch(`${SB_URL}/rest/v1/gn_usuarios?nome=eq.${encodeURIComponent(nome)}&select=id,ativo`,
+    { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } })
+    .then(r => r.ok ? r.json() : [])
+    .then(rows => {
+      const motivo = !rows.length ? 'usuario_nao_encontrado' : (rows[0].ativo === false ? 'usuario_inativo' : 'senha_incorreta');
+      return fetch(`${SB_URL}/rest/v1/gn_login_tentativas`, {
+        method: 'POST',
+        headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify({ nome, motivo, app: 'gn-home' })
+      });
+    })
+    .catch(() => {});
 }
 
 // Registra em gn_acessos, só pra controle — permite ao mestre ver na tela da loja
@@ -4091,19 +4119,25 @@ function _showMods() {
 }
 
 // ── TROCAR LOGIN/SENHA ────────────────────────────────────────────────────────
-function abrirTrocarSenha() {
+let _senhaForcada = false; // true quando a senha passou de 90 dias — bloqueia fechar o modal sem trocar
+
+function abrirTrocarSenha(forcada) {
   if (!session) return;
+  _senhaForcada = !!forcada;
   document.getElementById('ts-nome').value = session.nome;
   document.getElementById('ts-senha').value = '';
   document.getElementById('ts-conf').value = '';
   document.getElementById('ts-loja').textContent = LOJA_DISPLAY[session.loja] || session.loja;
   document.getElementById('ts-err').textContent = '';
+  document.getElementById('ts-forcada-msg').style.display = _senhaForcada ? 'block' : 'none';
+  document.getElementById('ts-cancel-btn').style.display = _senhaForcada ? 'none' : '';
   const btn = document.getElementById('ts-btn');
   btn.textContent = 'Salvar'; btn.disabled = false;
   document.getElementById('senha-overlay').classList.add('open');
 }
 
 function fecharTrocarSenha() {
+  if (_senhaForcada) return; // não deixa fechar sem trocar a senha vencida
   document.getElementById('senha-overlay').classList.remove('open');
 }
 
@@ -4115,9 +4149,10 @@ async function salvarTrocarSenha() {
   const btn   = document.getElementById('ts-btn');
   errEl.textContent = '';
   if (!nome) { errEl.textContent = 'Nome não pode ser vazio.'; return; }
+  if (_senhaForcada && !senha) { errEl.textContent = 'Defina uma nova senha para continuar.'; return; }
   if (senha && senha !== conf) { errEl.textContent = 'Senhas não conferem.'; return; }
   const payload = { nome, atualizado_em: new Date().toISOString() };
-  if (senha) payload.senha = senha;
+  if (senha) { payload.senha = senha; payload.senha_alterada_em = new Date().toISOString(); }
   btn.textContent = 'Salvando...'; btn.disabled = true;
   try {
     const res = await fetch(
@@ -4127,6 +4162,7 @@ async function salvarTrocarSenha() {
     if (!res.ok) { errEl.textContent = '⚠️ Erro ao salvar. Tente novamente.'; btn.textContent = 'Salvar'; btn.disabled = false; return; }
     session.nome = nome;
     localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+    _senhaForcada = false;
     fecharTrocarSenha();
     showHome(session);
   } catch(e) {

@@ -186,6 +186,14 @@ main{flex:1;padding:16px;padding-bottom:80px;max-width:600px;margin:0 auto;width
       </div>
       <div id="lista-usuarios"></div>
     </div>
+
+    <div class="section">
+      <div class="section-hd">
+        <h2>Tentativas de login com falha</h2>
+        <button class="btn-add" id="btn-refresh-tentativas" onclick="carregarTentativas()">↻ Atualizar</button>
+      </div>
+      <div id="lista-tentativas" style="font-size:12px;color:rgba(255,255,255,.4)">Carregando...</div>
+    </div>
   </main>
 </div>
 
@@ -319,6 +327,7 @@ async function fazerLogin() {
     if (!data || data.length === 0) {
       showLoginErr("Usuário ou senha incorretos.");
       elLoginSenha.value = "";
+      _registrarTentativaFalha(nome);
       return;
     }
     const user = data[0];
@@ -336,6 +345,18 @@ async function fazerLogin() {
   }
 }
 
+// Registra em gn_login_tentativas, mesma tabela usada pelo login do GN Gestão —
+// consulta separada só por nome pra classificar o motivo sem interferir na
+// mensagem de erro já mostrada.
+function _registrarTentativaFalha(nome) {
+  sbFetch(`gn_usuarios?nome=ilike.${encodeURIComponent(nome)}&select=id,ativo`)
+    .then(rows => {
+      const motivo = !rows || !rows.length ? "usuario_nao_encontrado" : (rows[0].ativo === false ? "usuario_inativo" : "senha_incorreta");
+      return sbFetch("gn_login_tentativas", { method: "POST", body: JSON.stringify({ nome, motivo, app: "gn-usuarios" }) });
+    })
+    .catch(() => {});
+}
+
 elBtnEntrar.addEventListener("click", fazerLogin);
 elLoginSenha.addEventListener("keydown", e => { if (e.key === "Enter") fazerLogin(); });
 elLoginNome.addEventListener("keydown", e => { if (e.key === "Enter") elLoginSenha.focus(); });
@@ -350,6 +371,30 @@ async function iniciarApp() {
   const sbUser = document.getElementById('sb-user');
   if (sbUser) sbUser.textContent = usuarioLogado.nome;
   await carregarUsuarios();
+  await carregarTentativas();
+}
+
+// ─── TENTATIVAS DE LOGIN (falhas) ───────────────────────────────────────────
+const MOTIVO_LABELS = { usuario_nao_encontrado: "usuário não existe", usuario_inativo: "usuário bloqueado", senha_incorreta: "senha incorreta" };
+
+async function carregarTentativas() {
+  const el = document.getElementById("lista-tentativas");
+  if (!el) return;
+  el.textContent = "Carregando...";
+  try {
+    const data = await sbFetch("gn_login_tentativas?order=criado_em.desc&limit=30&select=nome,motivo,app,criado_em");
+    if (!data || !data.length) { el.innerHTML = `<div style="padding:12px;color:rgba(255,255,255,.3)">Nenhuma tentativa com falha registrada.</div>`; return; }
+    el.innerHTML = data.map(t => {
+      const dt = new Date(t.criado_em);
+      const dtStr = dt.toLocaleDateString("pt-BR") + " " + dt.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+      return `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid #505050">
+        <div><b style="color:#fff">${t.nome || "—"}</b> <span style="color:rgba(255,255,255,.35)">· ${MOTIVO_LABELS[t.motivo] || t.motivo || "—"} · ${t.app || "—"}</span></div>
+        <div style="color:rgba(255,255,255,.3);white-space:nowrap;margin-left:8px">${dtStr}</div>
+      </div>`;
+    }).join("");
+  } catch(e) {
+    el.innerHTML = `<div style="padding:12px;color:#FF4444">Erro ao carregar tentativas.</div>`;
+  }
 }
 
 document.getElementById("btn-sair").addEventListener("click", () => {
@@ -439,12 +484,15 @@ function renderizarUsuarios() {
       const btnBlock = u.ativo
         ? `<button class="btn-sm btn-block" onclick="toggleAtivo(${u.id}, false)">Bloquear</button>`
         : `<button class="btn-sm btn-unblock" onclick="toggleAtivo(${u.id}, true)">Ativar</button>`;
+      const diasSenha = u.senha_alterada_em ? Math.floor((Date.now() - new Date(u.senha_alterada_em).getTime()) / 86400000) : null;
+      const senhaVencida = diasSenha === null || diasSenha >= 90;
+      const senhaInfo = `<span style="color:${senhaVencida?'#FF4444':'rgba(255,255,255,.3)'}"> · senha ${diasSenha===null?'sem registro':'há '+diasSenha+' dia'+(diasSenha===1?'':'s')}${senhaVencida?' ⚠️':''}</span>`;
       return `<div class="user-card${u.ativo ? '' : ' inactive'}">
         <div class="user-avatar" style="background:${cor}22;color:${cor}">${inicial}</div>
         <div class="user-info">
           <div class="user-name">${u.nome}${badgeHtml}</div>
           <div class="user-cargo">${cargoLabel}</div>
-          <div style="font-size:11px;color:rgba(255,255,255,.3);margin-top:2px">🔑 ${u.senha||'—'}</div>
+          <div style="font-size:11px;color:rgba(255,255,255,.3);margin-top:2px">🔑 ${u.senha||'—'}${senhaInfo}</div>
         </div>
         <div class="user-actions">
           <button class="btn-sm btn-edit" onclick="abrirEdicao(${u.id})">Editar</button>
@@ -691,7 +739,7 @@ document.getElementById("modal-save").addEventListener("click", async () => {
       delete permissoes.lojas_supervisor;
     }
     const payload = { nome, cargo, loja, permissoes, atualizado_em: new Date().toISOString() };
-    if (senha) payload.senha = senha;
+    if (senha) { payload.senha = senha; payload.senha_alterada_em = new Date().toISOString(); }
     if (id) {
       await sbFetch(`gn_usuarios?id=eq.${id}`, { method: "PATCH", body: JSON.stringify(payload) });
       const idx = todosUsuarios.findIndex(u => u.id === Number(id));
