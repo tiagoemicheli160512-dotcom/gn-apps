@@ -19,6 +19,12 @@
     *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
     body{background:#F5F6F8;color:#1A1D23;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh;overflow-x:hidden}
 
+    /* Alerta urgente (mestre/supervisor → loja) — borda vermelha pulsante cobrindo a
+       tela toda, até alguém na loja tocar no banner pra marcar como resolvido. */
+    .alerta-urgente-overlay{position:fixed;inset:0;z-index:99999;pointer-events:none;border:8px solid #ef4444;box-sizing:border-box;animation:alertaUrgentePulse 1s ease-in-out infinite}
+    @keyframes alertaUrgentePulse{0%,100%{box-shadow:inset 0 0 40px 10px rgba(239,68,68,.55);border-color:#ef4444}50%{box-shadow:inset 0 0 80px 24px rgba(239,68,68,.9);border-color:#fca5a5}}
+    .alerta-urgente-banner{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);pointer-events:auto;background:#ef4444;color:#fff;font-size:12px;font-weight:800;padding:11px 18px;border-radius:999px;box-shadow:0 4px 20px rgba(239,68,68,.5);cursor:pointer;white-space:nowrap;max-width:92vw;overflow:hidden;text-overflow:ellipsis;text-align:center}
+
     /* ── LOGIN ───────────────────────────────────── */
     #login-screen{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;padding:24px;background:radial-gradient(ellipse at 50% -10%,color-mix(in srgb,var(--cor) 18%,transparent) 0%,transparent 65%),#F5F6F8}
     .login-logo{font-size:54px;font-weight:900;color:var(--cor);letter-spacing:-3px;line-height:1}
@@ -854,6 +860,85 @@ async function _renderEscalaDiaHome(mostrar, sess, isMasterAtivo) {
   </div>`;
 }
 
+// ── ALERTA URGENTE (mestre/supervisor → loja) ──────────────────────────────
+// Botão no card de Pendências, restrito a quem _podeVerPainelGestao() já libera
+// (mestre/supervisor), grava em gn_alertas_urgentes. Quem está com o Home aberto
+// naquela loja (o próprio dispositivo da loja, tipicamente) faz polling simples
+// — não há Realtime configurado neste app — e mostra a borda vermelha pulsante
+// até alguém tocar no banner pra marcar como resolvido.
+let _alertaUrgentePollTimer = null;
+let _alertaUrgenteLoja = null;
+let _alertaUrgenteAtivo = null;
+
+function _iniciarAlertaUrgentePoll(loja) {
+  if (_alertaUrgenteLoja === loja && _alertaUrgentePollTimer) return;
+  if (_alertaUrgentePollTimer) clearInterval(_alertaUrgentePollTimer);
+  _alertaUrgenteLoja = loja;
+  _checarAlertaUrgente(loja);
+  _alertaUrgentePollTimer = setInterval(() => _checarAlertaUrgente(loja), 15000);
+}
+
+function _pararAlertaUrgentePoll() {
+  if (_alertaUrgentePollTimer) clearInterval(_alertaUrgentePollTimer);
+  _alertaUrgentePollTimer = null;
+  _alertaUrgenteLoja = null;
+  _alertaUrgenteAtivo = null;
+  _esconderAlertaUrgenteOverlay();
+}
+
+async function _checarAlertaUrgente(loja) {
+  try {
+    const res = await fetch(`${SB_URL}/rest/v1/gn_alertas_urgentes?loja=eq.${encodeURIComponent(loja)}&resolvido=eq.false&order=criado_em.desc&limit=1`,
+      { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } });
+    const rows = res.ok ? await res.json() : [];
+    if (rows.length) { _alertaUrgenteAtivo = rows[0]; _mostrarAlertaUrgenteOverlay(rows[0]); }
+    else { _alertaUrgenteAtivo = null; _esconderAlertaUrgenteOverlay(); }
+  } catch(e) {}
+}
+
+function _mostrarAlertaUrgenteOverlay(row) {
+  if (document.getElementById('alerta-urgente-overlay')) return;
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  const el = document.createElement('div');
+  el.id = 'alerta-urgente-overlay';
+  el.className = 'alerta-urgente-overlay';
+  el.innerHTML = `<div class="alerta-urgente-banner" onclick="_resolverAlertaUrgente()">🚨 Alerta urgente${row.criado_por?' de '+esc(row.criado_por):''} — toque para marcar como resolvido</div>`;
+  document.body.appendChild(el);
+}
+
+function _esconderAlertaUrgenteOverlay() {
+  const el = document.getElementById('alerta-urgente-overlay');
+  if (el) el.remove();
+}
+
+async function _resolverAlertaUrgente() {
+  if (!_alertaUrgenteAtivo) return;
+  const id = _alertaUrgenteAtivo.id;
+  _esconderAlertaUrgenteOverlay();
+  _alertaUrgenteAtivo = null;
+  try {
+    await fetch(`${SB_URL}/rest/v1/gn_alertas_urgentes?id=eq.${id}`, {
+      method: 'PATCH',
+      headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({ resolvido: true, resolvido_por: session ? session.nome : null, resolvido_em: new Date().toISOString() })
+    });
+  } catch(e) {}
+}
+
+async function _enviarAlertaUrgente(loja) {
+  if (!confirm('Enviar alerta urgente pra essa loja?\n\nA tela de quem estiver com o Home aberto lá vai piscar em vermelho até alguém tocar pra marcar como resolvido.')) return;
+  try {
+    await fetch(`${SB_URL}/rest/v1/gn_alertas_urgentes`, {
+      method: 'POST',
+      headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({ loja, criado_por: session ? session.nome : null })
+    });
+    alert('🚨 Alerta enviado!');
+  } catch(e) {
+    alert('⚠️ Erro ao enviar o alerta. Tente novamente.');
+  }
+}
+
 // Card "Pendências desta loja" — mesma versão do feed de alertas do Painel de Gestão
 // (⚠ Atenção), só que escopada a uma única loja e com fetches próprios, pra aparecer
 // logo no início do Home de cada loja (staff normal e mestre navegando a loja).
@@ -863,6 +948,7 @@ async function _renderPendenciasLojaHome(mostrar, sess, isMasterAtivo) {
   if (!mostrar || !sess) { el.innerHTML = ''; _pendLojaCount = 0; _updateHdrBell(); return; }
   const loja = (isMasterAtivo && masterLoja) ? masterLoja : sess.loja;
   if (!LOJAS_LISTA.includes(loja)) { el.innerHTML = ''; _pendLojaCount = 0; _updateHdrBell(); return; }
+  _iniciarAlertaUrgentePoll(loja);
   const comKey = LOJA_COM_KEY[loja] || loja;
   const chkKey = LOJA_DB_KEY[loja] || loja;
   const hoje = (d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'))(new Date());
@@ -1010,6 +1096,7 @@ async function _renderPendenciasLojaHome(mostrar, sess, isMasterAtivo) {
         <span style="font-size:13px;flex-shrink:0">${it.ico}</span>
         <div style="min-width:0"><div style="font-size:11px;font-weight:700;color:#1A1D23">${it.msg}</div>${it.sub?`<div style="font-size:9px;color:rgba(0,0,0,.4);margin-top:2px">${it.sub}</div>`:''}</div>
       </div>`).join('')}
+      ${_podeVerPainelGestao(sess) ? `<button onclick="_enviarAlertaUrgente('${loja}')" style="margin-top:10px;width:100%;background:#ef4444;border:none;border-radius:8px;padding:9px;color:#fff;font-size:11px;font-weight:800;cursor:pointer;font-family:inherit">🚨 Alertar loja agora (urgente)</button>` : ''}
     </div>`;
     _pendLojaCount = itens.length;
     _updateHdrBell();
@@ -1234,6 +1321,7 @@ function doLogout() {
   localStorage.removeItem(SESSION_KEY);
   localStorage.removeItem('gn_nav_loja');
   localStorage.removeItem('gn_last_loja');
+  _pararAlertaUrgentePoll();
   session = null; masterLoja = null;
   document.getElementById('inp-nome').value = '';
   document.getElementById('inp-senha').value = '';
