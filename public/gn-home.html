@@ -3067,10 +3067,16 @@ async function _loadFeriasGerencia(){
   _dashFeriasLoading = true;
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
   try{
+    // Fallback null (não []) pra distinguir "a busca falhou" de "não tem gerente
+    // cadastrado em loja nenhuma" — gnFetchJson engole o erro e devolve o fallback
+    // como se fosse um resultado válido; com [] como fallback, uma falha de rede
+    // virava "nenhuma loja tem gerente/sub", disparando um alerta falso no Xadrez
+    // pra todas as lojas de uma vez.
     const [gerRows, lojaRows] = await Promise.all([
-      window.gnFetchJson(`${SB_URL}/rest/v1/gn_usuarios?or=(cargo.ilike.gerente,cargo.ilike.sub_gerente)&ativo=eq.true&select=id,nome,cargo,loja&order=nome.asc`, H, 'ferias:gerentes', []),
-      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?select=loja,all_data`, H, 'ferias:lojas', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_usuarios?or=(cargo.ilike.gerente,cargo.ilike.sub_gerente)&ativo=eq.true&select=id,nome,cargo,loja&order=nome.asc`, H, 'ferias:gerentes', null),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?select=loja,all_data`, H, 'ferias:lojas', null),
     ]);
+    if(gerRows==null || lojaRows==null) throw new Error('Falha ao buscar gerentes/lojas');
     const porLoja = {};
     (gerRows||[]).forEach(u=>{
       if(!LOJAS_LISTA.includes(u.loja)) return;
@@ -3091,7 +3097,16 @@ async function _loadFeriasGerencia(){
     _dashAvaliacaoGerencia = avaliacaoPorLoja;
   }catch(e){
     window.gnLogError && window.gnLogError('ferias:_loadFeriasGerencia', e);
-    _dashGerentes = _dashGerentes||{}; _dashFeriasGerencia = _dashFeriasGerencia||{}; _dashAvaliacaoGerencia = _dashAvaliacaoGerencia||{};
+    if(_dashGerentes==null){
+      // Falha na primeira carga — não assume "nenhuma loja tem gerente" (dado falso
+      // e alarmante, gera um "sem gerente titular" pra rede toda no Xadrez). Mantém
+      // null (o painel continua mostrando "Carregando…") e tenta de novo em breve.
+      _dashFeriasLoading = false;
+      setTimeout(_loadFeriasGerencia, 5000);
+      return;
+    }
+    // Falha num refresh depois da primeira carga — mantém os dados anteriores em
+    // vez de zerar o que já estava certo na tela.
   }
   _dashFeriasLoading = false;
   renderDashboard();
