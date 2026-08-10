@@ -522,18 +522,17 @@ async function confirmarFechamento(){
 }
 
 /* ═══════════ INTEGRAÇÃO COM O CHECK-LIST ═══════════
-   Ao fechar uma comanda, recalcula do zero (idempotente) o total do dia vindo de
-   comandas fechadas e grava em checklist_diario.venda_salao — igual ao que o app
-   Caixa já faz hoje quando é usado. Os itens (jsonb "vendas") são mesclados com o
-   que já estiver lá, sem apagar lançamentos manuais de pratos que não passaram
-   por comanda. Não mexe em venda_delivery (comandas cobre só salão). */
+   Ao fechar uma comanda, dá baixa só nos pratos: recalcula do zero (idempotente)
+   as quantidades vendidas nas comandas fechadas do dia e mescla no jsonb "vendas"
+   do Check-list, sem apagar lançamentos manuais de pratos que não passaram por
+   comanda. O valor em dinheiro (venda_salao) continua vindo só do app Caixa —
+   Comandas não mexe nisso por enquanto. */
 async function sincronizarComandasChecklist(lojaUserKey, dataOperacao){
   try {
-    const comandas = await sb(`gn_comandas?loja=eq.${encodeURIComponent(lojaUserKey)}&data_operacao=eq.${dataOperacao}&status=eq.fechada&select=id,valor_total`);
+    const comandas = await sb(`gn_comandas?loja=eq.${encodeURIComponent(lojaUserKey)}&data_operacao=eq.${dataOperacao}&status=eq.fechada&select=id`);
     if (!comandas || !comandas.length) return;
     const ids = comandas.map(c=>c.id).join(',');
     const itens = await sb(`gn_comanda_itens?comanda_id=in.(${ids})&cancelado=eq.false&select=prato_codigo,quantidade`);
-    const totalValor = comandas.reduce((s,c)=>s+(parseFloat(c.valor_total)||0),0);
     const vendasAgg = {};
     (itens||[]).forEach(i => { vendasAgg[i.prato_codigo] = (vendasAgg[i.prato_codigo]||0) + (parseInt(i.quantidade)||0); });
     const lojaChk = LOJA_CHK_MAP[lojaUserKey] || lojaUserKey;
@@ -544,7 +543,7 @@ async function sincronizarComandasChecklist(lojaUserKey, dataOperacao){
     } catch(_) {}
     const vendasFinal = { ...vendasExistentes, ...vendasAgg };
     await sb(`checklist_diario?on_conflict=data_operacao,loja`, { method:'POST', prefer:'return=minimal,resolution=merge-duplicates',
-      body: { loja:lojaChk, data_operacao:dataOperacao, venda_salao:totalValor, vendas:vendasFinal, venda_salao_origem:'comandas' } });
+      body: { loja:lojaChk, data_operacao:dataOperacao, vendas:vendasFinal } });
   } catch(e) { console.error('[GN:comandas-sync]', e); }
 }
 
