@@ -3963,7 +3963,7 @@ async function _sincronizarComPedidos(produtosSync) {
   const naoSincronizados = []; // itens com dado real que não têm vínculo no catálogo — não podem ser perdidos em silêncio
   const kAntSinc = loja + "|" + wkKey(addDays(semana, -7));
 
-  produtosSync.forEach(({ prod, cx, und, pedidoCx, pedidoUnd, fator }) => {
+  produtosSync.forEach(({ prod, cx, und, pedidoCx, pedidoUnd, fator, estAntSnapshot }) => {
     const estoqueAtual = (cx * fator) + und;
     const qtdPedida = (pedidoCx * fator) + pedidoUnd;
     // gn_pedido_itens.qtd_pedida precisa ficar na mesma unidade do Catálogo (a mesma que
@@ -3977,15 +3977,14 @@ async function _sincronizarComPedidos(produtosSync) {
     const catalogoId = _resolverCatalogoId(prod);
     if (!catalogoId) { naoSincronizados.push(prod.produto); return; }
     const destSinc = mapeamentoPedido[String(prod.item)] || prod.produto.trim().toUpperCase();
-    // Est. Ant = estoque com que a semana anterior (kAntSinc) COMEÇOU — prioriza a
-    // contagem confirmada daquela própria semana (contAll[kAntSinc], o valor que a loja
-    // realmente digitou), que não muda mais depois de gravada. Se não existir (ninguém
-    // confirmou pedido durante aquela semana), calcula: estoque corrido no fim daquela
-    // semana MENOS as entradas recebidas naquela semana — nunca soma compra nenhuma no
-    // "início". (estIniAll[kAntSinc] sozinho já soma contagem+notas+confirmações, então
-    // usá-lo direto misturava compras no Est.ant — mesmo bug já corrigido no badge da
-    // aba Pedido, replicado aqui pro valor que fica gravado pro app Pedidos.)
-    let ulEstoque = (contAll[kAntSinc] || {})[destSinc] ?? null;
+    // Est. Ant = estoque com que a semana anterior (kAntSinc) COMEÇOU. Prioriza o
+    // estAntSnapshot tirado em confirmarPedido() ANTES desse mesmo confirmar somar seu
+    // próprio qtdBase em contAll[kAnterior] — reler contAll[kAntSinc] aqui (live) pegava
+    // esse valor já contaminado com o Est.Atual de HOJE, e "Est.ant" saía sempre idêntico
+    // a "Est.vig". Sem snapshot (chamada antiga da fila de retry, sem esse campo ainda),
+    // cai pro cálculo de fallback: estoque corrido no fim daquela semana MENOS as entradas
+    // recebidas naquela semana — nunca soma compra nenhuma no "início".
+    let ulEstoque = estAntSnapshot ?? null;
     if (ulEstoque == null) {
       const estFimSemanaAnt = (estIniAll[kAntSinc] || {})[destSinc];
       if (estFimSemanaAnt != null) {
@@ -4156,6 +4155,13 @@ async function confirmarPedido(modo) {
 
     const destino = insumoMapeado || nomeUpper;
 
+    // Snapshot de contAll[kAnterior][destino] ANTES da mutação duas linhas abaixo — é
+    // esse valor (o fechamento de kAnterior de ANTES desta confirmação) que precisa ir
+    // pro Est.ant do app Pedidos. Sem isso, _sincronizarComPedidos() lia contAll[kAntSinc]
+    // já contaminado pelo qtdBase que este mesmo confirmar tinha acabado de somar aqui,
+    // e "Est.ant" saía sempre idêntico a "Est.vig".
+    const estAntSnapshot = contAll[kAnterior][destino] ?? null;
+
     // → Somar ao estoque (sem apagar entradas manuais)
     estIniAll[k][destino] = (estIniAll[k][destino] || 0) + qtdBase;
 
@@ -4176,7 +4182,7 @@ async function confirmarPedido(modo) {
     if (qtdBase > 0 || pedCx > 0 || pedUnd > 0) {
       atualizados++;
       itensConf.push({ produto: prod.produto, fornecedor: prod.fornecedor || '', cx, und, pedidoCx: pedCx, pedidoUnd: pedUnd });
-      produtosParaSync.push({ prod, cx, und, pedidoCx: pedCx, pedidoUnd: pedUnd, fator });
+      produtosParaSync.push({ prod, cx, und, pedidoCx: pedCx, pedidoUnd: pedUnd, fator, estAntSnapshot });
     }
   });
 
