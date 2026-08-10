@@ -4013,19 +4013,26 @@ async function _sincronizarComPedidos(produtosSync) {
 }
 
 /* Sincroniza Ped.ant (ul_pedido) no app Pedidos assim que uma nota é lançada — sem
-   esperar a loja confirmar o pedido da semana. confirmarPedido/_sincronizarComPedidos
-   só rodam uma vez por semana e usam a semana ANTERIOR; isso aqui atualiza pro valor
-   mais atual, somando tudo que já foi lançado na Entrada nesta semana. Atualiza só a
-   última contagem que já existe pro item — nunca cria linha nova: se criasse uma linha
-   com a data de hoje, o app Pedidos passaria a considerá-la "a mais recente" (ordena
-   por data_contagem desc) e o Est.vig sumiria pra esse item até a loja recontar (ver
-   carregarContagens em gn-pedidos.html). Roda em segundo plano; falha em silêncio —
-   a sincronização via confirmarPedido continua existindo como reforço/backup. */
+   esperar a loja confirmar o pedido da semana. Usa a MESMA referência de semana que
+   confirmarPedido/_sincronizarComPedidos (semana ANTERIOR à atual) — antes este código
+   somava as entradas da semana EM ANDAMENTO, o que fazia o campo mudar de sentido
+   dependendo de qual dos dois processos escreveu por último nele (um dizia "semana
+   passada", o outro "essa semana", no mesmo campo). Atualiza só a última contagem que
+   já existe pro item — nunca cria linha nova: se criasse uma linha com a data de hoje,
+   o app Pedidos passaria a considerá-la "a mais recente" (ordena por data_contagem
+   desc) e o Est.vig sumiria pra esse item até a loja recontar (ver carregarContagens
+   em gn-pedidos.html). Roda em segundo plano; falha em silêncio — a sincronização via
+   confirmarPedido continua existindo como reforço/backup. */
 async function _syncUlPedidoAposNota(insumosAfetados) {
   try {
     await _carregarCatalogo();
     const lojaSlug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
-    const entPorInsumo = getEntradasPorInsumo();
+    const kAnteriorSync = loja + "|" + wkKey(addDays(semana, -7));
+    const entPorInsumo = {};
+    (entradasAll[kAnteriorSync] || []).forEach(e => {
+      const ins = (e.insumo || '').trim().toUpperCase();
+      entPorInsumo[ins] = (entPorInsumo[ins] || 0) + (parseFloat(e.qtd) || 0);
+    });
     for (const insumo of insumosAfetados) {
       const prod = getProdutosPedidoOrdenados().find(p => {
         const idStr = String(p.item);
@@ -6995,12 +7002,25 @@ function render() {
             <div style="display:flex;gap:5px;flex-wrap:wrap;padding-left:40px;margin-top:1px">
               ${(function(){
                 const dest = mapeamentoPedido[String(prod.item)] || prod.produto.trim().toUpperCase();
-                const estAnt = (contAll[kAnterior] || {})[dest];
                 const pedAntEntry = (pedidoAll[kAnterior] || {})[prod.item];
                 const pedAntCx  = pedAntEntry != null ? parseFloat(pedAntEntry._cxConfirmado)  : null;
                 const pedAntUnd = pedAntEntry != null ? parseFloat(pedAntEntry._undConfirmado) : null;
                 const estVig = (estIniAll[k] || {})[dest];
                 const fmtN = function(v){ return (v != null && !isNaN(v)) ? Number(v).toFixed(1) : '—'; };
+                let estAntVal = (contAll[kAnterior] || {})[dest];
+                let estAntTitle = '';
+                if (estAntVal == null) {
+                  // contAll[kAnterior] só é gravado quando alguém confirma o pedido DESTA
+                  // semana (mesmo em modo urgência) — no início da semana, antes da primeira
+                  // confirmação, ainda não existe. Usa o estoque corrente registrado ao final
+                  // da semana passada (estIniAll) como aproximação, que já fica disponível o
+                  // tempo todo, sem depender de ninguém confirmar nada.
+                  const estIniAnt = (estIniAll[kAnterior] || {})[dest];
+                  if (estIniAnt != null) {
+                    estAntVal = estIniAnt;
+                    estAntTitle = ' title="Estimado a partir do estoque corrente da semana passada — ainda não houve confirmação de pedido nesta semana"';
+                  }
+                }
                 let pedAntTxt, pedAntTitle = '';
                 if (pedAntCx != null) {
                   pedAntTxt = fmtN(pedAntCx) + ' CX' + (pedAntUnd > 0 ? ' + ' + fmtN(pedAntUnd) + ' UN' : '');
@@ -7018,8 +7038,8 @@ function render() {
                     pedAntTxt = '—';
                   }
                 }
-                return '<span style="font-size:9px;background:rgba(100,116,139,.15);border-radius:6px;padding:2px 7px;color:#94a3b8;white-space:nowrap">'
-                  + '<span style="opacity:.75">Est.ant:</span> <strong>' + fmtN(estAnt) + '</strong></span>'
+                return '<span' + estAntTitle + ' style="font-size:9px;background:rgba(100,116,139,.15);border-radius:6px;padding:2px 7px;color:#94a3b8;white-space:nowrap">'
+                  + '<span style="opacity:.75">Est.ant:</span> <strong>' + fmtN(estAntVal) + '</strong></span>'
                   + '<span' + pedAntTitle + ' style="font-size:9px;background:rgba(245,158,11,.12);border-radius:6px;padding:2px 7px;color:#fbbf24;white-space:nowrap">'
                   + '<span style="opacity:.75">Ped.ant:</span> <strong>' + pedAntTxt + '</strong></span>'
                   + '<span style="font-size:9px;background:rgba(16,185,129,.12);border-radius:6px;padding:2px 7px;color:#34d399;white-space:nowrap">'
