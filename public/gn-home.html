@@ -763,19 +763,20 @@ async function _renderXmlMesHome(mostrar, sess, isMasterAtivo) {
 async function _confirmarXmlMesHome(comKey, mesRef) {
   try {
     const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
-    const rowsRes = await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, { headers: H });
-    const rows = await rowsRes.json();
-    const novoAllData = {
-      ...((rows[0] && rows[0].all_data) || {}),
+    // RPC de merge atômico (gn_merge_all_data) em vez de ler→mesclar→gravar no cliente —
+    // esse padrão perdia a confirmação quando outro app (ex.: autosave do app Lojas em
+    // voo) gravava por cima com um all_data mais antigo entre a leitura e a escrita daqui,
+    // fazendo o card "Enviar XML do mês" voltar a aparecer mesmo já confirmado.
+    const patch = {
       xml_enviado_mes: mesRef,
       xml_enviado_por: (session && session.nome) || '',
       xml_enviado_em: new Date().toISOString(),
     };
-    if (!rows.length) {
-      await fetch(`${SB_URL}/rest/v1/gn_lojas`, { method: 'POST', headers: { ...H, Prefer: 'return=minimal' }, body: JSON.stringify({ loja: comKey, all_data: novoAllData }) });
-    } else {
-      await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}`, { method: 'PATCH', headers: { ...H, Prefer: 'return=minimal' }, body: JSON.stringify({ all_data: novoAllData }) });
-    }
+    const res = await fetch(`${SB_URL}/rest/v1/rpc/gn_merge_all_data`, {
+      method: 'POST', headers: H,
+      body: JSON.stringify({ p_loja: comKey, p_patch: patch })
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
     const isMasterAgora = session.loja === 'GERAL' || !!(session.permissoes || {}).master;
     _renderXmlMesHome(!isMasterAgora || !!masterLoja, session, isMasterAgora);
   } catch (e) {
@@ -2357,8 +2358,12 @@ function _renderVisCoberturaTab() {
     return `<div style="text-align:center;padding:30px;color:rgba(0,0,0,.35);font-size:12px">Carregando…</div>`;
   }
   const hojeStr = new Date().toISOString().split('T')[0];
+  // gn_chk_visitas.loja vem gravado no formato chkKey (ex.: "Nova América"), não no
+  // userKey usado como chave abaixo (ex.: "NOVA AMERICA") — sem normalizar aqui, a
+  // busca em porLoja[userKey] nunca batia e toda loja aparecia como "sem visita",
+  // mesmo com visitas reais recentes.
   const porLoja = {};
-  _coberturaVisData.forEach(v => { if (!porLoja[v.loja]) porLoja[v.loja] = v; });
+  _coberturaVisData.forEach(v => { const k = _normLoja(v.loja); if (!porLoja[k]) porLoja[k] = v; });
   const linhas = GN_LOJAS.map(l => l.userKey).map(loja => {
     const ultima = porLoja[loja];
     const dias = ultima ? Math.round((new Date(hojeStr+'T12:00') - new Date(ultima.data+'T12:00')) / 86400000) : null;
