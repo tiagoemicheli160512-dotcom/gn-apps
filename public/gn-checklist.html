@@ -2189,6 +2189,10 @@ function getComissoesFuncsHerdados(allData, idx){
       if(comNome.length>0){
         const herdados = wd.funcs.map(f=>{
           if(!f.nome || !f.nome.trim()) return {id:f.id,nome:'',tipo:'CLT / MENSALISTA',setor:'',dias:Array(7).fill('PRESENTE')};
+          // Funcionário arquivado (fim de contrato) não é herdado pra semana seguinte —
+          // libera o slot pra um novo funcionário sem mexer nos dados da semana em que
+          // foi arquivado (aquela semana mantém dias trabalhados/gorjetas intactos).
+          if(f.arquivado) return {id:f.id,nome:'',tipo:'CLT / MENSALISTA',setor:'',dias:Array(7).fill('PRESENTE')};
           // FOLGA, NT, FÉRIAS e AFASTAMENTO persistem para semana seguinte; FALTA/SUSPENSÃO/BANCO voltam para PRESENTE
           const MANTER_SEM = new Set(['FOLGA','NÃO TRABALHADO','FÉRIAS','AFASTAMENTO']);
           const diasHerd = Array(7).fill(null).map((_,di)=>{ const s=(f.dias||[])[di]; return (s && MANTER_SEM.has(s)) ? s : 'PRESENTE'; });
@@ -2333,6 +2337,62 @@ function _avaliacaoAppPainelHtmlChk(nome, chave){
   </div>`;
 }
 
+// Arquivamento por fim de contrato — só dispara quando alguém DIGITA a data de
+// "fim de contrato" e ela já passou (nunca por causa do prazo de 90 dias de
+// experiência, que é um controle totalmente separado em inicio_contrato/aval_exp_45/90
+// e continua funcionando do jeito que já funciona hoje, sem interferência daqui). Move o
+// funcionário pro arquivo de encerrados em gn_lojas.all_data (histórico permanente,
+// consultado no app RH — aba Dossiê) e marca f.arquivado=true no slot da semana atual —
+// só isso some da aba Funcionários (ver renderComissoesFuncs), sem apagar nome/dias já
+// registrados nessa semana (usados pelo app de Gorjetas pra calcular o rateio). O slot
+// só fica livre pra um novo funcionário a partir da semana seguinte (ver
+// getComissoesFuncsHerdados, que não herda quem está arquivado).
+async function _salvarFuncionariosArquivados(novos){
+  const comKey = comissoesLojaKey();
+  const res = await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, {headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}});
+  if(!res.ok) throw new Error('HTTP '+res.status);
+  const rows = await res.json();
+  const allData = (rows[0] && rows[0].all_data) || {};
+  const atual = Array.isArray(allData.funcionarios_arquivados) ? allData.funcionarios_arquivados : [];
+  const patchRes = await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}`, {
+    method:'PATCH',
+    headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},
+    body: JSON.stringify({all_data: {...allData, funcionarios_arquivados: [...atual, ...novos]}})
+  });
+  if(!patchRes.ok) throw new Error('HTTP '+patchRes.status);
+}
+async function _arquivarContratosEncerrados(){
+  if(!comissoesWD) return;
+  const hoje = hojeLocal();
+  const idxs = [];
+  comissoesWD.funcs.forEach((f,i)=>{ if(f.nome && f.nome.trim() && !f.arquivado && f.fim_contrato && f.fim_contrato < hoje) idxs.push(i); });
+  if(!idxs.length) return;
+  const agora = new Date().toISOString();
+  const arquivados = idxs.map(i=>{
+    const f = comissoesWD.funcs[i];
+    return {
+      nome: f.nome, tipo: f.tipo||'', setor: f.setor||'', turno: f.turno||'', horario: f.horario||'',
+      inicio_contrato: f.inicio_contrato||'', fim_contrato: f.fim_contrato||'',
+      encerramento_solicitado: f.encerramento_solicitado||false, encerramento_data: f.encerramento_data||'',
+      arquivado_em: agora, motivo: 'Fim de contrato',
+    };
+  });
+  try{
+    await _salvarFuncionariosArquivados(arquivados);
+  }catch(e){
+    console.error('Erro ao arquivar funcionário(s):', e.message||e);
+    return; // não marca como arquivado no Check-list se o arquivo não foi salvo, pra não perder o registro
+  }
+  scheduleComissoesOp(wd=>{
+    wd = {...wd}; wd.funcs=[...wd.funcs];
+    idxs.forEach(i=>{ wd.funcs[i] = {...wd.funcs[i], arquivado:true, arquivado_em:agora}; });
+    return wd;
+  });
+  comissoesWD = {...comissoesWD, funcs: comissoesWD.funcs.map((f,i)=>idxs.includes(i) ? {...f, arquivado:true, arquivado_em:agora} : f)};
+  renderComissoesFuncs();
+  showToast(`📦 ${arquivados.length} funcionário${arquivados.length>1?'s':''} arquivado${arquivados.length>1?'s':''} — fim de contrato`);
+}
+
 async function loadComissoesData(){
   comissoesLoadErr = false;
   escalaAllData = null; // invalida cache mensal ao recarregar
@@ -2359,6 +2419,9 @@ async function loadComissoesData(){
     });
   }
   renderComissoesFuncs();
+  if (comissoesWD && idx === comissoesSemIdx(hojeLocal())) {
+    _arquivarContratosEncerrados();
+  }
   // Sincroniza repique com o Bruto em Gorjetas pra semana INTEIRA, não só o dia
   // atualmente aberto no Check-list. Isso é necessário porque a sincronização "no ato"
   // (onRepiqueChange) pode falhar em silêncio (ex.: página fechada antes do debounce de
@@ -4747,8 +4810,8 @@ function renderComissoesFuncs(){
   }
 
   const sem=COMISSOES_CAL[comissoesWeekIdx];
-  const indicesVisiveis=comissoesWD.funcs.map((f,i)=>i).filter(i=>comissoesVisibleSlots[i]);
-  const nAtivos=comissoesWD.funcs.filter(f=>f.nome && f.nome.trim()).length;
+  const indicesVisiveis=comissoesWD.funcs.map((f,i)=>i).filter(i=>comissoesVisibleSlots[i] && !comissoesWD.funcs[i].arquivado);
+  const nAtivos=comissoesWD.funcs.filter(f=>f.nome && f.nome.trim() && !f.arquivado).length;
   countEl.textContent=nAtivos+' funcionário(s)';
   empty.style.display=indicesVisiveis.length?'none':'block';
   empty.textContent='Nenhum funcionário cadastrado';
