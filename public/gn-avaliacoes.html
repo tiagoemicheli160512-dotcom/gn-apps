@@ -337,6 +337,10 @@ const SB_URL = "https://ncxttwvpafajnilpjbol.supabase.co";
 const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5jeHR0d3ZwYWZham5pbHBqYm9sIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE4NDcyMDEsImV4cCI6MjA5NzQyMzIwMX0.MGDZNGY8GfSzBKAgdR7OhvOeR71i4fj9YseJRhoh5sE";
 const LOJAS = GN_LOJAS.map(l => l.userKey);
 const LOJA_COM_KEY = Object.fromEntries(GN_LOJAS.map(l => [l.chkKey, l.comKey]));
+// lojaAtiva usa chkKey (ex.: "Bangu"), mas LOJAS/gn_avaliacoes_colab usam userKey (ex.:
+// "BANGU") — mesma convenção de gn_lojas/gn_comissoes. Sem essa tradução, a linha salva
+// na nuvem com a chave de exibição nunca batia com a chave usada pra ler no ranking Mestre.
+const CHK_TO_USER_KEY = Object.fromEntries(GN_LOJAS.map(l => [l.chkKey, l.userKey]));
 async function fetchFuncionarios(lojaAtiva) {
   const comKey = LOJA_COM_KEY[lojaAtiva];
   if (!comKey) return [];
@@ -522,6 +526,42 @@ const saveLS = (loja, d) => {
   } catch {
   }
 };
+// Nuvem (gn_avaliacoes_colab) — localStorage acima continua sendo o cache instantâneo
+// (primeira pintura e fallback offline), mas a nuvem é a fonte de verdade entre
+// aparelhos/lojas. Mesmo padrão de tabela já usado em gn_lojas/gn_comissoes: uma
+// linha por loja, all_data guarda o array inteiro de avaliações daquela loja.
+const fetchAvaliacoesCloud = async (loja) => {
+  try {
+    const res = await fetch(`${SB_URL}/rest/v1/gn_avaliacoes_colab?loja=eq.${encodeURIComponent(loja)}&select=all_data`, { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } });
+    if (!res.ok) return null;
+    const rows = await res.json();
+    return Array.isArray(rows[0]?.all_data) ? rows[0].all_data : [];
+  } catch {
+    return null;
+  }
+};
+const pushAvaliacoesCloud = async (loja, arr, autor) => {
+  try {
+    await fetch(`${SB_URL}/rest/v1/gn_avaliacoes_colab?on_conflict=loja`, {
+      method: "POST",
+      headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}`, "Content-Type": "application/json", Prefer: "return=minimal,resolution=merge-duplicates" },
+      body: JSON.stringify({ loja, all_data: arr, updated_at: new Date().toISOString(), updated_by: autor || "" })
+    });
+  } catch {
+  }
+};
+const fetchAvaliacoesCloudTodasLojas = async () => {
+  try {
+    const res = await fetch(`${SB_URL}/rest/v1/gn_avaliacoes_colab?select=loja,all_data`, { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } });
+    if (!res.ok) return null;
+    const rows = await res.json();
+    const map = {};
+    rows.forEach(r => { map[r.loja] = Array.isArray(r.all_data) ? r.all_data : []; });
+    return map;
+  } catch {
+    return null;
+  }
+};
 const avVazia = (loja) => ({ id: Date.now(), loja, colaborador: "", cargo: "", avaliador: "", data: hoje(), pontualidade: 0, uniforme: 0, criteriosSetor: [], autoavaliacao: "", planoAcao: "", finalizada: false, criadaEm: hoje() });
 const gerarWppIndividual = (av, hist) => {
   const nota = calcNota(av), mx = maxNota(av), p = mx > 0 ? Math.round(nota / mx * 100) : 0, res = resultado(p);
@@ -680,11 +720,34 @@ function App() {
     }
   }, [lojaAtiva, isMaster, usuarioNome]);
   useEffect(() => {
-    if (lojaAtiva) setAvaliacoes(loadLS(lojaAtiva));
+    if (!lojaAtiva || lojaAtiva === 'master') return;
+    setAvaliacoes(loadLS(lojaAtiva)); // cache local — pinta na hora enquanto a nuvem carrega
+    let cancelado = false;
+    fetchAvaliacoesCloud(CHK_TO_USER_KEY[lojaAtiva] || lojaAtiva).then(cloud => {
+      if (cancelado || cloud === null) return;
+      setAvaliacoes(cloud);
+      saveLS(lojaAtiva, cloud);
+    });
+    return () => { cancelado = true; };
   }, [lojaAtiva]);
   useEffect(() => {
-    if (lojaAtiva) saveLS(lojaAtiva, avaliacoes);
+    if (!lojaAtiva || lojaAtiva === 'master') return;
+    saveLS(lojaAtiva, avaliacoes);
+    // Debounce do envio pra nuvem — evita uma requisição a cada tecla digitada no
+    // formulário (o estado avaliacoes muda a cada campo preenchido antes de finalizar).
+    const t = setTimeout(() => pushAvaliacoesCloud(CHK_TO_USER_KEY[lojaAtiva] || lojaAtiva, avaliacoes, usuarioNome), 1200);
+    return () => clearTimeout(t);
   }, [avaliacoes, lojaAtiva]);
+  const [masterAllData, setMasterAllData] = useState(null); // {lojaKey:[...]} — carregado só ao abrir a tela Mestre
+  useEffect(() => {
+    if (tela !== 'mestre' || !isMaster) return;
+    let cancelado = false;
+    fetchAvaliacoesCloudTodasLojas().then(map => {
+      if (!cancelado && map) setMasterAllData(map);
+    });
+    return () => { cancelado = true; };
+  }, [tela, isMaster]);
+  const avsDaLoja = (l) => masterAllData?.[l] ?? loadLS(l); // fallback local enquanto masterAllData ainda não carregou
   const todosColabs = useMemo(() => [...new Set(avaliacoes.map((a) => a.colaborador).filter(Boolean))].sort(), [avaliacoes]);
   const avsDoColab = (nome) => [...avaliacoes].filter((a) => a.colaborador === nome).sort((a, b) => a.data.localeCompare(b.data));
   const onLogin = (loja, master, nome) => {
@@ -983,14 +1046,14 @@ function App() {
   }
   if (tela === "mestre" && isMaster) {
     const masterData = LOJAS.map(l => {
-      const avs = loadLS(l);
+      const avs = avsDaLoja(l);
       const fechadas = avs.filter(a => a.finalizada && calcNota(a) > 0);
       const media = fechadas.length > 0 ? Math.round(fechadas.reduce((s, a) => s + pct(a), 0) / fechadas.length) : null;
       const ultimaData = avs.length > 0 ? avs.reduce((best, a) => a.data > best ? a.data : best, "") : null;
       return { loja: l, total: avs.length, fechadas: fechadas.length, media, ultimaData };
     }).sort((a, b) => (b.media || 0) - (a.media || 0));
     // Por Cargo: group all finalised evals across all lojas by cargo
-    const allFinAvs = LOJAS.flatMap(l => loadLS(l).filter(a => a.finalizada && calcNota(a) > 0 && a.cargo));
+    const allFinAvs = LOJAS.flatMap(l => avsDaLoja(l).filter(a => a.finalizada && calcNota(a) > 0 && a.cargo));
     const byCargo = {};
     allFinAvs.forEach(a => { if (!byCargo[a.cargo]) byCargo[a.cargo] = []; byCargo[a.cargo].push(a); });
     const cargoData = Object.entries(byCargo).map(([cargo, avs]) => ({
