@@ -600,6 +600,10 @@ let _xadrezMovs = []; // [{usuarioId, nome, cargoOriginal, lojaOrigem, lojaDesti
 let _xadrezMovsLoaded = false; // já buscou os movimentos pendentes do Supabase nesta sessão?
 let _xadrezValidando = false; // trava o botão "Validar" enquanto grava no Supabase
 let _dashAvaliacaoGerencia = null; // {lojaKey: {usuarioId: {status:'treinamento'|'bom'|'regular'|'ruim'|'desligamento', atualizadoEm}}}
+let _dashAvaliacoesColab = null; // {lojaKey(userKey): [avaliação...]} — vindo do app Avaliações (gn_avaliacoes_colab)
+// Cargo exato usado no formulário do app Avaliações (chaves de SETORES lá) — diferente
+// do cargo em snake_case de gn_usuarios (gerente/sub_gerente).
+const CARGO_AVAL_APP = { gerente:'Gerente', sub_gerente:'Sub-Gerente' };
 // Chave interna de "ruim" mantida (não é exibida) pra não quebrar avaliações já salvas —
 // só o rótulo mudou, pra deixar claro que é sobre aptidão pra função, não humor/pontuação.
 const STATUS_AVAL_GERENCIA = {
@@ -3083,9 +3087,12 @@ async function _loadFeriasGerencia(){
     // como se fosse um resultado válido; com [] como fallback, uma falha de rede
     // virava "nenhuma loja tem gerente/sub", disparando um alerta falso no Xadrez
     // pra todas as lojas de uma vez.
-    const [gerRows, lojaRows] = await Promise.all([
+    const [gerRows, lojaRows, avalColabRows] = await Promise.all([
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_usuarios?or=(cargo.ilike.gerente,cargo.ilike.sub_gerente)&ativo=eq.true&select=id,nome,cargo,loja&order=nome.asc`, H, 'ferias:gerentes', null),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?select=loja,all_data`, H, 'ferias:lojas', null),
+      // Avaliações de desempenho do app Avaliações (gn-avaliacoes.html) — mesma chave
+      // de loja (userKey) usada em gn_usuarios/gn_lojas, ver CHK_TO_USER_KEY lá.
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_avaliacoes_colab?select=loja,all_data`, H, 'ferias:avaliacoesColab', null),
     ]);
     if(gerRows==null || lojaRows==null) throw new Error('Falha ao buscar gerentes/lojas');
     const porLoja = {};
@@ -3094,6 +3101,9 @@ async function _loadFeriasGerencia(){
       (porLoja[u.loja]=porLoja[u.loja]||[]).push({ id:u.id, nome:u.nome, cargo:(u.cargo||'').toLowerCase() });
     });
     _dashGerentes = porLoja;
+    const avalColabPorLoja = {};
+    (avalColabRows||[]).forEach(r=>{ avalColabPorLoja[r.loja] = Array.isArray(r.all_data) ? r.all_data : []; });
+    _dashAvaliacoesColab = avalColabRows==null ? _dashAvaliacoesColab : avalColabPorLoja;
     const feriasPorLoja = {};
     const avaliacaoPorLoja = {};
     (lojaRows||[]).forEach(lr=>{
@@ -3199,6 +3209,41 @@ async function _salvarAvaliacaoGerencia(lojaKey, usuarioId, status){
     alert('Erro ao salvar avaliação. Tente novamente.');
   }
   renderDashboard();
+}
+
+// Avaliação de desempenho vinda do app Avaliações (gn-avaliacoes.html/gn_avaliacoes_colab)
+// — pontuação por critérios (pontualidade + uniforme + critérios do setor), separada da
+// avaliação simples Treinamento/Bom/Regular/Não apto/Desligamento acima. Fórmula igual à
+// do app de origem: Gerente/Sub-Gerente têm 50 pts de critérios de setor + 10 pts gerais.
+function _ultimaAvaliacaoApp(lojaKey, nome, cargoSnake){
+  const lista=_dashAvaliacoesColab?.[lojaKey];
+  if(!Array.isArray(lista) || !lista.length) return null;
+  const cargoAlvo=CARGO_AVAL_APP[cargoSnake];
+  const nomeAlvo=(nome||'').trim().toLowerCase();
+  const doColab=lista.filter(a=>a.finalizada && (a.colaborador||'').trim().toLowerCase()===nomeAlvo && (!cargoAlvo || a.cargo===cargoAlvo));
+  if(!doColab.length) return null;
+  return doColab.reduce((best,a)=> !best || a.data>best.data ? a : best, null);
+}
+function _pctAvaliacaoApp(av){
+  const nota=(av.pontualidade||0)+(av.uniforme||0)+(av.criteriosSetor||[]).reduce((s,v)=>s+(v||0),0);
+  // Sempre 60 aqui: só chegam avaliações de Gerente/Sub-Gerente (filtro em
+  // _ultimaAvaliacaoApp), e os dois têm critérios de setor definidos no app de origem
+  // (10 pts gerais + 50 pts de critérios do setor — mesma fórmula de lá).
+  const max=60;
+  return nota/max*100;
+}
+function _resultadoAvaliacaoApp(p){
+  if(p>=85) return { emoji:'🥇', cor:'#D4A017' };
+  if(p>=60) return { emoji:'✅', cor:'#4ade80' };
+  if(p>=40) return { emoji:'⚠️', cor:'#fbbf24' };
+  return { emoji:'🔴', cor:'#f87171' };
+}
+function _badgeAvaliacaoAppHtml(lojaKey, nome, cargoSnake){
+  const av=_ultimaAvaliacaoApp(lojaKey, nome, cargoSnake);
+  if(!av) return '';
+  const p=Math.round(_pctAvaliacaoApp(av));
+  const info=_resultadoAvaliacaoApp(p);
+  return `<span title="Avaliação de desempenho (app Avaliações) em ${_fmtDataBR(av.data)}" style="font-size:9px;font-weight:700;color:#1A1D23;background:${info.cor}18;border:1px solid ${info.cor}40;border-radius:6px;padding:1px 6px;margin-left:4px">${info.emoji} ${p}%</span>`;
 }
 
 function _badgeAvaliacaoHtml(usuarioId){
@@ -3482,7 +3527,7 @@ function _buildFeriasPanel(){
         : `<div style="font-size:10px;color:rgba(0,0,0,.25);margin-top:4px">Nenhuma férias cadastrada em ${_dashFeriasAno}</div>`;
       return `<div style="margin-top:12px;padding-top:12px;border-top:1px solid rgba(0,0,0,.06)">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
-          <div style="font-size:12px;font-weight:700;color:#1A1D23">${esc(p.nome)} <span style="font-size:9px;font-weight:700;color:#1A1D23;background:rgba(250,204,21,.12);border-radius:6px;padding:1px 6px;margin-left:4px">${cargoLbl}</span>${_badgeAvaliacaoHtml(p.id)}</div>
+          <div style="font-size:12px;font-weight:700;color:#1A1D23">${esc(p.nome)} <span style="font-size:9px;font-weight:700;color:#1A1D23;background:rgba(250,204,21,.12);border-radius:6px;padding:1px 6px;margin-left:4px">${cargoLbl}</span>${_badgeAvaliacaoHtml(p.id)}${_badgeAvaliacaoAppHtml(k,p.nome,p.cargo)}</div>
           <button onclick="_abrirFormFerias('${k}','${p.id}')" style="background:rgba(250,204,21,.12);border:1px solid rgba(250,204,21,.3);color:#1A1D23;border-radius:8px;padding:4px 10px;font-size:10px;font-weight:700;cursor:pointer">+ Férias</button>
         </div>
         ${_seletorAvaliacaoHtml(k,p.id)}
@@ -3798,7 +3843,7 @@ function _buildXadrezPanel(){
     const corLoja=foiAlterada?'#60a5fa':(COR_LOJA[k]||'#F97316');
     return `<div style="background:#FFFFFF;border:1px solid ${foiAlterada?'rgba(96,165,250,.35)':'rgba(0,0,0,.08)'};border-left:3px solid ${corLoja};border-radius:12px;padding:11px 14px;margin-bottom:8px;box-shadow:0 1px 3px rgba(0,0,0,.06)">
       <div style="font-size:12px;font-weight:800;color:#1A1D23">${esc(nome)}${foiAlterada?' 🔀':''}</div>
-      ${pessoas.length?pessoas.map(p=>`<div style="font-size:11px;color:rgba(0,0,0,.7);margin-top:3px">${esc(p.nome)} <span style="font-size:9px;color:rgba(0,0,0,.4)">· ${p.cargo==='gerente'?'Gerente':'Sub-Gerente'}</span>${_badgeAvaliacaoHtml(p.id)}</div>`).join(''):`<div style="font-size:10px;color:rgba(0,0,0,.3);margin-top:3px">Ninguém alocado</div>`}
+      ${pessoas.length?pessoas.map(p=>`<div style="font-size:11px;color:rgba(0,0,0,.7);margin-top:3px">${esc(p.nome)} <span style="font-size:9px;color:rgba(0,0,0,.4)">· ${p.cargo==='gerente'?'Gerente':'Sub-Gerente'}</span>${_badgeAvaliacaoHtml(p.id)}${_badgeAvaliacaoAppHtml(k,p.nome,p.cargo)}</div>`).join(''):`<div style="font-size:10px;color:rgba(0,0,0,.3);margin-top:3px">Ninguém alocado</div>`}
     </div>`;
   }).join('');
 
