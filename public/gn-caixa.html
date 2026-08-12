@@ -713,6 +713,7 @@ select option { background: var(--graf2); color: var(--txt); }
 }
 </style>
 <script src="gn-lojas-config.js"></script>
+<script src="gn-comissoes-calendario.js"></script>
 </head>
 <body>
 
@@ -1073,6 +1074,36 @@ const S = { user: null, loja: null, turnoSel: null, fech: null, comprovantes: []
 const LOJA_CHK_MAP = Object.fromEntries(GN_LOJAS.map(l=>[l.userKey,l.chkKey]));
 const LOJA_COM_MAP = Object.fromEntries(GN_LOJAS.map(l=>[l.userKey,l.comKey]));
 
+// Mesmo calendário (semanas 2..53) usado pelo app de Gorjetas/Checklist — garante que o
+// índice de semana calculado aqui bata com o de lá (ver comissoesSemIdx em gn-checklist.html).
+function _comSemIdx(dataISO) {
+  if (!dataISO) return null;
+  const dt = new Date(dataISO + 'T12:00:00');
+  const d = dt.getDate(), m = dt.getMonth() + 1;
+  const idx = COMISSOES_CAL.findIndex(w => w.days.some(x => x.d === d && x.m === m));
+  return idx >= 0 ? idx : null;
+}
+function _comDiaIdx(dataISO) {
+  if (!dataISO) return null;
+  const dt = new Date(dataISO + 'T12:00:00');
+  return (dt.getDay() + 6) % 7;
+}
+// Empurra o repique somado do dia direto pro gn_comissoes (fonte que o Painel de Gestão
+// do Home lê) via RPC atômica — sem isso, o repique só aparecia lá depois de alguém abrir
+// o app Check-list (que faz esse mesmo bridge, mas só quando alguém entra na aba Dados).
+async function _syncRepiqueComissoes(lojaChk, data, sumRepique) {
+  try {
+    const comKey = LOJA_COM_MAP[S.loja];
+    const semIdx = _comSemIdx(data);
+    const diaIdx = _comDiaIdx(data);
+    if (!comKey || semIdx == null || diaIdx == null) return;
+    await sb('rpc/gn_sync_repique_comissoes', {
+      method: 'POST',
+      body: { p_loja: comKey, p_sem_idx: semIdx, p_dia_idx: diaIdx, p_valor: sumRepique }
+    });
+  } catch (_) {}
+}
+
 // Sincroniza venda_salao, venda_delivery, repique, dinheiro_caixa e despesas do caixa para o checklist do dia.
 // Soma todos os caixas + comprovantes + despesas da loja na data informada.
 async function sincronizarChecklist(data, mostrarToast) {
@@ -1118,6 +1149,7 @@ async function sincronizarChecklist(data, mostrarToast) {
       prefer: 'return=minimal,resolution=merge-duplicates',
       body: { loja: lojaChk, data_operacao: data, venda_salao: vSalao, venda_delivery: vDelivery, repique: sumRepique, dinheiro_caixa: dinheiroCaixa, despesas }
     });
+    _syncRepiqueComissoes(lojaChk, data, sumRepique);
     if (mostrarToast) toast('✅ Lançado no Check-list!');
     return true;
   } catch(e) { if (mostrarToast) toast('❌ Erro: ' + e.message); return false; }
