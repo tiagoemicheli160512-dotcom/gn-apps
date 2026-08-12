@@ -811,6 +811,28 @@ function filterByLoja(obj, lojaNome) {
   return r;
 }
 
+// Une duas listas de registros com id (a local deste aparelho + a que já está na nuvem),
+// sem descartar nenhum dos dois lados — usado por sbPush() pra avariasAll/devolucoesAll/
+// transferAll, onde substituir a lista inteira pela cópia local apagava silenciosamente
+// registros criados por outro aparelho/aba logado na mesma loja nesse meio-tempo.
+function _mergeArrPorId(local, cloud) {
+  const localArr = Array.isArray(local) ? local : [];
+  const cloudArr = Array.isArray(cloud) ? cloud : [];
+  const idsLocais = new Set(localArr.map(x => x && x.id));
+  const soDaNuvem = cloudArr.filter(x => x && !idsLocais.has(x.id));
+  return [...localArr, ...soDaNuvem];
+}
+
+// transferAll é um dicionário {lojaKey|semana: [registros]} — mescla por id em cada
+// chave presente em qualquer um dos dois lados (local já filtrado só pra esta loja).
+function _mergeTransferAllPorId(localFiltrado, cloudTransferAll) {
+  const cloud = cloudTransferAll || {};
+  const chaves = new Set([...Object.keys(localFiltrado || {}), ...Object.keys(cloud)]);
+  const r = {};
+  chaves.forEach(k => { r[k] = _mergeArrPorId((localFiltrado || {})[k], cloud[k]); });
+  return r;
+}
+
 /* Envia (upsert) os dados desta loja para a nuvem */
 // Busca o all_data mais recente de uma loja direto da nuvem. Usado por sbPush/sbPushLoja
 // pra mesclar antes de gravar — ver comentário em sbPush(). Lança erro se falhar (quem
@@ -834,30 +856,37 @@ async function sbPush() {
   const statusAntes = sbStatus;
   try {
     sbStatus = "conectando"; updateSyncIndicator();
-    const payload = {
-      estIniAll:   filterByLoja(estIniAll,   loja),
-      vendasAll:   filterByLoja(vendasAll,   loja),
-      contAll:     filterByLoja(contAll,     loja),
-      entradasAll: filterByLoja(entradasAll, loja),
-      transferAll: filterByLoja(transferAll, loja),  // ← incluído aqui
-      pedidoAll:   filterByLoja(pedidoAll,   loja),
-      minAll: { [loja]: minAll[loja] || {} },
-      fatoresConversao, mapeamentoPedido,
-      pedidoCustom, pedidoRemovidos, pedidoConfs: filterByLoja(pedidoConfs, loja),
-      avariasAll: { [loja]: avariasAll[loja] || [] },
-      devolucoesAll: { [loja]: devolucoesAll[loja] || [] },
-      // urgenciaTemplate NÃO entra aqui de propósito — também é escrito pelo app Estoque e
-      // Pedido, direto na mesma linha. Se o autosave normal (a cada edição, debounced)
-      // reenviasse o valor local — que só atualiza a cada sbPull (20s) — ele podia sobrescrever
-      // de volta um toggle feito minutos antes no outro app. toggleUrgenciaManual() já grava
-      // essa chave isolada, com leitura fresca na hora (mesmo padrão do app Pedido).
-    };
     // Mescla com o all_data mais recente da nuvem antes de gravar — outros apps (Home,
     // Caixa, RH) escrevem campos próprios direto nessa mesma linha (xml_enviado_mes,
     // caixa_conferencias, fotos_caixa_sistema etc.), fora do payload conhecido aqui.
     // Sobrescrever sem mesclar apagava esses campos silenciosamente a cada autosave —
     // era o motivo do card "Enviar XML do mês" no painel voltar mesmo já confirmado.
     const baseAllData = await _fetchAllDataAtual(loja);
+    const payload = {
+      estIniAll:   filterByLoja(estIniAll,   loja),
+      vendasAll:   filterByLoja(vendasAll,   loja),
+      contAll:     filterByLoja(contAll,     loja),
+      entradasAll: filterByLoja(entradasAll, loja),
+      // avariasAll/transferAll/devolucoesAll são listas de registros com id — dois
+      // aparelhos/abas logados na mesma loja podem ter cada um sua própria cópia local
+      // levemente desatualizada. Em vez de substituir a lista inteira pela versão deste
+      // aparelho (o que apaga silenciosamente qualquer registro que outro aparelho tenha
+      // criado nesse meio-tempo — foi o que sumiu com uma Saída pra Terceiros do Nova
+      // América), mescla por id com o que já está na nuvem: mantém tudo dos dois lados,
+      // com a versão local prevalecendo só quando o mesmo id existe nos dois.
+      transferAll: _mergeTransferAllPorId(filterByLoja(transferAll, loja), baseAllData.transferAll),
+      pedidoAll:   filterByLoja(pedidoAll,   loja),
+      minAll: { [loja]: minAll[loja] || {} },
+      fatoresConversao, mapeamentoPedido,
+      pedidoCustom, pedidoRemovidos, pedidoConfs: filterByLoja(pedidoConfs, loja),
+      avariasAll: { [loja]: _mergeArrPorId(avariasAll[loja], (baseAllData.avariasAll||{})[loja]) },
+      devolucoesAll: { [loja]: _mergeArrPorId(devolucoesAll[loja], (baseAllData.devolucoesAll||{})[loja]) },
+      // urgenciaTemplate NÃO entra aqui de propósito — também é escrito pelo app Estoque e
+      // Pedido, direto na mesma linha. Se o autosave normal (a cada edição, debounced)
+      // reenviasse o valor local — que só atualiza a cada sbPull (20s) — ele podia sobrescrever
+      // de volta um toggle feito minutos antes no outro app. toggleUrgenciaManual() já grava
+      // essa chave isolada, com leitura fresca na hora (mesmo padrão do app Pedido).
+    };
     const mergedAllData = { ...baseAllData, ...payload };
     await sbRequest("gn_lojas?loja=eq." + encodeURIComponent(loja), {
       method: "PATCH",
