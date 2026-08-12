@@ -5593,12 +5593,43 @@ async function _fetchSaidasTerceiros() {
   return itens;
 }
 
+// Todos os empréstimos de mercadoria entre lojas ainda em aberto (não quitados), de
+// TODAS as lojas — não só os que já viraram pedido de pagamento em dinheiro/PIX (esses já
+// aparecem acima via _fetchSaidasTerceiros/tipo='transferencia_dinheiro'). Cada transferência
+// fica gravada tanto em gn_lojas.all_data.transferAll da loja origem quanto da destino
+// (mesmo registro duplicado), então dedupa por id. Só pra visão/acompanhamento do Compras —
+// quem define o valor do pagamento em dinheiro continua sendo o card de cima.
+async function _fetchEmprestimosAbertos() {
+  const chaves = [...new Set((window.GN_LOJAS||[]).flatMap(l => [l.userKey, l.comKey]))];
+  const { data, error } = await db.from('gn_lojas').select('loja,all_data').in('loja', chaves);
+  if (error) throw error;
+  const vistos = new Set();
+  const abertos = [];
+  (data||[]).forEach(row => {
+    const transferAll = row.all_data?.transferAll || {};
+    Object.values(transferAll).forEach(lista => {
+      (lista||[]).forEach(t => {
+        if (!t || !t.id || vistos.has(t.id) || t.quitado) return;
+        vistos.add(t.id);
+        abertos.push(t);
+      });
+    });
+  });
+  abertos.sort((a,b) => new Date(b.data||0) - new Date(a.data||0));
+  return abertos;
+}
+
+function _lojaDisplayEmp(key) {
+  const l = (window.GN_LOJAS||[]).find(l => l.userKey === key || l.comKey === key);
+  return l ? l.display : (key || '—');
+}
+
 async function renderTerceiros() {
   $('content').innerHTML = '<div class="empty"><div class="spin"></div></div>';
 
-  let itens = [];
+  let itens = [], emprestimos = [];
   try {
-    itens = await _fetchSaidasTerceiros();
+    [itens, emprestimos] = await Promise.all([_fetchSaidasTerceiros(), _fetchEmprestimosAbertos()]);
   } catch (e) {
     $('content').innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-texto">Erro ao carregar Saídas para Terceiros</div></div>`;
     return;
@@ -5644,6 +5675,27 @@ async function renderTerceiros() {
     </div>
   </div>`;
 
+  const cardEmprestimo = t => {
+    const temAvaria = !!t.pagDinheiroAvariaId;
+    let statusTxt, statusCor;
+    if (temAvaria) { statusTxt = '💵 Pagamento em dinheiro combinado — ver confirmação de valor acima'; statusCor = '#a78bfa'; }
+    else if (t.pagDinheiroDestino || t.pagDinheiroOrigem) { statusTxt = '💵 Uma loja já topou pagar em dinheiro — aguardando a outra confirmar'; statusCor = '#fbbf24'; }
+    else { statusTxt = '📦 Aguardando devolução física'; statusCor = 'var(--muted)'; }
+    return `<div class="prov-item">
+      <div class="prov-item-header">
+        <div>
+          <div class="prov-forn">${_lojaDisplayEmp(t.origem)} → ${_lojaDisplayEmp(t.destino)}</div>
+          <div class="prov-produto">${t.insumo}</div>
+          <div style="font-size:11px;color:${statusCor}">${statusTxt}</div>
+        </div>
+        <div style="text-align:right">
+          <div class="num" style="font-size:13px;font-weight:700">${fmtQtd(t.qtdOriginal!=null?t.qtdOriginal:t.qtd)} ${t.unidade||'UN'}</div>
+          <div style="font-size:10px;color:var(--muted)">${t.data?new Date(t.data).toLocaleDateString('pt-BR'):'—'}</div>
+        </div>
+      </div>
+    </div>`;
+  };
+
   $('content').innerHTML = `
     <div class="sec-header">
       <div class="sec-titulo">🤝 Terceiros <span class="badge badge-r">${pendentes.length}</span></div>
@@ -5652,6 +5704,14 @@ async function renderTerceiros() {
     <div style="font-size:11px;color:var(--muted);margin-bottom:12px">
       Saídas para terceiros e empréstimos entre lojas pagos em dinheiro/PIX, registrados no app Lojas (aba Empréstimo). Confirme o valor negociado — depois disso, vai pro Financeiro (app RH) validar o pagamento.
     </div>
+    <div class="sec-titulo" style="font-size:13px;margin-bottom:8px">🔄 Empréstimos entre lojas em aberto <span class="badge" style="background:rgba(167,139,250,.15);color:#1A1D23;font-size:10px">${emprestimos.length}</span></div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:10px">
+      Tudo que está emprestado entre lojas e ainda não foi devolvido nem quitado — inclusive os que ainda não viraram pedido de pagamento em dinheiro.
+    </div>
+    ${emprestimos.length === 0
+      ? `<div class="empty" style="padding:14px 0"><div class="empty-icon">✅</div><div class="empty-texto">Nenhum empréstimo em aberto</div></div>`
+      : emprestimos.map(cardEmprestimo).join('')}
+    <div class="sec-titulo" style="font-size:13px;margin:20px 0 8px">💰 Aguardando valor negociado</div>
     ${pendentes.length === 0
       ? `<div class="empty" style="padding:20px 0"><div class="empty-icon">✅</div><div class="empty-texto">Nenhuma saída aguardando valor</div></div>`
       : pendentes.map(cardPendente).join('')}
