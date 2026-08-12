@@ -1049,6 +1049,23 @@ select option { background: var(--graf2); color: var(--txt); }
   </div>
 </div>
 
+<div class="modal-overlay hidden" id="modalResolverDiverg">
+  <div class="modal-sheet">
+    <div class="modal-nm" style="color:#ff9999;">📝 Marcar divergência como identificada</div>
+    <div class="modal-cod" style="margin-bottom:16px;line-height:1.5;">O valor já foi baixado errado e não dá mais pra corrigir. Use isso só pra registrar que a divergência foi identificada e o caixa será orientado — ela sai da lista de pendências.</div>
+    <div class="form-group" style="margin-bottom:14px;">
+      <label style="font-size:11px;color:var(--mut);display:block;margin-bottom:5px;">Observação (opcional)</label>
+      <textarea id="resolverDivergObs" rows="3" placeholder="Ex: bandeira errada no cartão de crédito, caixa orientado a conferir antes de finalizar."
+        style="width:100%;background:var(--graf3);border:1px solid var(--linha);color:var(--txt);font-family:inherit;font-size:14px;padding:11px 13px;border-radius:8px;outline:none;box-sizing:border-box;resize:vertical;"></textarea>
+    </div>
+    <div class="err-txt" id="resolverDivergErro" style="margin-bottom:10px;"></div>
+    <div class="modal-btns">
+      <button class="btn-cancel" onclick="fecharModalResolverDiverg()">Cancelar</button>
+      <button class="btn-ok" id="btnConfirmarResolverDiverg" onclick="confirmarResolverDiverg()">Marcar como identificado</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -1221,6 +1238,8 @@ const deliveryVal = () => ifoodVal() + onlineVal();
 const vendaSalao = () => (totEntradas() - repiqueVal()) - deliveryVal();
 const totLiquido = () => totEntradas() - repiqueVal() - totSaidas();
 const cssId = s => s.replace(/[^a-zA-Z]/g, '');
+
+function escHtmlCx(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 
 function toast(msg) {
   const el = $('toast');
@@ -1874,13 +1893,33 @@ async function carregarBannerConferencia() {
     if (!conf) return;
     if (conf.tem_divergencia) {
       const por = conf.conferido_por ? ` · por ${conf.conferido_por}` : '';
-      el.innerHTML = `<div style="background:#3a0808;border:2px solid #ff4444;border-radius:10px;padding:14px 16px;margin-bottom:14px;display:flex;align-items:center;gap:12px">
-        <span style="font-size:24px">🚨</span>
-        <div>
-          <div style="font-size:14px;font-weight:800;color:#ff4444;letter-spacing:.5px">DIVERGÊNCIA — VERIFICAR</div>
-          <div style="font-size:11px;color:#ff9999;margin-top:3px">Conferência de RH encontrou divergência neste caixa${por}</div>
-        </div>
-      </div>`;
+      const res = conf.divergencia_resolvida;
+      if (res) {
+        const resPor = res.resolvido_por ? ` por ${res.resolvido_por}` : '';
+        const resData = res.resolvido_em ? new Date(res.resolvido_em).toLocaleString('pt-BR') : '';
+        el.innerHTML = `<div style="background:#3a2a08;border:2px solid #f59e0b;border-radius:10px;padding:14px 16px;margin-bottom:14px">
+          <div style="display:flex;align-items:center;gap:12px">
+            <span style="font-size:24px">📝</span>
+            <div>
+              <div style="font-size:14px;font-weight:800;color:#f59e0b;letter-spacing:.5px">DIVERGÊNCIA IDENTIFICADA</div>
+              <div style="font-size:11px;color:#ffd699;margin-top:3px">Conferência de RH encontrou divergência neste caixa${por} — já identificada${resPor}${resData?' em '+resData:''}</div>
+            </div>
+          </div>
+          ${res.obs ? `<div style="font-size:11px;color:#ffd699;margin-top:8px;padding-top:8px;border-top:1px solid rgba(245,158,11,.3)">${escHtmlCx(res.obs)}</div>` : ''}
+        </div>`;
+      } else {
+        const podeResolver = CARGOS_REABRIR.includes((S.user?.cargo||'').toLowerCase());
+        el.innerHTML = `<div style="background:#3a0808;border:2px solid #ff4444;border-radius:10px;padding:14px 16px;margin-bottom:14px">
+          <div style="display:flex;align-items:center;gap:12px">
+            <span style="font-size:24px">🚨</span>
+            <div>
+              <div style="font-size:14px;font-weight:800;color:#ff4444;letter-spacing:.5px">DIVERGÊNCIA — VERIFICAR</div>
+              <div style="font-size:11px;color:#ff9999;margin-top:3px">Conferência de RH encontrou divergência neste caixa${por}</div>
+            </div>
+          </div>
+          ${podeResolver ? `<button onclick="abrirModalResolverDiverg()" style="width:100%;margin-top:12px;background:transparent;border:1px solid #ff4444;border-radius:8px;padding:9px;color:#ff9999;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit">📝 Marcar como identificado (orientar caixa)</button>` : ''}
+        </div>`;
+      }
     } else {
       const por = conf.conferido_por ? ` por ${conf.conferido_por}` : '';
       el.innerHTML = `<div style="background:#072010;border:1px solid var(--ok);border-radius:10px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:10px">
@@ -1889,6 +1928,53 @@ async function carregarBannerConferencia() {
       </div>`;
     }
   } catch(_) {}
+}
+
+// Divergência de bandeira detectada na conferência de RH já foi baixada errado no
+// sistema e não dá pra corrigir o número retroativamente — esse fluxo só registra que
+// alguém da gerência identificou o caso e vai orientar o operador do caixa, tirando o
+// caixa da lista de pendências sem fingir que o valor foi de fato conciliado.
+function abrirModalResolverDiverg() {
+  if (!S.fech || !S.confAtual || !S.confAtual.tem_divergencia) return;
+  $('resolverDivergObs').value = '';
+  $('resolverDivergErro').textContent = '';
+  $('modalResolverDiverg').classList.remove('hidden');
+}
+
+function fecharModalResolverDiverg() {
+  $('modalResolverDiverg').classList.add('hidden');
+}
+
+async function confirmarResolverDiverg() {
+  if (!S.fech) return;
+  const btn = $('btnConfirmarResolverDiverg');
+  btn.disabled = true; btn.textContent = 'Salvando...';
+  try {
+    const comKey = LOJA_COM_MAP[S.loja] || S.loja;
+    const lojaRow = await sb(`gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`);
+    const allData = lojaRow?.[0]?.all_data || {};
+    const conferencias = allData.caixa_conferencias || {};
+    const conf = conferencias[S.fech.id];
+    if (!conf || !conf.tem_divergencia) { fecharModalResolverDiverg(); return; }
+    conf.divergencia_resolvida = {
+      resolvido_em: new Date().toISOString(),
+      resolvido_por: S.user?.nome || 'Usuário',
+      obs: $('resolverDivergObs').value.trim(),
+    };
+    conferencias[S.fech.id] = conf;
+    await sb(`gn_lojas?loja=eq.${encodeURIComponent(comKey)}`, {
+      method: 'PATCH',
+      body: { all_data: { ...allData, caixa_conferencias: conferencias } }
+    });
+    S.confAtual = conf;
+    fecharModalResolverDiverg();
+    toast('📝 Divergência marcada como identificada');
+    carregarBannerConferencia();
+  } catch(e) {
+    $('resolverDivergErro').textContent = 'Erro ao salvar: ' + e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Marcar como identificado';
+  }
 }
 
 async function carregarHistorico() {
@@ -1940,7 +2026,9 @@ async function carregarHistorico() {
       const conf = conferencias[f.id];
       const confBadge = conf
         ? (conf.tem_divergencia
-          ? '<div style="font-size:10px;color:#ff6b6b;font-weight:700;margin-top:2px">🚨 Divergência</div>'
+          ? (conf.divergencia_resolvida
+            ? '<div style="font-size:10px;color:#f59e0b;font-weight:700;margin-top:2px">📝 Divergência identificada</div>'
+            : '<div style="font-size:10px;color:#ff6b6b;font-weight:700;margin-top:2px">🚨 Divergência</div>')
           : '<div style="font-size:10px;color:#51cf66;font-weight:700;margin-top:2px">✅ Conferido</div>')
         : '';
       return `<div class="hist-item"${isCur}>
@@ -2226,8 +2314,8 @@ async function mostrarHome() {
       conferencias = lojaRow?.[0]?.all_data?.caixa_conferencias || {};
     } catch(_) {}
 
-    const divergentes = fechados.filter(f => conferencias[f.id]?.tem_divergencia);
-    const recentes = fechados.filter(f => !conferencias[f.id]?.tem_divergencia).slice(0, 6);
+    const divergentes = fechados.filter(f => conferencias[f.id]?.tem_divergencia && !conferencias[f.id]?.divergencia_resolvida);
+    const recentes = fechados.filter(f => !divergentes.includes(f)).slice(0, 6);
 
     let html = '';
 
@@ -2282,10 +2370,12 @@ async function mostrarHome() {
         const badge = (ok, lbl) => `<span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;font-weight:600;color:${ok?'var(--ok)':'var(--mut)'}">${ok?'✓':'○'} ${lbl}</span>`;
         const confBadge = conf
           ? (conf.tem_divergencia
-            ? `<span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;font-weight:800;color:#ff4444">🚨 Divergência</span>`
+            ? (conf.divergencia_resolvida
+              ? `<span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;font-weight:800;color:#f59e0b">📝 Divergência identificada</span>`
+              : `<span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;font-weight:800;color:#ff4444">🚨 Divergência</span>`)
             : `<span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;font-weight:600;color:var(--ok)">✅ Conferido</span>`)
           : badge(false, 'Conferido');
-        const borderStyle = conf?.tem_divergencia ? 'border-color:#ff4444;background:rgba(255,68,68,0.06)' : '';
+        const borderStyle = conf?.tem_divergencia && !conf?.divergencia_resolvida ? 'border-color:#ff4444;background:rgba(255,68,68,0.06)' : '';
         html += `<div class="hist-item" style="${borderStyle}">
           <div style="flex:1">
             <div style="font-size:13px;font-weight:bold">${data} ${chip}</div>
