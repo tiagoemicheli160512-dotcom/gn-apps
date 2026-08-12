@@ -28,6 +28,7 @@
 <script src="fichas-seed.js"></script>
 <script src="gn-lojas-config.js"></script>
 <script src="gn-comissoes-calendario.js"></script>
+<script src="gn-avaliacoes-setores.js"></script>
 <style>
   /* =============================================
      GN OPERAÇÕES — Design System v2
@@ -2240,6 +2241,98 @@ let comissoesDocs = {};  // { `${funcIdx}_${tipo}`: foto_base64 } — atestados/
 let _docFuncIdx = null;
 let _docTipo = null;
 
+// Avaliação de desempenho vinda do app Avaliações (gn-avaliacoes.html/gn_avaliacoes_colab),
+// espelhada aqui com o mesmo padrão de card expansível do Painel de Gestão (aba Férias).
+// Diferente de lá (só gerente/sub-gerente), aqui vale pra QUALQUER funcionário da loja —
+// o match é feito só por nome (case-insensitive), já que a taxonomia de cargo deste app
+// (COMISSOES_SETORES) não bate 1:1 com a do app Avaliações (SETORES, ver gn-avaliacoes-setores.js);
+// o cargo salvo na própria avaliação (av.cargo) é usado só pra achar os critérios certos.
+let _chkAvaliacoesColab = [];
+let _chkAvaliacoesColabLoja = null; // userKey já carregado, evita refetch repetido
+let _chkAvalExpandido = new Set();
+async function _loadAvaliacoesColabChk(){
+  const userKey = LOJA_TO_CAIXA[LOJA];
+  if(!userKey || _chkAvaliacoesColabLoja===userKey) return;
+  try{
+    const res = await fetch(`${SB_URL}/rest/v1/gn_avaliacoes_colab?loja=eq.${encodeURIComponent(userKey)}&select=all_data`, {
+      headers:{apikey:SB_KEY, Authorization:'Bearer '+SB_KEY}
+    });
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const rows = await res.json();
+    _chkAvaliacoesColab = Array.isArray(rows[0]?.all_data) ? rows[0].all_data : [];
+    _chkAvaliacoesColabLoja = userKey;
+  }catch(e){
+    console.error('Erro ao carregar avaliações (app Avaliações):', e.message||e);
+  }
+}
+function _ultimaAvaliacaoAppChk(nome){
+  if(!Array.isArray(_chkAvaliacoesColab) || !_chkAvaliacoesColab.length) return null;
+  const nomeAlvo=(nome||'').trim().toLowerCase();
+  if(!nomeAlvo) return null;
+  const doColab=_chkAvaliacoesColab.filter(a=>a.finalizada && (a.colaborador||'').trim().toLowerCase()===nomeAlvo);
+  if(!doColab.length) return null;
+  return doColab.reduce((best,a)=> !best || a.data>best.data ? a : best, null);
+}
+function _pctAvaliacaoAppChk(av){
+  const nota=(av.pontualidade||0)+(av.uniforme||0)+(av.criteriosSetor||[]).reduce((s,v)=>s+(v||0),0);
+  const max=10+(SETORES[av.cargo]?50:0);
+  return nota/max*100;
+}
+function _resultadoAvaliacaoAppChk(p){
+  if(p>=85) return { emoji:'🥇', cor:'#D4A017' };
+  if(p>=60) return { emoji:'✅', cor:'#4ade80' };
+  if(p>=40) return { emoji:'⚠️', cor:'#fbbf24' };
+  return { emoji:'🔴', cor:'#f87171' };
+}
+function _toggleAvaliacaoAppChk(chave){
+  if(_chkAvalExpandido.has(chave)) _chkAvalExpandido.delete(chave);
+  else _chkAvalExpandido.add(chave);
+  renderComissoesFuncs();
+}
+function _badgeAvaliacaoAppToggleHtmlChk(nome, chave){
+  const av=_ultimaAvaliacaoAppChk(nome);
+  if(!av) return '';
+  const p=Math.round(_pctAvaliacaoAppChk(av));
+  const info=_resultadoAvaliacaoAppChk(p);
+  const expandido=_chkAvalExpandido.has(chave);
+  return `<span onclick="event.stopPropagation();_toggleAvaliacaoAppChk('${chave}')" title="Avaliação de desempenho (app Avaliações) em ${_fmtDataBRChk(av.data)} — toque pra ${expandido?'recolher':'ver detalhes'}" style="cursor:pointer;font-size:9px;font-weight:700;color:#1A1D23;background:${info.cor}18;border:1px solid ${info.cor}40;border-radius:6px;padding:1px 6px;margin-left:4px;flex-shrink:0">${info.emoji} ${p}% ${expandido?'▲':'▼'}</span>`;
+}
+function _avaliacaoAppPainelHtmlChk(nome, chave){
+  if(!_chkAvalExpandido.has(chave)) return '';
+  const av=_ultimaAvaliacaoAppChk(nome);
+  if(!av) return '';
+  const info=_resultadoAvaliacaoAppChk(Math.round(_pctAvaliacaoAppChk(av)));
+  const crits=SETORES[av.cargo]||[];
+  const linhasCrit=crits.map((c,i)=>{
+    const v=av.criteriosSetor?.[i]||0;
+    const op=c.o.find(x=>x.p===v);
+    return `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(0,0,0,.05)">
+      <div style="display:flex;justify-content:space-between;gap:8px">
+        <span style="font-size:10px;font-weight:700;color:#1A1D23">${escHtml(c.t)}</span>
+        <span style="font-size:11px;font-weight:800;color:${v?info.cor:'rgba(0,0,0,.3)'}">${v||'—'}/5</span>
+      </div>
+      ${op?`<div style="font-size:10px;color:rgba(0,0,0,.5);margin-top:2px">${escHtml(op.tx)}</div>`:''}
+    </div>`;
+  }).join('');
+  const autoAv=AUTOAV.find(x=>x.key===av.autoavaliacao);
+  return `<div style="background:rgba(0,0,0,.025);border:1px solid rgba(0,0,0,.08);border-radius:10px;padding:10px 12px;margin-top:8px">
+    <div style="font-size:10px;color:rgba(0,0,0,.4);margin-bottom:4px">Avaliado por ${escHtml(av.avaliador||'—')} em ${_fmtDataBRChk(av.data)}${av.cargo?' — '+escHtml(av.cargo):''}</div>
+    <div style="display:flex;gap:14px;font-size:11px;color:#1A1D23">
+      <span>Pontualidade: <b>${av.pontualidade||0}/5</b></span>
+      <span>Uniforme: <b>${av.uniforme||0}/5</b></span>
+    </div>
+    ${linhasCrit}
+    ${autoAv?`<div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(0,0,0,.05)">
+      <div style="font-size:10px;font-weight:700;color:#1A1D23">Autoavaliação: ${autoAv.key}) ${escHtml(autoAv.label)}</div>
+      <div style="font-size:10px;color:rgba(0,0,0,.5);margin-top:2px">"${escHtml(autoAv.texto)}"</div>
+    </div>`:''}
+    ${av.planoAcao?`<div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(0,0,0,.05)">
+      <div style="font-size:10px;font-weight:700;color:#1A1D23">Plano de Ação</div>
+      <div style="font-size:10px;color:rgba(0,0,0,.5);margin-top:2px">${escHtml(av.planoAcao)}</div>
+    </div>`:''}
+  </div>`;
+}
+
 async function loadComissoesData(){
   comissoesLoadErr = false;
   escalaAllData = null; // invalida cache mensal ao recarregar
@@ -2247,7 +2340,10 @@ async function loadComissoesData(){
   comissoesWeekIdx = idx;
   if(idx==null || !LOJA){ comissoesWD=null; renderComissoesFuncs(); return; }
   try{
-    const allData = await fetchComissoesAllData(comissoesLojaKey());
+    const [allData] = await Promise.all([
+      fetchComissoesAllData(comissoesLojaKey()),
+      _loadAvaliacoesColabChk()
+    ]);
     comissoesWD = getComissoesWD(allData, idx);
     comissoesVisibleSlots = {};
     comissoesWD.funcs.forEach((f,i)=>{ if(f.nome && f.nome.trim()) comissoesVisibleSlots[i]=true; });
@@ -4792,6 +4888,7 @@ function renderComissoesFuncs(){
           style="flex:1;">
         ${expBadge}
         ${f.setor&&f.setor.trim()?`<span style="font-size:9px;color:var(--ouro,#F5D98A);background:rgba(245,217,138,.12);border-radius:4px;padding:1px 6px;white-space:nowrap;font-weight:700;flex-shrink:0">${escHtml(f.setor)}</span>`:''}
+        ${f.nome&&f.nome.trim()?_badgeAvaliacaoAppToggleHtmlChk(f.nome,`chk_${i}`):''}
         ${f.nome&&f.nome.trim()?`<button onclick="event.stopPropagation();abrirModalBancoHoras('${f.nome.trim().replace(/'/g,"\\'")}')"
           title="Banco de horas"
           style="background:#E9F7EE;border:1px solid #1a5a3a;border-radius:7px;padding:4px 8px;color:#1A1D23;font-size:11px;cursor:pointer;flex-shrink:0;font-weight:700;">⏱</button>`:''}
@@ -4806,6 +4903,7 @@ function renderComissoesFuncs(){
         <select onchange="updComissoeSetor(${i},this.value)" style="font-size:11px;">
           ${COMISSOES_SETORES.map(s=>`<option value="${s}"${s===(f.setor||'')?' selected':''}>${s||'— Setor —'}</option>`).join('')}
         </select>
+        ${_avaliacaoAppPainelHtmlChk(f.nome,`chk_${i}`)}
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;">
           <div>
             <label class="field-label">Turno</label>
