@@ -811,25 +811,35 @@ function filterByLoja(obj, lojaNome) {
   return r;
 }
 
+// Ids removidos explicitamente nesta sessão (cancelarAvaria/delTransferencia/devolução) —
+// sem isso, o merge por id abaixo ressuscitaria o registro a partir da cópia ainda presente
+// na nuvem (que só reflete a remoção depois que ESTE push específico for gravado). Nunca
+// são limpos durante a sessão: mantê-los de fora do merge indefinidamente é inofensivo (é
+// só uma lista curta de ids já removidos), enquanto limpar cedo demais reabriria a janela
+// de ressuscitar o item por engano. Um reload começa com os sets vazios, o que é seguro
+// porque nesse ponto a nuvem já reflete a remoção.
+let _pendingDelIds = { avariasAll: new Set(), transferAll: new Set(), devolucoesAll: new Set() };
+
 // Une duas listas de registros com id (a local deste aparelho + a que já está na nuvem),
-// sem descartar nenhum dos dois lados — usado por sbPush() pra avariasAll/devolucoesAll/
-// transferAll, onde substituir a lista inteira pela cópia local apagava silenciosamente
-// registros criados por outro aparelho/aba logado na mesma loja nesse meio-tempo.
-function _mergeArrPorId(local, cloud) {
+// sem descartar nenhum dos dois lados — usado por sbPush()/sbPushLoja() pra avariasAll/
+// devolucoesAll/transferAll, onde substituir a lista inteira pela cópia local apagava
+// silenciosamente registros criados por outro aparelho/aba logado na mesma loja nesse
+// meio-tempo. deletedIds (opcional) impede repescar da nuvem algo removido de propósito.
+function _mergeArrPorId(local, cloud, deletedIds) {
   const localArr = Array.isArray(local) ? local : [];
   const cloudArr = Array.isArray(cloud) ? cloud : [];
   const idsLocais = new Set(localArr.map(x => x && x.id));
-  const soDaNuvem = cloudArr.filter(x => x && !idsLocais.has(x.id));
+  const soDaNuvem = cloudArr.filter(x => x && !idsLocais.has(x.id) && !(deletedIds && deletedIds.has(x.id)));
   return [...localArr, ...soDaNuvem];
 }
 
 // transferAll é um dicionário {lojaKey|semana: [registros]} — mescla por id em cada
 // chave presente em qualquer um dos dois lados (local já filtrado só pra esta loja).
-function _mergeTransferAllPorId(localFiltrado, cloudTransferAll) {
+function _mergeTransferAllPorId(localFiltrado, cloudTransferAll, deletedIds) {
   const cloud = cloudTransferAll || {};
   const chaves = new Set([...Object.keys(localFiltrado || {}), ...Object.keys(cloud)]);
   const r = {};
-  chaves.forEach(k => { r[k] = _mergeArrPorId((localFiltrado || {})[k], cloud[k]); });
+  chaves.forEach(k => { r[k] = _mergeArrPorId((localFiltrado || {})[k], cloud[k], deletedIds); });
   return r;
 }
 
@@ -874,13 +884,13 @@ async function sbPush() {
       // criado nesse meio-tempo — foi o que sumiu com uma Saída pra Terceiros do Nova
       // América), mescla por id com o que já está na nuvem: mantém tudo dos dois lados,
       // com a versão local prevalecendo só quando o mesmo id existe nos dois.
-      transferAll: _mergeTransferAllPorId(filterByLoja(transferAll, loja), baseAllData.transferAll),
+      transferAll: _mergeTransferAllPorId(filterByLoja(transferAll, loja), baseAllData.transferAll, _pendingDelIds.transferAll),
       pedidoAll:   filterByLoja(pedidoAll,   loja),
       minAll: { [loja]: minAll[loja] || {} },
       fatoresConversao, mapeamentoPedido,
       pedidoCustom, pedidoRemovidos, pedidoConfs: filterByLoja(pedidoConfs, loja),
-      avariasAll: { [loja]: _mergeArrPorId(avariasAll[loja], (baseAllData.avariasAll||{})[loja]) },
-      devolucoesAll: { [loja]: _mergeArrPorId(devolucoesAll[loja], (baseAllData.devolucoesAll||{})[loja]) },
+      avariasAll: { [loja]: _mergeArrPorId(avariasAll[loja], (baseAllData.avariasAll||{})[loja], _pendingDelIds.avariasAll) },
+      devolucoesAll: { [loja]: _mergeArrPorId(devolucoesAll[loja], (baseAllData.devolucoesAll||{})[loja], _pendingDelIds.devolucoesAll) },
       // urgenciaTemplate NÃO entra aqui de propósito — também é escrito pelo app Estoque e
       // Pedido, direto na mesma linha. Se o autosave normal (a cada edição, debounced)
       // reenviasse o valor local — que só atualiza a cada sbPull (20s) — ele podia sobrescrever
@@ -916,12 +926,17 @@ async function sbPush() {
 /* Push de uma loja específica — usado em transferências para enviar crédito/débito
    diretamente na linha da loja destino/origem no Supabase */
 async function sbPushLoja(lojaAlvo) {
+  // Mesma mesclagem de sbPush() — essa função grava na linha de OUTRA loja (destino da
+  // transferência), que pode ter campos próprios (xml_enviado_mes etc.) gravados por
+  // outros apps, além de avariasAll/transferAll próprios dela que este aparelho não tem
+  // como saber sem buscar antes.
+  const baseAllData = await _fetchAllDataAtual(lojaAlvo);
   const payload = {
     estIniAll:   filterByLoja(estIniAll,   lojaAlvo),
     vendasAll:   filterByLoja(vendasAll,   lojaAlvo),
     contAll:     filterByLoja(contAll,     lojaAlvo),
     entradasAll: filterByLoja(entradasAll, lojaAlvo),
-    transferAll: filterByLoja(transferAll, lojaAlvo),
+    transferAll: _mergeTransferAllPorId(filterByLoja(transferAll, lojaAlvo), baseAllData.transferAll, _pendingDelIds.transferAll),
     pedidoAll:   filterByLoja(pedidoAll,   lojaAlvo),
     minAll: { [lojaAlvo]: minAll[lojaAlvo] || {} },
     fatoresConversao, mapeamentoPedido,
@@ -930,12 +945,8 @@ async function sbPushLoja(lojaAlvo) {
     // sessão atual recebe o registro de avaria (pagamento pro Financeiro validar), ele só
     // existe em memória local — sem isso aqui, sbPushLoja nunca levava esse registro pro
     // Supabase e o Financeiro nunca via a pendência.
-    avariasAll: { [lojaAlvo]: avariasAll[lojaAlvo] || [] },
+    avariasAll: { [lojaAlvo]: _mergeArrPorId(avariasAll[lojaAlvo], (baseAllData.avariasAll||{})[lojaAlvo], _pendingDelIds.avariasAll) },
   };
-  // Mesma mesclagem de sbPush() — essa função grava na linha de OUTRA loja (destino da
-  // transferência), que pode ter campos próprios (xml_enviado_mes etc.) gravados por
-  // outros apps.
-  const baseAllData = await _fetchAllDataAtual(lojaAlvo);
   const mergedAllData = { ...baseAllData, ...payload };
   await sbRequest("gn_lojas?loja=eq." + encodeURIComponent(lojaAlvo), {
     method: "PATCH",
@@ -5335,6 +5346,7 @@ function delTransferencia(id) {
   Object.keys(transferAll).forEach(k => {
     transferAll[k] = (transferAll[k]||[]).filter(t => t.id !== id);
   });
+  _pendingDelIds.transferAll.add(id); // impede o merge por id de repescar da nuvem
   autoSave();
   // Push imediato para AMBAS as lojas no Supabase
   Promise.all([
@@ -5685,6 +5697,7 @@ function cancelarAvaria(id) {
     estIniAll[k][av.insumo] = (estIniAll[k][av.insumo] || 0) + av.qtd;
   }
   avariasAll[loja] = avariasAll[loja].filter(a => a.id !== id);
+  _pendingDelIds.avariasAll.add(id); // impede o merge por id de repescar da nuvem
   autoSave();
   showToast('🗑️ Avaria cancelada e estoque estornado.');
   render();
@@ -5841,6 +5854,7 @@ async function cancelarDevolucao(id) {
   if (!dev || dev.status !== 'pendente') return;
   if (!confirm('Cancelar esta devolução?')) return;
   devolucoesAll[loja] = devolucoesAll[loja].filter(d => d.id !== id);
+  _pendingDelIds.devolucoesAll.add(id); // impede o merge por id de repescar da nuvem
   autoSave();
   if (dev.provisao_id) await _marcarProvisaoDevolvida(dev.provisao_id, 'AGUARDANDO');
   showToast('🗑️ Devolução cancelada.');
