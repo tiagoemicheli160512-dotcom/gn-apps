@@ -2487,10 +2487,26 @@ async function flushComissoesOps(immediate){
     if(msgEl){ msgEl.textContent='✓ Sincronizado com Gorjetas'; msgEl.style.color='#3ddc6f'; }
   }catch(e){
     console.error('Erro ao sincronizar com Gorjetas:', e.message||e);
-    if(msgEl){ msgEl.textContent='⚠️ Falha ao sincronizar com Gorjetas'; msgEl.style.color='#e85d5d'; }
-    showToast('⚠️ Falha ao sincronizar com Gorjetas','error');
+    // Antes essas edições eram descartadas em silêncio numa falha de rede (queda de
+    // conexão comum no Wi-Fi de loja) — devolve pra fila e tenta de novo em 10s, desde
+    // que ninguém tenha trocado de loja/semana nesse meio-tempo (reaplicar um mutator
+    // antigo na semana errada corromperia os dados de lá).
+    if(comissoesLojaKey()===lojaKey && comissoesWeekIdx===idx){
+      comissoesOpsQueue = [...ops, ...comissoesOpsQueue];
+      clearTimeout(comissoesSyncTimer);
+      comissoesSyncTimer = setTimeout(flushComissoesOps, 10000);
+      if(msgEl){ msgEl.textContent='⚠️ Falha ao sincronizar com Gorjetas — tentando de novo'; msgEl.style.color='#e85d5d'; }
+      showToast('⚠️ Falha ao sincronizar com Gorjetas — tentando de novo','error');
+    } else {
+      if(msgEl){ msgEl.textContent='⚠️ Falha ao sincronizar com Gorjetas'; msgEl.style.color='#e85d5d'; }
+      showToast('⚠️ Edição de Gorjetas não salva — loja/semana mudou antes de sincronizar','error');
+    }
   }
 }
+// Rede da loja (Wi-Fi) cai e volta com frequência sem o evento 'online' do navegador
+// disparar de forma confiável — sem isso, uma edição de Funcionários/Gorjetas podia
+// ficar pendente indefinidamente até a próxima edição manual reagendar o flush.
+setInterval(()=>{ if(comissoesOpsQueue.length) flushComissoesOps(); }, 25000);
 
 // =============================================
 // STATE
@@ -10513,6 +10529,12 @@ function calcUsarTotal(){
 
 setInterval(()=>saveAll(),30000);
 setInterval(()=>refreshManutStatus(),30000);
+// Avisa antes de fechar a aba se ainda tiver edição de Funcionários/Gorjetas esperando
+// pra sincronizar (ex.: rede caiu bem no momento do flush) — sem isso a edição some
+// de vez, já que só existe em memória até o próximo flush bem-sucedido.
+window.addEventListener('beforeunload', e => {
+  if(comissoesOpsQueue.length){ e.preventDefault(); e.returnValue=''; }
+});
 // Repique/dinheiro em caixa são lançados no app Caixa em uma sessão separada — sem
 // isso, quem já estava com o Check-list aberto só via o valor sincronizar depois
 // de recarregar a página.
@@ -10522,7 +10544,7 @@ setInterval(()=>carregarDinheiroCaixaDoApp(),30000);
 // só atualiza se a aba estiver aberta agora, pra não gastar requisição à toa.
 setInterval(()=>{ if(_activeTab==='gestao') renderGestao(); }, 30000);
 setInterval(()=>{ if(_activeTab==='caixa')  renderLivroCaixa(); }, 30000);
-window.addEventListener('online',()=>{ if(typeof LOJA!=='undefined'&&LOJA) saveAll(); });
+window.addEventListener('online',()=>{ if(typeof LOJA!=='undefined'&&LOJA) saveAll(); if(comissoesOpsQueue.length) flushComissoesOps(); });
 window.addEventListener('offline',()=>{ setSyncStatus('offline','Sem conexão (offline)'); });
 
 // =============================================
