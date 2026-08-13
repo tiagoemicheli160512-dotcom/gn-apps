@@ -540,16 +540,42 @@ const fetchAvaliacoesCloud = async (loja) => {
     return null;
   }
 };
+// Antes, uma falha de rede aqui era engolida em silêncio (nem log, nem retry) — a
+// avaliação ficava só no localStorage daquele aparelho e nunca chegava na nuvem, que é
+// a fonte de verdade entre aparelhos/lojas (ver comentário acima). _avalPushRetry guarda,
+// por loja, a última tentativa que falhou e reagenda o reenvio; uma tentativa nova
+// (edição seguinte ou o próprio retry) sempre cancela o retry anterior daquela loja antes
+// de tentar, então nunca reenviamos uma versão mais velha por cima de uma mais nova.
+let _avalPushRetry = {};
 const pushAvaliacoesCloud = async (loja, arr, autor) => {
+  if (_avalPushRetry[loja]) { clearTimeout(_avalPushRetry[loja].timer); delete _avalPushRetry[loja]; }
   try {
-    await fetch(`${SB_URL}/rest/v1/gn_avaliacoes_colab?on_conflict=loja`, {
+    const res = await fetch(`${SB_URL}/rest/v1/gn_avaliacoes_colab?on_conflict=loja`, {
       method: "POST",
       headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}`, "Content-Type": "application/json", Prefer: "return=minimal,resolution=merge-duplicates" },
       body: JSON.stringify({ loja, all_data: arr, updated_at: new Date().toISOString(), updated_by: autor || "" })
     });
-  } catch {
+    if (!res.ok) throw new Error("HTTP " + res.status);
+  } catch (e) {
+    console.error("Falha ao sincronizar avaliações com a nuvem, tentando de novo em 10s:", e.message || e);
+    _avalPushRetry[loja] = { arr, autor, timer: setTimeout(() => pushAvaliacoesCloud(loja, arr, autor), 10000) };
   }
 };
+// Rede de loja cai e volta com frequência sem o evento 'online' disparar de forma
+// confiável — o retry de 10s acima já cobre isso sozinho, mas reagir na hora que o
+// navegador avisa que voltou é mais rápido que esperar o timer.
+window.addEventListener("online", () => {
+  Object.keys(_avalPushRetry).forEach(loja => {
+    const r = _avalPushRetry[loja];
+    clearTimeout(r.timer);
+    pushAvaliacoesCloud(loja, r.arr, r.autor);
+  });
+});
+// Avisa antes de fechar a aba se ainda tiver avaliação esperando pra sincronizar com a
+// nuvem — sem isso ela ficava só no localStorage daquele aparelho, sem ninguém saber.
+window.addEventListener("beforeunload", (e) => {
+  if (Object.keys(_avalPushRetry).length) { e.preventDefault(); e.returnValue = ""; }
+});
 const fetchAvaliacoesCloudTodasLojas = async () => {
   try {
     const res = await fetch(`${SB_URL}/rest/v1/gn_avaliacoes_colab?select=loja,all_data`, { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } });
