@@ -4772,12 +4772,13 @@ async function confirmarEntrega(provisaoId) {
 // recebidos bateram exatamente com o previsto — pra quando a entrega toda chegou certinha
 // e não faz sentido abrir o modal item por item. Item que veio diferente do previsto
 // continua precisando ser validado individualmente (clicando nele), sem passar por aqui.
-async function confirmarEntregasEmLote(dataKey) {
-  const itens = S.entregasPendentes.filter(p => (p.data_entrega || 'Sem data') === dataKey);
+async function confirmarEntregasEmLotePorLoja(lojaSlug) {
+  const itens = S.entregasPendentes.filter(p => (p.loja_slug || '') === lojaSlug);
   if (!itens.length) return;
 
+  const lojaDisplay = S.lojas.find(l=>l.slug_pedido===lojaSlug)?.nome_display || lojaSlug || 'SEM LOJA';
   const total = itens.reduce((a,p) => a+(parseFloat(p.valor_previsto)||0), 0);
-  if (!confirm(`Confirmar TODAS as ${itens.length} entregas desta data como recebidas certinho (qtd e valor exatamente como previsto)?\n\nTotal: R$ ${fmt(total)}\n\nSe algum item veio diferente do previsto, valide ele individualmente em vez de usar este botão.`)) return;
+  if (!confirm(`Confirmar TODAS as ${itens.length} entregas pendentes de ${lojaDisplay} como recebidas certinho (qtd e valor exatamente como previsto)?\n\nTotal: R$ ${fmt(total)}\n\nSe algum item veio diferente do previsto, valide ele individualmente em vez de usar este botão.`)) return;
 
   let recebidoPor = 'SISTEMA';
   try { recebidoPor = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null')?.nome || 'SISTEMA'; } catch(e) {}
@@ -4803,7 +4804,7 @@ async function confirmarEntregasEmLote(dataKey) {
   toast(erros > 0
     ? `Confirmado com ${erros} erro(s) de ${itens.length}. Verifique o console.`
     : `✓ ${itens.length} entrega${itens.length>1?'s':''} confirmada${itens.length>1?'s':''}!`, erros>0?'err':'ok');
-  _logAuditoria('CONFIRMAR_ENTREGA_LOTE', { data: dataKey, itens: itens.length - erros, valor_total: total }, {});
+  _logAuditoria('CONFIRMAR_ENTREGA_LOTE', { loja: lojaSlug, itens: itens.length - erros, valor_total: total }, {});
   await renderEntrega();
 }
 
@@ -4822,22 +4823,28 @@ async function renderEntrega() {
       <div class="empty-texto">Nenhuma entrega pendente!</div>
     </div>`;
   } else {
-    const porData = {};
-    S.entregasPendentes.forEach(p => {
-      const d = p.data_entrega || 'Sem data';
-      if (!porData[d]) porData[d] = [];
-      porData[d].push(p);
+    // Agrupado por loja (não mais por data) — dentro de cada loja os itens já vêm
+    // ordenados por data de entrega (mais próxima primeiro), e como um Map preserva a
+    // ordem de inserção, a primeira loja encontrada na varredura já é a com a entrega
+    // mais próxima, então os cards saem naturalmente na ordem certa sem sort extra.
+    const porLoja = new Map();
+    [...S.entregasPendentes].sort((a,b)=>(a.data_entrega||'9999').localeCompare(b.data_entrega||'9999')).forEach(p => {
+      const slug = p.loja_slug || '';
+      if (!porLoja.has(slug)) porLoja.set(slug, []);
+      porLoja.get(slug).push(p);
     });
-    htmlPendentes = Object.entries(porData).sort(([a],[b])=>a.localeCompare(b)).map(([data, itens]) => {
+    htmlPendentes = [...porLoja.entries()].map(([lojaSlug, itens]) => {
+      const lojaDisplay = S.lojas.find(l=>l.slug_pedido===lojaSlug)?.nome_display || lojaSlug || 'SEM LOJA';
       const total = itens.reduce((a,p)=>a+(parseFloat(p.valor_previsto)||0),0);
+      const gid = 'entrega_loja_'+String(lojaSlug||'sem_loja').replace(/[^a-z0-9]/gi,'_');
       const itensHtml = itens.map(p => {
-        const lojaDisplay = S.lojas.find(l=>l.slug_pedido===p.loja_slug)?.nome_display || p.loja_slug;
+        const dtDisplay = p.data_entrega ? new Date(p.data_entrega+'T12:00:00').toLocaleDateString('pt-BR',{weekday:'short',day:'2-digit',month:'short'}) : 'Sem data';
         return `<div class="prov-item" style="cursor:pointer" onclick="modalValidar('${p.id}')">
           <div class="prov-item-header">
             <div>
               <div class="prov-forn">${p.fornecedor}</div>
               <div class="prov-produto">${p.gn_catalogo?.produto||'—'}</div>
-              <div style="font-size:11px;color:var(--muted)">${lojaDisplay}</div>
+              <div style="font-size:11px;color:var(--muted)">${dtDisplay}</div>
             </div>
             <div style="text-align:right">
               <div class="num" style="font-size:13px;font-weight:700">R$ ${fmt(p.valor_previsto)}</div>
@@ -4847,21 +4854,23 @@ async function renderEntrega() {
           </div>
         </div>`;
       }).join('');
-      const dtDisplay = data !== 'Sem data' ? new Date(data+'T12:00:00').toLocaleDateString('pt-BR',{weekday:'short',day:'2-digit',month:'short'}) : 'Sem data';
-      return `<div class="grupo-bloco aberto" style="margin-bottom:8px">
-        <div class="grupo-header" style="cursor:default">
-          <span class="grupo-nome">${dtDisplay}</span>
+      return `<div class="grupo-bloco${porLoja.size===1||S.provGruposAbertos.has(gid)?' aberto':''}" id="${gid}" style="margin-bottom:8px">
+        <div class="grupo-header" onclick="toggleEpGrupoProvisao('${gid}')">
+          <span class="grupo-nome">🏪 ${lojaDisplay}</span>
           <div style="display:flex;gap:12px;align-items:center">
             <span style="font-size:11px;color:var(--muted)">${itens.length} item${itens.length>1?'s':''}</span>
             <span class="num" style="font-size:12px">R$ ${fmt(total)}</span>
+            <span class="grupo-chevron">▼</span>
           </div>
         </div>
-        ${itens.length > 1 ? `<div style="padding:6px 12px;border-bottom:1px solid var(--border)">
-          <button onclick="confirmarEntregasEmLote('${data}')" style="width:100%;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);border-radius:8px;padding:7px;color:#1A1D23;font-size:11px;font-weight:700;cursor:pointer">
-            ✓ Confirmar tudo certo (qtd e valor previstos)
-          </button>
-        </div>` : ''}
-        <div class="grupo-body" style="display:block">${itensHtml}</div>
+        <div class="grupo-body">
+          ${itens.length > 1 ? `<div style="padding:6px 12px;border-bottom:1px solid var(--border)">
+            <button onclick="confirmarEntregasEmLotePorLoja('${lojaSlug}')" style="width:100%;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);border-radius:8px;padding:7px;color:#1A1D23;font-size:11px;font-weight:700;cursor:pointer">
+              ✓ Confirmar tudo certo (qtd e valor previstos)
+            </button>
+          </div>` : ''}
+          ${itensHtml}
+        </div>
       </div>`;
     }).join('');
   }
