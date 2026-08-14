@@ -3365,6 +3365,8 @@ async function _confirmarFerias(loja, usuarioId){
   const fim=document.getElementById('ferias-fim-'+usuarioId)?.value;
   if(!ini || !fim){ alert('Preencha início e fim das férias.'); return; }
   if(fim<ini){ alert('A data de fim não pode ser antes do início.'); return; }
+  const conflito=(_dashFeriasGerencia?.[loja]||[]).find(f=>String(f.usuarioId)===String(usuarioId) && ini<=f.fim && f.inicio<=fim);
+  if(conflito){ alert(`Esse período conflita com férias já cadastradas: ${_fmtDataBR(conflito.inicio)} – ${_fmtDataBR(conflito.fim)}.`); return; }
   const pessoa=(_dashGerentes[loja]||[]).find(p=>String(p.id)===String(usuarioId));
   if(!pessoa){ alert('Pessoa não encontrada.'); return; }
   _dashFeriasFormAberto=null;
@@ -3544,6 +3546,8 @@ async function _confirmarFeriasEquipe(usuarioId){
   const fim=document.getElementById('ferias-eq-fim-'+usuarioId)?.value;
   if(!ini || !fim){ alert('Preencha início e fim das férias.'); return; }
   if(fim<ini){ alert('A data de fim não pode ser antes do início.'); return; }
+  const conflito=(_dashFeriasEquipe||[]).find(f=>String(f.usuarioId)===String(usuarioId) && ini<=f.fim && f.inicio<=fim);
+  if(conflito){ alert(`Esse período conflita com férias já cadastradas: ${_fmtDataBR(conflito.inicio)} – ${_fmtDataBR(conflito.fim)}.`); return; }
   const pessoa=(_dashEquipeUsuarios||[]).find(p=>String(p.id)===String(usuarioId));
   if(!pessoa){ alert('Pessoa não encontrada.'); return; }
   _dashFeriasEquipeFormAberto=null;
@@ -3808,8 +3812,19 @@ async function _xadrezAddMov(){
   });
   if(!pessoa){ alert('Pessoa não encontrada.'); return; }
   if(lojaOrigem===lojaDestino){ alert('Selecione uma loja diferente da atual.'); return; }
+  const movAnterior=_xadrezMovs.find(mv=>String(mv.usuarioId)===String(usuarioId));
+  if(movAnterior && !confirm(`${pessoa.nome} já está simulado indo pra ${LOJA_DISPLAY[movAnterior.lojaDestino]||movAnterior.lojaDestino}${movAnterior.criadoPor?` (por ${movAnterior.criadoPor})`:''}. Substituir por ${LOJA_DISPLAY[lojaDestino]||lojaDestino}?`)) return;
+  // Aviso proativo: essa movimentação deixaria a loja de origem sem gerente/sub
+  // titular? Antes só aparecia depois, no painel de pendências — agora avisa
+  // na hora, mas sem bloquear (o supervisor pode ter um plano pra cobrir).
+  const boardDepois=_boardGerenciaSimulado();
+  if(boardDepois[lojaOrigem]) boardDepois[lojaOrigem]=boardDepois[lojaOrigem].filter(p=>String(p.id)!==String(usuarioId));
+  const pessoasOrigemDepois=boardDepois[lojaOrigem]||[];
+  const semGerente=pessoa.cargo==='gerente' && !pessoasOrigemDepois.some(p=>p.cargo==='gerente');
+  const semSub=pessoa.cargo==='sub_gerente' && !pessoasOrigemDepois.some(p=>p.cargo==='sub_gerente');
+  if((semGerente||semSub) && !confirm(`Essa troca deixa ${LOJA_DISPLAY[lojaOrigem]||lojaOrigem} sem ${semGerente?'gerente titular':'sub-gerente'}. Confirma mesmo assim?`)) return;
   _xadrezMovs=_xadrezMovs.filter(mv=>String(mv.usuarioId)!==String(usuarioId));
-  _xadrezMovs.push({ usuarioId:pessoa.id, nome:pessoa.nome, cargoOriginal:pessoa.cargo, lojaOrigem, lojaDestino });
+  _xadrezMovs.push({ usuarioId:pessoa.id, nome:pessoa.nome, cargoOriginal:pessoa.cargo, lojaOrigem, lojaDestino, criadoPor:(session&&session.nome)||'', criadoEm:new Date().toISOString() });
   await _salvarXadrezPendente();
 }
 async function _xadrezRemoverMov(usuarioId){ _xadrezMovs=_xadrezMovs.filter(mv=>String(mv.usuarioId)!==String(usuarioId)); await _salvarXadrezPendente(); }
@@ -3902,10 +3917,16 @@ function _buildXadrezPanel(){
 
   const movsHtml = simAtiva ? `<div style="margin-bottom:14px">
     <div style="font-size:10px;font-weight:800;color:rgba(0,0,0,.4);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Movimentos simulados</div>
-    ${_xadrezMovs.map(mv=>`<div style="display:flex;align-items:center;justify-content:space-between;background:rgba(96,165,250,.08);border:1px solid rgba(96,165,250,.25);border-radius:8px;padding:7px 10px;margin-bottom:5px">
+    ${_xadrezMovs.map(mv=>{
+      const autoria=mv.criadoPor?`Simulado por ${esc(mv.criadoPor)}${mv.criadoEm?' · '+new Date(mv.criadoEm).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):''}`:'';
+      return `<div style="background:rgba(96,165,250,.08);border:1px solid rgba(96,165,250,.25);border-radius:8px;padding:7px 10px;margin-bottom:5px">
+      <div style="display:flex;align-items:center;justify-content:space-between">
       <span style="font-size:11px;color:#1A1D23">${esc(mv.nome)}: ${esc(LOJA_DISPLAY[mv.lojaOrigem]||mv.lojaOrigem)} → ${esc(LOJA_DISPLAY[mv.lojaDestino]||mv.lojaDestino)}</span>
       <button onclick="_xadrezRemoverMov('${mv.usuarioId}')" style="background:none;border:none;color:rgba(0,0,0,.4);font-size:13px;cursor:pointer" ${_xadrezValidando?'disabled':''}>✕</button>
-    </div>`).join('')}
+      </div>
+      ${autoria?`<div style="font-size:9px;color:rgba(0,0,0,.4);margin-top:2px">${autoria}</div>`:''}
+    </div>`;
+    }).join('')}
     <div style="display:flex;gap:8px;margin-top:2px">
       <button onclick="_xadrezValidar()" ${_xadrezValidando?'disabled':''} style="background:${_xadrezValidando?'rgba(74,222,128,.3)':'#4ade80'};color:#0a2e17;border:none;border-radius:8px;padding:7px 14px;font-size:11px;font-weight:800;cursor:${_xadrezValidando?'default':'pointer'}">${_xadrezValidando?'⟳ Validando…':'✅ Validar alterações'}</button>
       <button onclick="_xadrezLimpar()" ${_xadrezValidando?'disabled':''} style="background:rgba(0,0,0,.06);border:1px solid rgba(0,0,0,.1);color:rgba(0,0,0,.6);border-radius:8px;padding:7px 12px;font-size:11px;cursor:pointer">Limpar simulação</button>
