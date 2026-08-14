@@ -2409,8 +2409,8 @@ function _iniciarVigiaHorario() {
     _verificarAutoAlerta();
   }, 60000);
 }
-function prevWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana, -7); checklistFat = null; checklistVendasItens = null; if(tab==="vendas") loadChecklistFat(); render(); }
-function nextWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana,  7); checklistFat = null; checklistVendasItens = null; if(tab==="vendas") loadChecklistFat(); render(); }
+function prevWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana, -7); checklistFat = null; checklistVendasItens = null; if(tab==="vendas") loadChecklistFat(); if(tab==="pedido") _carregarEstAntHistorico(); render(); }
+function nextWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana,  7); checklistFat = null; checklistVendasItens = null; if(tab==="vendas") loadChecklistFat(); if(tab==="pedido") _carregarEstAntHistorico(); render(); }
 function irParaSemana(isoStr) { semana = new Date(isoStr); tab = "relatorio"; render(); }
 function changeLoja(v) { if (lojaForcada) return; loja = v; tab = "home"; checklistFat = null; checklistVendasItens = null; _epGruposAbertos.clear(); render(); _epProcessarFila(); _pedSyncFilaProcessar(); }
 function carregarPermissaoLoja() {
@@ -2475,7 +2475,7 @@ function goTab(t) {
   const sl = document.querySelector(`.sidebar-link[data-sidebar-tab="${t}"]`);
   if (sl) sl.classList.add('active');
   busca = "";   // limpa busca ao trocar de aba
-  if (t === "pedido") { window._divergLojaSet = new Set(); carregarDivergencias().then(() => render()); carregarPedidoOficial(); }
+  if (t === "pedido") { window._divergLojaSet = new Set(); carregarDivergencias().then(() => render()); carregarPedidoOficial(); _carregarEstAntHistorico(); }
   if (t === "vendas" && checklistFat === null) { loadChecklistFat(); } // só carrega se ainda não foi carregado (reset ocorre ao trocar loja/semana)
   render();
   if (t === 'entrega') carregarEntregas(true);
@@ -3703,6 +3703,43 @@ function qtdPreenchidos() {
   return Object.values(p).filter(v => parseFloat(v.cx) > 0 || parseFloat(v.und) > 0 || parseFloat(v.atual) > 0 || parseFloat(v.pedido) > 0).length;
 }
 
+// Busca, por catalogo_id, o "atual" da contagem mais recente ANTES da semana informada
+// (monISO) — é isso que vira Est.ant: o que foi contado por último antes da semana atual
+// começar, direto do histórico já persistido em gn_contagens_pedido. Nunca deriva de
+// estIniAll/contAll (acumuladores locais que só somam entrada e nunca descontam venda —
+// ver aba Estoque, que continua assim de propósito, até existir baixa de venda de verdade);
+// aqui a régua é puramente semana-a-semana: o que foi contado, não um saldo corrido.
+let _estAntHistCache = {};              // { [catalogo_id]: atual } — cache pra render() síncrono
+let _estAntHistLoja = null, _estAntHistSemana = null; // evita refetch se loja/semana não mudou
+async function _buscarEstAntPorCatalogo(monISO) {
+  try {
+    await _carregarCatalogo();
+    const lojaSlug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+    const rows = await sbRequest(
+      'gn_contagens_pedido?loja_slug=eq.' + encodeURIComponent(lojaSlug) +
+      '&data_contagem=lt.' + monISO +
+      '&select=catalogo_id,atual,data_contagem&order=data_contagem.desc',
+      { method: 'GET' }
+    );
+    const porCatalogo = {};
+    (rows || []).forEach(r => {
+      if (!(r.catalogo_id in porCatalogo)) porCatalogo[r.catalogo_id] = r.atual; // 1ª ocorrência = mais recente (order desc)
+    });
+    return porCatalogo;
+  } catch(e) { return {}; }
+}
+
+// Prefetch do cache acima pro badge Est.ant renderizar síncrono na aba Pedido — chamado ao
+// entrar na aba e ao trocar de semana (goTab/prevWeek/nextWeek), nunca de dentro de render().
+async function _carregarEstAntHistorico() {
+  const monISO = wkKey(semana);
+  if (_estAntHistLoja === loja && _estAntHistSemana === monISO) return;
+  _estAntHistCache = await _buscarEstAntPorCatalogo(monISO);
+  _estAntHistLoja = loja;
+  _estAntHistSemana = monISO;
+  render();
+}
+
 // Busca, por catalogo_id, a contagem mais recente já gravada em gn_contagens_pedido pra
 // essa loja — é essa tabela que recebe o Est.Atual/Avulso confirmado (⚡Urgência/✅Confirmar),
 // não gn_pedido_itens (essa é só pro campo "Pedido" que só o Compras preenche).
@@ -4044,8 +4081,12 @@ async function _sincronizarComPedidos(produtosSync) {
   const itens = [];
   const naoSincronizados = []; // itens com dado real que não têm vínculo no catálogo — não podem ser perdidos em silêncio
   const kAntSinc = loja + "|" + wkKey(addDays(semana, -7));
+  // Est.ant vem sempre do histórico real em gn_contagens_pedido (o que foi contado antes
+  // desta semana começar) — nunca de estIniAll/contAll, que só somam entrada e nunca
+  // descontam venda. Busca uma vez só, fora do loop.
+  const estAntHist = await _buscarEstAntPorCatalogo(wkKey(semana));
 
-  produtosSync.forEach(({ prod, cx, und, pedidoCx, pedidoUnd, fator, estAntSnapshot }) => {
+  produtosSync.forEach(({ prod, cx, und, pedidoCx, pedidoUnd, fator }) => {
     const estoqueAtual = (cx * fator) + und;
     const qtdPedida = (pedidoCx * fator) + pedidoUnd;
     // gn_pedido_itens.qtd_pedida precisa ficar na mesma unidade do Catálogo (a mesma que
@@ -4059,23 +4100,7 @@ async function _sincronizarComPedidos(produtosSync) {
     const catalogoId = _resolverCatalogoId(prod);
     if (!catalogoId) { naoSincronizados.push(prod.produto); return; }
     const destSinc = mapeamentoPedido[String(prod.item)] || prod.produto.trim().toUpperCase();
-    // Est. Ant = estoque com que a semana anterior (kAntSinc) COMEÇOU. Prioriza o
-    // estAntSnapshot tirado em confirmarPedido() ANTES desse mesmo confirmar somar seu
-    // próprio qtdBase em contAll[kAnterior] — reler contAll[kAntSinc] aqui (live) pegava
-    // esse valor já contaminado com o Est.Atual de HOJE, e "Est.ant" saía sempre idêntico
-    // a "Est.vig". Sem snapshot (chamada antiga da fila de retry, sem esse campo ainda),
-    // cai pro cálculo de fallback: estoque corrido no fim daquela semana MENOS as entradas
-    // recebidas naquela semana — nunca soma compra nenhuma no "início".
-    let ulEstoque = estAntSnapshot ?? null;
-    if (ulEstoque == null) {
-      const estFimSemanaAnt = (estIniAll[kAntSinc] || {})[destSinc];
-      if (estFimSemanaAnt != null) {
-        const entradasSemanaAntUl = (entradasAll[kAntSinc] || [])
-          .filter(e => (e.insumo || '').trim().toUpperCase() === destSinc)
-          .reduce((s, e) => s + (parseFloat(e.qtd) || 0), 0);
-        ulEstoque = Math.max(0, estFimSemanaAnt - entradasSemanaAntUl);
-      }
-    }
+    const ulEstoque = estAntHist[catalogoId] ?? null;
     // Ped. Ant = entradas de mercadoria (NF) recebidas na semana anterior pra esse item —
     // não a quantidade sendo pedida agora (isso é o pedido da semana ATUAL, não "anterior").
     const entradasSemanaAnt = (entradasAll[kAntSinc] || [])
@@ -4189,11 +4214,8 @@ async function confirmarPedido(modo) {
 
   const p = getPedido();
   const k = lojaKey();
-  const semanaAnterior = addDays(semana, -7);
-  const kAnterior = loja + "|" + wkKey(semanaAnterior);
 
   if (!estIniAll[k]) estIniAll[k] = {};
-  if (!contAll[kAnterior]) contAll[kAnterior] = {};
   let atualizados = 0;
   const itensConf = [];
   const produtosParaSync = [];
@@ -4237,18 +4259,8 @@ async function confirmarPedido(modo) {
 
     const destino = insumoMapeado || nomeUpper;
 
-    // Snapshot de contAll[kAnterior][destino] ANTES da mutação duas linhas abaixo — é
-    // esse valor (o fechamento de kAnterior de ANTES desta confirmação) que precisa ir
-    // pro Est.ant do app Pedidos. Sem isso, _sincronizarComPedidos() lia contAll[kAntSinc]
-    // já contaminado pelo qtdBase que este mesmo confirmar tinha acabado de somar aqui,
-    // e "Est.ant" saía sempre idêntico a "Est.vig".
-    const estAntSnapshot = contAll[kAnterior][destino] ?? null;
-
     // → Somar ao estoque (sem apagar entradas manuais)
     estIniAll[k][destino] = (estIniAll[k][destino] || 0) + qtdBase;
-
-    // → Contagem de fechamento da semana anterior
-    contAll[kAnterior][destino] = (contAll[kAnterior][destino] || 0) + qtdBase;
 
     // Guardar os valores confirmados para poder substituir no próximo confirmar
     if (!pedidoAll[k]) pedidoAll[k] = {};
@@ -4259,12 +4271,11 @@ async function confirmarPedido(modo) {
     // Limpar entrada paralela pelo nome do produto se foi mapeado
     if (insumoMapeado) {
       delete estIniAll[k][nomeUpper];
-      delete contAll[kAnterior][nomeUpper];
     }
     if (qtdBase > 0 || pedCx > 0 || pedUnd > 0) {
       atualizados++;
       itensConf.push({ produto: prod.produto, fornecedor: prod.fornecedor || '', cx, und, pedidoCx: pedCx, pedidoUnd: pedUnd });
-      produtosParaSync.push({ prod, cx, und, pedidoCx: pedCx, pedidoUnd: pedUnd, fator, estAntSnapshot });
+      produtosParaSync.push({ prod, cx, und, pedidoCx: pedCx, pedidoUnd: pedUnd, fator });
     }
   });
 
@@ -7153,46 +7164,26 @@ function render() {
                   return (entradasAll[semanaKey] || []).reduce((s,e) => e.insumo === dest ? s + (e.qtd||0) : s, 0);
                 };
 
-                // Est.ant = o que a loja tinha ao INICIAR a semana atual, sem misturar com o
-                // que entrou depois. Prioriza a contagem confirmada da semana passada
-                // (contAll[kAnterior] — o valor que a loja realmente digitou como "Est. Atual"
-                // ao confirmar). Se ainda não existe (ninguém confirmou pedido nesta semana
-                // ainda), calcula ao vivo: estoque atual MENOS as entradas desta semana — nunca
-                // soma compras/notas no "início", que era o bug reportado.
-                let estAntVal = (contAll[kAnterior] || {})[dest];
-                let estAntTitle = '';
-                if (estAntVal == null) {
-                  const estVigAtual = (estIniAll[k] || {})[dest];
-                  if (estVigAtual != null) {
-                    estAntVal = Math.max(0, estVigAtual - entradasPorSemana(k));
-                    estAntTitle = ' title="Estimado: estoque atual menos as entradas desta semana — ainda não houve confirmação de pedido nesta semana"';
-                  }
-                }
+                // Controle semana-a-semana, sem tentar descontar venda (isso segue só na aba
+                // Estoque, que continua acumulando bruto de propósito até existir baixa de
+                // venda de verdade — ver decisão registrada em CLAUDE.md/histórico do projeto):
+                // Est.ant = o que foi contado antes desta semana começar, direto do histórico
+                // real em gn_contagens_pedido (nunca de estIniAll/contAll — acumuladores locais
+                // que só somam entrada). Ped.ant = tudo que entrou (Entrada de Notas) na semana
+                // passada, sempre — não o que foi pedido, que pode não bater com o que chegou.
+                // Est.vig = o que está sendo digitado agora nesta semana.
+                const catalogoIdBadge = _resolverCatalogoId(prod);
+                const estAntVal = catalogoIdBadge != null ? (_estAntHistCache[catalogoIdBadge] ?? null) : null;
 
-                const pedAntEntry = (pedidoAll[kAnterior] || {})[prod.item];
-                const pedAntCx  = pedAntEntry != null ? parseFloat(pedAntEntry._cxConfirmado)  : null;
-                const pedAntUnd = pedAntEntry != null ? parseFloat(pedAntEntry._undConfirmado) : null;
-                let pedAntTxt, pedAntTitle = '';
-                if (pedAntCx != null) {
-                  pedAntTxt = fmtCxUnd((pedAntCx||0) * fator + (pedAntUnd||0));
-                } else {
-                  // Loja não clicou em "Confirmar Pedido" na semana passada (foi direto pra
-                  // Entrada de Notas) — usa o total recebido via nota naquela semana como
-                  // aproximação, em vez de deixar o badge sempre vazio.
-                  const entradasAnt = entradasPorSemana(kAnterior);
-                  if (entradasAnt > 0) {
-                    pedAntTxt = fmtCxUnd(entradasAnt) + ' 📄';
-                    pedAntTitle = ' title="Estimado a partir da Entrada de Notas — o Pedido dessa semana não foi confirmado"';
-                  } else {
-                    pedAntTxt = '—';
-                  }
-                }
+                const entradasAnt = entradasPorSemana(kAnterior);
+                const pedAntTxt = entradasAnt > 0 ? fmtCxUnd(entradasAnt) : '—';
 
-                const estVig = (estIniAll[k] || {})[dest];
+                const cxTyped = parseFloat(entry.cx) || 0, undTyped = parseFloat(entry.und) || 0;
+                const estVig = (cxTyped > 0 || undTyped > 0) ? (cxTyped * fator + undTyped) : null;
 
-                return '<span' + estAntTitle + ' style="font-size:9px;background:rgba(100,116,139,.15);border-radius:6px;padding:2px 7px;color:#475569;white-space:nowrap">'
+                return '<span style="font-size:9px;background:rgba(100,116,139,.15);border-radius:6px;padding:2px 7px;color:#475569;white-space:nowrap">'
                   + '<span style="opacity:.75">Est.ant:</span> <strong>' + fmtCxUnd(estAntVal) + '</strong></span>'
-                  + '<span' + pedAntTitle + ' style="font-size:9px;background:rgba(245,158,11,.12);border-radius:6px;padding:2px 7px;color:#B45309;white-space:nowrap">'
+                  + '<span style="font-size:9px;background:rgba(245,158,11,.12);border-radius:6px;padding:2px 7px;color:#B45309;white-space:nowrap">'
                   + '<span style="opacity:.75">Ped.ant:</span> <strong>' + pedAntTxt + '</strong></span>'
                   + '<span style="font-size:9px;background:rgba(16,185,129,.12);border-radius:6px;padding:2px 7px;color:#059669;white-space:nowrap">'
                   + '<span style="opacity:.75">Est.vig:</span> <strong>' + fmtCxUnd(estVig) + '</strong></span>';
