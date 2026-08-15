@@ -838,13 +838,42 @@ function _mergeArrPorId(local, cloud, deletedIds) {
   return [...localArr, ...soDaNuvem];
 }
 
+// Campos de confirmação de empréstimo que só avançam (nunca voltam a false depois de
+// setados) — usados pelo merge abaixo pra nunca deixar o push desatualizado de uma loja
+// apagar a confirmação que a OUTRA loja já tinha feito do lado dela.
+const TRANSFER_FLAGS_MONOTONICOS = ['confirmadoOrigem','confirmadoDestino','pagDinheiroOrigem','pagDinheiroDestino','quitado'];
+
+// Mescla dois registros do MESMO id de empréstimo (cópia local + cópia da nuvem): em vez
+// de um lado descartar o outro por completo, os campos de confirmação avançam por OR —
+// sem isso, uma loja confirmando sua ponta podia empurrar pra nuvem uma cópia antiga do
+// registro da OUTRA loja (ainda sem a confirmação dela) e apagar essa confirmação já feita,
+// deixando o empréstimo preso "aguardando" pra sempre mesmo com as duas pontas OK.
+function _mergeTransferRecord(localRec, cloudRec) {
+  if (!cloudRec) return localRec;
+  if (!localRec) return cloudRec;
+  const merged = { ...cloudRec, ...localRec };
+  TRANSFER_FLAGS_MONOTONICOS.forEach(f => { merged[f] = !!localRec[f] || !!cloudRec[f]; });
+  if (!merged.dataQuitacao) merged.dataQuitacao = localRec.dataQuitacao || cloudRec.dataQuitacao || null;
+  return merged;
+}
+
 // transferAll é um dicionário {lojaKey|semana: [registros]} — mescla por id em cada
 // chave presente em qualquer um dos dois lados (local já filtrado só pra esta loja).
 function _mergeTransferAllPorId(localFiltrado, cloudTransferAll, deletedIds) {
   const cloud = cloudTransferAll || {};
   const chaves = new Set([...Object.keys(localFiltrado || {}), ...Object.keys(cloud)]);
   const r = {};
-  chaves.forEach(k => { r[k] = _mergeArrPorId((localFiltrado || {})[k], cloud[k], deletedIds); });
+  chaves.forEach(k => {
+    const localArr = Array.isArray((localFiltrado || {})[k]) ? (localFiltrado || {})[k] : [];
+    const cloudArr = Array.isArray(cloud[k]) ? cloud[k] : [];
+    const porId = new Map();
+    cloudArr.forEach(x => { if (x && !(deletedIds && deletedIds.has(x.id))) porId.set(x.id, x); });
+    localArr.forEach(x => {
+      if (!x || (deletedIds && deletedIds.has(x.id))) return;
+      porId.set(x.id, _mergeTransferRecord(x, porId.get(x.id)));
+    });
+    r[k] = [...porId.values()];
+  });
   return r;
 }
 
@@ -5197,7 +5226,7 @@ function atualizarPreviewTransf() {
   if (prev) prev.textContent = tot > 0 ? (unidade === 'CX' && fator > 1 ? '×' + fator + ' = ' + tot.toFixed(0) + ' UN' : '= ' + tot.toFixed(3) + ' ' + unidade) : '';
 }
 
-function quitarEmprestimo(id) {
+async function quitarEmprestimo(id) {
   /* Sistema de confirmação DUPLA:
      - Loja DESTINO (recebeu = credora) confirma que devolveu
      - Loja ORIGEM (enviou = devedora) confirma que recebeu de volta
@@ -5226,6 +5255,33 @@ function quitarEmprestimo(id) {
     });
   });
 
+  const outraLoja = isOrigem ? found.destino : found.origem;
+  render(); // feedback imediato (otimista) — o resto segue em segundo plano
+
+  // Buscar o estado mais recente da OUTRA loja na nuvem antes de decidir se as duas
+  // confirmaram — sem isso, uma confirmação já feita minutos antes do outro lado (que este
+  // aparelho ainda não tinha "puxado") nunca era percebida aqui, e o empréstimo ficava preso
+  // "aguardando confirmação" pra sempre mesmo com as duas pontas já confirmadas de verdade.
+  try {
+    const freshOutro = await _fetchAllDataAtual(outraLoja);
+    let remoto = null;
+    Object.values(freshOutro.transferAll || {}).forEach(lista => {
+      (lista||[]).forEach(x => { if (x && x.id === id) remoto = x; });
+    });
+    if (remoto) {
+      const remotoOk = isOrigem ? !!remoto.confirmadoDestino : !!remoto.confirmadoOrigem;
+      if (remotoOk) {
+        Object.values(transferAll).forEach(lista => {
+          (lista||[]).forEach(t => {
+            if (t.id !== id) return;
+            if (isOrigem) t.confirmadoDestino = true;
+            else          t.confirmadoOrigem  = true;
+          });
+        });
+      }
+    }
+  } catch(_) { /* offline — segue só com o que já se sabia localmente */ }
+
   const ambosConfirmaram = found.confirmadoDestino && found.confirmadoOrigem;
 
   if (ambosConfirmaram) {
@@ -5248,7 +5304,6 @@ function quitarEmprestimo(id) {
   } else {
     // Só um confirmou — salvar e empurrar para o outro
     autoSave();
-    const outraLoja = isOrigem ? found.destino : found.origem;
     sbPushLoja(outraLoja).then(() => {
       const msg = isDestino
         ? "✅ Você confirmou a devolução. Aguardando " + found.origem + " confirmar que recebeu."
