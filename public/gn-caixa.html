@@ -2529,6 +2529,24 @@ async function _carregarHistoricoMes() {
       conferencias = lojaRow?.[0]?.all_data?.caixa_conferencias || {};
     } catch(_) {}
 
+    // Fechamento (soma de todas as bandeiras/comprovantes) e Dinheiro (só a bandeira
+    // "Dinheiro") separados por fechamento_id, além das despesas do turno — pra o card
+    // mostrar mais que só o Valor Encontrado (que sozinho não dizia se era o total do
+    // turno, quanto disso era espécie, ou quanto foi gasto em despesas).
+    let fechamentoPorFech = {}, dinheiroPorFech = {}, despesaPorFech = {};
+    try {
+      const ids = rows.map(f => f.id).join(',');
+      const [comprovantes, despesas] = await Promise.all([
+        sb(`gn_caixa_comprovante?fechamento_id=in.(${ids})&select=fechamento_id,bandeira,valor`),
+        sb(`gn_caixa_despesa?fechamento_id=in.(${ids})&select=fechamento_id,valor`)
+      ]);
+      (comprovantes || []).forEach(c => {
+        fechamentoPorFech[c.fechamento_id] = (fechamentoPorFech[c.fechamento_id] || 0) + Number(c.valor || 0);
+        if (c.bandeira === 'Dinheiro') dinheiroPorFech[c.fechamento_id] = (dinheiroPorFech[c.fechamento_id] || 0) + Number(c.valor || 0);
+      });
+      (despesas || []).forEach(d => { despesaPorFech[d.fechamento_id] = (despesaPorFech[d.fechamento_id] || 0) + Number(d.valor || 0); });
+    } catch(_) {}
+
     const fechados = rows.filter(f => f.status === 'FECHADO');
     const totalMes = fechados.reduce((s,f) => s + (parseFloat(f.total_real)||0), 0);
     const resumoMes = `<div style="background:var(--graf3);border:1px solid var(--linha);border-radius:10px;padding:12px 14px;margin-bottom:12px">
@@ -2544,7 +2562,6 @@ async function _carregarHistoricoMes() {
       const chip = f.turno === 'DIA' ? '<span class="chip dia">DIA</span>' : '<span class="chip noite">NOITE</span>';
       const sts = f.status === 'FECHADO' ? '<span class="hist-sts hs-ok">FECHADO</span>' : '<span class="hist-sts hs-warn">ABERTO</span>';
       const aprov = f.aprovado_por ? `<div style="color:var(--ok);font-size:10px;margin-top:2px">✓ ${f.aprovado_por}</div>` : '';
-      const real = f.total_real != null ? money(f.total_real) : '—';
       const conf = conferencias[f.id];
       const confBadge = conf
         ? (conf.tem_divergencia
@@ -2553,12 +2570,41 @@ async function _carregarHistoricoMes() {
             : '<div style="font-size:10px;color:#DC2626;font-weight:700;margin-top:2px">🚨 Divergência</div>')
           : '<div style="font-size:10px;color:#16A34A;font-weight:700;margin-top:2px">✅ Conferido</div>')
         : '';
-      return `<div class="hist-item">
-        <div>
-          <div style="font-size:14px;font-weight:bold">${data} ${chip}</div>
-          <div class="hi-meta">${f.operador||'—'}${f.gerente ? ' · ' + f.gerente : ''}</div>
+
+      const fechamentoVal = fechamentoPorFech[f.id] || 0;
+      const dinheiroVal = dinheiroPorFech[f.id] || 0;
+      const despesaVal = despesaPorFech[f.id] || 0;
+      const resumo = `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:6px;padding-top:6px;border-top:1px solid var(--linha)">
+        <div><div style="font-size:9px;color:var(--mut)">Fechamento</div><div style="font-size:11px;font-weight:700;color:var(--ouro)">${money(fechamentoVal)}</div></div>
+        <div><div style="font-size:9px;color:var(--mut)">Dinheiro</div><div style="font-size:11px;font-weight:700;color:var(--txt)">${money(dinheiroVal)}</div></div>
+        <div><div style="font-size:9px;color:var(--mut)">Despesas</div><div style="font-size:11px;font-weight:700;color:var(--erro)">${money(despesaVal)}</div></div>
+      </div>`;
+
+      // Positivo (sobra) / negativo (falta) = Valor Encontrado (dinheiro contado no fim
+      // do turno) menos o Total do Sistema (o que o sistema esperava ter em caixa) —
+      // mesma diferença já calculada ao vivo no fechamento (calcDif()).
+      const realN = f.total_real != null ? parseFloat(f.total_real) : null;
+      const sistemaN = f.total_sistema != null ? parseFloat(f.total_sistema) : null;
+      const dif = (realN != null && sistemaN != null) ? Math.round((realN - sistemaN) * 100) / 100 : null;
+      let difBadge = '';
+      if (dif != null) {
+        if (Math.abs(dif) < 0.01) difBadge = `<div style="font-size:10px;color:var(--mut);margin-top:2px">= Bateu certinho (${money(realN)})</div>`;
+        else if (dif > 0) difBadge = `<div style="font-size:10px;color:#16A34A;font-weight:700;margin-top:2px">🔺 Positivo: +${money(dif)} (${money(realN)})</div>`;
+        else difBadge = `<div style="font-size:10px;color:#DC2626;font-weight:700;margin-top:2px">🔻 Negativo: ${money(dif)} (${money(realN)})</div>`;
+      } else if (realN != null) {
+        difBadge = `<div style="font-size:10px;color:var(--mut);margin-top:2px">Valor encontrado: ${money(realN)}</div>`;
+      }
+
+      return `<div class="hist-item" style="flex-direction:column;align-items:stretch">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start">
+          <div>
+            <div style="font-size:14px;font-weight:bold">${data} ${chip}</div>
+            <div class="hi-meta">${f.operador||'—'}${f.gerente ? ' · ' + f.gerente : ''}</div>
+          </div>
+          <div class="hi-right">${sts}${aprov}${confBadge}</div>
         </div>
-        <div class="hi-right">${sts}<div class="hi-val">${real}</div>${aprov}${confBadge}</div>
+        ${difBadge}
+        ${resumo}
       </div>`;
     }).join('');
     el.innerHTML = resumoMes + lista;
