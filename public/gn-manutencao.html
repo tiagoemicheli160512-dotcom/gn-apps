@@ -589,6 +589,13 @@ async function carregarDados(){
     let url=`checklist_diario?select=data_operacao,loja,manutencao&data_operacao=gte.${from}&order=data_operacao.desc`;
     if(!isMaster() && S.usuario?.loja) url+=`&loja=eq.${encodeURIComponent(S.usuario.loja)}`;
     const [rows, ofItems] = await Promise.all([sb(url), _carregarOfItems()]);
+
+    // Retrato "de hoje" de cada loja — rows vem em desc, então a primeira ocorrência de
+    // cada loja já é a mais recente. É exatamente a mesma lista que o Check-list mostra
+    // (a lista do dia já reflete o carry-over: item resolvido some, item novo aparece).
+    const _ultimaDataPorLoja={};
+    for(const row of rows){ if(!_ultimaDataPorLoja[row.loja]) _ultimaDataPorLoja[row.loja]=row.data_operacao; }
+
     const itensRaw=[];
     for(const row of rows){
       if(!Array.isArray(row.manutencao)||!row.manutencao.length) continue;
@@ -596,19 +603,25 @@ async function carregarDados(){
         itensRaw.push({...m, _loja:row.loja, _data:row.data_operacao});
       }
     }
-    // Deduplica carry-over preservando data de registro original:
-    // rows estão em desc → primeiro hit = mais recente (status atual), último hit = mais antigo (data de registro)
-    const _newest=new Map(); // key → item mais recente (status correto)
-    const _oldest=new Map(); // key → item mais antigo (data original de registro)
+    // A lista de pendentes/resolvidos vem só do retrato mais recente de cada loja — igual
+    // ao Check-list. O histórico (até 90 dias) só serve pra achar a data de registro
+    // original de quem ainda está na lista de hoje — sem essa restrição, um item que sumiu
+    // da lista de hoje sem nunca ter sido marcado "Resolvido" (ex.: reescrito com um texto
+    // um pouco diferente no dia seguinte) ficava "ressuscitado" pra sempre aqui como
+    // pendente, mesmo já não aparecendo mais no Check-list da loja — causando divergência
+    // entre os dois apps.
+    const _oldest=new Map(); // key → item mais antigo (data original de registro), no histórico todo
     for(const m of itensRaw){
       const k=`${m._loja}|${m.setor}|${m.tipo}|${(m.descricao||'').trim().toLowerCase()}`;
-      if(!_newest.has(k)) _newest.set(k,m);   // primeiro encontrado = mais recente
-      _oldest.set(k,m);                         // continuamente sobrescrito → ao fim = mais antigo
+      _oldest.set(k,m); // desc → sobrescrito continuamente → ao fim fica o mais antigo
     }
-    const itens=[..._newest.entries()].map(([k,newest])=>{
-      const oldest=_oldest.get(k);
-      return {...newest, _data:oldest._data, _dataUltima:newest._data};
-    });
+    const itens=itensRaw
+      .filter(m=>m._data===_ultimaDataPorLoja[m._loja])
+      .map(m=>{
+        const k=`${m._loja}|${m.setor}|${m.tipo}|${(m.descricao||'').trim().toLowerCase()}`;
+        const oldest=_oldest.get(k);
+        return {...m, _data:oldest?oldest._data:m._data, _dataUltima:m._data};
+      });
     verificarNovos(itens);
     S.itens=[...itens, ...ofItems];
     const tot=S.itens.length, pend=S.itens.filter(m=>m.status!=='Resolvido').length;
