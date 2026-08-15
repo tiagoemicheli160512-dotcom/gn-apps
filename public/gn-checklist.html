@@ -8642,7 +8642,11 @@ async function loadVisitasCalendario(){
   if(!wrap) return;
   wrap.innerHTML = '<div style="text-align:center;padding:30px;color:var(--t3);font-size:12px;">Carregando...</div>';
   const [ano, mes] = _visitasCalMes.split('-').map(Number);
-  const inicio = `${_visitasCalMes}-01`;
+  // Busca também os 7 dias antes do início do mês (a "última semana do mês anterior"),
+  // pra o resumo por loja mostrar visitas recentes que caíram no mês passado sem
+  // precisar trocar de mês.
+  const inicioBusca = new Date(ano, mes-1, 1); inicioBusca.setDate(inicioBusca.getDate()-7);
+  const inicio = inicioBusca.toISOString().split('T')[0];
   const ultimoDia = new Date(ano, mes, 0).getDate();
   const fim = `${_visitasCalMes}-${String(ultimoDia).padStart(2,'0')}`;
   const { data } = await sb.from('gn_chk_visitas')
@@ -8665,11 +8669,25 @@ function renderVisitasCalendario(){
   const porData = {};
   _visitasCalData.forEach(v => { if(!porData[v.data]) porData[v.data]=[]; porData[v.data].push(v); });
 
-  // Totais por loja (só visitas reais, sem planos)
-  const porLoja = {};
-  _visitasCalData.filter(v=>v.loja!=='FOLGA'&&v.loja!=='FÉRIAS'&&v.hora_chegada!=='PLAN').forEach(v => { porLoja[v.loja]=(porLoja[v.loja]||0)+1; });
+  // Datas de visita/plano por loja, no período todo buscado (mês + última semana do mês
+  // anterior) — alimenta o card por loja abaixo, com as datas reais e a contagem, pra dar
+  // pra ver de uma vez a frequência de cada loja (e quem está ficando pra trás).
+  const datasPorLoja = {};
+  _visitasCalData.forEach(v => {
+    if(v.loja==='FOLGA'||v.loja==='FÉRIAS') return;
+    if(!datasPorLoja[v.loja]) datasPorLoja[v.loja]=[];
+    datasPorLoja[v.loja].push({data:v.data, real:v.hora_chegada!=='PLAN'});
+  });
+  Object.values(datasPorLoja).forEach(arr=>arr.sort((a,b)=>a.data.localeCompare(b.data)));
   const nFolga  = _visitasCalData.filter(v=>v.loja==='FOLGA').length;
   const nFerias = _visitasCalData.filter(v=>v.loja==='FÉRIAS').length;
+  // Período coberto pelo resumo (mês selecionado + os 7 dias anteriores) — usado só pro
+  // rótulo e pra estimar "~N semanas" na contagem de cada loja.
+  const _rangeIniDate = new Date(ano, mes-1, 1); _rangeIniDate.setDate(_rangeIniDate.getDate()-7);
+  const rangeIniStr = _rangeIniDate.toISOString().split('T')[0];
+  const rangeFimStr = `${_visitasCalMes}-${String(ultimoDia).padStart(2,'0')}`;
+  const fmtDDMM = s => s.split('-').slice(1).reverse().join('/');
+  const totalSemanas = Math.round(((new Date(rangeFimStr+'T12:00:00') - _rangeIniDate)/86400000 + 1)/7);
 
   // Cabeçalho de navegação
   let html = `
@@ -8722,27 +8740,35 @@ function renderVisitasCalendario(){
   }
   html += `</div>`;
 
-  // Resumo por loja
-  const temResumo = Object.keys(porLoja).length > 0 || nFolga > 0 || nFerias > 0;
-  if(temResumo){
-    const ausenciaPills = [
-      ...(nFolga  ? [`<div style="background:rgba(6,182,212,.15);border:1px solid rgba(6,182,212,.4);border-radius:8px;padding:6px 10px;display:flex;align-items:center;gap:6px;"><span style="font-size:13px;">🌴</span><span style="font-size:11px;font-weight:700;color:#1A1D23;">Folga</span><span style="font-size:11px;color:var(--t3);">${nFolga} dia${nFolga>1?'s':''}</span></div>`] : []),
-      ...(nFerias ? [`<div style="background:rgba(14,165,233,.15);border:1px solid rgba(14,165,233,.4);border-radius:8px;padding:6px 10px;display:flex;align-items:center;gap:6px;"><span style="font-size:13px;">✈️</span><span style="font-size:11px;font-weight:700;color:#1A1D23;">Férias</span><span style="font-size:11px;color:var(--t3);">${nFerias} dia${nFerias>1?'s':''}</span></div>`] : []),
-    ].join('');
-    html += `<div style="margin-top:14px;border-top:1px solid var(--b2);padding-top:12px;">
-      <div style="font-size:11px;font-weight:700;color:var(--t2);margin-bottom:8px;">Resumo do mês</div>
-      <div style="display:flex;flex-wrap:wrap;gap:6px;">
-        ${Object.entries(porLoja).sort((a,b)=>b[1]-a[1]).map(([l,n])=>`<div style="background:${_lojaColor(l)}22;border:1px solid ${_lojaColor(l)}66;border-radius:8px;padding:6px 10px;display:flex;align-items:center;gap:6px;">
+  // Resumo por loja — um card por loja com as datas de visita/plano no período (mês +
+  // última semana do mês anterior), pra dar pra ver de uma vez quem já foi visitado, com
+  // que frequência, e quem ainda está zerado.
+  const ausenciaPills = [
+    ...(nFolga  ? [`<div style="background:rgba(6,182,212,.15);border:1px solid rgba(6,182,212,.4);border-radius:8px;padding:6px 10px;display:flex;align-items:center;gap:6px;"><span style="font-size:13px;">🌴</span><span style="font-size:11px;font-weight:700;color:#1A1D23;">Folga</span><span style="font-size:11px;color:var(--t3);">${nFolga} dia${nFolga>1?'s':''}</span></div>`] : []),
+    ...(nFerias ? [`<div style="background:rgba(14,165,233,.15);border:1px solid rgba(14,165,233,.4);border-radius:8px;padding:6px 10px;display:flex;align-items:center;gap:6px;"><span style="font-size:13px;">✈️</span><span style="font-size:11px;font-weight:700;color:#1A1D23;">Férias</span><span style="font-size:11px;color:var(--t3);">${nFerias} dia${nFerias>1?'s':''}</span></div>`] : []),
+  ].join('');
+  const lojasOrdenadas = Object.keys(LOJA_MAP).sort((a,b)=>(datasPorLoja[b]?.length||0)-(datasPorLoja[a]?.length||0));
+  const cardsLojaHtml = lojasOrdenadas.map(l=>{
+    const datas = datasPorLoja[l]||[];
+    const n = datas.length;
+    const chips = datas.map(dv=>`<span style="font-size:9px;background:${_lojaColor(l)}22;border:1px solid ${_lojaColor(l)}44;border-radius:5px;padding:2px 6px;color:var(--t1);font-weight:700;white-space:nowrap;">${fmtDDMM(dv.data)}${dv.real?'':' 📅'}</span>`).join('');
+    return `<div style="background:var(--s2);border:1px solid ${n?_lojaColor(l)+'44':'var(--b2)'};border-radius:10px;padding:8px 10px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+        <div style="display:flex;align-items:center;gap:6px;min-width:0;">
           <div style="width:8px;height:8px;border-radius:50%;background:${_lojaColor(l)};flex-shrink:0;"></div>
-          <span style="font-size:11px;font-weight:700;color:var(--t1);">${l}</span>
-          <span style="font-size:11px;color:var(--t3);">${n} visita${n>1?'s':''}</span>
-        </div>`).join('')}
-        ${ausenciaPills}
+          <span style="font-size:12px;font-weight:700;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${l}</span>
+        </div>
+        <span style="font-size:11px;font-weight:800;color:${n?_lojaColor(l):'var(--t3)'};flex-shrink:0;white-space:nowrap;">${n} visita${n!==1?'s':''} / ~${totalSemanas} sem.</span>
       </div>
+      ${n ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;">${chips}</div>` : `<div style="font-size:10px;color:var(--t3);margin-top:4px;">Sem visita nesse período.</div>`}
     </div>`;
-  } else {
-    html += `<div style="text-align:center;padding:20px;color:var(--t3);font-size:12px;">Nenhuma visita neste mês</div>`;
-  }
+  }).join('');
+  html += `<div style="margin-top:14px;border-top:1px solid var(--b2);padding-top:12px;">
+    <div style="font-size:11px;font-weight:700;color:var(--t2);margin-bottom:2px;">Visitas por loja</div>
+    <div style="font-size:9px;color:var(--t3);margin-bottom:8px;">${fmtDDMM(rangeIniStr)} → ${fmtDDMM(rangeFimStr)} (~${totalSemanas} semanas)</div>
+    <div style="display:flex;flex-direction:column;gap:6px;">${cardsLojaHtml}</div>
+    ${ausenciaPills ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">${ausenciaPills}</div>` : ''}
+  </div>`;
 
   // Detalhe do dia selecionado
   html += `<div id="visitas-cal-detalhe" style="margin-top:10px;"></div>`;
