@@ -9532,16 +9532,64 @@ function _saudacaoHorario(){
   return h < 12 ? 'Bom dia' : h < 18 ? 'Boa tarde' : 'Boa noite';
 }
 
-function imprimirRelatorioVisitas(){
+// Consulta em lote o checklist_diario das lojas/dias com visita real no período (uma
+// única query com .in(), em vez de uma por visita), pra alimentar o resumo de
+// Supervisão/Auditoria de Padrão/Manutenção nos relatórios de Visitas (PDF e WhatsApp).
+async function _carregarChecklistParaVisitas(reais){
+  if(!reais.length) return {};
+  const lojas = [...new Set(reais.map(v=>LOJA_MAP[v.loja]||v.loja.toUpperCase()))];
+  const datas = [...new Set(reais.map(v=>v.data))];
+  const { data } = await sb.from('checklist_diario')
+    .select('loja,data_operacao,supervisao,auditorias_padrao,manutencao')
+    .in('loja', lojas).in('data_operacao', datas);
+  const map = {};
+  (data||[]).forEach(r=>{ map[r.loja+'|'+r.data_operacao] = r; });
+  return map;
+}
+
+// Linhas curtas (texto puro) resumindo o que foi feito na loja naquele dia — usadas
+// tanto no PDF (uma por <br>) quanto no relatório de WhatsApp (uma por linha).
+function _visitaChecklistResumoLinhas(row){
+  if(!row) return [];
+  const linhas = [];
+  if(row.supervisao){
+    const nota = row.supervisao.nota ?? row.supervisao.notaFinal ?? null;
+    const supervisor = row.supervisao.supervisor || '';
+    if(nota !== null) linhas.push(`📋 Supervisão: ${Number(nota).toFixed(1)}/10${supervisor?' · '+supervisor:''}`);
+    else if(supervisor) linhas.push(`📋 Checklist realizado por ${supervisor}`);
+  }
+  if(row.auditorias_padrao){
+    const partes = AUDITORIA_PADRAO_TIPOS.map(t=>{
+      const calc = _audpCalcularDe(row.auditorias_padrao, t.key);
+      if(!calc.avaliados) return null;
+      return `${t.icon} ${t.label}: ${calc.nota!==null?calc.nota+'%':_audpStatusInfo(calc.status).emoji}`;
+    }).filter(Boolean);
+    if(partes.length) linhas.push('🔍 Auditoria — '+partes.join(' · '));
+  }
+  if(Array.isArray(row.manutencao)){
+    const pend = row.manutencao.filter(m=>!(m.status==='Resolvido'&&m.confirmado_loja));
+    if(pend.length) linhas.push(`🔧 ${pend.length} manutenção${pend.length>1?'ões':''} pendente${pend.length>1?'s':''}: `+pend.map(m=>m.tipo||'Estrutura').join(', '));
+  }
+  return linhas;
+}
+
+async function imprimirRelatorioVisitas(){
   const de = _visitasRelDe, ate = _visitasRelAte;
   const fmt = s => s?s.split('-').reverse().join('/'):'';
   const nome = usuarioLogado?.nome||'';
   const titulo=`Relatório de Visitas — ${_visitasRelTitulo(de, ate, _visitasRelPeriodo)}`;
 
+  // Abre a janela já aqui, ainda dentro do gesto de clique do usuário — se abrir só depois
+  // do await lá embaixo, vira uma chamada assíncrona "solta" e o navegador bloqueia como
+  // pop-up em vários casos.
+  const w=window.open('','_blank');
+  if(w) w.document.write('<p style="font-family:Arial,sans-serif;padding:24px;color:#555;">Gerando relatório…</p>');
+
   const reaisAll = _visitasRelData.filter(v=>v.loja!=='FOLGA'&&v.loja!=='FÉRIAS'&&v.hora_chegada!=='PLAN');
   const planosAll = _visitasRelData.filter(v=>v.hora_chegada==='PLAN');
   const lojasAll = [...new Set(reaisAll.map(v=>v.loja))].sort();
   let minsTot=0; reaisAll.forEach(v=>{ const m=_calcDuracaoMin(v.hora_chegada,v.hora_saida); if(m)minsTot+=m; });
+  const _ckMap = await _carregarChecklistParaVisitas(reaisAll);
 
   let rows='';
   let dataAtual='';
@@ -9560,10 +9608,14 @@ function imprimirRelatorioVisitas(){
     } else {
       const dur=_calcDuracaoMin(v.hora_chegada,v.hora_saida);
       rows+=`<tr><td>${v.loja}</td><td>${v.hora_chegada}</td><td>${v.hora_saida||'—'}</td><td>${dur?_fmtDuracao(dur):''}</td></tr>`;
+      const ckRow = _ckMap[(LOJA_MAP[v.loja]||v.loja.toUpperCase())+'|'+v.data];
+      const linhas = _visitaChecklistResumoLinhas(ckRow);
+      if(linhas.length) rows+=`<tr class="detail-row"><td colspan="4">${linhas.map(l=>escHtml(l)).join('<br>')}</td></tr>`;
     }
   });
 
-  const w=window.open('','_blank');
+  if(!w) { showToast('Não foi possível abrir a janela do relatório — verifique o bloqueador de pop-up','err'); return; }
+  w.document.open();
   w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${titulo}</title><style>
     body{font-family:Arial,sans-serif;padding:24px;color:#111;font-size:13px;}
     h1{font-size:16px;margin-bottom:4px;}
@@ -9576,6 +9628,7 @@ function imprimirRelatorioVisitas(){
     th{background:#f3f4f6;text-align:left;padding:6px 10px;font-size:11px;text-transform:uppercase;color:#555;}
     td{padding:6px 10px;border-bottom:1px solid #f0f0f0;font-size:12px;}
     tr.date-row td{font-weight:700;background:#f9fafb;color:#374151;font-size:11px;padding:4px 10px;}
+    tr.detail-row td{color:#555;font-size:11px;padding:2px 10px 8px 26px;border-bottom:1px solid #f0f0f0;line-height:1.6;}
     @media print{body{padding:0;}}
   </style></head><body>
     <h1>${titulo}</h1>
@@ -9592,7 +9645,7 @@ function imprimirRelatorioVisitas(){
   w.document.close();
 }
 
-function exportarVisitasWpp(){
+async function exportarVisitasWpp(){
   if(!_visitasRelData.length){ showToast('Sem dados para exportar','err'); return; }
   const de = _visitasRelDe, ate = _visitasRelAte;
   const fmt = s => s ? s.split('-').reverse().join('/') : '';
@@ -9600,6 +9653,7 @@ function exportarVisitasWpp(){
 
   // KPIs
   const reaisAll = _visitasRelData.filter(v=>v.loja!=='FOLGA'&&v.loja!=='FÉRIAS'&&v.hora_chegada!=='PLAN');
+  const _ckMap = await _carregarChecklistParaVisitas(reaisAll);
   const planosAll = _visitasRelData.filter(v=>v.hora_chegada==='PLAN');
   const lojasVisitadas = [...new Set(reaisAll.map(v=>v.loja))].sort();
   let totalMins=0; reaisAll.forEach(v=>{ const m=_calcDuracaoMin(v.hora_chegada,v.hora_saida); if(m) totalMins+=m; });
@@ -9662,6 +9716,8 @@ function exportarVisitasWpp(){
       txt+=`  📍 ${v.loja} — ${v.hora_chegada} → ${v.hora_saida||'andamento'}${dur?' ('+_fmtDuracao(dur)+')':''} 🔒\n`;
       if(v.endereco) txt+=`     📌 ${v.endereco}\n`;
       if(v.obs) txt+=`     💬 ${v.obs}\n`;
+      const ckRow = _ckMap[(LOJA_MAP[v.loja]||v.loja.toUpperCase())+'|'+v.data];
+      _visitaChecklistResumoLinhas(ckRow).forEach(l=>{ txt+=`     ${l}\n`; });
     }
   });
 
