@@ -554,7 +554,14 @@ const CARNES_DEF_PED = [
 ];
 const DIAS_SEM_PED = ['seg','ter','qua','qui','sex','sab','dom'];
 
-const db = supabase.createClient(SUPA_URL, SUPA_KEY);
+// Timeout global (30s) em toda chamada feita via `db` — sem isso, uma instabilidade de
+// rede/gateway faz o fetch nunca resolver, travando "Verificando..."/"Salvando..." pra sempre.
+function _dbFetchComTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  return fetch(url, { ...options, signal: options.signal || controller.signal }).finally(() => clearTimeout(timeoutId));
+}
+const db = supabase.createClient(SUPA_URL, SUPA_KEY, { global: { fetch: _dbFetchComTimeout } });
 
 const GN_VAPID_PUBLIC = 'BJTEqdQLTZ1ix8DeXWwytbo1OjNfPc5Kt6RYgHq50dWq3T7514Pv3kb14Gce0MgcOx3ySRtddqtCC41TZyAsBVQ';
 
@@ -872,10 +879,17 @@ $('btn-entrar').onclick = async () => {
   $('btn-entrar').disabled = true;
   $('btn-entrar').textContent = 'Verificando...';
   try {
-    const res = await fetch(
-      `${SUPA_URL}/rest/v1/gn_usuarios?nome=eq.${encodeURIComponent(nome)}&senha=eq.${encodeURIComponent(senha)}&ativo=eq.true`,
-      { headers: { apikey: SUPA_KEY, Authorization: 'Bearer ' + SUPA_KEY } }
-    );
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    let res;
+    try {
+      res = await fetch(
+        `${SUPA_URL}/rest/v1/gn_usuarios?nome=eq.${encodeURIComponent(nome)}&senha=eq.${encodeURIComponent(senha)}&ativo=eq.true`,
+        { headers: { apikey: SUPA_KEY, Authorization: 'Bearer ' + SUPA_KEY }, signal: controller.signal }
+      );
+    } finally {
+      clearTimeout(timeoutId);
+    }
     const data = await res.json();
     if (!data || !data.length) {
       errEl.textContent = 'Usuário ou senha incorretos.';
@@ -894,7 +908,7 @@ $('btn-entrar').onclick = async () => {
     localStorage.setItem(SESSION_KEY, JSON.stringify(sess));
     await iniciarApp();
   } catch(e) {
-    errEl.textContent = '⚠️ Erro de conexão.';
+    errEl.textContent = e.name === 'AbortError' ? '⚠️ Tempo de conexão esgotado. Verifique sua internet e tente novamente.' : '⚠️ Erro de conexão.';
     errEl.classList.add('ativo');
     $('btn-entrar').disabled = false; $('btn-entrar').textContent = 'Entrar';
   }
