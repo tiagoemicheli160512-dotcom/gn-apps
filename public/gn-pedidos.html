@@ -137,6 +137,8 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .prod-est .val{font-family:'Consolas',monospace;color:var(--text);font-size:13px;font-weight:800;background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.4);border-radius:5px;padding:1px 7px}
 .prod-ulp{font-size:12px;color:var(--muted);font-weight:500}
 .prod-ulp .val{font-family:'Consolas',monospace;color:#1A1D23;font-size:13px;font-weight:700;background:rgba(147,197,253,.15);border:1px solid rgba(147,197,253,.35);border-radius:5px;padding:1px 7px}
+.prod-prov{font-size:12px;color:var(--muted);font-weight:500}
+.prod-prov .val{font-family:'Consolas',monospace;color:#1A1D23;font-size:13px;font-weight:700;background:rgba(167,139,250,.15);border:1px solid rgba(167,139,250,.4);border-radius:5px;padding:1px 7px}
 .prod-vig{font-size:12px;color:var(--muted);font-weight:500}
 .prod-vig .val{font-family:'Consolas',monospace;color:#1A1D23;font-size:13px;font-weight:800;background:rgba(16,185,129,.15);border:1px solid rgba(16,185,129,.35);border-radius:5px;padding:1px 7px}
 
@@ -287,7 +289,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .todos-prod-nome{font-size:13px;font-weight:500;flex:1}
 .todos-prod-custo{font-size:11px;white-space:nowrap;flex-shrink:0}
 .todos-lojas-grid{display:flex;flex-direction:column;gap:5px}
-.todos-loja-row{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid rgba(0,0,0,.04)}
+.todos-loja-row{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid rgba(0,0,0,.04);flex-wrap:wrap}
 .todos-loja-row:last-child{border-bottom:none}
 .todos-loja-row.diverg-ativo{background:rgba(239,68,68,.06);border-left:3px solid #ef4444;padding-left:5px}
 .todos-loja-nome{font-size:11px;font-weight:600;color:var(--muted);min-width:90px;flex-shrink:0}
@@ -295,6 +297,8 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .todos-loja-est .v{font-family:'Consolas',monospace;color:var(--text);font-size:12px;font-weight:700;background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.4);border-radius:4px;padding:1px 5px}
 .todos-loja-ulp{font-size:12px;color:var(--muted);min-width:60px;font-weight:500}
 .todos-loja-ulp .v{font-family:'Consolas',monospace;color:#1A1D23;font-size:12px;font-weight:700;background:rgba(147,197,253,.15);border:1px solid rgba(147,197,253,.35);border-radius:4px;padding:1px 5px}
+.todos-loja-prov{font-size:12px;color:var(--muted);min-width:60px;font-weight:500}
+.todos-loja-prov .v{font-family:'Consolas',monospace;color:#1A1D23;font-size:12px;font-weight:700;background:rgba(167,139,250,.15);border:1px solid rgba(167,139,250,.4);border-radius:4px;padding:1px 5px}
 .todos-loja-vig{font-size:12px;color:var(--muted);min-width:60px;font-weight:500}
 .todos-loja-vig .v{font-family:'Consolas',monospace;color:#1A1D23;font-size:12px;font-weight:700;background:rgba(16,185,129,.15);border:1px solid rgba(16,185,129,.35);border-radius:4px;padding:1px 5px}
 .todos-loja-total{font-size:11px;margin-left:auto;white-space:nowrap}
@@ -648,6 +652,7 @@ let S = {
   pedidoItens: {},     // { catalogoId: { lojaSlug: { id, qtd } } }
   contagens:   {},     // { catalogoId: { lojaSlug: { atual, ul_estoque, ul_pedido } } }
   ultimoPedido:{},     // { catalogoId: { lojaSlug: qtd } } — semana anterior
+  provisaoAnterior:{}, // { catalogoId: { lojaSlug: qtd } } — provisionado pelo Compras na semana anterior, independente de entrada de NF
   pedidosConfirmados:{},// { catalogoId: { lojaSlug: qtd } } — confirmados desta semana
   fornecedoresConfirmados: new Set(), // fornecedores do pedidoAtual já com provisões geradas
   // Fornecedores já confirmados nesta semana, mas liberados de novo pra uma 2ª rodada de
@@ -999,12 +1004,37 @@ async function confirmarDevolucaoPedidos(lojaKey, devId) {
   } catch(e) { toast('Erro: ' + (e.message || e), 'err'); }
 }
 
+// Prov.ant: o que o setor de Compras efetivamente provisionou pra cada loja na semana
+// anterior (gn_provisoes.qtd_prevista), independente de a loja já ter dado entrada da
+// nota — ao contrário do Ped.ant (ul_pedido), que só reflete entradas de NF já lançadas.
+// Exclui só CANCELADO (provisão desfeita, nunca chegou a ser enviada de fato); AGUARDANDO,
+// RECEBIDO_OK, DIVERGENCIA e DEVOLVIDO contam, porque o pedido foi de fato feito ao
+// fornecedor pra aquela loja, independente do desfecho na ponta.
+async function carregarProvisaoAnterior() {
+  const semAnt = new Date(S.semanaAtiva);
+  semAnt.setDate(semAnt.getDate() - 7);
+  const monday = semAnt.toISOString().split('T')[0];
+  const sunday = getSundayOfWeek(semAnt).toISOString().split('T')[0];
+  const data = await _fetchTodasPaginas(() => db.from('gn_provisoes')
+    .select('catalogo_id,loja_slug,qtd_prevista,status')
+    .gte('data_entrega', monday).lte('data_entrega', sunday)
+    .neq('status', 'CANCELADO')
+    .order('id'));
+  S.provisaoAnterior = {};
+  (data || []).forEach(p => {
+    if (!S.provisaoAnterior[p.catalogo_id]) S.provisaoAnterior[p.catalogo_id] = {};
+    const atual = S.provisaoAnterior[p.catalogo_id][p.loja_slug] || 0;
+    S.provisaoAnterior[p.catalogo_id][p.loja_slug] = atual + (parseFloat(p.qtd_prevista) || 0);
+  });
+}
+
 async function carregarPedidoAtual() {
   if (!S.semanaAtiva) S.semanaAtiva = getMondayOfWeek();
 
   const semIsoStr  = S.semanaAtiva.toISOString().split('T')[0];
   const mondayHoje = getMondayOfWeek();
   const ehSemAtual = S.semanaAtiva.toDateString() === mondayHoje.toDateString();
+  await carregarProvisaoAnterior();
 
   // Busca pedido da semana — prioriza CONFIRMADO/ENVIADO sobre RASCUNHO, ignora CANCELADO
   const { data } = await db.from('gn_pedidos')
@@ -2360,6 +2390,9 @@ function renderPedido() {
             ? `<span class="val">${fmtQtd(estAnt)}${estAntCxUndTxt}</span>` : dash;
           const ulPedDisp = contagem?.ul_pedido != null
             ? `<span class="val">${fmtQtd(contagem.ul_pedido)}</span>` : dash;
+          const provAntQtd = S.provisaoAnterior[prod.id]?.[lojaAtiva];
+          const provAntDisp = provAntQtd != null
+            ? `<span class="val">${fmtQtd(provAntQtd)}</span>` : dash;
           // Espelho do que a loja digitou em Cx/Und no app Lojas (Est. Atual) — exatamente
           // como foi digitado, não uma decomposição estimada. Some quando não existir
           // (contagem antiga, anterior a essa quebra) e cai pro total simples de sempre.
@@ -2396,6 +2429,7 @@ function renderPedido() {
                 ${prod.custo?`<span class="prod-custo num">R$${fmt(prod.custo)}</span>`:''}
                 <span class="prod-est">Est.ant: ${ulEstDisp}</span>
                 <span class="prod-ulp">Ped.ant: ${ulPedDisp}</span>
+                <span class="prod-prov" title="Provisionado pelo Compras na semana anterior, independente de entrada de nota">Prov.ant: ${provAntDisp}</span>
                 <span class="prod-vig">Est.vig: ${estVigDisp} ${contInfoBtn}${corrigirBtn}</span>
               </div>
             </div>
@@ -2460,6 +2494,8 @@ function renderPedido() {
               : '';
             const ulEstV = estAntL != null ? `<span class="v">${fmtQtd(estAntL)}${antCxUndTxtL}</span>` : dsh;
             const ulPedV = contagem?.ul_pedido  != null ? `<span class="v">${fmtQtd(contagem.ul_pedido)}</span>`  : dsh;
+            const provAntQtdL = S.provisaoAnterior[prod.id]?.[loja.slug_pedido];
+            const provAntVL = provAntQtdL != null ? `<span class="v">${fmtQtd(provAntQtdL)}</span>` : dsh;
             const vigCxUndTxtL = (estVigCxL != null || estVigUndL != null)
               ? _fmtEstVigBreakdown(estVigCxL, estVigUndL, prod.und) : '';
             // Sem contagem nenhuma essa semana mostra "0" em vez de traço — mesmo motivo
@@ -2485,6 +2521,7 @@ function renderPedido() {
               <span class="todos-loja-nome">${loja.nome_display}</span>
               <span class="todos-loja-est">Est.ant:${ulEstV}</span>
               <span class="todos-loja-ulp">Ped.ant:${ulPedV}</span>
+              <span class="todos-loja-prov" title="Provisionado pelo Compras na semana anterior, independente de entrada de nota">Prov.ant:${provAntVL}</span>
               <span class="todos-loja-vig">Est.vig:${vigV}${contInfoBtnL}${corrigirBtnL}</span>
               <div style="display:flex;align-items:center;gap:0">
                 ${qtyCtrlSmHtml}
