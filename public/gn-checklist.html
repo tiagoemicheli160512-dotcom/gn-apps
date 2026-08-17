@@ -8906,10 +8906,15 @@ async function mostrarDiaVisitas(data){
   // Visitas reais
   for(const v of reais){
     let supHtml = '';
+    let audHtml = '';
+    let manutHtml = '';
     try{
       const lojaKey = LOJA_MAP[v.loja] || v.loja.toUpperCase();
+      // A coluna certa é data_operacao — usar 'data' aqui nunca batia com nada e essa
+      // consulta sempre voltava vazia, por isso nada do que foi feito na loja (checklist,
+      // auditoria, manutenção) aparecia no relatório do dia da visita.
       const { data: cdRows } = await sb.from('checklist_diario')
-        .select('supervisao').eq('loja', lojaKey).eq('data', data).maybeSingle();
+        .select('supervisao,auditorias_padrao,manutencao').eq('loja', lojaKey).eq('data_operacao', data).maybeSingle();
       if(cdRows?.supervisao){
         const sup = cdRows.supervisao;
         const nota = sup.nota ?? sup.notaFinal ?? null;
@@ -8924,6 +8929,24 @@ async function mostrarDiaVisitas(data){
           supHtml = `<div style="font-size:10px;color:var(--t3);margin-top:4px;">📋 Checklist realizado por ${supervisor}</div>`;
         }
       }
+      if(cdRows?.auditorias_padrao){
+        const chips = AUDITORIA_PADRAO_TIPOS.map(t=>{
+          const calc = _audpCalcularDe(cdRows.auditorias_padrao, t.key);
+          if(!calc.avaliados) return '';
+          const info = _audpStatusInfo(calc.status);
+          return `<span style="display:inline-flex;align-items:center;gap:4px;background:${info.cor}22;border:1px solid ${info.cor}55;border-radius:6px;padding:3px 7px;font-size:10px;font-weight:700;color:${info.cor};margin:2px 4px 0 0;">${t.icon} ${t.label}${calc.nota!==null?': '+calc.nota+'%':' '+info.emoji}</span>`;
+        }).filter(Boolean).join('');
+        if(chips) audHtml = `<div style="margin-top:4px;">${chips}</div>`;
+      }
+      if(Array.isArray(cdRows?.manutencao)){
+        const pendentes = cdRows.manutencao.filter(m=>!(m.status==='Resolvido'&&m.confirmado_loja));
+        if(pendentes.length){
+          manutHtml = `<div style="margin-top:6px;background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.25);border-radius:8px;padding:6px 9px;">
+            <div style="font-size:10px;font-weight:700;color:#ef4444;margin-bottom:3px;">🔧 ${pendentes.length} manutenção${pendentes.length>1?'ões':''} pendente${pendentes.length>1?'s':''}</div>
+            ${pendentes.map(m=>`<div style="font-size:10px;color:var(--t2);">• ${escHtml(m.tipo||'Estrutura')}${m.setor?' · '+escHtml(m.setor):''}${m.descricao?' — '+escHtml(m.descricao):''}${m.status==='Em andamento'?' (em andamento)':''}</div>`).join('')}
+          </div>`;
+        }
+      }
     } catch(_){}
 
     html += `<div style="border-left:3px solid ${_lojaColor(v.loja)};padding:8px 10px;margin-bottom:8px;background:var(--s3);border-radius:0 8px 8px 0;">
@@ -8934,6 +8957,8 @@ async function mostrarDiaVisitas(data){
       <div style="font-size:11px;color:var(--t3);margin-top:2px;">📍 ${v.hora_chegada} → ${v.hora_saida||'em andamento'} 🚪</div>
       ${v.endereco?`<div style="font-size:10px;color:var(--t3);margin-top:2px;">📌 ${v.endereco}${_mapsLink(v.lat,v.lon)}</div>`:''}
       ${supHtml}
+      ${audHtml}
+      ${manutHtml}
       <div style="display:flex;gap:6px;margin-top:8px;">
         <input id="obs-vcal-${v.id}" type="text" value="${(v.obs||'').replace(/"/g,'&quot;')}" placeholder="Observação da visita…"
           style="flex:1;background:var(--s4);color:var(--t1);border:1px solid var(--b2);border-radius:8px;padding:6px 9px;font-size:11px;outline:none;font-family:inherit;">
@@ -10772,11 +10797,18 @@ function _audpEstado(tipoKey){
 }
 
 function _audpCalcular(tipoKey){
+  return _audpCalcularDe(state.auditoriasPadrao, tipoKey);
+}
+
+// Mesma lógica de _audpCalcular, mas a partir de um objeto auditorias_padrao qualquer
+// (ex.: de um checklist_diario de outra loja/dia carregado à parte) em vez de state —
+// usado pro resumo de auditoria no relatório do dia da visita (mostrarDiaVisitas).
+function _audpCalcularDe(auditoriasPadrao, tipoKey){
   const banco = AUDITORIA_PADRAO_TIPOS.find(t=>t.key===tipoKey);
-  const aud = _audpEstado(tipoKey);
+  const aud = (auditoriasPadrao && auditoriasPadrao[tipoKey]) || {itens:{}};
   let somaSim=0, somaTotal=0, reprovadaCritica=false, avaliados=0;
   banco.itens.forEach((item,idx)=>{
-    const r = aud.itens[idx]?.resp;
+    const r = (aud.itens||{})[idx]?.resp;
     if(!r || r==='NA') return;
     avaliados++;
     somaTotal += item.peso;
