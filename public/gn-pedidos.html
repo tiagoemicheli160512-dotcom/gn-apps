@@ -1284,15 +1284,77 @@ const CORRECAO_SETOR_PREFIX = '🏢 Compras: ';
 // Corrige o Est.vig (estoque vigente) direto pelo app Pedidos, sem precisar que a loja
 // reconte. Grava em gn_contagens_pedido marcado com CORRECAO_SETOR_PREFIX, pra a loja
 // ver no app Lojas que aquele valor foi ajustado pelo setor.
-async function corrigirEstVig(catalogoId, lojaSlug, nomeProduto) {
+// Corrigir Est.vig — mesma quebra Cx/Avulso(UN) do app Estoque e Pedido (aba Pedido):
+// produto cujo "und" no catálogo é CX ou BB entra em duas caixas (a loja conta em caixas
+// fechadas + avulso), os demais entram como um total único. Sem essa quebra, uma correção
+// feita aqui apagava o atual_cx/atual_und que a loja tinha lançado, e o Est.vig passava a
+// mostrar só o total, sem o "(1CX+7UN)" ao lado.
+function corrigirEstVig(catalogoId, lojaSlug, nomeProduto) {
+  const prod = S.catalogo.find(p => p.id === catalogoId);
+  const contagemAtual = S.contagens[catalogoId]?.[lojaSlug];
+  const isCaixa = prod && (prod.und === 'CX' || prod.und === 'BB');
+  const fator = prod && prod.und_por_caixa > 1 ? prod.und_por_caixa : null;
+
+  let corpoHtml;
+  if (isCaixa) {
+    let sugCx = contagemAtual?.atualCx, sugUnd = contagemAtual?.atualUnd;
+    if (sugCx == null && sugUnd == null && contagemAtual?.atual != null && fator) {
+      // Sem quebra salva ainda — decompõe o total pelo fator só como ponto de partida.
+      sugCx = Math.floor(contagemAtual.atual / fator);
+      sugUnd = contagemAtual.atual - sugCx * fator;
+    }
+    corpoHtml = `
+      <div class="modal-titulo">✏️ Corrigir Est.vig
+        <button class="modal-close" onclick="$('modal-bg').classList.remove('ativo')">×</button>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:12px">${esc(nomeProduto)}</div>
+      <div style="display:flex;gap:8px">
+        <div style="flex:1">
+          <label style="font-size:9px;color:var(--muted);font-weight:700;text-transform:uppercase">Est. Atual (${prod.und})</label>
+          <input id="corrigir-ev-cx" type="text" inputmode="decimal" class="form-input" value="${sugCx ?? ''}" placeholder="0">
+        </div>
+        <div style="flex:1">
+          <label style="font-size:9px;color:var(--muted);font-weight:700;text-transform:uppercase">+ Avulso (UN)</label>
+          <input id="corrigir-ev-und" type="text" inputmode="decimal" class="form-input" value="${sugUnd ?? ''}" placeholder="0">
+        </div>
+      </div>
+      <div class="modal-acoes">
+        <button class="btn-sm btn-outline" onclick="$('modal-bg').classList.remove('ativo')">Cancelar</button>
+        <button class="btn-sm btn-success" onclick="_salvarCorrecaoEstVig('${catalogoId}','${lojaSlug}',${fator||'null'})">✓ Salvar</button>
+      </div>`;
+  } else {
+    const sugestao = contagemAtual?.atual != null ? String(contagemAtual.atual) : '';
+    corpoHtml = `
+      <div class="modal-titulo">✏️ Corrigir Est.vig
+        <button class="modal-close" onclick="$('modal-bg').classList.remove('ativo')">×</button>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:12px">${esc(nomeProduto)}</div>
+      <label style="font-size:9px;color:var(--muted);font-weight:700;text-transform:uppercase">Est. Atual (${(prod&&prod.und)||'UN'})</label>
+      <input id="corrigir-ev-total" type="text" inputmode="decimal" class="form-input" value="${sugestao}" placeholder="0">
+      <div class="modal-acoes">
+        <button class="btn-sm btn-outline" onclick="$('modal-bg').classList.remove('ativo')">Cancelar</button>
+        <button class="btn-sm btn-success" onclick="_salvarCorrecaoEstVig('${catalogoId}','${lojaSlug}',null)">✓ Salvar</button>
+      </div>`;
+  }
+  abrirModal(corpoHtml);
+}
+
+async function _salvarCorrecaoEstVig(catalogoId, lojaSlug, fator) {
   const contagemAtual = S.contagens[catalogoId]?.[lojaSlug];
   const { monISO, sunISO } = _semanaAtivaBounds();
   const { estAnt } = _estAntVigEfetivo(contagemAtual, monISO, sunISO);
-  const sugestao = contagemAtual?.atual != null ? String(contagemAtual.atual) : '';
-  const resp = prompt(`Corrigir Est.vig de "${nomeProduto}":`, sugestao);
-  if (resp === null) return;
-  const novoValor = parseFloat(resp.replace(',', '.'));
-  if (isNaN(novoValor) || novoValor < 0) { toast('⚠️ Informe um valor válido.', 'err'); return; }
+
+  let novoValor, atualCx = null, atualUnd = null;
+  if (fator) {
+    const cx = parseFloat(($('corrigir-ev-cx').value || '0').replace(',', '.')) || 0;
+    const und = parseFloat(($('corrigir-ev-und').value || '0').replace(',', '.')) || 0;
+    if (cx < 0 || und < 0) { toast('⚠️ Informe valores válidos.', 'err'); return; }
+    novoValor = cx * fator + und;
+    atualCx = cx; atualUnd = und;
+  } else {
+    novoValor = parseFloat(($('corrigir-ev-total').value || '').replace(',', '.'));
+    if (isNaN(novoValor) || novoValor < 0) { toast('⚠️ Informe um valor válido.', 'err'); return; }
+  }
 
   const nome = (() => {
     try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null')?.nome || 'Compras'; }
@@ -1302,7 +1364,7 @@ async function corrigirEstVig(catalogoId, lojaSlug, nomeProduto) {
   const criadoPor = CORRECAO_SETOR_PREFIX + nome;
   const payload = {
     catalogo_id: catalogoId, loja_slug: lojaSlug,
-    atual: novoValor, data_contagem: hoje, criado_por: criadoPor
+    atual: novoValor, atual_cx: atualCx, atual_und: atualUnd, data_contagem: hoje, criado_por: criadoPor
   };
   // Preserva o Est.ant (não sobrescreve com null) — só a contagem "atual" está sendo corrigida.
   if (estAnt != null) payload.ul_estoque = estAnt;
@@ -1313,9 +1375,10 @@ async function corrigirEstVig(catalogoId, lojaSlug, nomeProduto) {
     if (!S.contagens[catalogoId]) S.contagens[catalogoId] = {};
     S.contagens[catalogoId][lojaSlug] = {
       ...(S.contagens[catalogoId][lojaSlug] || {}),
-      atual: novoValor, data_contagem: hoje, criado_por: criadoPor, criado_em: new Date().toISOString(),
+      atual: novoValor, atualCx, atualUnd, data_contagem: hoje, criado_por: criadoPor, criado_em: new Date().toISOString(),
       ul_estoque: payload.ul_estoque ?? (S.contagens[catalogoId][lojaSlug]?.ul_estoque ?? null)
     };
+    $('modal-bg').classList.remove('ativo');
     toast('✏️ Est.vig corrigido!');
     renderPedido();
   } catch(e) {
