@@ -298,6 +298,8 @@
 
   <div id="xml-mes-home-card"></div>
 
+  <div id="carnes-docs-home-card"></div>
+
   <div id="datas-especiais-home-card"></div>
 
   <div id="escala-dia-home-card"></div>
@@ -830,6 +832,151 @@ async function _confirmarXmlMesHome(comKey, mesRef) {
   }
 }
 
+// Card "Documentos & Carnes" — mesma info que já existe em gn-checklist.html (aba Dados
+// tem os documentos/licenças; aba Gestão tem o resumo de carnes), só que aqui aparece
+// resumida, fechada por padrão, direto na Home da loja. Maglia não usa a feature de
+// Carnes (mesma regra das abas Banda/Carnes do app Check-list), então esse card não
+// aparece pra ela.
+const CARNES_DEF_HOME = [
+  { key:'carne_sol',  label:'Carne de Sol', icon:'🥩', unit:'kg', rows:[
+    {key:'pronta',    label:'Pronta'}, {key:'in_natura', label:'In Natura'}, {key:'na_salga', label:'Na Salga'}
+  ]},
+  { key:'picanha',    label:'Picanha',      icon:'🥩', unit:'kg', rows:[
+    {key:'pronta',    label:'Pronta'}, {key:'in_natura', label:'In Natura'}, {key:'na_salga', label:'Na Salga'}
+  ]},
+  { key:'carne_seca', label:'Carne Seca',   icon:'🥩', unit:'kg', rows:[
+    {key:'pronta',    label:'Pronta'}, {key:'in_natura', label:'In Natura'}, {key:'na_salga', label:'Na Salga'}
+  ]},
+  { key:'camarao',    label:'Camarão',      icon:'🦐', unit:'kg', rows:[
+    {key:'cru',      label:'Cru'}, {key:'recheio',  label:'Recheio'}
+  ]}
+];
+const DIAS_SEMANA_HOME = ['seg','ter','qua','qui','sex','sab','dom'];
+
+let _carnesDocsHomeData = null;
+let _carnesDocsHomeExpanded = false;
+
+async function _renderCarnesDocsHome(mostrar, sess, isMasterAtivo) {
+  const el = document.getElementById('carnes-docs-home-card');
+  if (!el) return;
+  const loja = (isMasterAtivo && masterLoja) ? masterLoja : (sess && sess.loja);
+  if (!mostrar || !sess || !loja || loja === 'MAGLIA') { el.innerHTML = ''; _carnesDocsHomeData = null; return; }
+  const comKey = LOJA_COM_KEY[loja] || loja;
+  const chkKey = LOJA_DB_KEY[loja] || loja;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+
+  const hoje = new Date();
+  const hojeSemHora = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate());
+  const monday = new Date(hojeSemHora); monday.setDate(hojeSemHora.getDate() - ((hojeSemHora.getDay() + 6) % 7));
+  const prevMonday = new Date(monday); prevMonday.setDate(monday.getDate() - 7);
+  const prevSunday = new Date(prevMonday); prevSunday.setDate(prevMonday.getDate() + 6);
+  const fmtISO = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const prevMondayISO = fmtISO(prevMonday);
+
+  const [docsRows, carnesRows] = await Promise.all([
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent('DOCS_' + comKey)}&select=all_data`, H, 'carnesDocsHome:docs', []),
+    // Filtra por chkKey OU comKey — algumas lojas (herança de bug antigo já corrigido em
+    // outras telas) ainda têm semanas gravadas com o comKey em vez do chkKey em
+    // checklist_carnes.loja; sem os dois, o card mostraria "sem dados" mesmo quando a
+    // loja já preencheu Carnes naquela semana.
+    window.gnFetchJson(`${SB_URL}/rest/v1/checklist_carnes?loja=in.(${encodeURIComponent(chkKey)},${encodeURIComponent(comKey)})&semana_inicio=eq.${prevMondayISO}&select=carnes`, H, 'carnesDocsHome:carnes', []),
+  ]);
+
+  const docs = (docsRows[0] && docsRows[0].all_data && docsRows[0].all_data.docs) || [];
+  const docsAlerta = docs
+    .filter(d => d.venc)
+    .map(d => ({ ...d, dias: Math.round((new Date(d.venc + 'T00:00:00') - hojeSemHora) / 86400000) }))
+    .filter(d => d.dias <= 10)
+    .sort((a, b) => a.dias - b.dias);
+
+  const carnes = (carnesRows[0] && carnesRows[0].carnes) || {};
+  const carnesResumo = CARNES_DEF_HOME.map(carne => {
+    const data = carnes[carne.key] || {};
+    let totIni = 0, totFim = 0, temIni = false, temFim = false;
+    const iniParts = [], fimParts = [];
+    carne.rows.forEach(r => {
+      const rd = data[r.key] || {};
+      if ((rd.inicial ?? '') !== '') temIni = true;
+      if ((rd.contagem_final ?? '') !== '') temFim = true;
+      const ini = parseFloat(rd.inicial) || 0, fim = parseFloat(rd.contagem_final) || 0;
+      totIni += ini; totFim += fim;
+      if (ini > 0) iniParts.push(r.label + ' ' + ini.toFixed(1));
+      if (fim > 0) fimParts.push(r.label + ' ' + fim.toFixed(1));
+    });
+    const rawRow = carne.rows.find(r => r.key === 'in_natura' || r.key === 'cru') || carne.rows[0];
+    const rawRd = data[rawRow.key] || {};
+    const totEnt = DIAS_SEMANA_HOME.slice(1).reduce((a, d) => a + (parseFloat(rawRd['ent_' + d]) || 0), 0);
+    if (totIni === 0 && totEnt === 0 && totFim === 0) return null;
+    const totDisp = totIni + totEnt, venda = totDisp - totFim;
+    // Início/Contagem são obrigatórios pra fechar a semana — sinaliza quando faltam,
+    // mesmo já tendo compras lançadas (senão a "venda estimada" sai sem sentido).
+    const faltando = [];
+    if (!temIni) faltando.push('Início');
+    if (!temFim) faltando.push('Contagem');
+    return { ...carne, totIni, totFim, totEnt, iniParts, fimParts, venda, faltando };
+  }).filter(Boolean);
+
+  const nCarnesAtencao = carnesResumo.filter(c => c.faltando.length > 0).length;
+  _carnesDocsHomeData = { docsAlerta, carnesResumo, nCarnesAtencao, prevMonday, prevSunday };
+  _renderCarnesDocsHomeBody();
+}
+
+function _toggleCarnesDocsHome() {
+  _carnesDocsHomeExpanded = !_carnesDocsHomeExpanded;
+  _renderCarnesDocsHomeBody();
+}
+
+function _renderCarnesDocsHomeBody() {
+  const el = document.getElementById('carnes-docs-home-card');
+  const d = _carnesDocsHomeData;
+  if (!el || !d) return;
+  const fmtDDMM = dt => String(dt.getDate()).padStart(2, '0') + '/' + String(dt.getMonth() + 1).padStart(2, '0');
+  const nAlertas = d.docsAlerta.length + d.nCarnesAtencao;
+  const temAlerta = nAlertas > 0;
+  const cor = temAlerta ? '#ef4444' : '#22c55e';
+  const bg = temAlerta ? 'rgba(239,68,68,.08)' : 'rgba(34,197,94,.08)';
+  const bgB = temAlerta ? 'rgba(239,68,68,.2)' : 'rgba(34,197,94,.2)';
+  const resumoTxt = temAlerta
+    ? [d.docsAlerta.length ? `${d.docsAlerta.length} documento${d.docsAlerta.length > 1 ? 's' : ''} vencendo` : '', d.nCarnesAtencao ? `${d.nCarnesAtencao} carne${d.nCarnesAtencao > 1 ? 's' : ''} sem Início/Contagem` : ''].filter(Boolean).join(' · ')
+    : 'Tudo em dia';
+
+  const docsHtml = d.docsAlerta.length ? d.docsAlerta.map(doc => {
+    const txt = doc.dias < 0 ? `🔴 VENCIDO há ${Math.abs(doc.dias)}d` : doc.dias === 0 ? '🔴 VENCE HOJE' : `🟡 Vence em ${doc.dias}d`;
+    return `<div style="display:flex;justify-content:space-between;font-size:11px;padding:5px 0;border-bottom:1px solid rgba(0,0,0,.06)">
+      <span style="color:#1A1D23">${window.escapeHtml ? window.escapeHtml(doc.nome || '') : (doc.nome || '')}</span>
+      <span style="font-weight:700;color:${doc.dias <= 0 ? '#ef4444' : '#b45309'}">${txt}</span>
+    </div>`;
+  }).join('') : `<div style="font-size:11px;color:rgba(0,0,0,.4)">Nenhum documento vencendo nos próximos 10 dias.</div>`;
+
+  const carnesHtml = d.carnesResumo.length ? d.carnesResumo.map(c => {
+    const vCor = c.venda >= -0.05 ? '#16a34a' : '#dc2626';
+    return `<div style="background:rgba(0,0,0,.03);border-radius:8px;padding:9px 10px;margin-top:6px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <span style="font-size:11px;font-weight:700;color:#1A1D23">${c.icon} ${c.label}</span>
+        ${c.faltando.length ? `<span style="font-size:9px;font-weight:700;color:#ef4444">⚠️ sem ${c.faltando.join('/')}</span>` : ''}
+      </div>
+      <div style="font-size:10px;color:rgba(0,0,0,.55);font-family:Consolas,monospace">Início ${c.totIni.toFixed(1)} · +Compras ${c.totEnt.toFixed(1)} · −Contagem ${c.totFim.toFixed(1)}</div>
+      <div style="font-size:11px;font-weight:700;color:${vCor};margin-top:3px">= Venda estimada ${Math.abs(c.venda).toFixed(1)} ${c.unit}${c.venda < -0.05 ? ' ⚠' : ''}</div>
+    </div>`;
+  }).join('') : `<div style="font-size:11px;color:rgba(0,0,0,.4)">Sem dados de carnes na semana anterior.</div>`;
+
+  el.innerHTML = `<div style="background:${bg};border:1px solid ${bgB};border-left:3px solid ${cor};border-radius:14px;margin:0 16px 14px;overflow:hidden">
+    <div onclick="_toggleCarnesDocsHome()" style="padding:14px 16px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:10px">
+      <div style="min-width:0">
+        <div style="font-size:12px;font-weight:800;color:#1A1D23">📄🥩 Documentos &amp; Carnes (semana anterior)</div>
+        <div style="font-size:10px;color:rgba(0,0,0,.5);margin-top:2px">${resumoTxt}</div>
+      </div>
+      <div style="font-size:13px;color:rgba(0,0,0,.35);flex-shrink:0">${_carnesDocsHomeExpanded ? '▲' : '▼'}</div>
+    </div>
+    ${_carnesDocsHomeExpanded ? `<div style="padding:0 16px 16px">
+      <div style="font-size:10px;font-weight:700;color:rgba(0,0,0,.45);text-transform:uppercase;letter-spacing:.3px;margin-bottom:6px">Documentos e Licenças</div>
+      ${docsHtml}
+      <div style="font-size:10px;font-weight:700;color:rgba(0,0,0,.45);text-transform:uppercase;letter-spacing:.3px;margin-top:14px;margin-bottom:2px">Carnes — semana ${fmtDDMM(d.prevMonday)} a ${fmtDDMM(d.prevSunday)}</div>
+      ${carnesHtml}
+    </div>` : ''}
+  </div>`;
+}
+
 function _renderDatasEspeciaisHome(mostrar) {
   const el = document.getElementById('datas-especiais-home-card');
   if (!el) return;
@@ -1334,6 +1481,7 @@ function _refreshPermUI(sess) {
   _renderContagemSegundaHome(!isMaster || !!masterLoja);
   _renderDatasEspeciaisHome(!isMaster || !!masterLoja);
   _renderXmlMesHome(!isMaster || !!masterLoja, sess, isMaster);
+  _renderCarnesDocsHome(!isMaster || !!masterLoja, sess, isMaster);
   _renderEscalaDiaHome(!isMaster || !!masterLoja, sess, isMaster);
   _renderBotNav(sess, isMaster);
 }
@@ -1539,6 +1687,7 @@ function showHome(sess) {
   _renderContagemSegundaHome(!isMaster || !!masterLoja);
   _renderDatasEspeciaisHome(!isMaster || !!masterLoja);
   _renderXmlMesHome(!isMaster || !!masterLoja, sess, isMaster);
+  _renderCarnesDocsHome(!isMaster || !!masterLoja, sess, isMaster);
   _renderEscalaDiaHome(!isMaster || !!masterLoja, sess, isMaster);
 
   // Health chips: reset when switching lojas
