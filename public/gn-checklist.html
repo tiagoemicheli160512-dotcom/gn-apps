@@ -1930,7 +1930,7 @@
     <div style="font-size:14px;font-weight:700;">🏖 Férias dos Funcionários</div>
     <button class="btn-secondary" onclick="openRelModal('ferias')" style="font-size:10px;padding:5px 10px;">📄 Relatório</button>
   </div>
-  <div style="font-size:10px;color:#1A1D23;margin-bottom:10px;">Períodos cadastrados aqui marcam automaticamente "FÉRIAS" na Escala pra todas as semanas do intervalo.</div>
+  <div style="font-size:10px;color:#1A1D23;margin-bottom:10px;">Períodos cadastrados aqui marcam automaticamente "FÉRIAS" na Escala pra todas as semanas do intervalo. O período aquisitivo é obrigatório e o início do gozo é bloqueado se passar do prazo máximo (12 meses após o fim do aquisitivo).</div>
   <div id="ferias-container"></div>
 </div>
 
@@ -6054,17 +6054,42 @@ async function loadFeriasGeral(){
   renderFeriasStore();
 }
 
+// Prazo máximo pra início do gozo (regra CLT): 12 meses após o fim do período
+// aquisitivo. Passado esse prazo as férias ficam vencidas (dobro na rescisão).
+function _prazoMaxAquisitivoISO(aqFimISO){
+  if(!aqFimISO) return null;
+  const d=new Date(aqFimISO+'T12:00:00');
+  d.setFullYear(d.getFullYear()+1);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function _atualizarPrazoMaxFeriasChk(key){
+  const aqFim=document.getElementById('ferias-aq-fim-'+key)?.value;
+  const el=document.getElementById('ferias-prazo-'+key);
+  if(!el) return;
+  const prazo=_prazoMaxAquisitivoISO(aqFim);
+  el.textContent = prazo ? `Prazo máximo pra início do gozo: ${_fmtDataBRChk(prazo)}` : '';
+}
+
 async function salvarFeriasGeral(nome, setor){
   const key=_feriasFormKey(nome);
+  const aqIni=document.getElementById('ferias-aq-ini-'+key)?.value;
+  const aqFim=document.getElementById('ferias-aq-fim-'+key)?.value;
   const ini=document.getElementById('ferias-ini-'+key)?.value;
   const fim=document.getElementById('ferias-fim-'+key)?.value;
-  if(!ini || !fim){ showToast('Preencha início e fim.','error'); return; }
+  if(!aqIni || !aqFim){ showToast('Preencha o período aquisitivo (obrigatório).','error'); return; }
+  if(aqFim<aqIni){ showToast('Fim do período aquisitivo não pode ser antes do início.','error'); return; }
+  if(!ini || !fim){ showToast('Preencha início e fim das férias.','error'); return; }
   if(fim<ini){ showToast('Fim não pode ser antes do início.','error'); return; }
+  const prazoMax=_prazoMaxAquisitivoISO(aqFim);
+  if(prazoMax && ini>prazoMax){
+    showToast(`⚠️ Início das férias ultrapassa o prazo máximo (${_fmtDataBRChk(prazoMax)}) pra gozo deste período aquisitivo.`,'error');
+    return;
+  }
   feriasFormAberto=null;
   try{
     const allData=await fetchComissoesAllData(comissoesLojaKey());
     const lista=Array.isArray(allData.ferias_geral)?[...allData.ferias_geral]:[];
-    lista.push({ id:'fer_'+Date.now()+'_'+Math.random().toString(36).slice(2,6), nome, setor:setor||'', inicio:ini, fim, criadoEm:new Date().toISOString() });
+    lista.push({ id:'fer_'+Date.now()+'_'+Math.random().toString(36).slice(2,6), nome, setor:setor||'', inicio:ini, fim, aq_ini:aqIni, aq_fim:aqFim, criadoEm:new Date().toISOString() });
     allData.ferias_geral=lista;
     _aplicarFeriasNaEscala(allData, nome, ini, fim, true);
     await patchComissoesAllData(comissoesLojaKey(), allData);
@@ -6126,6 +6151,39 @@ function _barraMesesFeriasChk(periodos, ano){
 }
 function _fmtDataBRChk(iso){ if(!iso) return '—'; const [y,m,d]=iso.split('-'); return `${d}/${m}/${y}`; }
 
+const _MESES_FERIAS_CHK=['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+
+// Alertas de concentração: mais de 3 pessoas de férias no mesmo mês (loja toda),
+// ou mais de 2 pessoas do mesmo setor de férias no mesmo mês.
+function _alertasFeriasChk(periodos, ano){
+  const porMes={}, porMesSetor={};
+  periodos.forEach(p=>{
+    const nome=(p.nome||'').trim();
+    if(!nome) return;
+    _mesesCobertosFeriasChk(p,ano).forEach(m=>{
+      (porMes[m]=porMes[m]||new Set()).add(nome);
+      const setor=(p.setor||'').trim();
+      if(setor){
+        porMesSetor[m]=porMesSetor[m]||{};
+        (porMesSetor[m][setor]=porMesSetor[m][setor]||new Set()).add(nome);
+      }
+    });
+  });
+  const alertas=[];
+  Object.keys(porMes).forEach(mKey=>{
+    const m=Number(mKey), qtd=porMes[m].size;
+    if(qtd>3) alertas.push({mes:m, txt:`⚠️ ${_MESES_FERIAS_CHK[m]}: ${qtd} pessoas de férias no mesmo mês`});
+  });
+  Object.keys(porMesSetor).forEach(mKey=>{
+    const m=Number(mKey);
+    Object.keys(porMesSetor[m]).forEach(setor=>{
+      const qtd=porMesSetor[m][setor].size;
+      if(qtd>2) alertas.push({mes:m, txt:`⚠️ ${_MESES_FERIAS_CHK[m]} — ${setor}: ${qtd} pessoas do mesmo setor de férias`});
+    });
+  });
+  return alertas.sort((a,b)=>a.mes-b.mes);
+}
+
 function renderFeriasStore(){
   const container=document.getElementById('ferias-container');
   if(!container) return;
@@ -6145,29 +6203,55 @@ function renderFeriasStore(){
     return;
   }
   const lista=feriasGeralData||[];
+  const periodosAnoTodos=lista.filter(p=>_mesesCobertosFeriasChk(p,feriasAno).size>0);
+  const alertas=_alertasFeriasChk(periodosAnoTodos, feriasAno);
+  const alertasHtml=alertas.length ? `<div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.35);border-radius:10px;padding:10px 12px;margin-bottom:14px;display:flex;flex-direction:column;gap:5px">
+      ${alertas.map(a=>`<div style="font-size:11px;font-weight:700;color:#b91c1c">${a.txt}</div>`).join('')}
+    </div>` : '';
   const cards=funcs.map(f=>{
     const nome=f.nome.trim();
     const nomeEsc=nome.replace(/'/g,"\\'");
     const periodosTodos=lista.filter(p=>(p.nome||'').trim().toLowerCase()===nome.toLowerCase());
     const periodosAno=periodosTodos.filter(p=>_mesesCobertosFeriasChk(p,feriasAno).size>0).sort((a,b)=>a.inicio.localeCompare(b.inicio));
     const listaPeriodos=periodosAno.length
-      ? periodosAno.map(p=>`<div style="display:flex;align-items:center;justify-content:space-between;background:rgba(0,0,0,.03);border-radius:8px;padding:6px 10px;margin-top:4px">
-          <span style="font-size:11px;color:#1A1D23">${_fmtDataBRChk(p.inicio)} – ${_fmtDataBRChk(p.fim)}</span>
-          <button onclick="excluirFeriasGeral('${p.id}')" style="background:none;border:none;color:rgba(0,0,0,.3);font-size:14px;cursor:pointer;padding:0 4px">✕</button>
-        </div>`).join('')
+      ? periodosAno.map(p=>{
+          const prazoMax=p.aq_fim?_prazoMaxAquisitivoISO(p.aq_fim):null;
+          return `<div style="display:flex;align-items:center;justify-content:space-between;background:rgba(0,0,0,.03);border-radius:8px;padding:6px 10px;margin-top:4px">
+            <div>
+              <span style="font-size:11px;color:#1A1D23">${_fmtDataBRChk(p.inicio)} – ${_fmtDataBRChk(p.fim)}</span>
+              ${p.aq_ini&&p.aq_fim?`<div style="font-size:9px;color:#475569;margin-top:1px">Aquisitivo: ${_fmtDataBRChk(p.aq_ini)} – ${_fmtDataBRChk(p.aq_fim)}${prazoMax?` · prazo máx. ${_fmtDataBRChk(prazoMax)}`:''}</div>`:''}
+            </div>
+            <button onclick="excluirFeriasGeral('${p.id}')" style="background:none;border:none;color:rgba(0,0,0,.3);font-size:14px;cursor:pointer;padding:0 4px">✕</button>
+          </div>`;
+        }).join('')
       : `<div style="font-size:10px;color:#475569;margin-top:4px">Nenhuma férias em ${feriasAno}</div>`;
     const key=_feriasFormKey(nome);
-    const formHtml=feriasFormAberto===nome ? `<div style="display:flex;gap:6px;margin-top:8px;align-items:flex-end;flex-wrap:wrap">
-        <div>
-          <div style="font-size:9px;color:#1A1D23;margin-bottom:2px">Início</div>
-          <input type="date" id="ferias-ini-${key}" style="background:#EEF1F4;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#1A1D23;font-family:inherit">
+    const formHtml=feriasFormAberto===nome ? `<div style="margin-top:8px;padding:10px;background:rgba(0,0,0,.02);border:1px solid rgba(0,0,0,.08);border-radius:10px">
+        <div style="font-size:9px;font-weight:700;color:#1A1D23;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Período aquisitivo (obrigatório)</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px">
+          <div>
+            <div style="font-size:9px;color:#1A1D23;margin-bottom:2px">Aquisitivo início</div>
+            <input type="date" id="ferias-aq-ini-${key}" onchange="_atualizarPrazoMaxFeriasChk('${key}')" style="background:#EEF1F4;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#1A1D23;font-family:inherit">
+          </div>
+          <div>
+            <div style="font-size:9px;color:#1A1D23;margin-bottom:2px">Aquisitivo fim</div>
+            <input type="date" id="ferias-aq-fim-${key}" onchange="_atualizarPrazoMaxFeriasChk('${key}')" style="background:#EEF1F4;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#1A1D23;font-family:inherit">
+          </div>
         </div>
-        <div>
-          <div style="font-size:9px;color:#1A1D23;margin-bottom:2px">Fim</div>
-          <input type="date" id="ferias-fim-${key}" style="background:#EEF1F4;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#1A1D23;font-family:inherit">
+        <div id="ferias-prazo-${key}" style="font-size:10px;color:#475569;margin-bottom:10px"></div>
+        <div style="font-size:9px;font-weight:700;color:#1A1D23;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Período de gozo</div>
+        <div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap">
+          <div>
+            <div style="font-size:9px;color:#1A1D23;margin-bottom:2px">Início</div>
+            <input type="date" id="ferias-ini-${key}" style="background:#EEF1F4;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#1A1D23;font-family:inherit">
+          </div>
+          <div>
+            <div style="font-size:9px;color:#1A1D23;margin-bottom:2px">Fim</div>
+            <input type="date" id="ferias-fim-${key}" style="background:#EEF1F4;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#1A1D23;font-family:inherit">
+          </div>
+          <button onclick="salvarFeriasGeral('${nomeEsc}','${(f.setor||'').replace(/'/g,"\\'")}')" style="background:var(--gn-color,#E8580A);color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:11px;font-weight:800;cursor:pointer">Salvar</button>
+          <button onclick="fecharFormFerias()" style="background:rgba(0,0,0,.06);border:1px solid rgba(0,0,0,.1);color:#1A1D23;border-radius:8px;padding:7px 12px;font-size:11px;cursor:pointer">Cancelar</button>
         </div>
-        <button onclick="salvarFeriasGeral('${nomeEsc}','${(f.setor||'').replace(/'/g,"\\'")}')" style="background:var(--gn-color,#E8580A);color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:11px;font-weight:800;cursor:pointer">Salvar</button>
-        <button onclick="fecharFormFerias()" style="background:rgba(0,0,0,.06);border:1px solid rgba(0,0,0,.1);color:#1A1D23;border-radius:8px;padding:7px 12px;font-size:11px;cursor:pointer">Cancelar</button>
       </div>` : '';
     return `<div style="background:rgba(0,0,0,.02);border:1px solid rgba(0,0,0,.08);border-radius:12px;padding:12px 14px;margin-bottom:10px">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
@@ -6182,7 +6266,7 @@ function renderFeriasStore(){
       ${formHtml}
     </div>`;
   }).join('');
-  container.innerHTML=anoNav+cards;
+  container.innerHTML=anoNav+alertasHtml+cards;
 }
 
 function enviarFeriasIndividualWpp(nome){
@@ -6197,8 +6281,13 @@ function enviarFeriasIndividualWpp(nome){
 function buildRelatorioFerias(){
   let txt=`🏖 RELATÓRIO DE FÉRIAS\n🏪 GN ${lojaDisp(LOJA)}\n📆 Ano: ${feriasAno}\n\n`;
   const lista=(feriasGeralData||[]).filter(p=>_mesesCobertosFeriasChk(p,feriasAno).size>0).sort((a,b)=>a.inicio.localeCompare(b.inicio));
+  const alertas=_alertasFeriasChk(lista, feriasAno);
+  if(alertas.length){ txt+='ATENÇÃO:\n'; alertas.forEach(a=>{ txt+=`${a.txt}\n`; }); txt+='\n'; }
   if(!lista.length) return txt+'Nenhuma férias cadastrada neste ano.\n\n_GN Operações_';
-  lista.forEach(p=>{ txt+=`👤 ${p.nome}${p.setor?` (${p.setor})`:''}\n   ${_fmtDataBRChk(p.inicio)} – ${_fmtDataBRChk(p.fim)}\n`; });
+  lista.forEach(p=>{
+    txt+=`👤 ${p.nome}${p.setor?` (${p.setor})`:''}\n   ${_fmtDataBRChk(p.inicio)} – ${_fmtDataBRChk(p.fim)}\n`;
+    if(p.aq_ini && p.aq_fim) txt+=`   Aquisitivo: ${_fmtDataBRChk(p.aq_ini)} – ${_fmtDataBRChk(p.aq_fim)}\n`;
+  });
   txt+='\n_GN Operações_';
   return txt;
 }
