@@ -2677,6 +2677,17 @@ let usuarioLogado = null;
 let supDesbloqueado = false;
 let _supLockMode = 'access'; // 'access' | 'reabrir'
 let _supLockAlvo = 'salao'; // 'salao' | 'cozinha' | 'visitas' — o que o cadeado de senha está protegendo
+// Também precisam vir antes do init IIFE: renderAll() (chamado sincronamente por ele, tanto no
+// login quanto no boot de sessão salva) já chama renderCarnes(), que lê carneTabAtiva; e
+// applySemana() (chamado por setSemanaAtual(), também síncrono no boot) já chama
+// loadComissoesData(), que lê/zera escalaAllData logo na primeira linha. Com `let` declarado
+// mais abaixo (perto de onde são normalmente usados), essas leituras aconteciam antes da
+// declaração ser alcançada, derrubando renderAll()/loadComissoesData() com um ReferenceError
+// silencioso em praticamente todo carregamento do app.
+let carneTabAtiva = 'contagem';
+let escalaAllData = null; // cache do all_data para visão mensal
+const BANDA_CONSUMO_FRANQUIA = 150.00; // renderAll() -> renderBandaDia() -> _calcBanda() já lê no boot
+const BANDA_COUVERT_VALOR = 7.00;      // idem
 const CARGOS_VISITAS = ['supervisor','mestre']; // só esses cargos dão entrada/saída na aba Visitas
 // Cargos que podem desbloquear as abas de supervisão (Salão/Cozinha/Auditoria de Padrão) neste app.
 // Local ao check-list: inclui 'mestre' além do CARGOS_SUPERVISAO compartilhado (gn-lojas-config.js),
@@ -2767,6 +2778,80 @@ const DATAS_ESPECIAIS_BASE = [
 // nenhum relatório olha — foi exatamente o que aconteceu com a Norte Shopping e a São
 // Gonçalo em agosto/2026. Precisa vir antes do init() abaixo, que já usa no primeiro load.
 const ANY_TO_CHK = Object.fromEntries(GN_LOJAS.flatMap(l=>[[l.userKey,l.chkKey],[l.comKey,l.chkKey],[l.chkKey,l.chkKey]]));
+// Mapeamento nome display → chave Supabase. Também precisa vir antes do init IIFE: várias
+// rotinas de comissões chamadas sincronamente no boot (ex.: carregarFuncionariosGorjetas())
+// já leem LOJA_MAP.
+const LOJA_MAP = Object.fromEntries(GN_LOJAS.map(l=>[l.chkKey,l.userKey])); // fonte única: gn-lojas-config.js
+// Mapa de LOJA (checklist) → chave usada em gn_caixa_fechamento — mesmo shape do LOJA_MAP acima
+// (idem, precisa vir antes do init IIFE: carregarFuncionariosGorjetas() já lê no boot).
+const LOJA_TO_CAIXA = LOJA_MAP;
+
+// Definição dos setores de avaliação
+// peso: 1=normal, 2=dobrado, 3=triplo
+// critico: true = dispara alerta especial
+const SUP_SETORES = [
+  {
+    key:'visual', label:'Padrão Visual', icon:'👁', peso_setor:1,
+    itens:[
+      {key:'limpeza_geral',    label:'Limpeza geral do salão, piso, mesas e cadeiras', peso:1},
+      {key:'uniformes',        label:'Funcionários uniformizados, com crachá e cabelos presos', peso:1},
+      {key:'iluminacao',       label:'Iluminação completa — lâmpadas e fachada funcionando', peso:1},
+      {key:'organizacao',      label:'Organização e layout das mesas', peso:1},
+      {key:'banheiros',        label:'Higiene dos banheiros (papel, sabonete, odor)', peso:1},
+    ]
+  },
+  {
+    key:'operacao', label:'Operação', icon:'⚙️', peso_setor:1,
+    itens:[
+      {key:'mise_en_place',    label:'Mise en place das praças completa', peso:1},
+      {key:'equipamentos',     label:'Equipamentos funcionando (geladeiras, freezers, fritadeiras)', peso:1},
+      {key:'estoque_org',      label:'Estoque organizado — PVPS aplicado', peso:1},
+      {key:'camaras',          label:'Câmaras frias limpas, organizadas e temperatura registrada', peso:1},
+      {key:'etiquetas',        label:'Máquina de etiquetas funcionando com insumos', peso:1},
+    ]
+  },
+  {
+    key:'validade', label:'Segurança Alimentar e Validades', icon:'🔬', peso_setor:1,
+    critico_setor: true,
+    itens:[
+      {key:'val_cozinha',      label:'Validades em dia na cozinha — nenhum produto vencido', peso:3, critico:true, peso_label:'⚡ Peso 3×'},
+      {key:'val_estoque',      label:'Validades em dia no estoque — nenhum produto vencido', peso:3, critico:true, peso_label:'⚡ Peso 3×'},
+      {key:'val_copa',         label:'Validades em dia na copa/bar — bebidas e frutas', peso:3, critico:true, peso_label:'⚡ Peso 3×'},
+      {key:'val_salao',        label:'Validades em dia nos produtos expostos no salão', peso:2, critico:true, peso_label:'⚡ Peso 2×'},
+      {key:'higiene_pessoal',  label:'Higiene pessoal dos manipuladores de alimentos', peso:1},
+      {key:'temp_registradas', label:'Temperaturas dos equipamentos registradas no dia', peso:1},
+    ]
+  },
+  {
+    key:'atendimento', label:'Atendimento e Equipe', icon:'👥', peso_setor:1,
+    itens:[
+      {key:'postura',          label:'Postura e cordialidade da equipe com clientes', peso:1},
+      {key:'tempo_resposta',   label:'Tempo de resposta — pedidos entregues no prazo', peso:1},
+      {key:'conhecimento',     label:'Equipe conhece cardápio e promoções do dia', peso:1},
+      {key:'reservas',         label:'Reservas conferidas, mesas montadas e confirmadas', peso:1},
+    ]
+  },
+  {
+    key:'documentacao', label:'Documentação e Controles', icon:'📄', peso_setor:1,
+    itens:[
+      {key:'licenca',          label:'Licença de funcionamento — vigente e afixada', peso:2, critico:true, peso_label:'⚡ Peso 2×'},
+      {key:'bombeiro',         label:'Laudo do Corpo de Bombeiros — vigente', peso:2, critico:true, peso_label:'⚡ Peso 2×'},
+      {key:'dedetizacao',      label:'Certificado de dedetização — vigente', peso:2, critico:true, peso_label:'⚡ Peso 2×'},
+      {key:'coifa',            label:'Registro de limpeza da coifa — em dia', peso:2, peso_label:'⚡ Peso 2×'},
+      {key:'extintores',       label:'Extintores com validade em dia — quantidade e tipos corretos', peso:2, peso_label:'⚡ Peso 2×'},
+      {key:'relatorios',       label:'Relatórios diários e controles preenchidos corretamente', peso:1},
+    ]
+  },
+  {
+    key:'delivery_financeiro', label:'Delivery e Financeiro', icon:'🛵', peso_setor:1,
+    itens:[
+      {key:'plataformas',      label:'iFood e 99Food online e operacionais', peso:1},
+      {key:'embalagens',       label:'Estoque de embalagens suficiente para operação', peso:1},
+      {key:'maquinetas',       label:'Máquinas de cartão testadas e funcionando', peso:1},
+      {key:'boletos',          label:'Boletos em dia e lançados no sistema', peso:1},
+    ]
+  }
+];
 
 (async function init(){
   // 1) Bridge de sessionStorage (vem do home/Dashboard — mesmo mecanismo do estoque)
@@ -4713,9 +4798,6 @@ async function onDataChange(val){
 // FATURAMENTO
 // =============================================
 
-// Mapa de LOJA (checklist) → chave usada em gn_caixa_fechamento
-const LOJA_TO_CAIXA = Object.fromEntries(GN_LOJAS.map(l=>[l.chkKey,l.userKey])); // fonte única: gn-lojas-config.js
-
 async function carregarDinheiroCaixaDoApp(){
   const caixaLoja = LOJA_TO_CAIXA[LOJA];
   if(!caixaLoja || !state.data) return;
@@ -5392,7 +5474,6 @@ function updComissoeSetor(i,v){
 // ── ESCALA ─────────────────────────────────────────────────────
 let escalaModo              = 'semanal'; // 'diaria' | 'semanal' | 'mensal'
 let escalaDiaIdx            = null;      // 0‒6, dia selecionado no modo diário
-let escalaAllData           = null;      // cache do all_data para visão mensal
 let escalaFiltroSoPresentes = false;     // oculta folga e ausentes
 let _escalaRelPeriodo       = 'semanal'; // período ativo no modal de relatório
 
@@ -6415,7 +6496,6 @@ function updateSummary(){
 // =============================================
 // CARNES
 // =============================================
-let carneTabAtiva = 'contagem';
 let diaAtivoIdx = 1; // 0=seg,1=ter...6=dom — padrão terça
 let _carneInicialEditando = false;
 
@@ -7666,73 +7746,6 @@ function loadDayFromHistory(data){
 // =============================================
 // SUPERVISÃO
 // =============================================
-
-// Definição dos setores de avaliação
-// peso: 1=normal, 2=dobrado, 3=triplo
-// critico: true = dispara alerta especial
-const SUP_SETORES = [
-  {
-    key:'visual', label:'Padrão Visual', icon:'👁', peso_setor:1,
-    itens:[
-      {key:'limpeza_geral',    label:'Limpeza geral do salão, piso, mesas e cadeiras', peso:1},
-      {key:'uniformes',        label:'Funcionários uniformizados, com crachá e cabelos presos', peso:1},
-      {key:'iluminacao',       label:'Iluminação completa — lâmpadas e fachada funcionando', peso:1},
-      {key:'organizacao',      label:'Organização e layout das mesas', peso:1},
-      {key:'banheiros',        label:'Higiene dos banheiros (papel, sabonete, odor)', peso:1},
-    ]
-  },
-  {
-    key:'operacao', label:'Operação', icon:'⚙️', peso_setor:1,
-    itens:[
-      {key:'mise_en_place',    label:'Mise en place das praças completa', peso:1},
-      {key:'equipamentos',     label:'Equipamentos funcionando (geladeiras, freezers, fritadeiras)', peso:1},
-      {key:'estoque_org',      label:'Estoque organizado — PVPS aplicado', peso:1},
-      {key:'camaras',          label:'Câmaras frias limpas, organizadas e temperatura registrada', peso:1},
-      {key:'etiquetas',        label:'Máquina de etiquetas funcionando com insumos', peso:1},
-    ]
-  },
-  {
-    key:'validade', label:'Segurança Alimentar e Validades', icon:'🔬', peso_setor:1,
-    critico_setor: true,
-    itens:[
-      {key:'val_cozinha',      label:'Validades em dia na cozinha — nenhum produto vencido', peso:3, critico:true, peso_label:'⚡ Peso 3×'},
-      {key:'val_estoque',      label:'Validades em dia no estoque — nenhum produto vencido', peso:3, critico:true, peso_label:'⚡ Peso 3×'},
-      {key:'val_copa',         label:'Validades em dia na copa/bar — bebidas e frutas', peso:3, critico:true, peso_label:'⚡ Peso 3×'},
-      {key:'val_salao',        label:'Validades em dia nos produtos expostos no salão', peso:2, critico:true, peso_label:'⚡ Peso 2×'},
-      {key:'higiene_pessoal',  label:'Higiene pessoal dos manipuladores de alimentos', peso:1},
-      {key:'temp_registradas', label:'Temperaturas dos equipamentos registradas no dia', peso:1},
-    ]
-  },
-  {
-    key:'atendimento', label:'Atendimento e Equipe', icon:'👥', peso_setor:1,
-    itens:[
-      {key:'postura',          label:'Postura e cordialidade da equipe com clientes', peso:1},
-      {key:'tempo_resposta',   label:'Tempo de resposta — pedidos entregues no prazo', peso:1},
-      {key:'conhecimento',     label:'Equipe conhece cardápio e promoções do dia', peso:1},
-      {key:'reservas',         label:'Reservas conferidas, mesas montadas e confirmadas', peso:1},
-    ]
-  },
-  {
-    key:'documentacao', label:'Documentação e Controles', icon:'📄', peso_setor:1,
-    itens:[
-      {key:'licenca',          label:'Licença de funcionamento — vigente e afixada', peso:2, critico:true, peso_label:'⚡ Peso 2×'},
-      {key:'bombeiro',         label:'Laudo do Corpo de Bombeiros — vigente', peso:2, critico:true, peso_label:'⚡ Peso 2×'},
-      {key:'dedetizacao',      label:'Certificado de dedetização — vigente', peso:2, critico:true, peso_label:'⚡ Peso 2×'},
-      {key:'coifa',            label:'Registro de limpeza da coifa — em dia', peso:2, peso_label:'⚡ Peso 2×'},
-      {key:'extintores',       label:'Extintores com validade em dia — quantidade e tipos corretos', peso:2, peso_label:'⚡ Peso 2×'},
-      {key:'relatorios',       label:'Relatórios diários e controles preenchidos corretamente', peso:1},
-    ]
-  },
-  {
-    key:'delivery_financeiro', label:'Delivery e Financeiro', icon:'🛵', peso_setor:1,
-    itens:[
-      {key:'plataformas',      label:'iFood e 99Food online e operacionais', peso:1},
-      {key:'embalagens',       label:'Estoque de embalagens suficiente para operação', peso:1},
-      {key:'maquinetas',       label:'Máquinas de cartão testadas e funcionando', peso:1},
-      {key:'boletos',          label:'Boletos em dia e lançados no sistema', peso:1},
-    ]
-  }
-];
 
 // Calcular nota total (0-100)
 function calcNotaSupervisao(){
@@ -10268,9 +10281,6 @@ const LOJA_UPPER = LOJA.toUpperCase()
   .replace('NOVA AMERICA','NOVA AMERICA')
   .replace('CAMPO GRANDE','CAMPO GRANDE');
 
-// Mapeamento nome display → chave Supabase
-const LOJA_MAP = Object.fromEntries(GN_LOJAS.map(l=>[l.chkKey,l.userKey])); // fonte única: gn-lojas-config.js
-
 function showLogin(){
   document.getElementById('login-screen').classList.add('visible');
   document.getElementById('app').style.display='none';
@@ -11241,9 +11251,6 @@ window.addEventListener('offline',()=>{ setSyncStatus('offline','Sem conexão (o
 // =============================================
 // BANDA DO DIA
 // =============================================
-const BANDA_COUVERT_VALOR = 7.00;
-const BANDA_CONSUMO_FRANQUIA = 150.00;
-
 // Slug usado em gn_trios_agenda — fonte única em gn-lojas-config.js (trioLojaSlugByComKey)
 function _triosLojaSlug(){
   const ck = comissoesLojaKey();
