@@ -7729,7 +7729,7 @@ function downloadChecklistCSV(){
   const blob=new Blob(['﻿'+lines.join('\n')],{type:'text/csv;charset=utf-8'});
   const url=URL.createObjectURL(blob);
   const a=document.createElement('a');
-  a.href=url; a.download=`checklist_${lojaDisp(LOJA)}_${new Date().toISOString().slice(0,10)}.csv`;
+  a.href=url; a.download=`checklist_${lojaDisp(LOJA)}_${hojeLocal()}.csv`;
   a.click(); URL.revokeObjectURL(url);
 }
 
@@ -8415,7 +8415,7 @@ let _visitasRelAte = (()=>{ const h=new Date(); const u=new Date(h.getFullYear()
 
 async function loadVisitasChk(){
   if(!LOJA) return;
-  const hoje = state.data || new Date().toISOString().split('T')[0];
+  const hoje = state.data || hojeLocal();
   const { data, error } = await sb.from('gn_chk_visitas')
     .select('*').eq('loja', LOJA).eq('data', hoje)
     .order('criado_em', { ascending: true });
@@ -8458,7 +8458,7 @@ async function iniciarVisitaChk(tipoVisita){
 
   const visitante = usuarioLogado?.nome || 'Sem identificação';
   const cargo     = usuarioLogado?.cargo || '';
-  const hoje      = state.data || new Date().toISOString().split('T')[0];
+  const hoje      = state.data || hojeLocal();
 
   let lat = null, lon = null, endereco = null;
 
@@ -8797,7 +8797,7 @@ function renderVisitasCalendario(){
   // Células vazias antes do dia 1
   for(let i=0;i<primeiroDia;i++) html += `<div style="height:62px;"></div>`;
 
-  const hoje = new Date().toISOString().split('T')[0];
+  const hoje = hojeLocal();
   for(let d=1;d<=ultimoDia;d++){
     const dataStr = `${_visitasCalMes}-${String(d).padStart(2,'0')}`;
     const visitas = porData[dataStr] || [];
@@ -10455,6 +10455,10 @@ async function initAppWithLoja(){
     loadSupabaseWeek(state.semanaInicio),
     loadDocs()
   ]);
+  // O indicador de conexão no cabeçalho começa como "Conectando..." (bolinha vermelha) no HTML
+  // estático e só é atualizado no fluxo de salvar — sem isto, ficava preso nesse estado pra
+  // sempre após um carregamento normal, parecendo desconectado mesmo com os dados já carregados.
+  setSyncStatus('online','Conectado ✓');
   // Se não havia docs no Supabase mas há dados locais com vencimento, sincroniza agora
   if(!docsFound && _docs.some(d=>d.venc)) saveDocs();
   // Preencher dinheiro em caixa a partir do App Caixa
@@ -12455,6 +12459,7 @@ let _gestaoMes = null, _gestaoAno = null;
 let _gestaoView = 'mensal'; // 'diario' | 'semanal' | 'mensal'
 let _gestaoSemIni = null, _gestaoDataDia = null;
 let _gestaoFatAtual = {}, _gestaoFatAnt = {}, _gestaoCMV = {}, _gestaoCMVTeorico = {}, _gestaoFuncCount = {};
+let _gestaoCMVTeoricoTemDados = false; // false = sem venda por produto vinculada a ficha no período (não é teórico=0, é "sem dado")
 let _gestaoWeekData = null, _gestaoDayRow = null, _gestaoDayCMV = 0, _gestaoDayCMVTeorico = 0;
 let _gestaoLoja = null;        // null = usa LOJA logado
 let _gestaoRelSelFat = true;   // seção faturamento incluída no relatório
@@ -12509,9 +12514,13 @@ function _custoPratoTeoricoCMV(ficha, entradasFlat){
   }, 0);
 }
 // Soma, por data (map data→R$), o custo teórico dos pratos vendidos nas linhas do checklist_diario.
+// `temDados` distingue "teórico é realmente zero" de "não há venda por produto vinculada a
+// ficha técnica no período" — sem essa distinção, uma loja sem esse cadastro sempre calculava
+// teórico=0% e o card de CMV soava um alarme falso permanente de "compras acima do teórico".
 async function _somarCMVTeoricoPorDia(rows, entradasFlat){
   const out={};
-  if(!rows || !rows.length) return out;
+  let temDados=false;
+  if(!rows || !rows.length) return {porDia:out, temDados};
   const fichasMap = await _fichasMapCMV();
   rows.forEach(r=>{
     if(!r.vendas) return;
@@ -12519,11 +12528,12 @@ async function _somarCMVTeoricoPorDia(rows, entradasFlat){
     Object.entries(r.vendas).forEach(([cod,qtd])=>{
       const q=parseInt(qtd)||0; if(q<=0) return;
       const ficha=fichasMap[cod]; if(!ficha) return;
+      temDados=true;
       const custo=_custoPratoTeoricoCMV(ficha, entradasFlat);
       if(custo>0) out[dia]=(out[dia]||0)+custo*q;
     });
   });
-  return out;
+  return {porDia:out, temDados};
 }
 
 async function renderGestao() {
@@ -12547,6 +12557,7 @@ async function _loadGestaoData() {
   const fromA = `${a-1}-${pad(m+1)}-01`;
   const toA   = `${a-1}-${pad(m+1)}-${pad(new Date(a-1,m+1,0).getDate())}`;
   _gestaoFatAtual = {}; _gestaoFatAnt = {}; _gestaoCMV = {}; _gestaoCMVTeorico = {}; _gestaoFuncCount = {};
+  _gestaoCMVTeoricoTemDados = false;
   if (!sb || !LOJA) return;
   try {
     const [r1, r2, lojaRow, comissoesDt] = await Promise.all([
@@ -12569,7 +12580,7 @@ async function _loadGestaoData() {
       }
     });
     // CMV teórico: pratos vendidos no dia × custo da ficha técnica de cada um
-    _gestaoCMVTeorico = await _somarCMVTeoricoPorDia(r1.data||[], entradasFlat);
+    ({porDia:_gestaoCMVTeorico, temDados:_gestaoCMVTeoricoTemDados} = await _somarCMVTeoricoPorDia(r1.data||[], entradasFlat));
     const lastDayN = new Date(a,m+1,0).getDate();
     for (let d=1; d<=lastDayN; d++) {
       const ds=`${a}-${pad(m+1)}-${pad(d)}`;
@@ -12586,7 +12597,7 @@ function _renderGestaoContent(el) {
   const a = _gestaoAno, m = _gestaoMes;
   const pad = n => String(n).padStart(2,'0');
   const now = new Date();
-  const hojeStr = now.toISOString().slice(0,10);
+  const hojeStr = hojeLocal();
   const MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
   const DSEM  = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
   const isCurrentMonth = m === now.getMonth() && a === now.getFullYear();
@@ -12614,7 +12625,7 @@ function _renderGestaoContent(el) {
   const deltaPct = totAnt>0 ? ((delta/totAnt)*100).toFixed(1) : null;
   const cmvPct = totAtual>0 ? (totCMV/totAtual*100).toFixed(1) : null;
   const cmvColor = !cmvPct?'#888':parseFloat(cmvPct)>35?'#f87171':parseFloat(cmvPct)>28?'#fbbf24':'#4ade80';
-  const cmvTPct = totAtual>0 ? (totCMVTeorico/totAtual*100).toFixed(1) : null;
+  const cmvTPct = (totAtual>0 && _gestaoCMVTeoricoTemDados) ? (totCMVTeorico/totAtual*100).toFixed(1) : null;
   const cmvTColor = !cmvTPct?'#888':parseFloat(cmvTPct)>35?'#f87171':parseFloat(cmvTPct)>28?'#fbbf24':'#4ade80';
   const cmvDiffPct = (cmvPct!==null && cmvTPct!==null) ? (parseFloat(cmvPct)-parseFloat(cmvTPct)).toFixed(1) : null;
   const maxFat = Math.max(...dias.map(d=>Math.max(d.fat,d.fatA,1)));
@@ -13026,7 +13037,7 @@ async function _loadGestaoDayData(){
       }
     });
     // CMV teórico do dia: pratos vendidos × custo da ficha técnica de cada um
-    const cmvTPorDia = await _somarCMVTeoricoPorDia(data ? [data] : [], entradasFlat);
+    const {porDia:cmvTPorDia} = await _somarCMVTeoricoPorDia(data ? [data] : [], entradasFlat);
     _gestaoDayCMVTeorico = cmvTPorDia[_gestaoDataDia] || 0;
   }catch(e){}
 }
