@@ -539,6 +539,9 @@ function _appUnicoPermitido(sess) {
 
 let session = null;
 let masterLoja = null; // loja ativa selecionada pelo mestre
+let _healthChipsTimer = null; // declarado aqui (não perto de _renderHealthChips) porque
+// showHome() chama _renderHealthChips() de forma síncrona durante o boot da página —
+// se a declaração ficasse mais abaixo, o acesso à variável ocorreria antes dela existir.
 
 // Declarado aqui (não lá embaixo, perto de renderDashboard) porque showHome() já
 // lê/atribui essas variáveis na primeira chamada síncrona logo abaixo — com `let`
@@ -553,6 +556,7 @@ let _dashWoff = 0;      // week offset (0=current week)
 let _dashMoff = 0;      // month offset (0=current month)
 let _dashFat     = null; // {lojaKey: total} for selected period
 let _dashFatPrev = null; // {lojaKey: total} for previous period
+let _dashFatPrevParcial = false; // true quando _dashFatPrev foi cortado nos mesmos dias já decorridos do período atual
 let _dashManut   = null; // {lojaKey: pendingCount}
 let _dashChk     = null; // Set of lojas that sent checklist today
 let _dashLoading = false;
@@ -1834,7 +1838,6 @@ function _openChipDetail(key) {
   if (d) _showChipDetail(d.title, d.lines, d.actionUrl, d.actionLabel);
 }
 
-let _healthChipsTimer = null;
 async function _renderHealthChips() {
   const el = document.getElementById('health-chips');
   if (!el) return;
@@ -2701,6 +2704,15 @@ async function _loadDashAll() {
   const prevRange = _dashPer==='sem' ? _weekRange(_dashWoff-1) : _monthRange(_dashMoff-1);
   const range2    = _dashPer==='sem' ? _weekRange(_dashWoff-2)  : _monthRange(_dashMoff-2);
   const range3    = _dashPer==='sem' ? _weekRange(_dashWoff-3)  : _monthRange(_dashMoff-3);
+  // Quando o período selecionado é o atual (em andamento), comparar o total parcial
+  // de hoje contra a semana/mês anterior INTEIRO sempre dá uma "queda" enorme e falsa
+  // (ex.: -100% numa terça-feira). Corta o período anterior nos mesmos dias já
+  // decorridos no atual, pra comparação ser dia-a-dia equivalente.
+  const diasDecorridos = _dashPer==='sem'
+    ? (d => d===0?7:d)(new Date().getDay())
+    : new Date().getDate();
+  const prevRangeCompDates = range.isCurrent ? prevRange.dates.slice(0, diasDecorridos) : prevRange.dates;
+  const precisaCompSeparada = prevRangeCompDates.length !== prevRange.dates.length;
   // Data local (não UTC) — toISOString() usa UTC, então a partir de ~21h no horário do
   // Brasil (UTC-3) "hoje" já virava o dia seguinte, fazendo o card Visitas do Dia mostrar
   // a visita de amanhã e o CHK Hoje não bater com o checklist do dia certo.
@@ -2712,9 +2724,10 @@ async function _loadDashAll() {
     const from30 = trinta.toISOString().slice(0,10);
     const _errCb = label => e => { window.gnLogError('dash:'+label, e); _dashLoadHadError = true; };
     const comKeysAll = Object.values(LOJA_COM_KEY).join(',');
-    const [fatCur, fatPrv, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows, comissoesAllRows, bhConfigRows, caixaFechadosRows, alertasUrgentesRows] = await Promise.all([
+    const [fatCur, fatPrv, fatPrvComp, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows, comissoesAllRows, bhConfigRows, caixaFechadosRows, alertasUrgentesRows] = await Promise.all([
       _fetchFat(range.dates).catch(e=>{ _errCb('fatCur')(e); return {}; }),
       _fetchFat(prevRange.dates).catch(e=>{ _errCb('fatPrv')(e); return {}; }),
+      precisaCompSeparada ? _fetchFat(prevRangeCompDates).catch(e=>{ _errCb('fatPrvComp')(e); return {}; }) : Promise.resolve(null),
       _fetchFat(range2.dates).catch(e=>{ _errCb('fat2')(e); return {}; }),
       _fetchFat(range3.dates).catch(e=>{ _errCb('fat3')(e); return {}; }),
       window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?select=data_operacao,loja,manutencao&data_operacao=gte.${from30}&order=data_operacao.desc`, H, 'dash:manutRows', []),
@@ -2729,7 +2742,8 @@ async function _loadDashAll() {
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?status=eq.FECHADO&data=gte.${from30}&select=id,loja,data,turno`, H, 'dash:caixaFechadosRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_alertas_urgentes?order=criado_em.desc&limit=50&select=loja,criado_por,criado_em,resolvido,resolvido_por,resolvido_em`, H, 'dash:alertasUrgentesRows', []),
     ]);
-    _dashFat = fatCur; _dashFatPrev = fatPrv;
+    _dashFat = fatCur; _dashFatPrev = precisaCompSeparada ? fatPrvComp : fatPrv;
+    _dashFatPrevParcial = precisaCompSeparada;
     _dashFatDia = fatDia.byDay || {}; _dashFatDiaLoja = fatDia.byLojaDay || {};
     _dashComDia = comDia.totals || Array(7).fill(0); _dashComDiaLoja = comDia.byLoja || {};
     // Manutenção: mesma lógica de deduplicação/carry-over do app gn-manutencao.html —
@@ -3068,9 +3082,10 @@ function _buildKPIRow() {
     ${sub?`<div class="kpi-tile-sub">${sub}</div>`:''}
   </div>`;
   const totalPStr=totalP>0?_fmtBRLs(totalP):null;
+  const anteriorLbl=_dashFatPrevParcial?'mesmos dias · anterior':'anterior';
   return `<div class="kpi-row">
-    ${t('Faturamento',_fmtBRLs(total)||'—',delta!==null?`<span style="color:#1A1D23">${dStr}</span> vs ${totalPStr||'—'} (anterior)`:'')}
-    ${t('Variação',dStr,totalPStr?`${totalPStr} no período anterior`:'vs período anterior',dClr)}
+    ${t('Faturamento',_fmtBRLs(total)||'—',delta!==null?`<span style="color:#1A1D23">${dStr}</span> vs ${totalPStr||'—'} (${anteriorLbl})`:'')}
+    ${t('Variação',dStr,totalPStr?`${totalPStr} no período ${anteriorLbl}`:'vs período anterior',dClr)}
     ${avgM!==null?t('% Média Meta',avgM+'%',`${stAbove}/${stMN} acima da meta`,mClr):t('% Média Meta','—','configure em Metas')}
     ${t('CHK Hoje',chkN!==null?chkN+'/'+LOJAS_LISTA.length:'—',chkN===LOJAS_LISTA.length?'todas em dia':chkN>0?'algumas sem checklist · toque para ver':'nenhum hoje',chkClr,chkN!==null&&chkN<LOJAS_LISTA.length?"_openChipDetail('dashChk')":null)}
   </div>`;
@@ -4448,12 +4463,13 @@ function renderDashboard() {
         const rank=rankCur[k];
         const rDelta=(rankPrv[k]||rank)-rank;
         const rClr=rDelta>0?'#4ade80':rDelta<0?'#f87171':'rgba(0,0,0,.35)';
-        const rankBadge=hasData?`<span class="rank-badge">#${rank}${rDelta!==0?` <span style="color:#1A1D23">${rDelta>0?'↑':'↓'}${Math.abs(rDelta)}</span>`:''}</span>`:'';
+        const rankTitle=`Posição #${rank} no ranking de faturamento`+(rDelta!==0?` · ${rDelta>0?'subiu':'caiu'} ${Math.abs(rDelta)} posição${Math.abs(rDelta)>1?'ões':''} vs período anterior`:'');
+        const rankBadge=hasData?`<span class="rank-badge" title="${rankTitle}">#${rank}${rDelta!==0?` <span style="color:#1A1D23">${rDelta>0?'↑':'↓'}${Math.abs(rDelta)}</span>`:''}</span>`:'';
         // % vs prev period
         let diffHtml='';
         if(hasData&&vP>0){
           const d=Math.round((v-vP)/vP*100);
-          diffHtml=`<span style="font-size:9px;font-weight:700;color:#1A1D23;margin-left:4px">${d>=0?'+':''}${d}%</span>`;
+          diffHtml=`<span title="Variação do faturamento vs ${_dashFatPrevParcial?'mesmos dias do':''} período anterior" style="font-size:9px;font-weight:700;color:#1A1D23;margin-left:4px">${d>=0?'+':''}${d}%</span>`;
         }
         // progress bar
         let bar='';
@@ -4507,9 +4523,9 @@ function renderDashboard() {
         // status badges
         const badges=[];
         if(saudeBadge) badges.push(saudeBadge);
-        if(chkOk===true) badges.push(`<span style="font-size:9px;color:#1A1D23">✅ chk</span>`);
-        else if(chkOk===false) badges.push(`<span style="font-size:9px;color:rgba(0,0,0,.22)">⚠ chk</span>`);
-        if(manut>0) badges.push(`<span style="font-size:9px;color:#1A1D23">🔧 ${manut}</span>`);
+        if(chkOk===true) badges.push(`<span title="Checklist enviado hoje" style="font-size:9px;color:#1A1D23">✅ chk</span>`);
+        else if(chkOk===false) badges.push(`<span title="Checklist ainda não enviado hoje" style="font-size:9px;color:rgba(0,0,0,.22)">⚠ chk</span>`);
+        if(manut>0) badges.push(`<span title="${manut} manutenç${manut>1?'ões pendentes':'ão pendente'}" style="font-size:9px;color:#1A1D23">🔧 ${manut}</span>`);
         const badgeRow=badges.length?`<div style="display:flex;gap:6px;margin-top:4px">${badges.join('')}</div>`:'';
         const selMode=_dashRelSel.size>0;
         const isSel=_dashRelSel.has(k);
