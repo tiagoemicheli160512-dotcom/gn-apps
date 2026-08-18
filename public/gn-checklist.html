@@ -2250,15 +2250,36 @@ function getComissoesFuncsHerdados(allData, idx){
     if(wd && wd.funcs){
       const comNome = wd.funcs.filter(f=>f.nome && f.nome.trim());
       if(comNome.length>0){
+        const semAlvo = COMISSOES_CAL[idx];
         const herdados = wd.funcs.map(f=>{
           if(!f.nome || !f.nome.trim()) return {id:f.id,nome:'',tipo:'CLT / MENSALISTA',setor:'',dias:Array(7).fill('PRESENTE')};
           // Funcionário arquivado (fim de contrato) não é herdado pra semana seguinte —
           // libera o slot pra um novo funcionário sem mexer nos dados da semana em que
           // foi arquivado (aquela semana mantém dias trabalhados/gorjetas intactos).
           if(f.arquivado) return {id:f.id,nome:'',tipo:'CLT / MENSALISTA',setor:'',dias:Array(7).fill('PRESENTE')};
-          // FOLGA, NT, FÉRIAS e AFASTAMENTO persistem para semana seguinte; FALTA/SUSPENSÃO/BANCO voltam para PRESENTE
-          const MANTER_SEM = new Set(['FOLGA','NÃO TRABALHADO','FÉRIAS','AFASTAMENTO']);
-          const diasHerd = Array(7).fill(null).map((_,di)=>{ const s=(f.dias||[])[di]; return (s && MANTER_SEM.has(s)) ? s : 'PRESENTE'; });
+          // FOLGA, NT e AFASTAMENTO persistem indefinidamente pra semana seguinte (não têm data de
+          // fim conhecida); FALTA/SUSPENSÃO/BANCO voltam para PRESENTE. FÉRIAS só persiste se a data
+          // real do dia na semana nova ainda estiver dentro de ferias_ini/ferias_fim — sem essa
+          // checagem, uma folga de férias acabava sendo arrastada pra sempre pelas semanas seguintes.
+          const MANTER_SEM = new Set(['FOLGA','NÃO TRABALHADO','AFASTAMENTO']);
+          let feriasIni=null, feriasFim=null;
+          if(f.ferias_ini && f.ferias_fim){
+            feriasIni=new Date(f.ferias_ini+'T12:00:00');
+            feriasFim=new Date(f.ferias_fim+'T12:00:00');
+          }
+          const diasHerd = Array(7).fill(null).map((_,di)=>{
+            const s=(f.dias||[])[di];
+            if(!s) return 'PRESENTE';
+            if(MANTER_SEM.has(s)) return s;
+            if(s==='FÉRIAS' && feriasIni && feriasFim && semAlvo){
+              const day=semAlvo.days[di];
+              const iniY=feriasIni.getFullYear();
+              let dt=new Date(`${iniY}-${String(day.m).padStart(2,'0')}-${String(day.d).padStart(2,'0')}T12:00:00`);
+              if(dt<feriasIni) dt=new Date(`${iniY+1}-${String(day.m).padStart(2,'0')}-${String(day.d).padStart(2,'0')}T12:00:00`);
+              if(dt>=feriasIni && dt<=feriasFim) return 'FÉRIAS';
+            }
+            return 'PRESENTE';
+          });
           return {id:f.id, nome:f.nome, tipo:f.tipo, setor:f.setor||'', turno:f.turno||'', horario:f.horario||'', ferias_ini:f.ferias_ini||'', ferias_fim:f.ferias_fim||'', afastamento_just:f.afastamento_just||'', inicio_contrato:f.inicio_contrato||'', fim_contrato:f.fim_contrato||'', horario_dias:f.horario_dias||null, aval_exp_45:f.aval_exp_45||null, aval_exp_90:f.aval_exp_90||null, encerramento_solicitado:f.encerramento_solicitado||false, encerramento_data:f.encerramento_data||'', dias:diasHerd};
         });
         while(herdados.length<COMISSOES_MAX_FUNC) herdados.push({id:herdados.length,nome:'',tipo:'CLT / MENSALISTA',setor:'',dias:Array(7).fill('PRESENTE')});
@@ -5915,6 +5936,7 @@ function updComissoesDia(i,d,sel){
         let dt=new Date(`${iniY}-${mm}-${dd2}T12:00:00`);
         if(dt<ini) dt=new Date(`${iniY+1}-${mm}-${dd2}T12:00:00`);
         if(dt>=ini&&dt<=fim) novos[di]=v;
+        else if(novos[di]===v) novos[di]='PRESENTE';
       });
       novos[d]=v;
       diasFinal=novos;
@@ -6002,6 +6024,10 @@ function _aplicarFeriasNaEscala(allData, nomeAlvo, inicioISO, fimISO, marcar){
         if(dt>=ini && dt<=fim){
           if(marcar) novos[di]='FÉRIAS';
           else if(novos[di]==='FÉRIAS') novos[di]='PRESENTE';
+        } else if(novos[di]==='FÉRIAS'){
+          // Fora do intervalo atual mas ainda marcado FÉRIAS: sobra de uma marcação anterior
+          // deste mesmo período (ex: editar pra encurtar a data fim) — limpa.
+          novos[di]='PRESENTE';
         }
       });
       func.dias=novos;
