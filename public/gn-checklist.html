@@ -8449,6 +8449,16 @@ async function loadVisitasChk(){
   renderVisitasChk();
 }
 
+// Distância em metros entre dois pontos (fórmula de Haversine) — usada pra comparar
+// o local da saída com o local da chegada e avisar se a visita foi encerrada longe da loja.
+function _distMetros(lat1, lon1, lat2, lon2){
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
 async function _reverseGeocode(lat, lon){
   try{
     const r = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json`,
@@ -8546,25 +8556,46 @@ async function registrarSaidaChk(id){
   const horaSaida = _horaAtual();
   const updateObj = { hora_saida: horaSaida };
 
-  // Se a entrada não capturou localização, tenta obter agora na saída
+  // Sempre captura a localização atual na saída (não reaproveita a da chegada) — é o
+  // único jeito de detectar quando alguém sai do local antes de encerrar a visita.
   const visita = _visitasChk.find(v => String(v.id) === String(id));
-  if(visita && !visita.lat){
-    const geoEl = document.getElementById('visita-chk-geo-status');
-    if(geoEl) geoEl.textContent = '📡 Obtendo localização...';
-    try{
-      if(navigator.geolocation){
-        const pos = await new Promise((res,rej)=>
-          navigator.geolocation.getCurrentPosition(res, rej, { timeout:10000, enableHighAccuracy:true })
-        );
-        updateObj.lat = parseFloat(pos.coords.latitude.toFixed(6));
-        updateObj.lon = parseFloat(pos.coords.longitude.toFixed(6));
-        if(geoEl) geoEl.textContent = '🔍 Identificando endereço...';
-        updateObj.endereco = await _reverseGeocode(updateObj.lat, updateObj.lon);
+  const geoEl = document.getElementById('visita-chk-geo-status');
+  let latSaida = null, lonSaida = null;
+  if(geoEl) geoEl.textContent = '📡 Obtendo localização...';
+  try{
+    if(navigator.geolocation){
+      const pos = await new Promise((res,rej)=>
+        navigator.geolocation.getCurrentPosition(res, rej, { timeout:10000, enableHighAccuracy:true })
+      );
+      latSaida = parseFloat(pos.coords.latitude.toFixed(6));
+      lonSaida = parseFloat(pos.coords.longitude.toFixed(6));
+      updateObj.lat_saida = latSaida;
+      updateObj.lon_saida = lonSaida;
+      if(geoEl) geoEl.textContent = '🔍 Identificando endereço...';
+      updateObj.endereco_saida = await _reverseGeocode(latSaida, lonSaida);
+      // Se a chegada não tinha localização (GPS falhou na hora), aproveita a da saída pra ela também.
+      if(visita && visita.lat == null){
+        updateObj.lat = latSaida;
+        updateObj.lon = lonSaida;
+        updateObj.endereco = updateObj.endereco_saida;
       }
-    } catch(e){
-      if(geoEl){ geoEl.textContent='⚠️ Localização não obtida — verifique a permissão no navegador'; setTimeout(()=>{if(geoEl)geoEl.textContent='';},5000); }
+    } else {
+      if(geoEl){ geoEl.textContent='⚠️ GPS não disponível neste dispositivo'; setTimeout(()=>{if(geoEl)geoEl.textContent='';},4000); }
     }
-    if(geoEl && !geoEl.textContent.startsWith('⚠️')) geoEl.textContent = '';
+  } catch(e){
+    if(geoEl){ geoEl.textContent='⚠️ Localização não obtida — verifique a permissão no navegador'; setTimeout(()=>{if(geoEl)geoEl.textContent='';},5000); }
+  }
+  if(geoEl && !geoEl.textContent.startsWith('⚠️')) geoEl.textContent = '';
+
+  // Compara com o local da chegada — se a saída foi registrada a mais de 500m de
+  // distância, avisa e pede confirmação antes de salvar.
+  if(visita && visita.lat != null && visita.lon != null && latSaida != null && lonSaida != null){
+    const dist = _distMetros(visita.lat, visita.lon, latSaida, lonSaida);
+    if(dist > 500){
+      updateObj.alerta_local_saida = true;
+      const ok = confirm(`⚠️ A saída está sendo registrada a ${Math.round(dist)}m do local onde a chegada foi registrada.\n\nConfirma o registro de saída mesmo assim?`);
+      if(!ok) return;
+    }
   }
 
   const { error } = await sb.from('gn_chk_visitas').update(updateObj).eq('id', id);
@@ -8665,7 +8696,9 @@ function renderVisitasChk(){
 
   lista.innerHTML = concluidas.map(v => {
     const isSuper = supDesbloqueado;
-    const loc = v.endereco ? `<div class="visita-chk-loc">📌 <span>${v.endereco}</span>${_mapsLink(v.lat,v.lon)}</div>` : (v.lat ? `<div class="visita-chk-loc">📌 <span>${v.lat}, ${v.lon}</span>${_mapsLink(v.lat,v.lon)}</div>` : '');
+    const loc = v.endereco ? `<div class="visita-chk-loc">📍 <span>${v.endereco}</span>${_mapsLink(v.lat,v.lon)}</div>` : (v.lat ? `<div class="visita-chk-loc">📍 <span>${v.lat}, ${v.lon}</span>${_mapsLink(v.lat,v.lon)}</div>` : '');
+    const locSaida = v.endereco_saida ? `<div class="visita-chk-loc">🚪 <span>${v.endereco_saida}</span>${_mapsLink(v.lat_saida,v.lon_saida)}</div>` : (v.lat_saida ? `<div class="visita-chk-loc">🚪 <span>${v.lat_saida}, ${v.lon_saida}</span>${_mapsLink(v.lat_saida,v.lon_saida)}</div>` : '');
+    const alertaLoc = v.alerta_local_saida ? `<div class="visita-chk-loc" style="color:#dc2626;font-weight:700;">⚠️ Saída registrada longe do local de chegada</div>` : '';
     const dur = _calcDuracaoMin(v.hora_chegada, v.hora_saida);
     return `<div class="visita-chk-card">
       <div class="visita-chk-header">
@@ -8688,6 +8721,8 @@ function renderVisitasChk(){
       </div>
       ${dur ? `<div style="font-size:10px;color:var(--t3);margin-top:2px;">⏱ ${_fmtDuracao(dur)} de visita</div>` : ''}
       ${loc}
+      ${locSaida}
+      ${alertaLoc}
       ${(v.obs||localStorage.getItem('gn_visita_obs_'+v.id)) ? `<div class="visita-chk-loc" style="padding:0 0 4px;">💬 <span style="color:var(--t2);">${v.obs||localStorage.getItem('gn_visita_obs_'+v.id)}</span></div>` : ''}
     </div>`;
   }).join('');
@@ -8702,8 +8737,11 @@ function buildRelatorioVisitasChk(){
     txt += `${i+1}. ${v.visitante}${v.cargo?' ('+v.cargo+')':''}\n`;
     txt += `   📍 Chegada: ${v.hora_chegada} 🔒\n`;
     txt += `   🚪 Saída:   ${v.hora_saida || '(em andamento)'} 🔒\n`;
-    if(v.endereco) txt += `   📌 Local: ${v.endereco}\n`;
-    else if(v.lat) txt += `   📌 Coords: ${v.lat}, ${v.lon}\n`;
+    if(v.endereco) txt += `   📌 Local chegada: ${v.endereco}\n`;
+    else if(v.lat) txt += `   📌 Coords chegada: ${v.lat}, ${v.lon}\n`;
+    if(v.endereco_saida) txt += `   📌 Local saída: ${v.endereco_saida}\n`;
+    else if(v.lat_saida) txt += `   📌 Coords saída: ${v.lat_saida}, ${v.lon_saida}\n`;
+    if(v.alerta_local_saida) txt += `   ⚠️ Saída registrada longe do local de chegada\n`;
     if(v.obs) txt += `   💬 Obs: ${v.obs}\n`;
     txt += '\n';
   });
