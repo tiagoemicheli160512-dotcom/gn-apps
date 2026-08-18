@@ -679,6 +679,7 @@ let S = {
   lojaAtiva: null,
   todosModo: false,
   vendaAntCache: {}, // `${lojaSlug}|${isoSegundaAnterior}` -> {loading, dias:[7], total, erro}
+  totalCompradorCache: {}, // pedidoId -> {loading, itens:[{produto,und,total}], erro} — total pedido da semana por item, somado entre as 11 lojas (aba Edu/Oseas)
   busca: '',
   grupoFiltro: '',
   fornFiltro: '',
@@ -2221,6 +2222,72 @@ function _labelCompradorAtivo() {
   return S.eduAtivo ? ' · 👤 Edu' : S.oseasAtivo ? ' · 👤 Oseas' : S.matheusAtivo ? ' · 👤 Matheus' : '';
 }
 
+// ── TOTAL PEDIDO DA SEMANA POR ITEM (aba Edu/Oseas) ────────────────────────
+// O comprador (Edu/Oseas) manda pro fornecedor um pedido ÚNICO por item, consolidando
+// o que cada uma das 11 lojas pediu — pra saber esse total ele precisava somar loja por
+// loja manualmente. Este card mostra, por item do fornecedor da aba ativa, o total já
+// pedido nesta semana somando as 11 lojas originais (Maglia, Cozinha e Loja Teste ficam
+// de fora — não são uma das 11 lojas).
+const LOJAS_SLUG_PEDIDO_REAIS = (window.GN_LOJAS || [])
+  .filter(l => l.display !== 'Maglia')
+  .map(l => l.lojaSlug);
+
+async function _carregarTotalCompradorSemana(pedidoId, fornecedores) {
+  if (S.totalCompradorCache[pedidoId]) return; // já carregado ou carregando
+  S.totalCompradorCache[pedidoId] = { loading: true };
+  try {
+    const itens = await _fetchTodasPaginas(() => db.from('gn_pedido_itens')
+      .select('catalogo_id,loja_slug,qtd_pedida').eq('pedido_id', pedidoId));
+    const porItem = {};
+    (itens || []).forEach(it => {
+      if (!LOJAS_SLUG_PEDIDO_REAIS.includes(it.loja_slug)) return;
+      const qtd = parseFloat(it.qtd_pedida) || 0;
+      if (qtd <= 0) return;
+      porItem[it.catalogo_id] = (porItem[it.catalogo_id] || 0) + qtd;
+    });
+    const lista = S.catalogo
+      .filter(p => fornecedores.includes(p.fornecedor) && porItem[p.id] > 0)
+      .map(p => ({ produto: p.produto, und: p.und, total: porItem[p.id] }))
+      .sort((a, b) => b.total - a.total);
+    S.totalCompradorCache[pedidoId] = { loading: false, itens: lista };
+  } catch (e) {
+    S.totalCompradorCache[pedidoId] = { loading: false, erro: true };
+  }
+  if (S.pedidoAtual && S.pedidoAtual.id === pedidoId && (S.tab === 'edu' || S.tab === 'oseas')) renderPedido();
+}
+
+function _totalCompradorSemanaCardHtml() {
+  if (!S.eduAtivo && !S.oseasAtivo) return '';
+  if (!S.pedidoAtual) return '';
+  const fornecedores = S.eduAtivo ? EDU_FORNECEDORES : OSEAS_FORNECEDORES;
+  const pedidoId = S.pedidoAtual.id;
+  const cache = S.totalCompradorCache[pedidoId];
+  if (!cache) _carregarTotalCompradorSemana(pedidoId, fornecedores);
+
+  let corpo;
+  if (!cache || cache.loading) {
+    corpo = `<div style="font-size:11px;color:var(--muted);padding:4px 0">Carregando…</div>`;
+  } else if (cache.erro) {
+    corpo = `<div style="font-size:11px;color:var(--muted);padding:4px 0">Não foi possível carregar o total da semana.</div>`;
+  } else if (!cache.itens.length) {
+    corpo = `<div style="font-size:11px;color:var(--muted);padding:4px 0">Nenhum item pedido ainda nesta semana.</div>`;
+  } else {
+    corpo = `<div style="max-height:260px;overflow-y:auto;margin-top:4px">
+      ${cache.itens.map(it => `
+        <div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:4px 0;border-bottom:1px solid rgba(0,0,0,.04)">
+          <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${it.produto}</span>
+          <span style="font-weight:800;color:#1A1D23;font-family:monospace;flex-shrink:0">${fmtQtd(it.total)} ${it.und}</span>
+        </div>`).join('')}
+    </div>`;
+  }
+
+  return `<div style="background:var(--card2);border:1px solid var(--border);border-left:3px solid var(--primary);border-radius:var(--r);padding:12px 14px;margin-bottom:10px">
+    <div style="font-size:12px;font-weight:700;margin-bottom:3px">📦 Total Pedido da Semana · ${S.eduAtivo?'Edu':'Oseas'}</div>
+    <div style="font-size:10px;color:var(--muted);margin-bottom:2px">Soma do que já foi pedido nas 11 lojas nesta semana — use pra saber quanto pedir na próxima.</div>
+    ${corpo}
+  </div>`;
+}
+
 // ── URGÊNCIA (raio) — compartilhada com o app Lojas ────────────────────────
 // gn_lojas_pedido usa slug_pedido (ex.: 'boulevard'); o app Lojas guarda a urgência em
 // gn_lojas.all_data.urgenciaTemplate, chaveado pelo "loja" dele (ex.: 'BOULEVARD', o
@@ -2646,6 +2713,8 @@ function renderPedido() {
         ` : ''}
       </div>
     </div>
+
+    ${_totalCompradorSemanaCardHtml()}
 
     ${toggleModo}
     ${!S.todosModo ? `<div class="store-tabs-wrap">
