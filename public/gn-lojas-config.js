@@ -64,6 +64,45 @@ window.gnFetchJson = async function(url, headers, context, fallback) {
   }
 };
 
+// Sobe uma foto (data URI base64, já comprimida no cliente) pro bucket gn-fotos do
+// Storage e devolve a URL pública — padrão compartilhado pra ir substituindo, app por
+// app, o armazenamento de foto como base64 direto em coluna/JSON. `pasta` organiza por
+// funcionalidade (ex.: 'manut-gastos', 'caixa-fechamento'). Lança erro se falhar —
+// quem chama decide se aborta o salvamento ou segue sem foto.
+window.gnUploadFotoStorage = async function(supaUrl, supaKey, pasta, dataUri) {
+  const m = /^data:([^;]+);base64,(.*)$/.exec(dataUri || '');
+  if (!m) throw new Error('Formato de foto inválido');
+  const mime = m[1];
+  const bin = atob(m[2]);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const ext = mime.split('/')[1] || 'jpg';
+  const nome = pasta + '/' + Date.now() + '-' + Math.random().toString(36).slice(2, 9) + '.' + ext;
+  const r = await fetch(supaUrl + '/storage/v1/object/gn-fotos/' + nome, {
+    method: 'POST',
+    headers: { apikey: supaKey, Authorization: 'Bearer ' + supaKey, 'Content-Type': mime },
+    body: bytes,
+  });
+  if (!r.ok) throw new Error('Falha ao subir foto (HTTP ' + r.status + ')');
+  return supaUrl + '/storage/v1/object/public/gn-fotos/' + nome;
+};
+
+// Remove uma foto do Storage a partir da URL pública salva (best-effort — chamado ao
+// excluir o registro dono da foto; falha aqui não deve travar a exclusão do registro).
+window.gnDeleteFotoStorage = async function(supaUrl, supaKey, url) {
+  const prefixo = supaUrl + '/storage/v1/object/public/gn-fotos/';
+  if (!url || !url.startsWith(prefixo)) return;
+  const caminho = url.slice(prefixo.length);
+  try {
+    await fetch(supaUrl + '/storage/v1/object/gn-fotos/' + caminho, {
+      method: 'DELETE',
+      headers: { apikey: supaKey, Authorization: 'Bearer ' + supaKey },
+    });
+  } catch (e) {
+    window.gnLogError('storage:delete', e);
+  }
+};
+
 // Escapa texto livre antes de inserir em innerHTML (nomes, observações, motivos etc.)
 // — evita que caracteres como <, >, & quebrem o layout ou injetem HTML.
 window.escapeHtml = function(str) {

@@ -1025,11 +1025,13 @@ async function salvarStatus(loja, data, itemId){
     if(novoStatus==='Resolvido'&&arr[idx].status!=='Resolvido') arr[idx].resolved_at=new Date().toISOString();
     // Resolvido não precisa mais da foto pra auditoria — apaga pra otimizar espaço
     // (mesmo padrão do app RH/Financeiro pro caixa conferido).
+    const fotoAntiga=arr[idx].fotoBase64;
     if(novoStatus==='Resolvido') arr[idx].fotoBase64='';
     arr[idx].status=novoStatus;
     await sb(`checklist_diario?data_operacao=eq.${data}&loja=eq.${encodeURIComponent(loja)}`,{
       method:'PATCH', prefer:'return=minimal', body:{manutencao:arr}
     });
+    if(novoStatus==='Resolvido'&&fotoAntiga) window.gnDeleteFotoStorage(SB_URL,SB_KEY,fotoAntiga);
     const local=S.itens.find(m=>String(m.id)===String(itemId)&&m._loja===loja&&m._data===data);
     if(local){ local.status=novoStatus; local.fotoBase64=arr[idx].fotoBase64; }
     _logAuditoriaManut('ALTERAR_STATUS',{loja,setor:local?.setor||'',status:novoStatus});
@@ -1054,11 +1056,13 @@ async function salvarStatusOficial(loja, itemId){
     if(novoStatus==='Resolvido'&&items[idx].status!=='Resolvido') items[idx].resolved_at=new Date().toISOString();
     // Resolvido não precisa mais da foto pra auditoria — apaga pra otimizar espaço
     // (mesmo padrão do app RH/Financeiro pro caixa conferido).
+    const fotoAntiga=items[idx].fotoBase64;
     if(novoStatus==='Resolvido') items[idx].fotoBase64='';
     items[idx].status=novoStatus;
     await sb(`gn_lojas?loja=eq.${encodeURIComponent(comKey)}`,{
       method:'PATCH',prefer:'return=minimal',body:{all_data:{...allData,manut_oficial_items:items}}
     });
+    if(novoStatus==='Resolvido'&&fotoAntiga) window.gnDeleteFotoStorage(SB_URL,SB_KEY,fotoAntiga);
     const local=S.itens.find(m=>String(m.id)===String(itemId));
     if(local){ local.status=novoStatus; local.fotoBase64=items[idx].fotoBase64; if(novoStatus==='Resolvido'&&!local.resolved_at) local.resolved_at=new Date().toISOString(); }
     _logAuditoriaManut('ALTERAR_STATUS',{loja,setor:local?.setor||'',status:novoStatus});
@@ -1396,6 +1400,7 @@ async function deleteCatItem(idx){
   if(!confirm('Excluir "'+item.nome+'"?')) return;
   try{
     await sb('gn_utensilios_catalogo?id=eq.'+item.id,{method:'DELETE'});
+    if(item.foto_base64) window.gnDeleteFotoStorage(SB_URL,SB_KEY,item.foto_base64);
     await loadUtensCatalogo(); renderLista(); toast('Excluído!');
   }catch(e){ toast('Erro ao excluir'); }
 }
@@ -1408,13 +1413,22 @@ async function saveCatItem(){
   _savingCat=true;
   const btn=document.querySelector('.cat-btn.pri');
   if(btn){ btn.disabled=true; btn.textContent='Salvando…'; }
+  let fotoUrl=S.utensEditItem?.foto_base64||null;
+  try{
+    if(S._catFotoB64) fotoUrl=await window.gnUploadFotoStorage(SB_URL,SB_KEY,'utensilios-catalogo',S._catFotoB64);
+  }catch(e){
+    toast('Erro ao enviar a foto: '+e.message);
+    _savingCat=false;
+    if(btn){ btn.disabled=false; btn.textContent='Salvar'; }
+    return;
+  }
   const body={
     nome,
     categoria:document.getElementById('cat-cat')?.value||'Geral',
     unidade:(document.getElementById('cat-und')?.value||'un').trim(),
     estoque_minimo:Number(document.getElementById('cat-min')?.value||0),
     descricao:(document.getElementById('cat-desc')?.value||'').trim()||null,
-    foto_base64:S._catFotoB64||(S.utensEditItem?.foto_base64||null),
+    foto_base64:fotoUrl,
     atualizado_em:new Date().toISOString(),
   };
   const isEdit=!!S.utensEditItem; const editId=S.utensEditItem?.id;
@@ -1878,11 +1892,20 @@ async function salvarRegistro(){
   _savingOf=true;
   const btn=document.getElementById('of-save-btn');
   if(btn){ btn.disabled=true; btn.textContent='Salvando…'; }
+  let fotoUrl=null;
+  try{
+    if(S._ofFotoB64) fotoUrl=await window.gnUploadFotoStorage(SB_URL,SB_KEY,'manut-oficial',S._ofFotoB64);
+  }catch(e){
+    toast('Erro ao enviar a foto: '+e.message);
+    _savingOf=false;
+    if(btn){ btn.disabled=false; btn.textContent='Salvar'; }
+    return;
+  }
   const comKey=CHK_TO_COM[loja]||loja;
   const newItem={
     id:'of_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),
     tipo, setor:setor||null, descricao:desc||null, status:'Pendente', prioridade:prior,
-    fotoBase64:S._ofFotoB64||null,
+    fotoBase64:fotoUrl,
     created_at:new Date().toISOString(),
     criado_por:S.usuario.nome,
     confirmado_loja:false, resolved_at:null,
@@ -1923,6 +1946,7 @@ async function excluirRegistroOficial(itemId, loja){
     await sb(`gn_lojas?loja=eq.${encodeURIComponent(comKey)}`,{
       method:'PATCH',prefer:'return=minimal',body:{all_data:{...allData,manut_oficial_items:items}}
     });
+    if(itemExcluido?.fotoBase64) window.gnDeleteFotoStorage(SB_URL,SB_KEY,itemExcluido.fotoBase64);
     S.itens=S.itens.filter(m=>String(m.id)!==String(itemId));
     _logAuditoriaManut('EXCLUIR_MANUTENCAO_OFICIAL',{loja,setor:itemExcluido?.setor||'',descricao:itemExcluido?.descricao||''});
     renderBotNav(); renderLista();
@@ -2475,13 +2499,22 @@ async function salvarGasto(){
   _savingGasto=true;
   const btn=document.getElementById('gasto-save-btn');
   if(btn){ btn.disabled=true; btn.textContent='Salvando…'; }
+  let fotoUrl=null;
+  try{
+    if(S._gastoFotoB64) fotoUrl=await window.gnUploadFotoStorage(SB_URL,SB_KEY,'manut-gastos',S._gastoFotoB64);
+  }catch(e){
+    toast('Erro ao enviar a foto: '+e.message);
+    _savingGasto=false;
+    if(btn){ btn.disabled=false; btn.textContent='Salvar'; }
+    return;
+  }
   const body={
     loja,
     data:document.getElementById('gasto-data')?.value||new Date().toISOString().split('T')[0],
     categoria:document.getElementById('gasto-cat')?.value||'Outro',
     descricao:(document.getElementById('gasto-desc')?.value||'').trim()||null,
     valor,
-    foto:S._gastoFotoB64||null,
+    foto:fotoUrl,
     obs:(document.getElementById('gasto-obs')?.value||'').trim()||null,
     criado_por:S.usuario.nome,
     criado_em:new Date().toISOString(),
@@ -2500,6 +2533,7 @@ async function deletarGasto(id){
   const gastoExcluido=S.gastosItems.find(g=>String(g.id)===String(id));
   try{
     await sb(`gn_manut_gastos?id=eq.${id}`,{method:'DELETE'});
+    if(gastoExcluido?.foto) window.gnDeleteFotoStorage(SB_URL,SB_KEY,gastoExcluido.foto);
     _logAuditoriaManut('EXCLUIR_GASTO',{loja:gastoExcluido?.loja||'',descricao:gastoExcluido?.descricao||'',valor:gastoExcluido?.valor||0});
     await loadGastos(); renderGastosPanel();
     toast('Gasto excluído');

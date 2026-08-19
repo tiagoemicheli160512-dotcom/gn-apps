@@ -2972,6 +2972,18 @@ function comprimirFoto(file, cb){
   reader.readAsDataURL(file);
 }
 
+// Sobe uma foto (data URI já comprimida) pro Storage — usado por todos os handlers de
+// foto deste arquivo. Mostra o erro e devolve null em caso de falha, pra quem chamou só
+// checar `if(!url) return;` em vez de repetir try/catch em cada um dos handlers.
+async function _uploadFotoChk(b64, pasta){
+  try{
+    return await window.gnUploadFotoStorage(SB_URL, SB_KEY, pasta, b64);
+  }catch(e){
+    showToast('Erro ao enviar foto: '+e.message,'error');
+    return null;
+  }
+}
+
 function addDespesa(){
   const id = Date.now();
   state.despesas.push({id, descricao:'', valor:0, foto:''});
@@ -3110,12 +3122,16 @@ function updateDespesaField(id, field, value){
 function addDespesaFoto(id, input){
   const file = input.files && input.files[0];
   if(!file) return;
-  comprimirFoto(file, b64=>{
+  comprimirFoto(file, async b64=>{
+    const url = await _uploadFotoChk(b64, 'checklist-despesas');
+    if(!url) return;
     const d = state.despesas.find(x=>x.id===id);
     if(!d) return;
-    d.foto = b64;
+    const fotoAntiga = d.foto;
+    d.foto = url;
     autoSave();
     renderDespesas();
+    if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
   });
 }
 
@@ -3201,24 +3217,32 @@ function verFotoLCDinh(rowIdx){
 function onFotoDinhCaixa(input){
   const file = input.files && input.files[0];
   if(!file) return;
-  comprimirFoto(file, b64=>{
+  comprimirFoto(file, async b64=>{
+    const url = await _uploadFotoChk(b64, 'checklist-despesas');
+    if(!url) return;
     const idx = state.despesas.findIndex(d=>d._tipo==='foto_dinheiro');
-    if(idx>=0) state.despesas[idx].foto = b64;
-    else state.despesas.push({id:'__foto_dinheiro__', _tipo:'foto_dinheiro', foto:b64, valor:0, descricao:''});
+    const fotoAntiga = idx>=0 ? state.despesas[idx].foto : null;
+    if(idx>=0) state.despesas[idx].foto = url;
+    else state.despesas.push({id:'__foto_dinheiro__', _tipo:'foto_dinheiro', foto:url, valor:0, descricao:''});
     autoSave();
     renderLivroCaixa();
+    if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
   });
 }
 
 function onFotoDespCaixa(despId, input){
   const file = input.files && input.files[0];
   if(!file) return;
-  comprimirFoto(file, b64=>{
+  comprimirFoto(file, async b64=>{
+    const url = await _uploadFotoChk(b64, 'checklist-despesas');
+    if(!url) return;
     const d = state.despesas.find(x=>String(x.id)===String(despId));
     if(!d) return;
-    d.foto = b64;
+    const fotoAntiga = d.foto;
+    d.foto = url;
     autoSave();
     renderLivroCaixa();
+    if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
   });
 }
 
@@ -5253,29 +5277,35 @@ function onFuncDocChange(input){
   const file=input.files[0];
   if(!file||_docFuncIdx==null||!_docTipo) return;
   const capIdx=_docFuncIdx, capTipo=_docTipo;
-  _comprimirParaFoto(file,function(b64){
+  _comprimirParaFoto(file,async function(b64){
+    const url = await _uploadFotoChk(b64, 'comissoes-docs-func');
+    if(!url) return;
     const key=`${capIdx}_${capTipo}`;
-    comissoesDocs[key]=b64;
+    const fotoAntiga=comissoesDocs[key];
+    comissoesDocs[key]=url;
     // Atualiza o WD local imediatamente para re-render sem delay
     if(comissoesWD&&comissoesWD.funcs[capIdx]){
       if(!comissoesWD.funcs[capIdx].docs) comissoesWD.funcs[capIdx].docs={};
-      comissoesWD.funcs[capIdx].docs[capTipo]=b64;
+      comissoesWD.funcs[capIdx].docs[capTipo]=url;
     }
     renderComissoesFuncs();
     // Persiste dentro de gn_comissoes.all_data via mecanismo existente (sem migration)
     scheduleComissoesOp(function(wd){
       if(!wd.funcs[capIdx]) return wd;
       if(!wd.funcs[capIdx].docs) wd.funcs[capIdx].docs={};
-      wd.funcs[capIdx].docs[capTipo]=b64;
+      wd.funcs[capIdx].docs[capTipo]=url;
       return wd;
     });
     showToast('📷 Documento salvo');
+    if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
   });
 }
 
 function _excluirFotoFunc(funcIdx, tipo) {
   const key = `${funcIdx}_${tipo}`;
   const funcionario = comissoesWD?.funcs?.[funcIdx]?.nome || '';
+  const fotoAntiga = comissoesDocs[key];
+  if (fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
   delete comissoesDocs[key];
   if (comissoesWD && comissoesWD.funcs[funcIdx]) {
     if (!comissoesWD.funcs[funcIdx].docs) comissoesWD.funcs[funcIdx].docs = {};
@@ -5325,7 +5355,7 @@ function _verFotoDocChecklist(funcIdx, tipo) {
     </div>`;
 }
 
-function _wppDocChecklist(funcIdx, tipo) {
+async function _wppDocChecklist(funcIdx, tipo) {
   const foto = comissoesDocs[`${funcIdx}_${tipo}`];
   const func = comissoesWD?.funcs?.[funcIdx];
   const nome = func?.nome || '';
@@ -5333,13 +5363,20 @@ function _wppDocChecklist(funcIdx, tipo) {
   const texto = `📎 ${tipoLabel} — ${nome}\n📍 GN ${LOJA||''}\n📅 ${new Date().toLocaleDateString('pt-BR')}`;
   if (foto && navigator.share) {
     try {
-      const byteStr = atob(foto.split(',')[1]);
-      const arr = new Uint8Array(byteStr.length);
-      for (let i = 0; i < byteStr.length; i++) arr[i] = byteStr.charCodeAt(i);
-      const blob = new Blob([arr], { type: 'image/jpeg' });
-      const file = new File([blob], `${tipo.toLowerCase()}.jpg`, { type: 'image/jpeg' });
+      // Foto pode ser um data URI base64 (registros antigos) ou uma URL do Storage
+      // (a partir da migração pro bucket gn-fotos) — trata as duas formas.
+      let blob;
+      if (/^https?:\/\//.test(foto)) {
+        blob = await (await fetch(foto)).blob();
+      } else {
+        const byteStr = atob(foto.split(',')[1]);
+        const arr = new Uint8Array(byteStr.length);
+        for (let i = 0; i < byteStr.length; i++) arr[i] = byteStr.charCodeAt(i);
+        blob = new Blob([arr], { type: 'image/jpeg' });
+      }
+      const file = new File([blob], `${tipo.toLowerCase()}.jpg`, { type: blob.type || 'image/jpeg' });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        navigator.share({ files: [file], text: texto }).catch(() => {
+        await navigator.share({ files: [file], text: texto }).catch(() => {
           window.open('https://wa.me/?text=' + encodeURIComponent(texto), '_blank');
         });
         return;
@@ -6643,10 +6680,13 @@ function updateProblema(stateKey, setor, idx){
 function handleFoto(stateKey, setor, idx, input){
   if(!input.files||!input.files[0]) return;
   const file=input.files[0];
-  compressAndSave(file, b64=>{
+  compressAndSave(file, async b64=>{
+    const url = await _uploadFotoChk(b64, 'checklist-item');
+    if(!url) return;
     if(!state[stateKey][setor]) state[stateKey][setor]={};
     if(!state[stateKey][setor][idx]) state[stateKey][setor][idx]={};
-    state[stateKey][setor][idx].fotoBase64=b64;
+    const fotoAntiga = state[stateKey][setor][idx].fotoBase64;
+    state[stateKey][setor][idx].fotoBase64=url;
     state[stateKey][setor][idx].fotoName=file.name;
     autoSave();
     // Rerenderiza o item inteiro para mostrar botão excluir
@@ -6655,14 +6695,21 @@ function handleFoto(stateKey, setor, idx, input){
     const panel=document.getElementById(`prob-${stateKey}_${setor}-${idx}`);
     if(panel) panel.classList.add('open');
     showToast('📷 Foto salva!','success');
+    if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
   });
 }
 
 function handleFotoManut(id, input){
   if(!input.files||!input.files[0]) return;
-  compressAndSave(input.files[0], b64=>{
+  compressAndSave(input.files[0], async b64=>{
+    const url = await _uploadFotoChk(b64, 'checklist-manutencao');
+    if(!url) return;
     const m=state.manutencao.find(m=>m.id===id);
-    if(m){m.fotoBase64=b64;m.fotoName=input.files[0].name;autoSave();renderManutencao();}
+    if(m){
+      const fotoAntiga=m.fotoBase64;
+      m.fotoBase64=url;m.fotoName=input.files[0].name;autoSave();renderManutencao();
+      if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
+    }
   });
 }
 
@@ -7813,34 +7860,50 @@ document.getElementById('rel-modal').addEventListener('click',function(e){
 function deleteFotoChecklist(stateKey, setor, idx){
   if(!state[stateKey]||!state[stateKey][setor]||!state[stateKey][setor][idx]) return;
   if(!confirm('Excluir esta foto?')) return;
+  const fotoAntiga=state[stateKey][setor][idx].fotoBase64;
   state[stateKey][setor][idx].fotoBase64='';
   state[stateKey][setor][idx].fotoName='';
   autoSave();
   // Re-renderizar apenas o item
   const map=stateKey==='checklist'?SETORES_CHECKLIST:stateKey==='abertura'?SETORES_ABERTURA:SETORES_FECHAMENTO;
   renderSetorItems(stateKey, setor);
+  if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
   showToast('🗑 Foto removida','info');
 }
 
 function deleteFotoManut(id){
   if(!confirm('Excluir esta foto?')) return;
   const m=state.manutencao.find(m=>m.id===id);
-  if(m){m.fotoBase64='';m.fotoName='';autoSave();renderManutencao();}
+  if(m){
+    const fotoAntiga=m.fotoBase64;
+    m.fotoBase64='';m.fotoName='';autoSave();renderManutencao();
+    if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
+  }
   showToast('🗑 Foto removida','info');
 }
 
 // ===== FOTO INSUMOS =====
 function handleFotoFalta(id, input){
   if(!input.files||!input.files[0]) return;
-  compressAndSave(input.files[0], b64=>{
+  compressAndSave(input.files[0], async b64=>{
+    const url = await _uploadFotoChk(b64, 'checklist-faltas');
+    if(!url) return;
     const f=state.faltas.find(f=>f.id===id);
-    if(f){f.fotoBase64=b64;f.fotoName=input.files[0].name;autoSave();renderFaltas();}
+    if(f){
+      const fotoAntiga=f.fotoBase64;
+      f.fotoBase64=url;f.fotoName=input.files[0].name;autoSave();renderFaltas();
+      if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
+    }
   });
 }
 function deleteFotoFalta(id){
   if(!confirm('Excluir esta foto?')) return;
   const f=state.faltas.find(f=>f.id===id);
-  if(f){f.fotoBase64='';f.fotoName='';autoSave();renderFaltas();}
+  if(f){
+    const fotoAntiga=f.fotoBase64;
+    f.fotoBase64='';f.fotoName='';autoSave();renderFaltas();
+    if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
+  }
   showToast('🗑 Foto removida','info');
 }
 
@@ -8476,21 +8539,27 @@ function updateAcaoCorretivaCoz(idx, val){
 
 function handleCozFoto(setorKey, itemKey, input){
   if(!input.files||!input.files[0]) return;
-  compressAndSave(input.files[0], b64=>{
+  compressAndSave(input.files[0], async b64=>{
+    const url = await _uploadFotoChk(b64, 'checklist-supervisao-cozinha');
+    if(!url) return;
     if(!state.supervisaoCozinha.itens[setorKey]) state.supervisaoCozinha.itens[setorKey]={};
-    state.supervisaoCozinha.itens[setorKey][itemKey+'_foto'] = b64;
+    const fotoAntiga = state.supervisaoCozinha.itens[setorKey][itemKey+'_foto'];
+    state.supervisaoCozinha.itens[setorKey][itemKey+'_foto'] = url;
     autoSave();
     renderSupervisaoCozinha();
     showToast('📷 Foto anexada','success');
+    if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
   });
 }
 
 function deleteCozFoto(setorKey, itemKey){
   if(!confirm('Excluir esta foto?')) return;
   if(state.supervisaoCozinha.itens[setorKey]){
+    const fotoAntiga = state.supervisaoCozinha.itens[setorKey][itemKey+'_foto'];
     delete state.supervisaoCozinha.itens[setorKey][itemKey+'_foto'];
     autoSave();
     renderSupervisaoCozinha();
+    if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
     showToast('🗑 Foto removida','info');
   }
 }
@@ -11135,21 +11204,27 @@ async function doSupLogin(){
 
 function handleSupFoto(setorKey, itemKey, input){
   if(!input.files||!input.files[0]) return;
-  compressAndSave(input.files[0], b64=>{
+  compressAndSave(input.files[0], async b64=>{
+    const url = await _uploadFotoChk(b64, 'checklist-supervisao');
+    if(!url) return;
     if(!state.supervisao.itens[setorKey]) state.supervisao.itens[setorKey]={};
-    state.supervisao.itens[setorKey][itemKey+'_foto'] = b64;
+    const fotoAntiga = state.supervisao.itens[setorKey][itemKey+'_foto'];
+    state.supervisao.itens[setorKey][itemKey+'_foto'] = url;
     autoSave();
     renderSupervisao();
     showToast('📷 Foto anexada','success');
+    if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
   });
 }
 
 function deleteSupFoto(setorKey, itemKey){
   if(!confirm('Excluir esta foto?')) return;
   if(state.supervisao.itens[setorKey]){
+    const fotoAntiga = state.supervisao.itens[setorKey][itemKey+'_foto'];
     delete state.supervisao.itens[setorKey][itemKey+'_foto'];
     autoSave();
     renderSupervisao();
+    if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
     showToast('🗑 Foto removida','info');
   }
 }
@@ -11343,13 +11418,17 @@ function _audpResponder(tipoKey, idx, resp){
 
 function _audpFoto(tipoKey, idx, input){
   if(!input.files||!input.files[0]) return;
-  compressAndSave(input.files[0], b64=>{
+  compressAndSave(input.files[0], async b64=>{
+    const url = await _uploadFotoChk(b64, 'checklist-auditoria-padrao');
+    if(!url) return;
     const aud = _audpEstado(tipoKey);
     if(!aud.itens[idx]) aud.itens[idx]={};
-    aud.itens[idx].foto = b64;
+    const fotoAntiga = aud.itens[idx].foto;
+    aud.itens[idx].foto = url;
     autoSave();
     renderAuditoriaPadrao();
     showToast('📷 Evidência anexada','success');
+    if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
   });
 }
 
@@ -12374,11 +12453,14 @@ async function enviarFotoComissaoRH(b64){
   try{
     const semanaAnt = _semanaAnteriorIni();
     const nomeEnviado = (usuarioLogado&&usuarioLogado.nome)||LOJA;
+    const {data:fotoAtual} = await sb.from('gn_comissao_foto').select('foto_base64').eq('loja',LOJA).eq('semana_ini',semanaAnt).maybeSingle();
+    const url = await window.gnUploadFotoStorage(SB_URL, SB_KEY, 'comissao-gorjeta', b64);
     const {error} = await sb.from('gn_comissao_foto').upsert(
-      {loja:LOJA, semana_ini:semanaAnt, foto_base64:b64, enviado_por:nomeEnviado},
+      {loja:LOJA, semana_ini:semanaAnt, foto_base64:url, enviado_por:nomeEnviado},
       {onConflict:'loja,semana_ini'}
     );
     if(error) throw error;
+    if(fotoAtual?.foto_base64) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAtual.foto_base64);
     try{ localStorage.setItem(_fotoComissaoRHKey(),'1'); }catch(ex){}
     renderFotoComissaoStatus();
     showToast('✓ Foto enviada ao App RH — Auditoria!','success');

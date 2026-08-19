@@ -2908,11 +2908,14 @@ async function salvarFotoComissao(loja, semanaIni) {
   if (!img || img.classList.contains('hidden')) { toast('Selecione uma foto', 'err'); return; }
   const b64 = img.src;
   try {
+    const { data: fotoAtual } = await db.from('gn_comissao_foto').select('foto_base64').eq('loja', loja).eq('semana_ini', semanaIni).maybeSingle();
+    const url = await window.gnUploadFotoStorage(SUPA_URL, SUPA_KEY, 'comissao-gorjeta', b64);
     const { error } = await db.from('gn_comissao_foto').upsert(
-      { loja, semana_ini: semanaIni, foto_base64: b64, enviado_por: enviado },
+      { loja, semana_ini: semanaIni, foto_base64: url, enviado_por: enviado },
       { onConflict: 'loja,semana_ini' }
     );
     if (error) throw error;
+    if (fotoAtual?.foto_base64) window.gnDeleteFotoStorage(SUPA_URL, SUPA_KEY, fotoAtual.foto_base64);
     toast('Foto salva! Analisando com IA...', 'ok');
     fecharModal();
     await carregarFinanceiro(); renderFinanceiro();
@@ -3024,9 +3027,11 @@ async function triggerAnalisarFoto(loja, semanaIni) {
 
 async function excluirFoto(loja, semanaIni) {
   if (!confirm('Excluir a foto desta semana?')) return;
+  const { data: fotoAtual } = await db.from('gn_comissao_foto').select('foto_base64').eq('loja', loja).eq('semana_ini', semanaIni).maybeSingle();
   const { error } = await db.from('gn_comissao_foto')
     .delete().eq('loja', loja).eq('semana_ini', semanaIni);
   if (error) { toast('Erro ao excluir', 'err'); return; }
+  if (fotoAtual?.foto_base64) window.gnDeleteFotoStorage(SUPA_URL, SUPA_KEY, fotoAtual.foto_base64);
   _logAuditoriaRH('EXCLUIR_FOTO_GORJETA', loja, { semanaIni });
   toast('Foto removida', 'ok');
   fecharModal();
@@ -3381,9 +3386,10 @@ async function compartilharPDFConferenciaAtualWpp() {
 // tem coluna própria de foto — a foto da despesa vive só em checklist_diario.despesas[]
 // (é de lá que verConferencia() lê pra exibir), então basta limpar ali. Best-effort: erro
 // aqui não deve travar a confirmação da conferência em si (já foi salva antes desta chamada).
-async function _limparFotosCaixaConferido(fechId, lojaObj, data) {
+async function _limparFotosCaixaConferido(fechId, lojaObj, data, fotoSistemaAntiga) {
   try {
     await db.from('gn_caixa_fechamento').update({ foto_sistema: null }).eq('id', fechId);
+    if (fotoSistemaAntiga) window.gnDeleteFotoStorage(SUPA_URL, SUPA_KEY, fotoSistemaAntiga);
     if (lojaObj && data) {
       var chkRes = await db.from('checklist_diario').select('despesas')
         .eq('loja', lojaObj.chkKey).eq('data_operacao', data).limit(1);
@@ -3392,6 +3398,7 @@ async function _limparFotosCaixaConferido(fechId, lojaObj, data) {
         var novo = arr.map(function(d) { return d.foto ? Object.assign({}, d, { foto: '' }) : d; });
         await db.from('checklist_diario').update({ despesas: novo })
           .eq('loja', lojaObj.chkKey).eq('data_operacao', data);
+        arr.forEach(function(d) { if (d.foto) window.gnDeleteFotoStorage(SUPA_URL, SUPA_KEY, d.foto); });
       }
     }
   } catch(_) {}
@@ -3458,8 +3465,9 @@ async function salvarConferencia(fechId, lojaUserKey) {
     _logAuditoriaRH('SALVAR_CONFERENCIA', comKey, { temDivergencia: temDivergencia });
 
     var rowFech = S.caixaSemana.find(function(r) { return r.id === fechId; });
+    var fotoSistemaAntiga = rowFech ? rowFech.foto_sistema : null;
     if (rowFech) rowFech.foto_sistema = null;
-    _limparFotosCaixaConferido(fechId, lojaObj, rowFech ? rowFech.data : null).catch(function(){});
+    _limparFotosCaixaConferido(fechId, lojaObj, rowFech ? rowFech.data : null, fotoSistemaAntiga).catch(function(){});
 
     var resultEl = document.getElementById('conf-result-' + safeId);
     if (resultEl) {
@@ -4766,20 +4774,27 @@ function verFotoDoc(funcIdx, tipo) {
   `);
 }
 
-function _wppDocRH() {
+async function _wppDocRH() {
   if (!_rhDocModal) return;
   const { nome, foto, tipoLabel } = _rhDocModal;
   const loja = S.rhLoja?.display || '';
   const texto = `📎 ${tipoLabel} — ${nome}\n📍 ${loja}\n📅 ${new Date().toLocaleDateString('pt-BR')}`;
   if (foto && navigator.share) {
     try {
-      const byteStr = atob(foto.split(',')[1]);
-      const arr = new Uint8Array(byteStr.length);
-      for (let i = 0; i < byteStr.length; i++) arr[i] = byteStr.charCodeAt(i);
-      const blob = new Blob([arr], { type: 'image/jpeg' });
-      const file = new File([blob], 'documento.jpg', { type: 'image/jpeg' });
+      // Foto pode ser um data URI base64 (registros antigos) ou uma URL do Storage
+      // (a partir da migração pro bucket gn-fotos) — trata as duas formas.
+      let blob;
+      if (/^https?:\/\//.test(foto)) {
+        blob = await (await fetch(foto)).blob();
+      } else {
+        const byteStr = atob(foto.split(',')[1]);
+        const arr = new Uint8Array(byteStr.length);
+        for (let i = 0; i < byteStr.length; i++) arr[i] = byteStr.charCodeAt(i);
+        blob = new Blob([arr], { type: 'image/jpeg' });
+      }
+      const file = new File([blob], 'documento.jpg', { type: blob.type || 'image/jpeg' });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        navigator.share({ files: [file], text: texto }).catch(() => {
+        await navigator.share({ files: [file], text: texto }).catch(() => {
           window.open('https://wa.me/?text=' + encodeURIComponent(texto), '_blank');
         });
         return;
