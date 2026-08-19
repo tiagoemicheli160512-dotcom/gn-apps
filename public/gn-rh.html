@@ -1268,11 +1268,12 @@ function renderFinanceiro() {
         return `<div class="card" style="margin-bottom:10px">
           <div class="card-header" style="flex-wrap:wrap;gap:8px;align-items:flex-start">
             <span class="card-title" style="align-self:center">${lojaObj?.display||lojaChk}</span>
-            <div style="display:flex;align-items:flex-end;gap:16px;margin-left:auto">
+            <div style="display:flex;align-items:flex-end;gap:10px;margin-left:auto">
               <div style="text-align:right">
                 <div class="num fin-total">${money(totalLoja)}</div>
                 <div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">total cofre</div>
               </div>
+              <button onclick="gerarPDFFinanceiroLoja('${lojaChk}')" title="Gerar PDF desta loja" style="background:rgba(192,57,43,.12);border:1px solid rgba(192,57,43,.3);border-radius:6px;padding:5px 8px;color:#e74c3c;font-size:11px;font-weight:700;cursor:pointer;align-self:center">📄</button>
             </div>
           </div>
           <div style="overflow-x:auto">
@@ -1354,6 +1355,7 @@ function renderFinanceiro() {
     ${fotoHtml}
     <div class="sec-header" style="margin-top:4px">
       <div style="font-size:13px;font-weight:700">Fechamentos</div>
+      ${S.caixaSemana.length ? `<button onclick="gerarPDFFinanceiroConsolidado()" style="background:rgba(192,57,43,.12);border:1px solid rgba(192,57,43,.3);border-radius:6px;padding:5px 10px;color:#e74c3c;font-size:11px;font-weight:700;cursor:pointer">📄 PDF Consolidado</button>` : ''}
     </div>
     ${caixaHtml}`;
 }
@@ -2797,6 +2799,51 @@ async function navegarFinSemana(delta) {
   if (S.finSemana > getMondayOfWeek()) S.finSemana = getMondayOfWeek();
   $('content').innerHTML = `<div class="empty"><div class="spin"></div></div>`;
   await carregarFinanceiro(); renderFinanceiro();
+}
+
+// Monta o bloco de texto (data/turno/status/valores, com REPIQUE DO DIA quando a
+// loja tem 2+ caixas na mesma data) de uma loja pra semana carregada em S.caixaSemana —
+// reaproveitado tanto no PDF por loja quanto no PDF consolidado.
+function _finBlocoLoja(lojaChk) {
+  const rows = S.caixaSemana.filter(r => r.loja === lojaChk);
+  if (!rows.length) return null;
+  const lojaDisplay = LOJAS.find(l => l.userKey === lojaChk)?.display || lojaChk;
+  const porData = {};
+  rows.forEach(r => { (porData[r.data] = porData[r.data] || []).push(r); });
+  let totalLoja = 0;
+  const linhas = Object.keys(porData).sort().map(data => {
+    const rs = porData[data];
+    const bloco = rs.map(r => {
+      totalLoja += parseFloat(r.total_real) || 0;
+      const totalStr = r.total_real != null ? money(r.total_real) : '—';
+      return `${fmtBRShort(r.data)} — ${r.turno} — ${r.status}\n  Total: ${totalStr}   Repique: ${money(r.repique)}   iFood: ${money(r.venda_ifood)}   Online: ${money(r.venda_online)}`;
+    }).join('\n');
+    if (rs.length < 2) return bloco;
+    const repDia = rs.reduce((a,r)=>a+(parseFloat(r.repique)||0),0);
+    return bloco + `\n  REPIQUE DO DIA (${rs.length} caixas): ${money(repDia)}`;
+  }).join('\n\n');
+  return { lojaDisplay, linhas, totalLoja };
+}
+
+function gerarPDFFinanceiroLoja(lojaChk) {
+  const b = _finBlocoLoja(lojaChk);
+  if (!b) { toast('Sem fechamentos nesta semana.', 'err'); return; }
+  const sem = formatSemana(S.finSemana);
+  const texto = `GN RH — Financeiro — ${b.lojaDisplay}\nSemana ${sem.num} (${sem.periodo})\n\n${b.linhas}\n\nTOTAL SEMANA: ${money(b.totalLoja)}`;
+  gerarPDF(texto, `Financeiro — ${b.lojaDisplay} — Sem. ${sem.num}`);
+}
+
+function gerarPDFFinanceiroConsolidado() {
+  if (!S.caixaSemana.length) { toast('Sem fechamentos nesta semana.', 'err'); return; }
+  const sem = formatSemana(S.finSemana);
+  const lojasChk = [...new Set(S.caixaSemana.map(r => r.loja))];
+  let totalGeral = 0;
+  const blocos = lojasChk.map(chk => _finBlocoLoja(chk)).filter(Boolean)
+    .sort((a,b) => a.lojaDisplay.localeCompare(b.lojaDisplay))
+    .map(b => { totalGeral += b.totalLoja; return `${b.lojaDisplay}\n${b.linhas}\nSubtotal: ${money(b.totalLoja)}`; })
+    .join('\n\n' + '─'.repeat(32) + '\n\n');
+  const texto = `GN RH — Financeiro Consolidado\nSemana ${sem.num} (${sem.periodo})\n\n${blocos}\n\nTOTAL GERAL: ${money(totalGeral)}`;
+  gerarPDF(texto, `Financeiro Consolidado — Sem. ${sem.num}`);
 }
 
 function modalUploadFoto(loja, semanaIni) {
