@@ -351,6 +351,27 @@
   </div>
 </div>
 
+<!-- VISITA PENDENTE (bloqueia até confirmar saída) -->
+<div class="picker-overlay" id="visita-pendente-overlay">
+  <div class="picker-sheet" style="max-width:340px;border-radius:20px;margin:auto">
+    <div class="picker-title">📍 Encerrar visita pendente</div>
+    <div style="margin:0 4px 12px;padding:9px 12px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.22);border-radius:9px;font-size:12px;color:#1A1D23">Você tem uma visita sem horário de saída registrado. Informe o horário real (estimado) em que saiu pra continuar.</div>
+    <div style="padding:0 4px 12px">
+      <div style="margin-bottom:12px;padding:8px 12px;background:rgba(0,0,0,.04);border-radius:8px;font-size:12px;color:#6B7280;line-height:1.7">
+        🏪 Loja: <span id="vp-loja" style="color:rgba(0,0,0,.6)">—</span><br>
+        📅 Data: <span id="vp-data" style="color:rgba(0,0,0,.6)">—</span><br>
+        🕐 Chegada: <span id="vp-chegada" style="color:rgba(0,0,0,.6)">—</span>
+      </div>
+      <label class="ts-lbl">Horário de saída (estimado)</label>
+      <input id="vp-saida" class="ts-inp" type="time">
+      <div id="vp-err" style="color:#1A1D23;font-size:12px;margin-top:8px;min-height:16px"></div>
+    </div>
+    <div style="padding:0 4px">
+      <button id="vp-btn" style="width:100%;padding:12px;background:var(--cor);border:none;border-radius:10px;color:#1a1a1a;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit" onclick="confirmarSaidaVisitaPendente()">Confirmar saída e continuar</button>
+    </div>
+  </div>
+</div>
+
 <!-- LOJA PICKER (mestre) -->
 <div class="picker-overlay" id="picker-overlay" onclick="if(event.target===this)closeLojaPicker()">
   <div class="picker-sheet">
@@ -1711,6 +1732,7 @@ function showHome(sess) {
     }
   }
   _renderBotNav(sess, isMaster);
+  _verificarVisitaAbertaPendente(sess);
 }
 
 // ── MODULES ───────────────────────────────────────────────────────────────────
@@ -5031,6 +5053,66 @@ async function salvarTrocarSenha() {
   } catch(e) {
     errEl.textContent = '⚠️ Erro de conexão.';
     btn.textContent = 'Salvar'; btn.disabled = false;
+  }
+}
+
+// ── VISITA PENDENTE (bloqueia acesso até confirmar saída) ─────────────────────
+// Se o usuário logado tiver uma visita (aba Visitas do Check-list) de dia
+// anterior sem hora_saida — esqueceu de encerrar —, bloqueia o Home com um
+// modal pedindo o horário real estimado de saída antes de liberar o app.
+// Só considera visitas de dias ANTERIORES a hoje: uma visita ainda aberta no
+// dia de hoje pode genuinamente estar em andamento, não é esquecimento.
+let _visitasPendentesFila = [];
+
+async function _verificarVisitaAbertaPendente(sess) {
+  if (!sess || !sess.nome) return;
+  try {
+    const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+    const hojeISO = (d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'))(new Date());
+    const rows = await window.gnFetchJson(
+      `${SB_URL}/rest/v1/gn_chk_visitas?visitante=eq.${encodeURIComponent(sess.nome)}&hora_chegada=neq.PLAN&hora_saida=is.null&data=lt.${hojeISO}&select=id,loja,data,hora_chegada&order=data.asc`,
+      H, 'home:visitaPendente', []
+    );
+    _visitasPendentesFila = rows || [];
+    if (_visitasPendentesFila.length) _abrirModalVisitaPendente();
+  } catch(e) { window.gnLogError && window.gnLogError('home:verificarVisitaAbertaPendente', e); }
+}
+
+function _abrirModalVisitaPendente() {
+  const v = _visitasPendentesFila[0];
+  if (!v) return;
+  document.getElementById('vp-loja').textContent = v.loja || '—';
+  document.getElementById('vp-data').textContent = v.data ? v.data.split('-').reverse().join('/') : '—';
+  document.getElementById('vp-chegada').textContent = v.hora_chegada || '—';
+  document.getElementById('vp-saida').value = '';
+  document.getElementById('vp-err').textContent = '';
+  const btn = document.getElementById('vp-btn');
+  btn.textContent = 'Confirmar saída e continuar'; btn.disabled = false;
+  document.getElementById('visita-pendente-overlay').classList.add('open');
+}
+
+async function confirmarSaidaVisitaPendente() {
+  const v = _visitasPendentesFila[0];
+  if (!v) return;
+  const saida = document.getElementById('vp-saida').value;
+  const errEl = document.getElementById('vp-err');
+  errEl.textContent = '';
+  if (!saida) { errEl.textContent = 'Informe o horário de saída.'; return; }
+  const btn = document.getElementById('vp-btn');
+  btn.textContent = 'Salvando...'; btn.disabled = true;
+  try {
+    const res = await fetch(`${SB_URL}/rest/v1/gn_chk_visitas?id=eq.${v.id}`, {
+      method: 'PATCH',
+      headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({ hora_saida: saida })
+    });
+    if (!res.ok) { errEl.textContent = '⚠️ Erro ao salvar. Tente novamente.'; btn.textContent = 'Confirmar saída e continuar'; btn.disabled = false; return; }
+    _visitasPendentesFila.shift();
+    if (_visitasPendentesFila.length) { _abrirModalVisitaPendente(); return; }
+    document.getElementById('visita-pendente-overlay').classList.remove('open');
+  } catch(e) {
+    errEl.textContent = '⚠️ Erro de conexão.';
+    btn.textContent = 'Confirmar saída e continuar'; btn.disabled = false;
   }
 }
 
