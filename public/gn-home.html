@@ -288,6 +288,8 @@
 
   <div id="pendencias-loja-home-card"></div>
 
+  <div id="docs-rh-home-card"></div>
+
   <!-- Banner de permissão de notificações — aparece só se não concedida -->
   <div id="notif-banner" style="display:none;align-items:center;gap:10px;background:rgba(250,204,21,.10);border:1px solid rgba(250,204,21,.22);border-radius:12px;padding:11px 14px;margin:0 16px 14px;font-size:13px;color:rgba(0,0,0,.72)">
     <span style="font-size:20px;flex-shrink:0">🔔</span>
@@ -852,6 +854,179 @@ async function _confirmarXmlMesHome(comKey, mesRef) {
     alert('Erro ao confirmar envio. Tente novamente.');
   }
 }
+
+// ══════════════════ DOCUMENTOS RH: ADVERTÊNCIA / SUSPENSÃO / DEMISSÃO ══════════════════
+// Card colapsável no Home de cada loja, logo abaixo de "Pendências desta loja" —
+// gerador de documento (sem persistir nada no banco), com modelos prontos pro
+// setor de restaurante e opção de gerar PDF / PDF pro WhatsApp (reaproveita
+// gerarPDF/_compartilharPdfWpp já definidos mais abaixo neste arquivo).
+let _showDocsRH = false;
+
+function _escDocRH(s) {
+  return window.escapeHtml ? window.escapeHtml(s) : String(s == null ? '' : s);
+}
+
+const _docRH = { loja: '', tipo: 'advertencia', nome: '', cargo: '', cnpj: '', data: new Date().toISOString().slice(0,10), dias: 1, motivoKey: '', motivoTexto: '' };
+
+const DOC_RH_TITULOS = {
+  advertencia: 'ADVERTÊNCIA DISCIPLINAR',
+  suspensao:   'NOTIFICAÇÃO DE SUSPENSÃO DISCIPLINAR',
+  demissao:    'COMUNICADO DE RESCISÃO DE CONTRATO DE TRABALHO (DEMISSÃO)'
+};
+
+const _DOC_RH_MOTIVOS_COMPORTAMENTAIS = [
+  ['atraso','Atraso reiterado / falta não justificada','Atraso reiterado ao início do expediente e/ou ausência não justificada, descumprindo o horário de trabalho estabelecido.'],
+  ['higiene','Descumprimento de normas de higiene/segurança alimentar','Descumprimento das normas de higiene e segurança alimentar estabelecidas pela empresa, colocando em risco a qualidade dos serviços prestados.'],
+  ['celular','Uso de celular durante o expediente','Uso indevido de telefone celular durante o horário de trabalho, prejudicando o desempenho das funções e o atendimento ao cliente.'],
+  ['uniforme','Não uso do uniforme/EPI','Comparecimento ao trabalho sem o uniforme e/ou os equipamentos de proteção individual (EPI) exigidos pela empresa.'],
+  ['desrespeito','Desrespeito a superior/colega de trabalho','Conduta desrespeitosa para com superior hierárquico e/ou colega de trabalho, incompatível com o ambiente profissional.'],
+  ['atendimento','Erro/negligência no atendimento ao cliente','Falha ou negligência no atendimento ao cliente, causando prejuízo à imagem e aos interesses da empresa.'],
+  ['caixa','Divergência de caixa não justificada','Divergência de valores no fechamento de caixa sem justificativa apresentada pelo(a) funcionário(a).'],
+  ['abandono','Abandono de posto de trabalho','Abandono do posto de trabalho durante o expediente, sem autorização da chefia imediata.'],
+  ['checklist','Não cumprimento de procedimento operacional (checklist)','Não cumprimento dos procedimentos operacionais padrão (checklist) estabelecidos pela empresa para a função.'],
+];
+const DOC_RH_MOTIVOS = {
+  advertencia: [..._DOC_RH_MOTIVOS_COMPORTAMENTAIS, ['outro','Outro (descrever abaixo)','']],
+  suspensao: [
+    ..._DOC_RH_MOTIVOS_COMPORTAMENTAIS,
+    ['reincidencia','Reincidência em falta já advertida','Reincidência em conduta que já havia sido objeto de advertência anterior por parte da empresa.'],
+    ['outro','Outro (descrever abaixo)','']
+  ],
+  demissao: [
+    ['improbidade','Justa causa — ato de improbidade','Dispensa por justa causa em razão da prática de ato de improbidade, nos termos do art. 482, "a", da CLT.'],
+    ['insubordinacao','Justa causa — insubordinação/indisciplina','Dispensa por justa causa em razão de ato de insubordinação/indisciplina, nos termos do art. 482, "h", da CLT.'],
+    ['abandonoEmprego','Justa causa — abandono de emprego','Dispensa por justa causa em razão de abandono de emprego, caracterizado pela ausência injustificada e reiterada ao trabalho, nos termos do art. 482, "i", da CLT.'],
+    ['reincidenciaDemissao','Justa causa — reincidência em falta disciplinar','Dispensa por justa causa em razão da reincidência em falta disciplinar já objeto de advertência e/ou suspensão anteriores, nos termos do art. 482 da CLT.'],
+    ['semJustaReestrut','Sem justa causa — reestruturação/redução de quadro','Dispensa sem justa causa, em razão de reestruturação e/ou redução do quadro de funcionários.'],
+    ['semJustaDesemp','Sem justa causa — desempenho abaixo do esperado','Dispensa sem justa causa, em razão de desempenho considerado insatisfatório para a função exercida.'],
+    ['experiencia','Término de contrato de experiência','Encerramento do contrato de experiência na data de seu vencimento, sem prorrogação e sem efetivação.'],
+    ['outro','Outro (descrever abaixo)','']
+  ]
+};
+
+function toggleDocsRH() {
+  _showDocsRH = !_showDocsRH;
+  const isMasterAgora = session.loja === 'GERAL' || !!(session.permissoes || {}).master;
+  _renderDocsRHHome(!isMasterAgora || !!masterLoja, session, isMasterAgora);
+}
+
+function selecionarTipoDocRH(tipo) {
+  _docRH.tipo = tipo; _docRH.motivoKey = ''; _docRH.motivoTexto = '';
+  const isMasterAgora = session.loja === 'GERAL' || !!(session.permissoes || {}).master;
+  _renderDocsRHHome(!isMasterAgora || !!masterLoja, session, isMasterAgora);
+}
+
+function selecionarMotivoDocRH(key) {
+  _docRH.motivoKey = key;
+  const item = (DOC_RH_MOTIVOS[_docRH.tipo] || []).find(m => m[0] === key);
+  _docRH.motivoTexto = item ? item[2] : '';
+  const ta = document.getElementById('docRhDescricao');
+  if (ta) ta.value = _docRH.motivoTexto;
+}
+
+function _renderDocsRHHome(mostrar, sess, isMasterAtivo) {
+  const el = document.getElementById('docs-rh-home-card');
+  if (!el) return;
+  if (!mostrar || !sess) { el.innerHTML = ''; return; }
+  _docRH.loja = (isMasterAtivo && masterLoja) ? masterLoja : sess.loja;
+  const tipos = [['advertencia','⚠️ Advertência'],['suspensao','⛔ Suspensão'],['demissao','📤 Demissão']];
+  const motivos = DOC_RH_MOTIVOS[_docRH.tipo] || [];
+  const inp = 'width:100%;background:rgba(0,0,0,.05);border:1px solid rgba(0,0,0,.12);border-radius:10px;padding:9px 11px;font-size:13px;color:#1A1D23;font-family:inherit';
+  const lbl = 'font-size:10px;color:rgba(0,0,0,.45);font-weight:700;text-transform:uppercase;display:block;margin-bottom:4px';
+
+  const corpoAberto = `
+    <div style="font-size:12px;font-weight:800;color:#1A1D23;margin-bottom:10px">${_escDocRH(DOC_RH_TITULOS[_docRH.tipo])}</div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:12px">
+      ${tipos.map(([k,label]) => `<button onclick="selecionarTipoDocRH('${k}')" style="background:${_docRH.tipo===k?'#ef4444':'rgba(0,0,0,.06)'};border:1px solid ${_docRH.tipo===k?'#ef4444':'rgba(0,0,0,.15)'};border-radius:10px;padding:8px 4px;color:${_docRH.tipo===k?'#fff':'#475569'};font-weight:700;font-size:11px;cursor:pointer;font-family:inherit">${label}</button>`).join('')}
+    </div>
+    <div style="margin-bottom:8px">
+      <label style="${lbl}">Nome do Funcionário *</label>
+      <input id="docRhNome" type="text" value="${_escDocRH(_docRH.nome)}" oninput="_docRH.nome=this.value" placeholder="Nome completo" style="${inp}"/>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+      <div>
+        <label style="${lbl}">Cargo/Função</label>
+        <input id="docRhCargo" type="text" value="${_escDocRH(_docRH.cargo)}" oninput="_docRH.cargo=this.value" placeholder="ex: Cozinheiro(a)" style="${inp}"/>
+      </div>
+      <div>
+        <label style="${lbl}">Data</label>
+        <input id="docRhData" type="date" value="${_docRH.data}" oninput="_docRH.data=this.value" style="${inp}"/>
+      </div>
+    </div>
+    <div style="margin-bottom:8px">
+      <label style="${lbl}">CNPJ da Empresa *</label>
+      <input id="docRhCnpj" type="text" value="${_escDocRH(_docRH.cnpj)}" oninput="_docRH.cnpj=this.value" placeholder="00.000.000/0000-00" style="${inp}"/>
+    </div>
+    ${_docRH.tipo === 'suspensao' ? `<div style="margin-bottom:8px">
+      <label style="${lbl}">Dias de Suspensão</label>
+      <input id="docRhDias" type="number" min="1" value="${_escDocRH(_docRH.dias)}" oninput="_docRH.dias=this.value" style="${inp}"/>
+    </div>` : ''}
+    <div style="margin-bottom:8px">
+      <label style="${lbl}">Motivo</label>
+      <select id="docRhMotivoSel" onchange="selecionarMotivoDocRH(this.value)" style="${inp}">
+        <option value="">Selecione um motivo pré-definido…</option>
+        ${motivos.map(([k,label]) => `<option value="${k}" ${_docRH.motivoKey===k?'selected':''}>${_escDocRH(label)}</option>`).join('')}
+      </select>
+    </div>
+    <div style="margin-bottom:12px">
+      <label style="${lbl}">Descrição do Motivo (editável)</label>
+      <textarea id="docRhDescricao" rows="4" oninput="_docRH.motivoTexto=this.value" placeholder="Descreva o motivo, ou selecione uma opção acima" style="${inp}">${_escDocRH(_docRH.motivoTexto)}</textarea>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <button onclick="gerarPDFDocRH()" style="background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.35);border-radius:10px;padding:10px 0;color:#b91c1c;font-weight:800;font-size:12px;cursor:pointer;font-family:inherit">📄 Gerar PDF</button>
+      <button onclick="compartilharPDFDocRHWpp()" style="background:linear-gradient(135deg,#25D366,#128C7E);border:none;border-radius:10px;padding:10px 0;color:#fff;font-weight:800;font-size:12px;cursor:pointer;font-family:inherit">📲 PDF WhatsApp</button>
+    </div>`;
+
+  el.innerHTML = `<div style="background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.18);border-left:3px solid #ef4444;border-radius:14px;padding:14px 16px;margin:0 16px 14px">
+    <button onclick="toggleDocsRH()" style="width:100%;background:none;border:none;padding:0;display:flex;align-items:center;justify-content:space-between;cursor:pointer;font-family:inherit">
+      <span style="font-size:12px;font-weight:800;color:#1A1D23">📋 Advertência / Suspensão / Demissão</span>
+      <span style="font-size:11px;color:rgba(0,0,0,.4)">${_showDocsRH?'▲':'▼'}</span>
+    </button>
+    ${_showDocsRH ? '<div style="margin-top:12px">' + corpoAberto + '</div>' : ''}
+  </div>`;
+}
+
+// Monta o texto completo do documento (mesmos dados preenchidos no card) —
+// valida os campos obrigatórios antes, retornando null e mostrando um alert
+// de erro (mesmo padrão de aviso já usado no restante deste arquivo).
+function _validarEMontarTextoDocRH() {
+  const nome = (_docRH.nome || '').trim();
+  const cnpj = (_docRH.cnpj || '').trim();
+  if (!nome) { alert('Informe o nome do funcionário.'); return null; }
+  if (!cnpj) { alert('Informe o CNPJ da empresa.'); return null; }
+  const motivo = (_docRH.motivoTexto || '').trim();
+  if (!motivo) { alert('Selecione ou descreva o motivo.'); return null; }
+  const cargoLinha = _docRH.cargo ? ` — Cargo: ${_docRH.cargo}` : '';
+  const dataFmt = _docRH.data ? new Date(_docRH.data + 'T00:00:00').toLocaleDateString('pt-BR') : new Date().toLocaleDateString('pt-BR');
+  const empresa = LOJA_DISPLAY[_docRH.loja] || _docRH.loja;
+
+  let corpo = '';
+  if (_docRH.tipo === 'advertencia') {
+    corpo = `Pelo presente instrumento, a empresa acima identificada aplica ADVERTÊNCIA ao(à)\nfuncionário(a) acima qualificado(a), em razão do seguinte motivo:\n\n${motivo}\n\nFica o(a) funcionário(a) advertido(a) de que a reincidência em conduta semelhante,\nou em qualquer outra falta disciplinar, poderá ensejar a aplicação de penalidades\nmais severas, incluindo suspensão e, em caso de reiteração, rescisão do contrato\nde trabalho por justa causa, nos termos da legislação trabalhista vigente (CLT).`;
+  } else if (_docRH.tipo === 'suspensao') {
+    const dias = parseInt(_docRH.dias, 10) || 1;
+    corpo = `Pelo presente instrumento, a empresa acima identificada aplica SUSPENSÃO\nDISCIPLINAR de ${dias} dia(s), ao(à) funcionário(a) acima qualificado(a), em razão\ndo seguinte motivo:\n\n${motivo}\n\nDurante o período de suspensão, ficam sobrestados os efeitos do contrato de\ntrabalho, não sendo devida remuneração pelos dias de afastamento, nos termos do\nart. 474 da CLT. A reincidência em conduta semelhante poderá ensejar a rescisão\ndo contrato de trabalho por justa causa.`;
+  } else {
+    corpo = `Comunicamos que fica rescindido, nesta data, o contrato de trabalho firmado entre\nas partes, pelo seguinte motivo:\n\n${motivo}\n\nO(A) funcionário(a) deverá comparecer ao setor de Recursos Humanos para\nformalização do acerto rescisório e demais providências cabíveis, observados os\nprazos e direitos previstos na legislação trabalhista vigente (CLT).`;
+  }
+
+  const texto = `${DOC_RH_TITULOS[_docRH.tipo]}\n\nEmpresa: ${empresa} — CNPJ: ${cnpj}\nFuncionário(a): ${nome}${cargoLinha}\nData: ${dataFmt}\n\n${corpo}\n\n\n_______________________________          _______________________________\nAssinatura do Funcionário                 Assinatura do Responsável (Empresa)\n\n\n_______________________________\nAssinatura de Testemunha`;
+  const titulo = `${DOC_RH_TITULOS[_docRH.tipo]} — ${nome}`;
+  return { texto, titulo };
+}
+
+function gerarPDFDocRH() {
+  const r = _validarEMontarTextoDocRH();
+  if (!r) return;
+  gerarPDF(r.texto, r.titulo);
+}
+
+async function compartilharPDFDocRHWpp() {
+  const r = _validarEMontarTextoDocRH();
+  if (!r) return;
+  await _compartilharPdfWpp(r.texto, r.titulo);
+}
+// ────────────────────────────────────────────────────────────────────────────
 
 // Card "Documentos & Carnes" — mesma info que já existe em gn-checklist.html (aba Dados
 // tem os documentos/licenças; aba Gestão tem o resumo de carnes), só que aqui aparece
@@ -1498,6 +1673,7 @@ function _refreshPermUI(sess) {
   renderModules(sess, isMaster);
   loadBadges(sess, isMaster);
   _renderPendenciasLojaHome(!isMaster || !!masterLoja, sess, isMaster);
+  _renderDocsRHHome(!isMaster || !!masterLoja, sess, isMaster);
   _renderDataComemorativaHome(!isMaster || !!masterLoja, sess, isMaster);
   _renderContagemSegundaHome(!isMaster || !!masterLoja);
   _renderDatasEspeciaisHome(!isMaster || !!masterLoja);
@@ -1704,6 +1880,7 @@ function showHome(sess) {
   renderModules(sess, isMaster);
   loadBadges(sess, isMaster);
   _renderPendenciasLojaHome(!isMaster || !!masterLoja, sess, isMaster);
+  _renderDocsRHHome(!isMaster || !!masterLoja, sess, isMaster);
   _renderDataComemorativaHome(!isMaster || !!masterLoja, sess, isMaster);
   _renderContagemSegundaHome(!isMaster || !!masterLoja);
   _renderDatasEspeciaisHome(!isMaster || !!masterLoja);
