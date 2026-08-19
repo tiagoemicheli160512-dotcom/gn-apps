@@ -62,6 +62,27 @@ input,select{font-family:inherit;font-size:inherit;outline:none}
 .mesa-num{font-size:17px}
 .mesa-info{font-size:9px;font-weight:700;opacity:.85}
 
+/* Mapa de mesas */
+.mesas-toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.view-toggle{display:flex;background:#EEF1F4;border-radius:12px;padding:3px;gap:2px}
+.view-toggle button{padding:7px 12px;border-radius:9px;font-size:12px;font-weight:700;color:rgba(0,0,0,.45)}
+.view-toggle button.active{background:#fff;color:#1A1D23;box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.btn-editar-mapa{background:#EEF1F4;border:1px solid #E1E4E9;border-radius:10px;padding:7px 12px;font-size:12px;font-weight:700;color:#1A1D23}
+.btn-editar-mapa.on{background:var(--cor);border-color:var(--cor);color:#fff}
+.mapa-hint{font-size:11px;color:rgba(0,0,0,.45);margin-bottom:8px}
+.mapa-wrap{position:relative;width:100%;aspect-ratio:4/3;background-image:linear-gradient(#E1E4E9 1px,transparent 1px),linear-gradient(90deg,#E1E4E9 1px,transparent 1px);background-size:12.5% 12.5%;background-color:#FAFBFC;border:1.5px solid #E1E4E9;border-radius:16px;overflow:hidden;touch-action:none}
+.mesa-map{position:absolute;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;justify-content:center;font-weight:800;user-select:none;box-shadow:0 2px 6px rgba(0,0,0,.10)}
+.mesa-map.redonda{width:56px;height:56px;border-radius:50%}
+.mesa-map.quadrada{width:52px;height:52px;border-radius:12px}
+.mesa-map.retangular{width:78px;height:44px;border-radius:10px}
+.mesa-map .mesa-num{font-size:15px;line-height:1.1}
+.mesa-map .mesa-info{font-size:8px;font-weight:700;opacity:.85;line-height:1.3}
+.mesa-map.livre{background:#fff;border:1.5px solid #E1E4E9;color:#1A1D23}
+.mesa-map.ocupada{background:rgba(232,88,10,.16);border:1.5px solid var(--cor);color:var(--cor2)}
+.mesa-map.editando{cursor:grab}
+.mesa-map.arrastando{cursor:grabbing;z-index:20;box-shadow:0 6px 18px rgba(0,0,0,.28)}
+.mesa-map-shape-btn{position:absolute;top:-8px;right:-8px;width:20px;height:20px;border-radius:50%;background:#1A1D23;color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center;z-index:5}
+
 /* Comanda */
 .comanda-hdr{display:flex;align-items:center;gap:10px;margin-bottom:12px}
 .btn-voltar{background:#EEF1F4;border-radius:10px;padding:8px 12px;font-size:13px;font-weight:700;color:#1A1D23}
@@ -187,7 +208,7 @@ const LOJAS_COMANDAS = window.GN_LOJAS.filter(l => l.userKey !== 'MAGLIA');
 const LOJA_CHK_MAP = Object.fromEntries(window.GN_LOJAS.map(l=>[l.userKey,l.chkKey]));
 const CARGOS_ADMIN_COMANDAS = ['mestre','supervisor','administrador','gerente'];
 
-const S = { user:null, loja:null, tab:'mesas', mesasAbertas:[], comandaAtual:null, itensAtual:[], precos:{}, numMesas:30, relData:null, relRows:[] };
+const S = { user:null, loja:null, tab:'mesas', mesasAbertas:[], comandaAtual:null, itensAtual:[], precos:{}, numMesas:30, relData:null, relRows:[], mesasViewMode:'mapa', mesasLayoutSalvo:null, editandoMapa:false };
 
 function $(id){ return document.getElementById(id); }
 
@@ -320,14 +341,43 @@ async function carregarMesasAbertas(){
 }
 
 async function renderMesasTab(){
-  $('content').innerHTML = `<div class="sec-title">Mesas</div><div class="mesas-grid" id="mesasGrid"><div class="card" style="grid-column:1/-1;text-align:center;color:rgba(0,0,0,.4);padding:24px">Carregando…</div></div>
+  try { S.mesasViewMode = localStorage.getItem('gn_comandas_viewmesas_'+S.loja) || 'mapa'; } catch(_) { S.mesasViewMode = 'mapa'; }
+  const toolbar = `
+    <div class="mesas-toolbar">
+      <div class="view-toggle">
+        <button class="${S.mesasViewMode==='mapa'?'active':''}" onclick="alternarViewMesas('mapa')">🗺️ Mapa</button>
+        <button class="${S.mesasViewMode==='grid'?'active':''}" onclick="alternarViewMesas('grid')">▦ Grade</button>
+      </div>
+      ${podeAdmin() && S.mesasViewMode==='mapa' ? `<button class="btn-editar-mapa${S.editandoMapa?' on':''}" onclick="toggleEditarMapa()">${S.editandoMapa?'✓ Concluir edição':'✏️ Editar mapa'}</button>` : ''}
+    </div>`;
+  const hint = (S.mesasViewMode==='mapa' && S.editandoMapa) ? `<div class="mapa-hint">Arraste as mesas pra posição real do salão. Toque no ⟳ pra trocar o formato.</div>` : '';
+  $('content').innerHTML = `<div class="sec-title">Mesas</div>${toolbar}${hint}
+    <div id="mesasArea"><div class="card" style="text-align:center;color:rgba(0,0,0,.4);padding:24px">Carregando…</div></div>
     ${podeAdmin() ? '<div style="margin-top:14px"><button class="btn-secondary" onclick="ajustarNumMesas()">⚙️ Nº de mesas (' + S.numMesas + ')</button></div>' : ''}`;
-  await carregarMesasAbertas();
-  const grid = $('mesasGrid');
-  if (!grid) return;
+  const tarefas = [carregarMesasAbertas()];
+  if (S.mesasViewMode === 'mapa') tarefas.push(carregarLayoutMesas());
+  await Promise.all(tarefas);
+  if (S.mesasViewMode === 'mapa') renderMapaMesas(); else renderGradeMesas();
+}
+
+function alternarViewMesas(modo){
+  S.mesasViewMode = modo;
+  try { localStorage.setItem('gn_comandas_viewmesas_'+S.loja, modo); } catch(_) {}
+  if (modo !== 'mapa') S.editandoMapa = false;
+  renderMesasTab();
+}
+
+function toggleEditarMapa(){
+  S.editandoMapa = !S.editandoMapa;
+  renderMesasTab();
+}
+
+function renderGradeMesas(){
+  const area = $('mesasArea');
+  if (!area) return;
   const porMesa = {};
   S.mesasAbertas.forEach(c => { porMesa[String(c.mesa)] = c; });
-  let html = '';
+  let html = '<div class="mesas-grid">';
   for (let i = 1; i <= S.numMesas; i++) {
     const c = porMesa[String(i)];
     if (c) {
@@ -344,7 +394,130 @@ async function renderMesasTab(){
       </button>`;
     }
   }
-  grid.innerHTML = html;
+  html += '</div>';
+  area.innerHTML = html;
+}
+
+/* ═══════════ MAPA DE MESAS ═══════════ */
+const FORMATOS_MESA = ['redonda','quadrada','retangular'];
+
+// Arranjo padrão (grade) usado pra qualquer mesa que ainda não tenha posição
+// salva — garante que o mapa já funcione antes de o admin arrastar nada.
+function defaultLayoutMesas(n){
+  const cols = 5, rows = Math.max(1, Math.ceil(n / cols));
+  const out = [];
+  for (let i = 1; i <= n; i++) {
+    const idx = i - 1, col = idx % cols, row = Math.floor(idx / cols);
+    out.push({ mesa:String(i), x:Math.round(((col+0.5)/cols)*100), y:Math.round(((row+0.5)/rows)*100), formato:'redonda' });
+  }
+  return out;
+}
+
+async function carregarLayoutMesas(){
+  try {
+    const [row] = await sb(`gn_comandas_mesas_layout?loja=eq.${encodeURIComponent(S.loja)}&select=layout`);
+    S.mesasLayoutSalvo = (row && Array.isArray(row.layout)) ? row.layout : [];
+  } catch(e) { S.mesasLayoutSalvo = []; }
+}
+
+// Mescla o layout salvo com posições padrão pra mesas que ainda não foram
+// posicionadas manualmente (ex.: número de mesas aumentou depois do último ajuste).
+function layoutEfetivo(){
+  const salvo = {};
+  (S.mesasLayoutSalvo||[]).forEach(m => { salvo[String(m.mesa)] = m; });
+  const def = defaultLayoutMesas(S.numMesas);
+  const out = [];
+  for (let i = 1; i <= S.numMesas; i++) {
+    const k = String(i);
+    out.push(salvo[k] || def[i-1]);
+  }
+  return out;
+}
+
+async function _salvarPosicaoMesa(mesa, patch){
+  const lista = Array.isArray(S.mesasLayoutSalvo) ? [...S.mesasLayoutSalvo] : [];
+  const idx = lista.findIndex(m=>String(m.mesa)===String(mesa));
+  const base = idx>=0 ? lista[idx] : (layoutEfetivo().find(m=>String(m.mesa)===String(mesa)) || {mesa:String(mesa),x:50,y:50,formato:'redonda'});
+  const novo = { ...base, ...patch, mesa:String(mesa) };
+  if (idx>=0) lista[idx] = novo; else lista.push(novo);
+  S.mesasLayoutSalvo = lista;
+  try {
+    await sb('gn_comandas_mesas_layout?on_conflict=loja', { method:'POST', prefer:'return=minimal,resolution=merge-duplicates',
+      body:{ loja:S.loja, layout:lista, atualizado_em:new Date().toISOString(), atualizado_por:S.user.nome } });
+  } catch(e) { toast('⚠️ Erro ao salvar posição da mesa.', true); }
+}
+
+function ciclarFormatoMesa(mesa){
+  const atual = (layoutEfetivo().find(m=>String(m.mesa)===String(mesa))||{}).formato || 'redonda';
+  const novo = FORMATOS_MESA[(FORMATOS_MESA.indexOf(atual)+1) % FORMATOS_MESA.length];
+  _salvarPosicaoMesa(mesa, { formato: novo });
+  renderMapaMesas();
+}
+
+function renderMapaMesas(){
+  const area = $('mesasArea');
+  if (!area) return;
+  const porMesa = {};
+  S.mesasAbertas.forEach(c => { porMesa[String(c.mesa)] = c; });
+  const layout = layoutEfetivo();
+  const itensHtml = layout.map(m => {
+    const c = porMesa[m.mesa];
+    const ocupada = !!c;
+    const cls = `mesa-map ${m.formato||'redonda'} ${ocupada?'ocupada':'livre'}${S.editandoMapa?' editando':''}`;
+    const info = ocupada ? `<span class="mesa-info">${money(c.valor_total)}</span>` : `<span class="mesa-info">livre</span>`;
+    const shapeBtn = S.editandoMapa
+      ? `<span class="mesa-map-shape-btn" onpointerdown="event.stopPropagation();ciclarFormatoMesa('${m.mesa}')" title="Trocar formato">⟳</span>` : '';
+    return `<div class="${cls}" id="mesaMap-${m.mesa}" data-mesa="${m.mesa}" style="left:${m.x}%;top:${m.y}%"
+      onpointerdown="onMesaMapPointerDown(event,'${m.mesa}')">
+      <span class="mesa-num">${escapeHtml(m.mesa)}</span>${info}${shapeBtn}
+    </div>`;
+  }).join('');
+  area.innerHTML = `<div class="mapa-wrap" id="mapaWrap">${itensHtml}</div>`;
+}
+
+let _mapaDrag = null;
+
+function onMesaMapPointerDown(ev, mesa){
+  ev.preventDefault();
+  const wrap = $('mapaWrap'), el = $('mesaMap-'+mesa);
+  if (!wrap || !el) return;
+  _mapaDrag = { mesa, rect: wrap.getBoundingClientRect(), el, startX:ev.clientX, startY:ev.clientY, moved:false };
+  try { el.setPointerCapture(ev.pointerId); } catch(_) {}
+  el.addEventListener('pointermove', onMesaMapPointerMove);
+  el.addEventListener('pointerup', onMesaMapPointerUp);
+  el.addEventListener('pointercancel', onMesaMapPointerUp);
+}
+
+function onMesaMapPointerMove(ev){
+  if (!_mapaDrag) return;
+  const dx = ev.clientX - _mapaDrag.startX, dy = ev.clientY - _mapaDrag.startY;
+  if (Math.abs(dx) > 4 || Math.abs(dy) > 4) _mapaDrag.moved = true;
+  if (!S.editandoMapa || !_mapaDrag.moved) return;
+  const { rect, el } = _mapaDrag;
+  const x = Math.max(2, Math.min(98, ((ev.clientX - rect.left) / rect.width) * 100));
+  const y = Math.max(2, Math.min(98, ((ev.clientY - rect.top) / rect.height) * 100));
+  el.classList.add('arrastando');
+  el.style.left = x + '%';
+  el.style.top = y + '%';
+  _mapaDrag.finalX = x; _mapaDrag.finalY = y;
+}
+
+function onMesaMapPointerUp(){
+  if (!_mapaDrag) return;
+  const { mesa, el, moved, finalX, finalY } = _mapaDrag;
+  el.removeEventListener('pointermove', onMesaMapPointerMove);
+  el.removeEventListener('pointerup', onMesaMapPointerUp);
+  el.removeEventListener('pointercancel', onMesaMapPointerUp);
+  el.classList.remove('arrastando');
+  _mapaDrag = null;
+  if (S.editandoMapa && moved && finalX != null) {
+    _salvarPosicaoMesa(mesa, { x: Math.round(finalX), y: Math.round(finalY) });
+  } else if (!S.editandoMapa && !moved) {
+    const porMesa = {};
+    S.mesasAbertas.forEach(c => { porMesa[String(c.mesa)] = c; });
+    const c = porMesa[String(mesa)];
+    if (c) abrirComandaExistente(c.id); else abrirMesa(Number(mesa));
+  }
 }
 
 function ajustarNumMesas(){
