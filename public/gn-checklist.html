@@ -4557,16 +4557,32 @@ async function saveAll(){
       }).eq('data_operacao',state.data).eq('loja',LOJA);
     }catch(_){}
 
-    // Salvar carnes da SEMANA — só salva se houver ao menos um valor preenchido
+    // Salvar carnes da SEMANA — só salva se houver ao menos um valor preenchido, e sempre
+    // pela semana realmente carregada em stateWeek.carnes (stateWeek.semanaInicio), NUNCA
+    // pelo state.semanaInicio "visível" da tela. Navegar pro Histórico troca
+    // state.semanaInicio pra semana do dia visualizado (ver mergeState), sem recarregar
+    // stateWeek.carnes — gravar usando state.semanaInicio nesse caso sobrescrevia a semana
+    // histórica com os dados da semana atual, apagando tudo que já estava lá.
     const _carnesTemDados = CARNES_DEF.some(c=>
       c.rows.some(r=>{
         const rd=(stateWeek.carnes[c.key]||{})[r.key]||{};
         return Object.values(rd).some(v=>v!==''&&v!==undefined&&v!==null&&parseFloat(v)!==0);
       })
     );
-    if(state.semanaInicio && _carnesTemDados){
+    if(stateWeek.semanaInicio && _carnesTemDados){
+      const semanaIniCarnes = stateWeek.semanaInicio;
+      const semanaFimCarnes = toISO((d=>{ d.setDate(d.getDate()+6); return d; })(new Date(semanaIniCarnes+'T12:00:00')));
+      // Re-mescla com o que já está salvo no servidor imediatamente antes de gravar — reduz
+      // bastante a janela de corrida entre dois aparelhos editando a mesma semana (um em
+      // Entradas, outro em Contagem, por exemplo): sem isso, o autosave de 30s de um
+      // aparelho apagava silenciosamente campos que só o outro tinha em memória.
+      try{
+        const {data:servRow}=await sb.from('checklist_carnes')
+          .select('carnes').eq('semana_inicio',semanaIniCarnes).eq('loja',LOJA).single();
+        if(servRow?.carnes) stateWeek.carnes = _mesclarCarnesAntesDeSalvar(servRow.carnes);
+      }catch(_){}
       const {error:e2}=await sb.from('checklist_carnes').upsert({
-        semana_inicio: state.semanaInicio, semana_fim: state.semanaFim,
+        semana_inicio: semanaIniCarnes, semana_fim: semanaFimCarnes,
         loja: LOJA, carnes: stateWeek.carnes, fat: {...stateWeek.fat, meta: stateWeek.metaSemanal}
       },{onConflict:'semana_inicio,loja'});
       if(e2) throw e2;
@@ -4604,7 +4620,7 @@ async function saveAll(){
             });
           });
           await sb.from('checklist_carnes').upsert({
-            semana_inicio: state.semanaInicio, semana_fim: state.semanaFim,
+            semana_inicio: semanaIniCarnes, semana_fim: semanaFimCarnes,
             loja: LOJA, carnes: stateWeek.carnes, fat: {...stateWeek.fat, meta: stateWeek.metaSemanal}
           },{onConflict:'semana_inicio,loja'});
           carneTabAtiva='inicial';
@@ -4613,7 +4629,7 @@ async function saveAll(){
           renderCarnes();
 
           // 2) Propaga como contagem_final da SEMANA ANTERIOR (fecha o Resumo daquela semana)
-          const dPrev=new Date(state.semanaInicio+'T12:00:00');
+          const dPrev=new Date(semanaIniCarnes+'T12:00:00');
           dPrev.setDate(dPrev.getDate()-7);
           const prevIni=dPrev.toISOString().slice(0,10);
           const {data:prevRow}=await sb.from('checklist_carnes')
@@ -4743,6 +4759,30 @@ function mergeWeekState(rows){
     if(rows.fat.delivery) stateWeek.fat.delivery = {...stateWeek.fat.delivery,...rows.fat.delivery};
     if(rows.fat.meta != null) stateWeek.metaSemanal = parseFloat(rows.fat.meta)||0;
   }
+}
+
+// Mescla o carnes que já está salvo no servidor com o que está em memória, ANTES de
+// gravar — só sobrescreve um campo quando o valor local não está vazio. Chamado em todo
+// saveAll() (autosave de 3s por digitação + timer de 30s), reduz muito a janela de corrida
+// entre dois aparelhos editando a mesma semana ao mesmo tempo (ex.: um em Entradas, outro
+// em Contagem): sem isso, o último a salvar apagava silenciosamente os campos que só o
+// outro aparelho tinha carregado em memória.
+function _mesclarCarnesAntesDeSalvar(carnesServidor){
+  const out = {};
+  CARNES_DEF.forEach(c=>{
+    out[c.key] = {};
+    c.rows.forEach(r=>{
+      const doServidor = (carnesServidor[c.key]||{})[r.key] || {};
+      const local = (stateWeek.carnes[c.key]||{})[r.key] || {};
+      const merged = {...doServidor};
+      Object.keys(local).forEach(k=>{
+        const v = local[k];
+        if(v!==''&&v!==undefined&&v!==null) merged[k]=v;
+      });
+      out[c.key][r.key] = merged;
+    });
+  });
+  return out;
 }
 
 function applySemanaLabels(){
