@@ -3088,26 +3088,31 @@ async function toggleDiverg(catalogoId, lojaSlug) {
   if (!S.pedidoItens[catalogoId][lojaSlug]) S.pedidoItens[catalogoId][lojaSlug] = { id: null, qtd: 0, custo: null, diverg: false };
   const item = S.pedidoItens[catalogoId][lojaSlug];
   const novaDiverg = !item.diverg;
-  item.diverg = novaDiverg;
 
-  // Atualizar botões e linhas visualmente (sem re-render completo)
-  document.querySelectorAll(`.prod-row[data-cid="${catalogoId}"][data-loja="${lojaSlug}"]`).forEach(row => {
-    row.classList.toggle('diverg-ativo', novaDiverg);
-    row.querySelectorAll('.diverg-btn').forEach(btn => btn.classList.toggle('ativo', novaDiverg));
-  });
-  document.querySelectorAll('.todos-loja-row').forEach(row => {
-    const btn = row.querySelector('.diverg-btn');
-    if (!btn) return;
-    const onclick = btn.getAttribute('onclick') || '';
-    if (onclick.includes(catalogoId) && onclick.includes(lojaSlug)) {
-      btn.classList.toggle('ativo', novaDiverg);
-      row.classList.toggle('diverg-ativo', novaDiverg);
-    }
-  });
+  // Atualizar botões e linhas visualmente (sem re-render completo) — extraído numa função
+  // pra poder desfazer visualmente também, se a gravação abaixo falhar.
+  const _aplicarVisual = (v) => {
+    document.querySelectorAll(`.prod-row[data-cid="${catalogoId}"][data-loja="${lojaSlug}"]`).forEach(row => {
+      row.classList.toggle('diverg-ativo', v);
+      row.querySelectorAll('.diverg-btn').forEach(btn => btn.classList.toggle('ativo', v));
+    });
+    document.querySelectorAll('.todos-loja-row').forEach(row => {
+      const btn = row.querySelector('.diverg-btn');
+      if (!btn) return;
+      const onclick = btn.getAttribute('onclick') || '';
+      if (onclick.includes(catalogoId) && onclick.includes(lojaSlug)) {
+        btn.classList.toggle('ativo', v);
+        row.classList.toggle('diverg-ativo', v);
+      }
+    });
+  };
+  item.diverg = novaDiverg;
+  _aplicarVisual(novaDiverg);
 
   try {
     if (item.id) {
-      await db.from('gn_pedido_itens').update({ divergencia: novaDiverg }).eq('id', item.id);
+      const { error } = await db.from('gn_pedido_itens').update({ divergencia: novaDiverg }).eq('id', item.id);
+      if (error) throw error;
     } else if (novaDiverg && S.pedidoAtual) {
       // Sem linha no banco ainda — cria com qtd=0 e divergencia=true
       const { data, error } = await db.from('gn_pedido_itens').insert([{
@@ -3118,10 +3123,19 @@ async function toggleDiverg(catalogoId, lojaSlug) {
         custo_unitario: null,
         divergencia:    true
       }]).select('id').single();
-      if (!error && data) item.id = data.id;
+      if (error) throw error;
+      if (data) item.id = data.id;
     }
     // novaDiverg=false + sem id: nada a desfazer no banco
-  } catch(e) { console.error('toggleDiverg:', e.message); }
+  } catch(e) {
+    console.error('toggleDiverg:', e.message);
+    // A marcação visual já tinha sido aplicada antes da gravação (otimista) — desfaz os
+    // dois lados (estado em memória e visual) já que a gravação falhou, senão a tela
+    // mostrava "divergência" marcada sem isso persistir em lugar nenhum.
+    item.diverg = !novaDiverg;
+    _aplicarVisual(!novaDiverg);
+    toast('⚠️ Não foi possível salvar a divergência — tente de novo.', 'err');
+  }
 }
 
 function verProvisoes() {
@@ -4975,18 +4989,28 @@ async function confirmarEntrega(provisaoId) {
   const diff    = qtdRec - qtdPrev;
   const status  = Math.abs(diff) < 0.01 ? 'RECEBIDO_OK' : 'DIVERGENCIA';
 
-  // Salva recebimento
-  await db.from('gn_recebimentos').insert([{
-    provisao_id: provisaoId,
-    qtd_recebida: qtdRec,
-    valor_recebido: valRec,
-    diferenca_qtd: diff,
-    observacao: obs,
-    validado_por: recebidoPor
-  }]);
+  // Salva recebimento — checa o erro (nem sempre o insert lança, pode só retornar
+  // {error} no PostgREST), senão o toast de sucesso aparecia mesmo quando a gravação
+  // falhou de verdade (RLS, rede instável etc.), igual ao já corrigido no lote
+  // (confirmarEntregasEmLotePorLoja).
+  try {
+    const { error: e1 } = await db.from('gn_recebimentos').insert([{
+      provisao_id: provisaoId,
+      qtd_recebida: qtdRec,
+      valor_recebido: valRec,
+      diferenca_qtd: diff,
+      observacao: obs,
+      validado_por: recebidoPor
+    }]);
+    if (e1) throw e1;
 
-  // Atualiza status da provisão
-  await db.from('gn_provisoes').update({ status, atualizado_em: new Date().toISOString() }).eq('id', provisaoId);
+    // Atualiza status da provisão
+    const { error: e2 } = await db.from('gn_provisoes').update({ status, atualizado_em: new Date().toISOString() }).eq('id', provisaoId);
+    if (e2) throw e2;
+  } catch(e) {
+    toast('⚠️ Erro ao confirmar entrega: ' + (e.message || e), 'err');
+    return;
+  }
 
   $('modal-bg').classList.remove('ativo');
   toast(status === 'RECEBIDO_OK' ? '✓ Entrega confirmada!' : '⚠ Divergência registrada.', status==='RECEBIDO_OK'?'ok':'err');
@@ -6273,7 +6297,15 @@ async function carregarMasterConfig() {
 
 async function sbPushMasterConfig() {
   try {
-    const payload = { fichasCustom, fichasRemoved, insumosCustom };
+    // Busca o all_data mais recente da linha MASTER_CONFIG antes de gravar — essa mesma
+    // linha guarda fatoresConversao/alertasWpp/nfMapeamentos/fichasMapeamentos (lidos por
+    // gn-lojas.html), gravados por outros apps/telas fora deste payload conhecido aqui.
+    // Sobrescrever com só {fichasCustom, fichasRemoved, insumosCustom} apagava esses campos
+    // silenciosamente toda vez que alguém salvava/removia uma ficha técnica.
+    const { data: baseRow } = await db.from('gn_lojas')
+      .select('all_data').eq('loja', 'MASTER_CONFIG').maybeSingle();
+    const baseAllData = (baseRow && baseRow.all_data) || {};
+    const payload = { ...baseAllData, fichasCustom, fichasRemoved, insumosCustom };
     const { error } = await db.from('gn_lojas')
       .update({ all_data: payload, updated_at: new Date().toISOString(), updated_by: 'MASTER' })
       .eq('loja', 'MASTER_CONFIG');
