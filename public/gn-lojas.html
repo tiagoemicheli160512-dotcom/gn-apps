@@ -653,6 +653,13 @@ let notaFotoBase64 = "";  // foto da NF em edição (Entradas)
 let notaFotoName   = "";
 
 let estIniAll  = {};   // lojaKey -> {insumo: val}
+// Última cópia de estIniAll conhecida como vinda da nuvem (por lojaKey) — usada só na hora
+// do push, pra calcular o delta que ESTE aparelho aplicou localmente desde a última
+// sincronização e reaplicar esse delta em cima do valor mais fresco da nuvem, em vez de
+// sobrescrever o insumo inteiro (ver _mergeEstIniAllPorDelta). Sem isso, duas notas fiscais
+// do mesmo insumo lançadas quase juntas em dois aparelhos faziam quem sincronizasse por
+// último apagar o incremento do outro do saldo — pedido da semana saía a menos, ruptura real.
+let _estIniAllSync = {};
 let vendasAll  = {};   // lojaKey -> {cod: qtd}
 let checklistFat = null; // null=não carregado, []=vazio, [{data_operacao,venda_salao,venda_delivery}]
 let checklistVendasItens = null; // null=não carregado, {}={cod:qtd} agregado semanal do check-list
@@ -908,6 +915,30 @@ function _mergeMapaAninhadoPorLoja(localFiltrado, cloudMapa) {
   return r;
 }
 
+// Mesma função acima, mas por DELTA, específica pra estIniAll — substituir o insumo inteiro
+// (como faz _mergeMapaAninhadoPorLoja) apaga silenciosamente o incremento de outro aparelho
+// que tenha mexido no mesmo insumo desde a última sincronização deste. Em vez disso, calcula
+// quanto ESTE aparelho somou/subtraiu localmente desde a última cópia conhecida da nuvem
+// (_estIniAllSync) e reaplica só esse delta em cima do valor mais fresco da nuvem.
+function _mergeEstIniAllPorDelta(localFiltrado, cloudMapa) {
+  const cloud = cloudMapa || {};
+  const chaves = new Set([...Object.keys(localFiltrado || {}), ...Object.keys(cloud)]);
+  const r = {};
+  chaves.forEach(k => {
+    const localObj    = (localFiltrado || {})[k] || {};
+    const cloudObj     = cloud[k] || {};
+    const baselineObj  = _estIniAllSync[k] || {};
+    const insumos = new Set([...Object.keys(localObj), ...Object.keys(cloudObj), ...Object.keys(baselineObj)]);
+    const merged = {};
+    insumos.forEach(insumo => {
+      const delta = (localObj[insumo] || 0) - (baselineObj[insumo] || 0);
+      merged[insumo] = delta !== 0 ? Math.max(0, (cloudObj[insumo] || 0) + delta) : (cloudObj[insumo] || 0);
+    });
+    r[k] = merged;
+  });
+  return r;
+}
+
 // entradasAll é um dicionário {lojaKey|semana: [registros com id]} — mesma lógica de
 // _mergeTransferAllPorId (uma lista por chave, união por id, local prevalece em conflito),
 // só que sem o merge de campos monotônicos específico de transferência.
@@ -950,10 +981,12 @@ async function sbPush() {
     // Sobrescrever sem mesclar apagava esses campos silenciosamente a cada autosave —
     // era o motivo do card "Enviar XML do mês" no painel voltar mesmo já confirmado.
     const baseAllData = await _fetchAllDataAtual(loja);
+    const estIniAllMerged = _mergeEstIniAllPorDelta(filterByLoja(estIniAll, loja), baseAllData.estIniAll);
     const payload = {
-      // estIniAll/vendasAll/contAll/pedidoAll: mescla item a item com a nuvem — não
-      // substitui a semana inteira (ver _mergeMapaAninhadoPorLoja).
-      estIniAll:   _mergeMapaAninhadoPorLoja(filterByLoja(estIniAll, loja), baseAllData.estIniAll),
+      // estIniAll: mescla por delta, não por chave (ver _mergeEstIniAllPorDelta). vendasAll/
+      // contAll/pedidoAll: mescla item a item com a nuvem — não substitui a semana inteira
+      // (ver _mergeMapaAninhadoPorLoja).
+      estIniAll:   estIniAllMerged,
       vendasAll:   _mergeMapaAninhadoPorLoja(filterByLoja(vendasAll, loja), baseAllData.vendasAll),
       contAll:     _mergeMapaAninhadoPorLoja(filterByLoja(contAll,   loja), baseAllData.contAll),
       // entradasAll/avariasAll/transferAll/devolucoesAll são listas de registros com id —
@@ -984,6 +1017,12 @@ async function sbPush() {
       body: JSON.stringify({ all_data: mergedAllData, updated_at: new Date().toISOString(), updated_by: loja + (usuarioAtual ? '/' + usuarioAtual.nome : '') })
     });
     sbStatus = "online"; sbLastError = "";
+    // Atualiza o estIniAll local com o valor reconciliado (delta reaplicado sobre a nuvem
+    // fresca) e marca essa cópia como o novo baseline conhecido — só depois do PATCH
+    // confirmar, senão uma falha de rede deixaria o baseline avançado sem o dado ter
+    // realmente chegado na nuvem, incorrendo o próximo cálculo de delta.
+    Object.assign(estIniAll, estIniAllMerged);
+    Object.keys(estIniAllMerged).forEach(k => { _estIniAllSync[k] = { ...estIniAllMerged[k] }; });
     if (statusAntes === 'erro') showToast('✅ Sincronizado com a nuvem novamente.', '', 2500);
     // Só marca como sincronizado até a versão que existia quando este push começou —
     // se o usuário editou de novo enquanto a requisição estava em voo, sbEditVersion já
@@ -1011,8 +1050,9 @@ async function sbPushLoja(lojaAlvo) {
   // outros apps, além de avariasAll/transferAll próprios dela que este aparelho não tem
   // como saber sem buscar antes.
   const baseAllData = await _fetchAllDataAtual(lojaAlvo);
+  const estIniAllMergedAlvo = _mergeEstIniAllPorDelta(filterByLoja(estIniAll, lojaAlvo), baseAllData.estIniAll);
   const payload = {
-    estIniAll:   _mergeMapaAninhadoPorLoja(filterByLoja(estIniAll, lojaAlvo), baseAllData.estIniAll),
+    estIniAll:   estIniAllMergedAlvo,
     vendasAll:   _mergeMapaAninhadoPorLoja(filterByLoja(vendasAll, lojaAlvo), baseAllData.vendasAll),
     contAll:     _mergeMapaAninhadoPorLoja(filterByLoja(contAll,   lojaAlvo), baseAllData.contAll),
     entradasAll: _mergeListaPorLojaSemana(filterByLoja(entradasAll, lojaAlvo), baseAllData.entradasAll, _pendingDelIds.entradasAll),
@@ -1033,6 +1073,8 @@ async function sbPushLoja(lojaAlvo) {
     headers: { "Prefer": "return=minimal" },
     body: JSON.stringify({ all_data: mergedAllData, updated_at: new Date().toISOString(), updated_by: loja + "→" + lojaAlvo })
   });
+  Object.assign(estIniAll, estIniAllMergedAlvo);
+  Object.keys(estIniAllMergedAlvo).forEach(k => { _estIniAllSync[k] = { ...estIniAllMergedAlvo[k] }; });
 }
 
 /* Busca dados de TODAS as lojas da nuvem e mescla no estado local */
@@ -1066,12 +1108,15 @@ async function sbPull(silent) {
           const hoje = getMonday(new Date());
           Object.entries(d.estIniAll).forEach(([key, val]) => {
             const [lojaK, wk] = key.split('|');
-            if (!wk) { Object.assign(estIniAll, {[key]: val}); return; }
+            if (!wk) { Object.assign(estIniAll, {[key]: val}); _estIniAllSync[key] = { ...val }; return; }
             // wk format: YYYY-MM-DD
             const wkDate = new Date(wk + 'T00:00:00');
             const diffDias = (wkDate - hoje) / 86400000;
             if (diffDias >= -7) { // aceitar até 1 semana atrás
               estIniAll[key] = val;
+              // Baseline pro cálculo de delta no próximo push (ver _mergeEstIniAllPorDelta) —
+              // sem isso, ficaria desalinhado do valor que acabou de vir da nuvem.
+              _estIniAllSync[key] = { ...val };
             }
           });
         }
@@ -4024,7 +4069,18 @@ let _catalogoPorItemId = null; // item (mesmo id de PRODUTOS_PEDIDO) -> catalogo
 async function _carregarCatalogo() {
   if (_catalogoMap) return _catalogoMap;
   try {
-    const rows = await sbRequest('gn_catalogo?select=id,item_id,produto&limit=2000', { method: 'GET' });
+    // Pagina em vez de confiar num limit fixo — um catálogo que ultrapassasse o corte
+    // deixaria os itens excedentes sem catalogo_id silenciosamente, entrando no fluxo de
+    // "não sincronizados" (o mesmo tipo de causa já visto no incidente da Pedreira).
+    const rows = [];
+    let offset = 0;
+    const pageSize = 1000;
+    while (true) {
+      const page = await sbRequest('gn_catalogo?select=id,item_id,produto&order=id&limit=' + pageSize + '&offset=' + offset, { method: 'GET' });
+      rows.push(...(page || []));
+      if (!page || page.length < pageSize) break;
+      offset += pageSize;
+    }
     const catalogoMap = {};
     const catalogoPorItemId = {};
     (rows || []).forEach(r => {
@@ -5386,6 +5442,8 @@ async function quitarEmprestimo(id) {
     autoSave();
     Promise.all([sbPush(), sbPushLoja(isOrigem ? found.destino : found.origem)]).then(() => {
       showToast("✅ Ambas confirmaram! Estoque revertido nas duas lojas.");
+    }).catch(() => {
+      showToast("⚠️ Estoque revertido só neste aparelho — sem conexão pra sincronizar. Tentando de novo automaticamente.", 'err');
     });
   } else {
     // Só um confirmou — salvar e empurrar para o outro
@@ -5395,6 +5453,8 @@ async function quitarEmprestimo(id) {
         ? "✅ Você confirmou a devolução. Aguardando " + found.origem + " confirmar que recebeu."
         : "✅ Você confirmou que recebeu. Aguardando " + found.destino + " confirmar que devolveu.";
       showToast(msg);
+    }).catch(() => {
+      showToast("✅ Registrado localmente — sincronize para atualizar a outra loja.");
     });
   }
   render();
@@ -8678,7 +8738,12 @@ async function carregarEntregas(silent) {
     if(dot) dot.classList.toggle('hidden',provisoesEntrega.length===0&&_devPend===0);
     if(!silent||tab==='entrega') render();
     _verificarAutoAlertaEntregas();
-  }catch(e){}
+  }catch(e){
+    // Sem isso, uma falha de rede deixava a lista de entregas travada num snapshot antigo
+    // sem ninguém saber — agravando o risco de confirmar recebimento de um item que outra
+    // sessão já pode ter processado nesse meio tempo.
+    if (typeof window.gnLogError === 'function') window.gnLogError('lojas:carregarEntregas', e);
+  }
 }
 
 /* ── CORREÇÕES DE ESTOQUE FEITAS PELO SETOR DE COMPRAS (app Estoque e Pedido) ──
@@ -8752,15 +8817,32 @@ async function _epProcessarFila(){
   if(_epFilaRetryTimer){ clearTimeout(_epFilaRetryTimer); _epFilaRetryTimer=null; }
   const fila=_epFilaPendente[loja]||[];
   if(!fila.length) return;
-  let houveErro=false;
+  let houveErro=false, houveDuplicado=false;
   for(const item of [...fila]){
     if(_epFilaEmVoo.has(item.id)) continue;
     _epFilaEmVoo.add(item.id);
     try{
-      await sbRequest('gn_recebimentos',{method:'POST',headers:{'Prefer':'return=minimal'},
-        body:JSON.stringify({provisao_id:item.id,qtd_recebida:item.qtdRec,valor_recebido:item.valRec,diferenca_qtd:item.diff,validado_por:item.validado_por})});
-      await sbRequest('gn_provisoes?id=eq.'+item.id,{method:'PATCH',headers:{'Prefer':'return=minimal'},
+      // Reivindica a provisão primeiro, com update condicional (só avança se ainda estiver
+      // AGUARDANDO) — se duas pessoas da mesma loja (ou loja + supervisor) confirmarem o
+      // mesmo item quase junto, só quem "ganhar" essa atualização segue pro insert do
+      // recebimento, evitando duplicar (mesmo padrão do fix em gn-pedidos.html).
+      const claim = await sbRequest('gn_provisoes?id=eq.'+item.id+'&status=eq.AGUARDANDO',{method:'PATCH',headers:{'Prefer':'return=representation'},
         body:JSON.stringify({status:item.status,atualizado_em:new Date().toISOString()})});
+      if(!claim || claim.length===0){
+        houveDuplicado=true;
+        _epFilaPendente[loja]=(_epFilaPendente[loja]||[]).filter(x=>x.id!==item.id);
+        _epFilaSalvar();
+        delete _epConfirmadosSessao[item.id];
+        continue;
+      }
+      try{
+        await sbRequest('gn_recebimentos',{method:'POST',headers:{'Prefer':'return=minimal'},
+          body:JSON.stringify({provisao_id:item.id,qtd_recebida:item.qtdRec,valor_recebido:item.valRec,diferenca_qtd:item.diff,validado_por:item.validado_por})});
+      }catch(eRec){
+        // reverte a provisão pra não ficar marcada como recebida sem nenhum registro
+        await sbRequest('gn_provisoes?id=eq.'+item.id,{method:'PATCH',headers:{'Prefer':'return=minimal'},body:JSON.stringify({status:'AGUARDANDO'})}).catch(()=>{});
+        throw eRec;
+      }
       _epFilaPendente[loja]=(_epFilaPendente[loja]||[]).filter(x=>x.id!==item.id);
       _epFilaSalvar();
       if(_epConfirmadosSessao[item.id]) _epConfirmadosSessao[item.id]._syncPendente=false;
@@ -8770,6 +8852,10 @@ async function _epProcessarFila(){
     }finally{
       _epFilaEmVoo.delete(item.id);
     }
+  }
+  if(houveDuplicado){
+    showToast('⚠️ Alguma entrega já tinha sido confirmada em outra sessão/aparelho — não foi duplicada.', 'err');
+    render();
   }
   if(houveErro){
     _epFilaRetryTimer=setTimeout(_epProcessarFila,8000);
