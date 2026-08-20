@@ -1169,17 +1169,31 @@ function _comDiaIdx(dataISO) {
 // Empurra o repique somado do dia direto pro gn_comissoes (fonte que o Painel de Gestão
 // do Home lê) via RPC atômica — sem isso, o repique só aparecia lá depois de alguém abrir
 // o app Check-list (que faz esse mesmo bridge, mas só quando alguém entra na aba Dados).
+// Retorna true/false (sucesso real) — antes engolia qualquer falha (rede instável, RPC
+// fora do ar) e sincronizarChecklist() nunca sabia disso, sempre reportando sucesso pro
+// operador mesmo quando só a comissão não tinha ido pro Painel de Gestão. Faz 2 retries
+// curtos antes de desistir, já que a causa mais comum é uma instabilidade passageira.
 async function _syncRepiqueComissoes(lojaChk, data, sumRepique) {
-  try {
-    const comKey = LOJA_COM_MAP[S.loja];
-    const semIdx = _comSemIdx(data);
-    const diaIdx = _comDiaIdx(data);
-    if (!comKey || semIdx == null || diaIdx == null) return;
-    await sb('rpc/gn_sync_repique_comissoes', {
-      method: 'POST',
-      body: { p_loja: comKey, p_sem_idx: semIdx, p_dia_idx: diaIdx, p_valor: sumRepique }
-    });
-  } catch (e) { if (window.gnLogError) window.gnLogError('caixa:syncRepiqueComissoes', e); }
+  const comKey = LOJA_COM_MAP[S.loja];
+  const semIdx = _comSemIdx(data);
+  const diaIdx = _comDiaIdx(data);
+  if (!comKey || semIdx == null || diaIdx == null) {
+    if (window.gnLogError) window.gnLogError('caixa:syncRepiqueComissoes', new Error('índice inválido: comKey=' + comKey + ' semIdx=' + semIdx + ' diaIdx=' + diaIdx + ' data=' + data));
+    return false;
+  }
+  for (let tentativa = 1; tentativa <= 3; tentativa++) {
+    try {
+      await sb('rpc/gn_sync_repique_comissoes', {
+        method: 'POST',
+        body: { p_loja: comKey, p_sem_idx: semIdx, p_dia_idx: diaIdx, p_valor: sumRepique }
+      });
+      return true;
+    } catch (e) {
+      if (tentativa === 3) { if (window.gnLogError) window.gnLogError('caixa:syncRepiqueComissoes', e); return false; }
+      await new Promise(r => setTimeout(r, tentativa * 1500));
+    }
+  }
+  return false;
 }
 
 // Sincroniza venda_salao, venda_delivery, repique, dinheiro_caixa e despesas do caixa para o checklist do dia.
@@ -1227,9 +1241,13 @@ async function sincronizarChecklist(data, mostrarToast) {
       prefer: 'return=minimal,resolution=merge-duplicates',
       body: { loja: lojaChk, data_operacao: data, venda_salao: vSalao, venda_delivery: vDelivery, repique: sumRepique, dinheiro_caixa: dinheiroCaixa, despesas }
     });
-    await _syncRepiqueComissoes(lojaChk, data, sumRepique);
-    if (mostrarToast) toast('✅ Lançado no Check-list!');
-    return true;
+    // O resultado da sincronização da comissão agora entra no retorno geral — antes essa
+    // chamada era só "esperada" sem checar o que voltava, então uma falha aqui (repique
+    // não chegando no Painel de Gestão) nunca aparecia pro operador em nenhum dos lugares
+    // que checam o retorno desta função (fechar caixa, salvar repique, relançar).
+    const okComissao = await _syncRepiqueComissoes(lojaChk, data, sumRepique);
+    if (mostrarToast) toast(okComissao ? '✅ Lançado no Check-list!' : '⚠️ Lançado no Check-list, mas a comissão não sincronizou — tente "Relançar" de novo.');
+    return okComissao;
   } catch(e) {
     if (window.gnLogError) window.gnLogError('caixa:sincronizarChecklist', e);
     if (mostrarToast) toast('❌ Erro: ' + e.message);
