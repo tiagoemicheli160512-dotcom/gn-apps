@@ -2597,6 +2597,14 @@ setInterval(()=>{ if(comissoesOpsQueue.length) flushComissoesOps(); }, 25000);
 // =============================================
 // STATE
 // =============================================
+// Ids removidos localmente nesta sessão em campos que o saveAll() abaixo passa a mesclar
+// com o servidor antes de gravar — sem isso, o merge reingressaria um item já excluído
+// localmente, porque ele ainda existe na cópia do servidor até este mesmo saveAll() gravar
+// a exclusão. Nunca são limpos durante a sessão (mesmo raciocínio do _pendingDelIds do
+// gn-lojas.html): é só uma lista curta de ids já removidos, e limpar cedo demais reabriria
+// a janela de ressuscitar por engano.
+const _pendingDelChk = { faltas: new Set(), retiradas: new Set(), entradasManuais: new Set(), despesas: new Set() };
+
 // state: dados do DIA (zera a cada novo dia)
 let state = {
   data: hojeLocal(),
@@ -2996,6 +3004,7 @@ function addDespesa(){
 function removeDespesa(id){
   if(!confirm('Excluir esta despesa?')) return;
   state.despesas = state.despesas.filter(d=>d.id!==id);
+  _pendingDelChk.despesas.add(id);
   autoSave();
   renderDespesas();
 }
@@ -3055,9 +3064,11 @@ async function removerEntradaManual(rowIdx, entIdx){
   const r = _livroCaixaRows[rowIdx];
   if(!r) return;
   if(!confirm('Excluir esta entrada?')) return;
+  const removida = (Array.isArray(r.entradas_manuais)?r.entradas_manuais:[])[entIdx];
   const atualizadas = (Array.isArray(r.entradas_manuais)?r.entradas_manuais:[]).filter((_,i)=>i!==entIdx);
   if(r.data_operacao === hojeLocal()){
     state.entradasManuais = atualizadas;
+    if(removida) _pendingDelChk.entradasManuais.add(removida.id);
     autoSave();
   } else {
     const {error} = await sb.from('checklist_diario').upsert(
@@ -3073,9 +3084,11 @@ async function removerRetirada(rowIdx, retIdx){
   const r = _livroCaixaRows[rowIdx];
   if(!r) return;
   if(!confirm('Excluir esta retirada?')) return;
+  const removida = (Array.isArray(r.retiradas)?r.retiradas:[])[retIdx];
   const atualizadas = (Array.isArray(r.retiradas)?r.retiradas:[]).filter((_,i)=>i!==retIdx);
   if(r.data_operacao === hojeLocal()){
     state.retiradas = atualizadas;
+    if(removida) _pendingDelChk.retiradas.add(removida.id);
     autoSave();
   } else {
     const {error} = await sb.from('checklist_diario').upsert(
@@ -4440,7 +4453,12 @@ async function importarInicialDaSemanaAnterior(){
     c.rows.some(r=>(stateWeek.carnes[c.key]?.[r.key]?.inicial||'')!=='')
   );
   if(preencheu){
-    pushSave();
+    // pushSave() nunca existiu neste arquivo — a chamada quebrava aqui com um
+    // ReferenceError sempre que a importação preenchia algo, abortando antes do toast de
+    // sucesso e do render, e sem empurrar pro servidor de propósito (só ficava no
+    // autoSave/localStorage já feito dentro de _seedInicialFromPrevWeek, arriscando se
+    // perder se a aba fechasse antes do autosave periódico).
+    await saveAll();
     renderCarnes();
     showToast('✅ Estoque inicial importado do fechamento anterior!','success');
   } else {
@@ -4528,18 +4546,54 @@ async function saveAll(){
     if(JSON.stringify(state.manutencao.map(m=>m.status+''+m.confirmado_loja))!==_antesManut) renderManutencao();
 
     // Salvar check-list do DIA
-    // Preservar campos financeiros se gn-caixa já escreveu dinheiro_caixa para este dia
-    let _caixaTemDados = false;
+    // Busca a cópia mais recente do servidor pra este dia — usada tanto pra decidir se o
+    // Caixa já é dono dos campos financeiros (_caixaTemDados) quanto pra mesclar os demais
+    // campos antes de gravar (ver _mesclarObjChk/_mesclarArrChk logo abaixo): sem isso, o
+    // upsert substituía checklist/abertura/fechamento/faltas/retiradas/despesas/supervisão
+    // etc. pela cópia inteira deste aparelho, apagando silenciosamente o que outro
+    // aparelho/aba logado na mesma loja (comum numa segunda de contagem/checklist com mais
+    // de uma pessoa) tivesse acabado de salvar. Mesmo mecanismo já usado pras carnes
+    // (_mesclarCarnesAntesDeSalvar) e pra manutenção (_mergeManutFromDb), estendido aqui
+    // pros demais campos do dia.
+    let _servRow = null, _caixaTemDados = false;
     try {
-      const { data: _caixaRow } = await sb.from('checklist_diario')
-        .select('dinheiro_caixa').eq('data_operacao', state.data).eq('loja', LOJA).maybeSingle();
-      _caixaTemDados = _caixaRow != null && _caixaRow.dinheiro_caixa != null;
+      const { data } = await sb.from('checklist_diario')
+        .select('dinheiro_caixa,checklist,abertura,fechamento,faltas,retiradas,entradas_manuais,despesas,supervisao,supervisao_cozinha,auditorias_padrao,faltas_funcionarios')
+        .eq('data_operacao', state.data).eq('loja', LOJA).maybeSingle();
+      _servRow = data;
+      _caixaTemDados = _servRow != null && _servRow.dinheiro_caixa != null;
     } catch(_) {}
+    const _mesclarObjChk = (local, serv) => ({ ...(serv && typeof serv==='object' && !Array.isArray(serv) ? serv : {}), ...(local||{}) });
+    const _mesclarArrChk = (local, serv, deletedIds) => {
+      const localArr = Array.isArray(local) ? local : [];
+      const servArr = Array.isArray(serv) ? serv : [];
+      const idsLocais = new Set(localArr.map(x=>x&&x.id));
+      const soDoServ = servArr.filter(x=>x && !idsLocais.has(x.id) && !(deletedIds && deletedIds.has(x.id)));
+      return [...localArr, ...soDoServ];
+    };
+    if (_servRow) {
+      state.checklist = _mesclarObjChk(state.checklist, _servRow.checklist);
+      state.abertura = _mesclarObjChk(state.abertura, _servRow.abertura);
+      state.fechamento = _mesclarObjChk(state.fechamento, _servRow.fechamento);
+      state.supervisao = _mesclarObjChk(state.supervisao, _servRow.supervisao);
+      state.supervisaoCozinha = _mesclarObjChk(state.supervisaoCozinha, _servRow.supervisao_cozinha);
+      state.auditoriasPadrao = _mesclarObjChk(state.auditoriasPadrao, _servRow.auditorias_padrao);
+      state.faltas = _mesclarArrChk(state.faltas, _servRow.faltas, _pendingDelChk.faltas);
+      state.retiradas = _mesclarArrChk(state.retiradas, _servRow.retiradas, _pendingDelChk.retiradas);
+      state.entradasManuais = _mesclarArrChk(state.entradasManuais, _servRow.entradas_manuais, _pendingDelChk.entradasManuais);
+      state.faltasFuncionarios = _mesclarArrChk(state.faltasFuncionarios, _servRow.faltas_funcionarios, null);
+      state.despesas = _mesclarArrChk(state.despesas, _servRow.despesas, _pendingDelChk.despesas);
+    }
     const _upsert = {
       data_operacao: state.data, loja: LOJA,
       semana_inicio: state.semanaInicio, semana_fim: state.semanaFim,
+      // despesas fica de fora do gate de _caixaTemDados — é editável direto na aba
+      // Despesas deste app, então não pode parar de ser salva só porque o Caixa também
+      // já sincronizou o dia (era exatamente isso que fazia uma despesa lançada aqui
+      // sumir de todo salvamento seguinte, mesmo com o toast de "salvo" aparecendo normal).
+      despesas: state.despesas,
       ...(!_caixaTemDados && { venda_salao: state.vendaSalao, venda_delivery: state.vendaDelivery, repique: state.repique,
-        dinheiro_caixa: state.dinheiroCaixa, despesas: state.despesas }),
+        dinheiro_caixa: state.dinheiroCaixa }),
       retiradas: state.retiradas, entradas_manuais: state.entradasManuais, banda: state.banda, vendas: state.vendas,
       checklist: state.checklist, abertura: state.abertura, fechamento: state.fechamento,
       faltas: state.faltas, manutencao: state.manutencao,
@@ -4834,6 +4888,14 @@ function autoSave(){
 }
 
 async function onDataChange(val){
+  // Salva o dia que está saindo ANTES de zerar state — sem isso, um toggle de checklist ou
+  // uma falta lançada há poucos segundos (que só tinha ido pro autoSave/localStorage, não
+  // pro servidor) era apagada da memória aqui embaixo e nunca mais salva: a próxima consulta
+  // a esse dia (inclusive a re-navegação de volta pra hoje, que dispara este mesmo
+  // onDataChange) recarrega do servidor sem aquela edição. Mesma classe do bug já corrigido
+  // nas carnes (navegar de dia não pode descartar dado ainda não confirmado no servidor).
+  await saveAll();
+
   // Captura pendências antes de zerar — faltas não recebidas e manutenções não resolvidas
   const carryFaltas = state.faltas.filter(f => f.nome && f.nome.trim());
   const carryManut  = state.manutencao.filter(m => !(m.status === 'Resolvido' && m.confirmado_loja));
@@ -7255,6 +7317,7 @@ function removeFalta(id){
   if(!confirm('Excluir esta falta?'))return;
   const f=state.faltas.find(f=>f.id===id);
   state.faltas=state.faltas.filter(f=>f.id!==id);
+  _pendingDelChk.faltas.add(id);
   renderFaltas();autoSave();
   if(f) _logAuditoriaChk('RECEBER_INSUMO',{nome:f.nome,quantidade:f.quantidade});
 }
