@@ -1649,7 +1649,7 @@ function _toggleTodosFornConfirm(btn) {
 }
 
 async function _confirmarFornecedoresSelecionados() {
-  const selecionados = [...document.querySelectorAll('.confirmForn-chk:checked')].map(chk => chk.value);
+  let selecionados = [...document.querySelectorAll('.confirmForn-chk:checked')].map(chk => chk.value);
   if (selecionados.length === 0) {
     toast('Selecione ao menos um fornecedor.', 'err'); return;
   }
@@ -1664,6 +1664,26 @@ async function _confirmarFornecedoresSelecionados() {
   $('modal-bg').classList.remove('ativo');
 
   try {
+    // 0. Reconferir no banco (não no Set local, que pode estar desatualizado se outra
+    // aba/sessão já confirmou esse fornecedor nesse meio tempo) quem já tem provisão
+    // gerada pra este pedido — foi exatamente essa janela que já duplicou entrega inteira
+    // de fornecedor (TOP ALTO/DIFERENCIAL confirmados 2x, cada um em uma sessão, gerando
+    // provisões e recebimentos em dobro). Fornecedor em "2ª rodada" (fornecedoresReabertos)
+    // é esperado já ter provisão da rodada anterior, então não conta como duplicidade.
+    const { data: jaNoBanco } = await db.from('gn_provisoes')
+      .select('fornecedor')
+      .eq('pedido_id', S.pedidoAtual.id)
+      .neq('status', 'CANCELADO')
+      .in('fornecedor', selecionados);
+    const fornsJaNoBanco = new Set((jaNoBanco || []).map(p => p.fornecedor));
+    const fornsDuplicados = selecionados.filter(f => fornsJaNoBanco.has(f) && !S.fornecedoresReabertos.has(f));
+    if (fornsDuplicados.length > 0) {
+      alert('⚠️ ' + fornsDuplicados.join(', ') + ' já ' + (fornsDuplicados.length > 1 ? 'foram confirmados' : 'foi confirmado') + ' — provavelmente em outra aba/sessão, sem essa página saber. Pra não duplicar a entrega, essa parte foi pulada; atualize a página (F5) pra ver o estado atual antes de confirmar de novo.');
+      fornsDuplicados.forEach(f => S.fornecedoresConfirmados.add(f));
+      selecionados = selecionados.filter(f => !fornsDuplicados.includes(f));
+      if (selecionados.length === 0) { renderPedido(); return; }
+    }
+
     // 1. Recarregar itens do banco para garantir que todos têm id
     await carregarItensPedido();
 
