@@ -1059,7 +1059,24 @@ async function carregarPedidoAtual() {
     const { data: novo } = await db.from('gn_pedidos')
       .insert([{ data_pedido: hoje(), semana_inicio: semIsoStr, status: 'RASCUNHO', regiao: 'RJ' }])
       .select().single();
-    S.pedidoAtual = novo;
+    // Corrida: se duas sessões abrirem o app quase juntas sem nenhum pedido ainda criado
+    // pra semana, as duas veem "nenhum pedido" e cada uma insere o seu — itens lançados
+    // pelas lojas ficariam divididos entre dois pedido_id (um deles nunca confirmado/
+    // entregue, igual ao caso das "provisões órfãs" já visto nesta base). Reconfere logo
+    // após o insert e, se achar mais de um, todo mundo converge pro mais antigo.
+    const { data: concorrentes } = await db.from('gn_pedidos')
+      .select('*')
+      .eq('semana_inicio', semIsoStr).eq('regiao', 'RJ')
+      .in('status', ['CONFIRMADO', 'ENVIADO', 'RASCUNHO'])
+      .order('criado_em', { ascending: true });
+    if (concorrentes && concorrentes.length > 1) {
+      S.pedidoAtual = concorrentes[0];
+      if (S.pedidoAtual.id !== novo?.id && novo?.id) {
+        await db.from('gn_pedidos').delete().eq('id', novo.id);
+      }
+    } else {
+      S.pedidoAtual = novo;
+    }
   } else {
     // Semana passada sem pedido
     S.pedidoAtual = null;
@@ -1982,6 +1999,24 @@ async function _confirmarELimparFornecedores(forns, label, msgTitulo, msgRodape)
 
   if (S.pedidoAtual?.id && catalogoIdsAba.length > 0) {
     try {
+      // Reconferir no banco imediatamente antes de zerar — entre o aviso acima e aqui pode
+      // passar tempo (usuário lendo o confirm()), e uma loja pode ter salvado uma
+      // quantidade nova nesse intervalo; zerar sem checar apagaria esse lançamento sem
+      // ninguém perceber (ruptura de estoque silenciosa).
+      const { data: atuais } = await db.from('gn_pedido_itens')
+        .select('catalogo_id,loja_slug,qtd_pedida')
+        .eq('pedido_id', S.pedidoAtual.id)
+        .in('catalogo_id', catalogoIdsAba);
+      const mudouAgora = (atuais || []).some(row => {
+        const item = S.pedidoItens[row.catalogo_id]?.[row.loja_slug];
+        const qtdLocal = item?.qtd || 0;
+        return (parseFloat(row.qtd_pedida) || 0) !== qtdLocal;
+      });
+      if (mudouAgora) {
+        toast('⚠️ Uma loja lançou/alterou um item desses agora mesmo — atualize a tela e tente de novo pra não apagar o lançamento dela.', 'err');
+        return false;
+      }
+
       const { error } = await db.from('gn_pedido_itens')
         .update({ qtd_pedida: 0, qtd_cx: null, qtd_und: null })
         .eq('pedido_id', S.pedidoAtual.id)
@@ -3143,8 +3178,20 @@ async function toggleDiverg(catalogoId, lojaSlug) {
         custo_unitario: null,
         divergencia:    true
       }]).select('id').single();
-      if (error) throw error;
-      if (data) item.id = data.id;
+      if (error) {
+        // Conflito de linha única — outra sessão (ex.: a própria loja lançando a
+        // quantidade) já criou essa linha nesse meio tempo, com valor real de qtd_pedida.
+        // Busca o id existente e só marca a divergência, sem sobrescrever a quantidade.
+        const { data: existente, error: e3 } = await db.from('gn_pedido_itens')
+          .select('id').eq('pedido_id', S.pedidoAtual.id)
+          .eq('catalogo_id', catalogoId).eq('loja_slug', lojaSlug).maybeSingle();
+        if (e3 || !existente) throw error;
+        const { error: e4 } = await db.from('gn_pedido_itens').update({ divergencia: true }).eq('id', existente.id);
+        if (e4) throw e4;
+        item.id = existente.id;
+      } else if (data) {
+        item.id = data.id;
+      }
     }
     // novaDiverg=false + sem id: nada a desfazer no banco
   } catch(e) {
@@ -5014,6 +5061,23 @@ async function confirmarEntrega(provisaoId) {
   // falhou de verdade (RLS, rede instável etc.), igual ao já corrigido no lote
   // (confirmarEntregasEmLotePorLoja).
   try {
+    // Reivindica a provisão primeiro, com update condicional (só avança se ainda estiver
+    // AGUARDANDO) — se duas pessoas confirmarem a mesma entrega quase junto (duas sessões
+    // vendo a mesma provisão pendente), só quem "ganhar" essa atualização segue pro insert,
+    // evitando dois gn_recebimentos pra mesma entrega (já aconteceu com fornecedor, do
+    // outro lado do fluxo — ver PR de _confirmarFornecedoresSelecionados).
+    const { data: claim, error: eClaim } = await db.from('gn_provisoes')
+      .update({ status, atualizado_em: new Date().toISOString() })
+      .eq('id', provisaoId).eq('status', 'AGUARDANDO')
+      .select('id');
+    if (eClaim) throw eClaim;
+    if (!claim || claim.length === 0) {
+      toast('⚠️ Essa entrega já foi confirmada — provavelmente em outra sessão/aparelho. Atualize a tela.', 'err');
+      $('modal-bg').classList.remove('ativo');
+      await renderProvisoes();
+      return;
+    }
+
     const { error: e1 } = await db.from('gn_recebimentos').insert([{
       provisao_id: provisaoId,
       qtd_recebida: qtdRec,
@@ -5022,11 +5086,11 @@ async function confirmarEntrega(provisaoId) {
       observacao: obs,
       validado_por: recebidoPor
     }]);
-    if (e1) throw e1;
-
-    // Atualiza status da provisão
-    const { error: e2 } = await db.from('gn_provisoes').update({ status, atualizado_em: new Date().toISOString() }).eq('id', provisaoId);
-    if (e2) throw e2;
+    if (e1) {
+      // reverte a provisão pra não ficar marcada como recebida sem nenhum registro
+      await db.from('gn_provisoes').update({ status: 'AGUARDANDO' }).eq('id', provisaoId);
+      throw e1;
+    }
   } catch(e) {
     toast('⚠️ Erro ao confirmar entrega: ' + (e.message || e), 'err');
     return;
@@ -5052,9 +5116,18 @@ async function confirmarEntregasEmLotePorLoja(lojaSlug) {
   let recebidoPor = 'SISTEMA';
   try { recebidoPor = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null')?.nome || 'SISTEMA'; } catch(e) {}
 
-  let erros = 0;
+  let erros = 0, jaConfirmados = 0;
   for (const p of itens) {
     try {
+      // Mesmo update condicional de confirmarEntrega() — reivindica a provisão antes de
+      // inserir o recebimento, pra não duplicar se outra sessão já confirmou esse item.
+      const { data: claim, error: eClaim } = await db.from('gn_provisoes')
+        .update({ status: 'RECEBIDO_OK', atualizado_em: new Date().toISOString() })
+        .eq('id', p.id).eq('status', 'AGUARDANDO')
+        .select('id');
+      if (eClaim) throw eClaim;
+      if (!claim || claim.length === 0) { jaConfirmados++; continue; }
+
       const { error: e1 } = await db.from('gn_recebimentos').insert([{
         provisao_id: p.id,
         qtd_recebida: p.qtd_prevista,
@@ -5063,17 +5136,20 @@ async function confirmarEntregasEmLotePorLoja(lojaSlug) {
         observacao: null,
         validado_por: recebidoPor
       }]);
-      if (e1) throw e1;
-      const { error: e2 } = await db.from('gn_provisoes')
-        .update({ status: 'RECEBIDO_OK', atualizado_em: new Date().toISOString() }).eq('id', p.id);
-      if (e2) throw e2;
+      if (e1) {
+        await db.from('gn_provisoes').update({ status: 'AGUARDANDO' }).eq('id', p.id);
+        throw e1;
+      }
     } catch (e) { erros++; console.error('Erro ao confirmar em lote:', p.id, e.message||e); }
   }
 
+  const confirmados = itens.length - erros - jaConfirmados;
   toast(erros > 0
     ? `Confirmado com ${erros} erro(s) de ${itens.length}. Verifique o console.`
-    : `✓ ${itens.length} entrega${itens.length>1?'s':''} confirmada${itens.length>1?'s':''}!`, erros>0?'err':'ok');
-  _logAuditoria('CONFIRMAR_ENTREGA_LOTE', { loja: lojaSlug, itens: itens.length - erros, valor_total: total }, {});
+    : jaConfirmados > 0
+      ? `✓ ${confirmados} entrega${confirmados>1?'s':''} confirmada${confirmados>1?'s':''}! ${jaConfirmados} já ${jaConfirmados>1?'estavam':'estava'} confirmada${jaConfirmados>1?'s':''} (outra sessão).`
+      : `✓ ${itens.length} entrega${itens.length>1?'s':''} confirmada${itens.length>1?'s':''}!`, erros>0?'err':'ok');
+  _logAuditoria('CONFIRMAR_ENTREGA_LOTE', { loja: lojaSlug, itens: confirmados, valor_total: total }, {});
   await renderEntrega();
 }
 

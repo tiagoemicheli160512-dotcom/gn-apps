@@ -3009,6 +3009,24 @@ function removeDespesa(id){
   renderDespesas();
 }
 
+// Pra edições de dia PASSADO no Livro Caixa — reconfere o array atual no servidor antes de
+// gravar, em vez de sobrescrever com o array montado a partir do snapshot que carregou
+// quando o painel foi aberto (_livroCaixaRows). Sem isso, duas pessoas corrigindo o mesmo
+// dia passado quase juntas fariam a segunda apagar a retirada/entrada que a primeira acabou
+// de lançar — dia corrente já tem esse merge no saveAll(), dia passado não passa por lá.
+async function _upsertArrayDiaPassado(dataOp, campo, editar) {
+  const { data, error: eGet } = await sb.from('checklist_diario')
+    .select(campo).eq('data_operacao', dataOp).eq('loja', LOJA).maybeSingle();
+  if (eGet) return { error: eGet };
+  const servArr = Array.isArray(data && data[campo]) ? data[campo] : [];
+  const novoArr = editar(servArr);
+  const { error } = await sb.from('checklist_diario').upsert(
+    { data_operacao: dataOp, loja: LOJA, [campo]: novoArr },
+    { onConflict: 'data_operacao,loja' }
+  );
+  return { error, novoArr };
+}
+
 async function adicionarRetirada(rowIdx){
   const descEl = document.getElementById('ret-desc-'+rowIdx);
   const valEl  = document.getElementById('ret-val-'+rowIdx);
@@ -3019,16 +3037,13 @@ async function adicionarRetirada(rowIdx){
   const r = _livroCaixaRows[rowIdx];
   if(!r) return;
   const novaRet = {id: Date.now(), descricao: desc, valor: val};
-  const atualizadas = [...(Array.isArray(r.retiradas)?r.retiradas:[]), novaRet];
   if(r.data_operacao === hojeLocal()){
-    state.retiradas = atualizadas;
+    state.retiradas = [...(Array.isArray(r.retiradas)?r.retiradas:[]), novaRet];
     autoSave();
   } else {
-    const {error} = await sb.from('checklist_diario').upsert(
-      {data_operacao: r.data_operacao, loja: LOJA, retiradas: atualizadas},
-      {onConflict:'data_operacao,loja'}
-    );
+    const {error, novoArr} = await _upsertArrayDiaPassado(r.data_operacao, 'retiradas', servArr => [...servArr, novaRet]);
     if(error){ toast('Erro ao salvar retirada','err'); return; }
+    r.retiradas = novoArr;
   }
   renderLivroCaixa();
 }
@@ -3046,16 +3061,13 @@ async function adicionarEntradaManual(rowIdx){
   const r = _livroCaixaRows[rowIdx];
   if(!r) return;
   const novaEnt = {id: Date.now(), descricao: desc, valor: val};
-  const atualizadas = [...(Array.isArray(r.entradas_manuais)?r.entradas_manuais:[]), novaEnt];
   if(r.data_operacao === hojeLocal()){
-    state.entradasManuais = atualizadas;
+    state.entradasManuais = [...(Array.isArray(r.entradas_manuais)?r.entradas_manuais:[]), novaEnt];
     autoSave();
   } else {
-    const {error} = await sb.from('checklist_diario').upsert(
-      {data_operacao: r.data_operacao, loja: LOJA, entradas_manuais: atualizadas},
-      {onConflict:'data_operacao,loja'}
-    );
+    const {error, novoArr} = await _upsertArrayDiaPassado(r.data_operacao, 'entradas_manuais', servArr => [...servArr, novaEnt]);
     if(error){ toast('Erro ao salvar entrada','err'); return; }
+    r.entradas_manuais = novoArr;
   }
   renderLivroCaixa();
 }
@@ -3071,11 +3083,11 @@ async function removerEntradaManual(rowIdx, entIdx){
     if(removida) _pendingDelChk.entradasManuais.add(removida.id);
     autoSave();
   } else {
-    const {error} = await sb.from('checklist_diario').upsert(
-      {data_operacao: r.data_operacao, loja: LOJA, entradas_manuais: atualizadas},
-      {onConflict:'data_operacao,loja'}
+    const {error, novoArr} = await _upsertArrayDiaPassado(r.data_operacao, 'entradas_manuais',
+      servArr => removida ? servArr.filter(x => !x || x.id !== removida.id) : servArr
     );
     if(error){ toast('Erro ao remover entrada','err'); return; }
+    r.entradas_manuais = novoArr;
   }
   renderLivroCaixa();
 }
@@ -3091,11 +3103,11 @@ async function removerRetirada(rowIdx, retIdx){
     if(removida) _pendingDelChk.retiradas.add(removida.id);
     autoSave();
   } else {
-    const {error} = await sb.from('checklist_diario').upsert(
-      {data_operacao: r.data_operacao, loja: LOJA, retiradas: atualizadas},
-      {onConflict:'data_operacao,loja'}
+    const {error, novoArr} = await _upsertArrayDiaPassado(r.data_operacao, 'retiradas',
+      servArr => removida ? servArr.filter(x => !x || x.id !== removida.id) : servArr
     );
     if(error){ toast('Erro ao remover retirada','err'); return; }
+    r.retiradas = novoArr;
   }
   renderLivroCaixa();
 }
@@ -4557,12 +4569,22 @@ async function saveAll(){
     // pros demais campos do dia.
     let _servRow = null, _caixaTemDados = false;
     try {
-      const { data } = await sb.from('checklist_diario')
+      const { data, error: eServ } = await sb.from('checklist_diario')
         .select('dinheiro_caixa,checklist,abertura,fechamento,faltas,retiradas,entradas_manuais,despesas,supervisao,supervisao_cozinha,auditorias_padrao,faltas_funcionarios')
         .eq('data_operacao', state.data).eq('loja', LOJA).maybeSingle();
+      if (eServ) throw eServ;
       _servRow = data;
       _caixaTemDados = _servRow != null && _servRow.dinheiro_caixa != null;
-    } catch(_) {}
+    } catch(eServ) {
+      // Sem essa cópia do servidor não dá pra mesclar com segurança — gravar por cima aqui
+      // reverteria repique/vendas (se o Caixa já tiver sincronizado) e apagaria
+      // silenciosamente retiradas/despesas/entradas manuais de outro aparelho, sem nenhum
+      // aviso (o toast de "salvo" aparecia normal mesmo assim). Aborta e deixa o timer de
+      // 30s (ou o próximo saveAll() disparado por edição) tentar de novo — o dado já está
+      // seguro no localStorage via autoSave() logo no início desta função.
+      setSyncStatus('offline','⚠️ Sem conexão — tentando de novo');
+      return;
+    }
     const _mesclarObjChk = (local, serv) => ({ ...(serv && typeof serv==='object' && !Array.isArray(serv) ? serv : {}), ...(local||{}) });
     const _mesclarArrChk = (local, serv, deletedIds) => {
       const localArr = Array.isArray(local) ? local : [];
