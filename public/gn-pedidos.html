@@ -665,6 +665,9 @@ let S = {
   // recarregar a página. A rodada anterior continua intacta em gn_provisoes; isso só
   // reabre a digitação. Ver _limparFornecedoresAba().
   fornecedoresReabertos: new Set(),
+  // Fornecedores cuja última ação no pedido foi um "↩️ Reverter Confirmação" — ver
+  // carregarFornecedoresRevertidos()/_fornecedoresRevertidosAlertHtml().
+  fornecedoresRevertidos: {},
 
   // Carnes
   carnesLoja: null,
@@ -1095,6 +1098,32 @@ async function carregarPedidoAtual() {
   await carregarUltimoPedido();
   await carregarConfirmadosSemana();
   await carregarFornecedoresConfirmados();
+  await carregarFornecedoresRevertidos();
+}
+
+// Fornecedores cuja ÚLTIMA ação no pedido atual foi um "↩️ Reverter Confirmação" — ficam
+// destravados pra editar de novo, mas isso não é óbvio na tela (o botão "Confirmar" só
+// reaparece se sobrar item realmente pendente, e nada mais avisa que uma reversão
+// aconteceu). Reconstrói o estado a partir do log de auditoria (CONFIRMAR_FORNECEDOR
+// "reconfirma" e limpa; REVERTER_CONFIRMACAO marca) pra mostrar um aviso — sem isso, um
+// fornecedor revertido sem querer/por engano some de vista até alguém notar que a Saída
+// nunca chegou (foi o que aconteceu com o PETISCOS).
+async function carregarFornecedoresRevertidos() {
+  S.fornecedoresRevertidos = {};
+  if (!S.pedidoAtual?.id) return;
+  const data = await _fetchTodasPaginas(() => db.from('gn_auditoria_pedidos')
+    .select('acao,fornecedor,detalhes,usuario,criado_em')
+    .eq('pedido_id', S.pedidoAtual.id)
+    .in('acao', ['CONFIRMAR_FORNECEDOR', 'REVERTER_CONFIRMACAO'])
+    .order('criado_em', { ascending: true }));
+  (data || []).forEach(row => {
+    if (row.acao === 'REVERTER_CONFIRMACAO') {
+      const forn = row.fornecedor || row.detalhes?.fornecedor;
+      if (forn) S.fornecedoresRevertidos[forn] = row;
+    } else {
+      (row.detalhes?.fornecedores || []).forEach(f => { delete S.fornecedoresRevertidos[f]; });
+    }
+  });
 }
 
 // Fornecedores do pedido atual que já tiveram provisões geradas (confirmarFornecedores) —
@@ -1804,7 +1833,7 @@ async function _confirmarFornecedoresSelecionados() {
     // 4. Marca como confirmados só os fornecedores que realmente tiveram as provisões
     // geradas — os com erro continuam pendentes (voltam a aparecer em "Confirmar
     // Pedido" pra tentar de novo, sem duplicar o que já foi criado).
-    fornsOk.forEach(f => { S.fornecedoresConfirmados.add(f); S.fornecedoresReabertos.delete(f); });
+    fornsOk.forEach(f => { S.fornecedoresConfirmados.add(f); S.fornecedoresReabertos.delete(f); delete S.fornecedoresRevertidos[f]; });
 
     // 5. Se todos os fornecedores com itens já estão confirmados, finaliza o pedido —
     // um fornecedor ainda reaberto pra 2ª rodada (de outro comprador, fora deste confirm)
@@ -1904,6 +1933,14 @@ async function reverterConfirmacaoFornecedor(fornecedor) {
 
     toast(`↩️ Confirmação de ${fornecedor} revertida (${reversiveis.length} provisão(ões) apagada(s)).`, 'ok');
     _logAuditoria('REVERTER_CONFIRMACAO', { fornecedor, provisoes_apagadas: reversiveis.length, ja_recebidas: jaRecebidas }, { pedido_id: S.pedidoAtual.id, fornecedor });
+    // Marca aqui na hora (não só no banco) pra o aviso aparecer imediatamente, sem esperar
+    // recarregar a página — ver _fornecedoresRevertidosAlertHtml().
+    let _usuarioRevert = 'SISTEMA';
+    try { _usuarioRevert = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null')?.nome || 'SISTEMA'; } catch(e) {}
+    S.fornecedoresRevertidos[fornecedor] = {
+      acao: 'REVERTER_CONFIRMACAO', fornecedor, usuario: _usuarioRevert, criado_em: new Date().toISOString(),
+      detalhes: { fornecedor, provisoes_apagadas: reversiveis.length, ja_recebidas: jaRecebidas }
+    };
     renderPedido();
   } catch (e) {
     toast('Erro ao reverter: ' + (e.message || e), 'err');
@@ -2378,6 +2415,25 @@ async function _carregarTotalCompradorSemana(pedidoId, fornecedores) {
   if (S.pedidoAtual && S.pedidoAtual.id === pedidoId && (S.tab === 'edu' || S.tab === 'oseas')) renderPedido();
 }
 
+// Aviso de "fornecedor revertido, esperando confirmar de novo" — ver
+// carregarFornecedoresRevertidos(). Some sozinho assim que o fornecedor for confirmado de
+// novo (deixa de estar em S.fornecedoresRevertidos).
+function _fornecedoresRevertidosAlertHtml() {
+  const forns = Object.keys(S.fornecedoresRevertidos || {}).filter(f => _fornecedorNoEscopoAtivo(f));
+  if (!forns.length) return '';
+  return forns.map(f => {
+    const r = S.fornecedoresRevertidos[f];
+    const d = r.detalhes || {};
+    const dt = r.criado_em ? new Date(r.criado_em) : null;
+    const hora = dt ? dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '';
+    const dia = dt ? dt.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }) : '';
+    const jaRecebidasTxt = d.ja_recebidas > 0 ? ` (${d.ja_recebidas} já recebido${d.ja_recebidas > 1 ? 's' : ''} — preservado${d.ja_recebidas > 1 ? 's' : ''})` : '';
+    return `<div style="background:rgba(217,119,6,.1);border:1px solid rgba(217,119,6,.4);border-left:3px solid #D97706;border-radius:var(--r);padding:10px 14px;margin-bottom:10px;font-size:12px;color:var(--text)">
+      ⚠️ <strong>${esc(f)}</strong> foi revertido por ${esc(r.usuario || '—')} às ${hora} de ${dia} — ${d.provisoes_apagadas || 0} item(ns) ficaram sem provisão gerada${jaRecebidasTxt}. Ajuste as quantidades se precisar e confirme de novo.
+    </div>`;
+  }).join('');
+}
+
 function _totalCompradorSemanaCardHtml() {
   if (!S.eduAtivo && !S.oseasAtivo) return '';
   if (!S.pedidoAtual) return '';
@@ -2841,6 +2897,7 @@ function renderPedido() {
       </div>
     </div>
 
+    ${_fornecedoresRevertidosAlertHtml()}
     ${_totalCompradorSemanaCardHtml()}
 
     ${toggleModo}
