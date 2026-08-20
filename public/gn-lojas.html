@@ -836,7 +836,7 @@ function filterByLoja(obj, lojaNome) {
 // só uma lista curta de ids já removidos), enquanto limpar cedo demais reabriria a janela
 // de ressuscitar o item por engano. Um reload começa com os sets vazios, o que é seguro
 // porque nesse ponto a nuvem já reflete a remoção.
-let _pendingDelIds = { avariasAll: new Set(), transferAll: new Set(), devolucoesAll: new Set() };
+let _pendingDelIds = { avariasAll: new Set(), transferAll: new Set(), devolucoesAll: new Set(), entradasAll: new Set() };
 
 // Une duas listas de registros com id (a local deste aparelho + a que já está na nuvem),
 // sem descartar nenhum dos dois lados — usado por sbPush()/sbPushLoja() pra avariasAll/
@@ -890,6 +890,37 @@ function _mergeTransferAllPorId(localFiltrado, cloudTransferAll, deletedIds) {
   return r;
 }
 
+// estIniAll/vendasAll/contAll/pedidoAll são dicionários {lojaKey|semana: {item: valor}} (ou,
+// no caso de pedidoAll, {item: {cx,und,...}}) — mescla item a item com o que já está na
+// nuvem, em vez de substituir o objeto da semana inteiro. Sem isso, dois aparelhos contando
+// na mesma loja ao mesmo tempo (comum numa segunda-feira de contagem) faziam um apagar
+// silenciosamente o item que o outro tinha acabado de digitar, só porque a cópia local
+// deste aparelho ainda não tinha aquele item quando o push saiu.
+function _mergeMapaAninhadoPorLoja(localFiltrado, cloudMapa) {
+  const cloud = cloudMapa || {};
+  const chaves = new Set([...Object.keys(localFiltrado || {}), ...Object.keys(cloud)]);
+  const r = {};
+  chaves.forEach(k => {
+    const localObj = (localFiltrado || {})[k];
+    const cloudObj = cloud[k];
+    r[k] = { ...(cloudObj || {}), ...(localObj || {}) };
+  });
+  return r;
+}
+
+// entradasAll é um dicionário {lojaKey|semana: [registros com id]} — mesma lógica de
+// _mergeTransferAllPorId (uma lista por chave, união por id, local prevalece em conflito),
+// só que sem o merge de campos monotônicos específico de transferência.
+function _mergeListaPorLojaSemana(localFiltrado, cloudMapa, deletedIds) {
+  const cloud = cloudMapa || {};
+  const chaves = new Set([...Object.keys(localFiltrado || {}), ...Object.keys(cloud)]);
+  const r = {};
+  chaves.forEach(k => {
+    r[k] = _mergeArrPorId((localFiltrado || {})[k], cloud[k], deletedIds);
+  });
+  return r;
+}
+
 /* Envia (upsert) os dados desta loja para a nuvem */
 // Busca o all_data mais recente de uma loja direto da nuvem. Usado por sbPush/sbPushLoja
 // pra mesclar antes de gravar — ver comentário em sbPush(). Lança erro se falhar (quem
@@ -920,20 +951,22 @@ async function sbPush() {
     // era o motivo do card "Enviar XML do mês" no painel voltar mesmo já confirmado.
     const baseAllData = await _fetchAllDataAtual(loja);
     const payload = {
-      estIniAll:   filterByLoja(estIniAll,   loja),
-      vendasAll:   filterByLoja(vendasAll,   loja),
-      contAll:     filterByLoja(contAll,     loja),
-      entradasAll: filterByLoja(entradasAll, loja),
-      // avariasAll/transferAll/devolucoesAll são listas de registros com id — dois
-      // aparelhos/abas logados na mesma loja podem ter cada um sua própria cópia local
+      // estIniAll/vendasAll/contAll/pedidoAll: mescla item a item com a nuvem — não
+      // substitui a semana inteira (ver _mergeMapaAninhadoPorLoja).
+      estIniAll:   _mergeMapaAninhadoPorLoja(filterByLoja(estIniAll, loja), baseAllData.estIniAll),
+      vendasAll:   _mergeMapaAninhadoPorLoja(filterByLoja(vendasAll, loja), baseAllData.vendasAll),
+      contAll:     _mergeMapaAninhadoPorLoja(filterByLoja(contAll,   loja), baseAllData.contAll),
+      // entradasAll/avariasAll/transferAll/devolucoesAll são listas de registros com id —
+      // dois aparelhos/abas logados na mesma loja podem ter cada um sua própria cópia local
       // levemente desatualizada. Em vez de substituir a lista inteira pela versão deste
       // aparelho (o que apaga silenciosamente qualquer registro que outro aparelho tenha
       // criado nesse meio-tempo — foi o que sumiu com uma Saída pra Terceiros do Nova
       // América), mescla por id com o que já está na nuvem: mantém tudo dos dois lados,
       // com a versão local prevalecendo só quando o mesmo id existe nos dois.
+      entradasAll: _mergeListaPorLojaSemana(filterByLoja(entradasAll, loja), baseAllData.entradasAll, _pendingDelIds.entradasAll),
       transferAll: _mergeTransferAllPorId(filterByLoja(transferAll, loja), baseAllData.transferAll, _pendingDelIds.transferAll),
-      pedidoAll:   filterByLoja(pedidoAll,   loja),
-      minAll: { [loja]: minAll[loja] || {} },
+      pedidoAll:   _mergeMapaAninhadoPorLoja(filterByLoja(pedidoAll, loja), baseAllData.pedidoAll),
+      minAll: { [loja]: { ...((baseAllData.minAll||{})[loja]), ...(minAll[loja] || {}) } },
       fatoresConversao, mapeamentoPedido,
       pedidoCustom, pedidoRemovidos, pedidoConfs: filterByLoja(pedidoConfs, loja),
       avariasAll: { [loja]: _mergeArrPorId(avariasAll[loja], (baseAllData.avariasAll||{})[loja], _pendingDelIds.avariasAll) },
@@ -979,13 +1012,13 @@ async function sbPushLoja(lojaAlvo) {
   // como saber sem buscar antes.
   const baseAllData = await _fetchAllDataAtual(lojaAlvo);
   const payload = {
-    estIniAll:   filterByLoja(estIniAll,   lojaAlvo),
-    vendasAll:   filterByLoja(vendasAll,   lojaAlvo),
-    contAll:     filterByLoja(contAll,     lojaAlvo),
-    entradasAll: filterByLoja(entradasAll, lojaAlvo),
+    estIniAll:   _mergeMapaAninhadoPorLoja(filterByLoja(estIniAll, lojaAlvo), baseAllData.estIniAll),
+    vendasAll:   _mergeMapaAninhadoPorLoja(filterByLoja(vendasAll, lojaAlvo), baseAllData.vendasAll),
+    contAll:     _mergeMapaAninhadoPorLoja(filterByLoja(contAll,   lojaAlvo), baseAllData.contAll),
+    entradasAll: _mergeListaPorLojaSemana(filterByLoja(entradasAll, lojaAlvo), baseAllData.entradasAll, _pendingDelIds.entradasAll),
     transferAll: _mergeTransferAllPorId(filterByLoja(transferAll, lojaAlvo), baseAllData.transferAll, _pendingDelIds.transferAll),
-    pedidoAll:   filterByLoja(pedidoAll,   lojaAlvo),
-    minAll: { [lojaAlvo]: minAll[lojaAlvo] || {} },
+    pedidoAll:   _mergeMapaAninhadoPorLoja(filterByLoja(pedidoAll, lojaAlvo), baseAllData.pedidoAll),
+    minAll: { [lojaAlvo]: { ...((baseAllData.minAll||{})[lojaAlvo]), ...(minAll[lojaAlvo] || {}) } },
     fatoresConversao, mapeamentoPedido,
     pedidoCustom, pedidoRemovidos, pedidoConfs: filterByLoja(pedidoConfs, lojaAlvo),
     // Necessário pro pagamento de transferência em dinheiro: quando a loja que NÃO é a
@@ -1118,9 +1151,9 @@ function sbScheduleSync() {
 // aba — sem isso, um recarregamento nesse intervalo perdia a última contagem/pedido
 // digitado, mesmo já estando salvo no localStorage deste aparelho.
 function _forcarSyncPendente() {
-  if (!sbTemPendente()) return;
+  if (!sbTemPendente()) return Promise.resolve();
   if (sbSyncTimer) { clearTimeout(sbSyncTimer); sbSyncTimer = null; }
-  sbPush();
+  return sbPush();
 }
 document.addEventListener('visibilitychange', () => { if (document.hidden) _forcarSyncPendente(); });
 window.addEventListener('pagehide', _forcarSyncPendente);
@@ -2311,6 +2344,7 @@ function addEntrada(insumo, dataNF, nf, fornecedor, qtd, custoUnit, fotoBase64, 
 function delEntrada(id) {
   const k = lojaKey();
   entradasAll[k] = (entradasAll[k]||[]).filter(e => e.id !== id);
+  _pendingDelIds.entradasAll.add(id);
   autoSave();
   showToast("🗑 Entrada removida.");
   render();
@@ -8494,16 +8528,19 @@ try {
   const KEYS_SESSAO_COMPARTILHADA = ["gn_session_v1", "gn_nav_loja", "gn_last_loja"];
   const savedVersion = localStorage.getItem(VERSION_KEY);
   if (savedVersion !== APP_VERSION) {
-    // Limpar TODOS os dados GN do localStorage (qualquer chave que comece com "gn_"),
-    // exceto a sessão compartilhada entre apps.
+    // Limpar dados GN do localStorage (qualquer chave que comece com "gn_"), exceto a
+    // sessão compartilhada entre apps E qualquer cache "gn_estoque_v1" (com ou sem sufixo
+    // de loja travada — ver SAVE_KEY) — essa é a cópia offline de contagem/pedido/estoque
+    // ainda não confirmada na nuvem (ver leitura de SAVE_KEY logo abaixo). Um deploy podia
+    // coincidir com o meio de uma contagem — apagar esse cache aqui, incondicionalmente, é
+    // o que apagava dado real digitado minutos antes só porque uma versão nova do app
+    // chegou nesse meio-tempo.
     const keysToRemove = Object.keys(localStorage).filter(k =>
-      (k.startsWith("gn_") || k.startsWith("gn_estoque")) && !KEYS_SESSAO_COMPARTILHADA.includes(k)
+      k.startsWith("gn_") && !k.startsWith("gn_estoque_v1") && !KEYS_SESSAO_COMPARTILHADA.includes(k)
     );
     keysToRemove.forEach(k => localStorage.removeItem(k));
-    // Também limpar a chave atual por nome exato
-    localStorage.removeItem(SAVE_KEY);
     localStorage.setItem(VERSION_KEY, APP_VERSION);
-    console.log("[GN] Versão atualizada para " + APP_VERSION + " — localStorage limpo.");
+    console.log("[GN] Versão atualizada para " + APP_VERSION + " — localStorage limpo (cache de contagem/pedido preservado).");
   }
 } catch(e) {}
 
@@ -8815,8 +8852,17 @@ sbStartPolling();
 
 // Register service worker silently (enables push if already activated)
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.addEventListener('message', function(e) {
-    if (e.data && e.data.type === 'GN_SW_UPDATED') window.location.reload();
+  navigator.serviceWorker.addEventListener('message', async function(e) {
+    if (e.data && e.data.type === 'GN_SW_UPDATED') {
+      // Um deploy pode disparar essa mensagem a qualquer momento, inclusive no meio de
+      // uma contagem/pedido sendo digitado — recarregar na hora sem confirmar que o
+      // último salvamento chegou na nuvem arriscava perder a edição em voo (o reload é
+      // uma navegação de verdade, não elegível pro bfcache, então o request de sync podia
+      // ser abortado no meio). Espera o push pendente terminar (com teto de 6s pra não
+      // travar o recarregamento indefinidamente se a rede estiver ruim).
+      try { await Promise.race([_forcarSyncPendente(), new Promise(r => setTimeout(r, 6000))]); } catch(_) {}
+      window.location.reload();
+    }
   });
   navigator.serviceWorker.register('/sw.js').then(function(reg) { reg.update(); }).catch(() => {});
 }
