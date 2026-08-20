@@ -159,6 +159,9 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .urg-btn:hover{border-color:#f59e0b;color:#f59e0b;background:rgba(245,158,11,.1)}
 .urg-btn.ativo{background:rgba(180,83,9,.3);border-color:#b45309;color:#fbbf24}
 .urg-btn.ativo.finalizada{background:rgba(34,197,94,.25);border-color:#22c55e;color:#4ade80}
+.semana-btn{width:26px;height:26px;background:transparent;border:1.5px solid rgba(14,165,233,.35);border-radius:6px;color:rgba(14,165,233,.5);font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:.15s;margin-left:4px;line-height:1}
+.semana-btn:hover{border-color:#0ea5e9;color:#0ea5e9;background:rgba(14,165,233,.1)}
+.semana-btn.ativo{background:rgba(14,165,233,.2);border-color:#0ea5e9;color:#0ea5e9}
 .prod-row.diverg-ativo{border-left:3px solid #ef4444 !important;background:rgba(239,68,68,.04) !important}
 .prod-row.ja-pedido{border-left:3px solid #22c55e;background:rgba(34,197,94,.15)}
 .todos-loja-row.ja-pedido{border-left:3px solid #22c55e;background:rgba(34,197,94,.15);padding-left:5px}
@@ -1098,30 +1101,35 @@ async function carregarPedidoAtual() {
   await carregarUltimoPedido();
   await carregarConfirmadosSemana();
   await carregarFornecedoresConfirmados();
-  await carregarFornecedoresRevertidos();
+  await carregarEstadoAuditoriaFornecedores();
 }
 
-// Fornecedores cuja ÚLTIMA ação no pedido atual foi um "↩️ Reverter Confirmação" — ficam
-// destravados pra editar de novo, mas isso não é óbvio na tela (o botão "Confirmar" só
-// reaparece se sobrar item realmente pendente, e nada mais avisa que uma reversão
-// aconteceu). Reconstrói o estado a partir do log de auditoria (CONFIRMAR_FORNECEDOR
-// "reconfirma" e limpa; REVERTER_CONFIRMACAO marca) pra mostrar um aviso — sem isso, um
-// fornecedor revertido sem querer/por engano some de vista até alguém notar que a Saída
-// nunca chegou (foi o que aconteceu com o PETISCOS).
-async function carregarFornecedoresRevertidos() {
+// Reconstrói, a partir do log de auditoria, dois estados que hoje só existiam em memória
+// (zeravam ao recarregar a página ou noutra sessão/aparelho, travando os itens de novo
+// como se nada tivesse acontecido — mesma confusão real já vista com o PETISCOS):
+// - S.fornecedoresRevertidos: última ação foi "↩️ Reverter Confirmação" — sobrou pendência
+//   sem aviso nenhum na tela.
+// - S.fornecedoresReabertos: última ação foi "🔓 Abrir 2ª rodada" — itens destravados pra
+//   um pedido novo do mesmo fornecedor na semana, sem sobrescrever o que já foi confirmado.
+// CONFIRMAR_FORNECEDOR sempre "reconfirma" e limpa os dois pra aquele fornecedor.
+async function carregarEstadoAuditoriaFornecedores() {
   S.fornecedoresRevertidos = {};
+  S.fornecedoresReabertos = new Set();
   if (!S.pedidoAtual?.id) return;
   const data = await _fetchTodasPaginas(() => db.from('gn_auditoria_pedidos')
     .select('acao,fornecedor,detalhes,usuario,criado_em')
     .eq('pedido_id', S.pedidoAtual.id)
-    .in('acao', ['CONFIRMAR_FORNECEDOR', 'REVERTER_CONFIRMACAO'])
+    .in('acao', ['CONFIRMAR_FORNECEDOR', 'REVERTER_CONFIRMACAO', 'ABRIR_2A_RODADA'])
     .order('criado_em', { ascending: true }));
   (data || []).forEach(row => {
     if (row.acao === 'REVERTER_CONFIRMACAO') {
       const forn = row.fornecedor || row.detalhes?.fornecedor;
-      if (forn) S.fornecedoresRevertidos[forn] = row;
+      if (forn) { S.fornecedoresRevertidos[forn] = row; S.fornecedoresReabertos.delete(forn); }
+    } else if (row.acao === 'ABRIR_2A_RODADA') {
+      const forn = row.fornecedor || row.detalhes?.fornecedor;
+      if (forn) { S.fornecedoresReabertos.add(forn); delete S.fornecedoresRevertidos[forn]; }
     } else {
-      (row.detalhes?.fornecedores || []).forEach(f => { delete S.fornecedoresRevertidos[f]; });
+      (row.detalhes?.fornecedores || []).forEach(f => { delete S.fornecedoresRevertidos[f]; S.fornecedoresReabertos.delete(f); });
     }
   });
 }
@@ -1130,9 +1138,6 @@ async function carregarFornecedoresRevertidos() {
 // usado pra travar a edição só daqueles itens e permitir confirmar o resto depois.
 async function carregarFornecedoresConfirmados() {
   S.fornecedoresConfirmados = new Set();
-  // "Reaberto" (2ª rodada) é por pedido/semana — trocar de semana não pode carregar o
-  // desbloqueio de uma semana diferente.
-  S.fornecedoresReabertos = new Set();
   if (!S.pedidoAtual?.id) return;
   const data = await _fetchTodasPaginas(() => db.from('gn_provisoes')
     .select('fornecedor')
@@ -1162,7 +1167,11 @@ async function carregarItensPedido() {
       // Quebra real em Cx/Und (quando veio do app Lojas ou foi digitada aqui mesmo nos
       // campos separados) — null quando só existe o total, aí o Pedido decompõe na hora.
       qtdCx: item.qtd_cx != null ? parseFloat(item.qtd_cx) : null,
-      qtdUnd: item.qtd_und != null ? parseFloat(item.qtd_und) : null
+      qtdUnd: item.qtd_und != null ? parseFloat(item.qtd_und) : null,
+      // Força a entrega pra hoje na hora de confirmar, sem marcar ⚡ urgência (que também
+      // avisa a loja) — ver toggleEntregaSemana() e o cálculo de data em
+      // _confirmarFornecedoresSelecionados().
+      entregaSemana: item.entrega_semana || false
     };
   });
   calcularTotais();
@@ -1753,15 +1762,18 @@ async function _confirmarFornecedoresSelecionados() {
         const diasForn = forn?.dias_entrega || [];
         const isoDate = dt => dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
 
-        // Item marcado com ⚡ urgência: a entrega é hoje mesmo (giro rápido, fora do
-        // cronograma normal do fornecedor) — sem isso, a data calculada caía no próximo
-        // dia de entrega do fornecedor (podia ser semana que vem) mesmo pra pedidos que já
-        // saíram e foram entregues no mesmo dia, deixando a Saída da Produção "atrasada"
-        // até alguém lembrar de editar a data de entrega manualmente.
-        // Sem urgência: data (ou janela) de entrega do fornecedor — prazo em dias após o
-        // pedido tem prioridade sobre o cálculo por dia da semana, quando cadastrado.
+        // Item marcado com ⚡ urgência (giro rápido, fora do cronograma normal do
+        // fornecedor) OU 📅 "entrega essa semana" (item.entregaSemana — mesmo efeito na
+        // data, mas sem marcar urgenciaTemplate, que o app Lojas lê como aviso de urgência
+        // pra loja: são dois sinais diferentes, não pode disparar um só porque o comprador
+        // não quer que o pedido caia na semana seguinte): a entrega é hoje mesmo. Sem
+        // nenhum dos dois, a data calculada caía no próximo dia de entrega do fornecedor
+        // (podia ser semana que vem) mesmo pra pedidos que já saíram e foram entregues no
+        // mesmo dia, deixando a Saída da Produção "atrasada" até alguém editar a mão.
+        // Sem nenhum dos dois: data (ou janela) de entrega do fornecedor — prazo em dias
+        // após o pedido tem prioridade sobre o cálculo por dia da semana, quando cadastrado.
         let dataEntrega = null, dataEntregaFim = null;
-        if (_pedidoItemUrgente(prod, loja.slug_pedido)) {
+        if (_pedidoItemUrgente(prod, loja.slug_pedido) || item.entregaSemana) {
           dataEntrega = isoDate(new Date());
         } else if (forn?.prazo_dias_min != null) {
           const ref = new Date();
@@ -2019,7 +2031,13 @@ async function _limparFornecedoresAba() {
     `${jaConfirmados.join('/')} já ${jaConfirmados.length>1?'foram':'foi'} confirmado(s) essa semana (entrega já registrada).`,
     `Isso NÃO mexe no pedido já confirmado — só libera os campos pra você lançar um NOVO pedido de ${jaConfirmados.join('/')} nessa mesma semana. Continuar?`);
   if (!ok) return;
-  jaConfirmados.forEach(f => S.fornecedoresReabertos.add(f));
+  jaConfirmados.forEach(f => {
+    S.fornecedoresReabertos.add(f);
+    // Registrado pra sobreviver a um reload/outra sessão — sem isso, "2ª rodada" era só
+    // um Set em memória que zerava ao recarregar a página, travando os itens de novo como
+    // se estivessem confirmados (mesma classe de confusão do aviso de reversão).
+    _logAuditoria('ABRIR_2A_RODADA', { fornecedor: f }, { pedido_id: S.pedidoAtual.id, fornecedor: f });
+  });
   renderPedido();
   toast(`Nova rodada de ${label} liberada — pode lançar de novo.`, 'ok');
 }
@@ -2636,6 +2654,7 @@ function renderPedido() {
           const itemAtual = S.pedidoItens[prod.id]?.[lojaAtiva];
           const qtdAtual  = itemAtual?.qtd ?? 0;
           const divAtual  = itemAtual?.diverg ?? false;
+          const semanaAtual = itemAtual?.entregaSemana ?? false;
           const jaPedido  = (S.pedidosConfirmados[prod.id]?.[lojaAtiva] ?? 0) > 0;
           const dash = '<span style="color:var(--muted)">—</span>';
           const { estAnt, estVig, estVigCx, estVigUnd } = _estAntVigEfetivo(contagem, _semAtivaMonISO, _semAtivaSunISO);
@@ -2694,6 +2713,7 @@ function renderPedido() {
               ${qtyCtrlHtml}
               <button class="diverg-btn${divAtual?' ativo':''}" title="Marcar divergência na contagem" onclick="toggleDiverg('${prod.id}','${lojaAtiva}')">⚑</button>
               <button class="urg-btn${isUrgente?' ativo':''}${isUrgente&&prodConfirmado?' finalizada':''}" title="${isUrgente?(prodConfirmado?'Urgência — fornecedor já confirmado':'Urgência — remover'):'Marcar como urgência'}" onclick="toggleUrgenciaPedido('${prod.item_id}','${lojaAtiva}')">⚡</button>
+              <button class="semana-btn${semanaAtual?' ativo':''}" title="${semanaAtual?'Entrega ainda essa semana — remover':'Forçar entrega ainda essa semana (sem avisar a loja como urgência)'}" onclick="toggleEntregaSemana('${prod.id}','${lojaAtiva}')">📅</button>
             </div>
           </div>`;
         }).join('');
@@ -2759,6 +2779,7 @@ function renderPedido() {
             const vigV   = estVigL != null ? `<span class="v" style="color:#1A1D23;font-weight:700">✓${fmtQtd(estVigL)}${vigCxUndTxtL}</span>` : `<span class="v">0</span>`;
             const subT = qtdL > 0 ? `<span class="v">R$${fmt(qtdL*(prod.custo||0))}</span>` : '';
             const isUrgenteL = _pedidoItemUrgente(prod, loja.slug_pedido);
+            const semanaL = itemLoja?.entregaSemana ?? false;
             const contInfoTxtL = _contagemInfoTxt(contagem);
             const contInfoBtnL = contInfoTxtL
               ? `<span onclick="event.stopPropagation();mostrarInfoContagem('${prod.id}','${loja.slug_pedido}')" title="${contInfoTxtL.replace(/"/g,'&quot;')}" style="cursor:pointer;opacity:.7">🕒</span>` : '';
@@ -2782,6 +2803,7 @@ function renderPedido() {
                 ${qtyCtrlSmHtml}
                 <button class="diverg-btn${divL?' ativo':''}" style="width:22px;height:22px;font-size:10px" title="Marcar divergência" onclick="toggleDiverg('${prod.id}','${loja.slug_pedido}')">⚑</button>
                 <button class="urg-btn${isUrgenteL?' ativo':''}${isUrgenteL&&prodConfirmado?' finalizada':''}" style="width:22px;height:22px;font-size:10px" title="${isUrgenteL?(prodConfirmado?'Urgência — fornecedor já confirmado':'Urgência — remover'):'Marcar como urgência'}" onclick="toggleUrgenciaPedido('${prod.item_id}','${loja.slug_pedido}')">⚡</button>
+                <button class="semana-btn${semanaL?' ativo':''}" style="width:22px;height:22px;font-size:10px" title="${semanaL?'Entrega ainda essa semana — remover':'Forçar entrega ainda essa semana'}" onclick="toggleEntregaSemana('${prod.id}','${loja.slug_pedido}')">📅</button>
               </div>
               ${subT?`<span class="todos-loja-total">${subT}</span>`:''}
             </div>`;
@@ -3268,6 +3290,58 @@ async function toggleDiverg(catalogoId, lojaSlug) {
     item.diverg = !novaDiverg;
     _aplicarVisual(!novaDiverg);
     toast('⚠️ Não foi possível salvar a divergência — tente de novo.', 'err');
+  }
+}
+
+// "Entrega ainda essa semana" — força a data calculada em _confirmarFornecedoresSelecionados()
+// pra hoje, do mesmo jeito que ⚡ urgência, mas SEM marcar urgenciaTemplate (que é lido pelo
+// app Lojas e mostra um aviso de urgência pro lado da loja — sinal diferente, que não devia
+// disparar só porque o comprador não quer que o pedido caia na semana seguinte). Mesmo
+// padrão de gravação de toggleDiverg().
+async function toggleEntregaSemana(catalogoId, lojaSlug) {
+  if (!S.pedidoItens[catalogoId]) S.pedidoItens[catalogoId] = {};
+  if (!S.pedidoItens[catalogoId][lojaSlug]) S.pedidoItens[catalogoId][lojaSlug] = { id: null, qtd: 0, custo: null, diverg: false, entregaSemana: false };
+  const item = S.pedidoItens[catalogoId][lojaSlug];
+  const novoValor = !item.entregaSemana;
+
+  const _aplicarVisual = (v) => {
+    document.querySelectorAll(`.prod-row[data-cid="${catalogoId}"][data-loja="${lojaSlug}"] .semana-btn`).forEach(btn => btn.classList.toggle('ativo', v));
+    document.querySelectorAll('.todos-loja-row').forEach(row => {
+      const btn = row.querySelector('.semana-btn');
+      if (!btn) return;
+      const onclick = btn.getAttribute('onclick') || '';
+      if (onclick.includes(catalogoId) && onclick.includes(lojaSlug)) btn.classList.toggle('ativo', v);
+    });
+  };
+  item.entregaSemana = novoValor;
+  _aplicarVisual(novoValor);
+
+  try {
+    if (item.id) {
+      const { error } = await db.from('gn_pedido_itens').update({ entrega_semana: novoValor }).eq('id', item.id);
+      if (error) throw error;
+    } else if (novoValor && S.pedidoAtual) {
+      const { data, error } = await db.from('gn_pedido_itens').insert([{
+        pedido_id: S.pedidoAtual.id, catalogo_id: catalogoId, loja_slug: lojaSlug,
+        qtd_pedida: 0, custo_unitario: null, entrega_semana: true
+      }]).select('id').single();
+      if (error) {
+        const { data: existente, error: e3 } = await db.from('gn_pedido_itens')
+          .select('id').eq('pedido_id', S.pedidoAtual.id)
+          .eq('catalogo_id', catalogoId).eq('loja_slug', lojaSlug).maybeSingle();
+        if (e3 || !existente) throw error;
+        const { error: e4 } = await db.from('gn_pedido_itens').update({ entrega_semana: true }).eq('id', existente.id);
+        if (e4) throw e4;
+        item.id = existente.id;
+      } else if (data) {
+        item.id = data.id;
+      }
+    }
+  } catch(e) {
+    console.error('toggleEntregaSemana:', e.message);
+    item.entregaSemana = !novoValor;
+    _aplicarVisual(!novoValor);
+    toast('⚠️ Não foi possível salvar — tente de novo.', 'err');
   }
 }
 
