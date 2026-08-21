@@ -680,6 +680,44 @@ function _parseHorasHorario(horario) {
   return Math.round(mins / 60 * 10) / 10;
 }
 
+// Horário entrada/saída por dia da semana — mesmos dados cadastrados no app
+// Check-list (Funcionários, aba Dados), lidos direto de gn_comissoes.all_data.
+function _horasEntreHorarios(entrada, saida) {
+  const [h1, m1] = entrada.split(':').map(Number);
+  const [h2, m2] = saida.split(':').map(Number);
+  let mins = (h2 * 60 + m2) - (h1 * 60 + m1);
+  if (mins <= 0) mins += 1440;
+  if (mins <= 0 || mins > 1440) return null;
+  if (mins >= 360) mins -= 60;
+  return Math.round(mins / 60 * 10) / 10;
+}
+function _fmtHoraCompacta(hhmm) {
+  if (!hhmm) return '';
+  const [h, m] = hhmm.split(':');
+  const hn = parseInt(h, 10);
+  return (m && m !== '00') ? `${hn}:${m}` : String(hn);
+}
+// Horas/semana de um funcionário — usa o horário registrado dia a dia (Check-list)
+// quando existir; cai pro horário geral em texto livre pros dias sem cadastro.
+function _horasSemanaFunc(f, diasSemAbrev, presenteSet) {
+  const hDiaGenerico = _parseHorasHorario(f.horario);
+  const horarioDias = Array.isArray(f.horario_dias) ? f.horario_dias : [];
+  const temHorarioDias = horarioDias.some(hd => hd && hd.entrada && hd.saida);
+  if (!temHorarioDias) {
+    const diasPres = (f.dias || []).filter(s => presenteSet.has(s || 'PRESENTE')).length;
+    return hDiaGenerico != null ? Math.round(hDiaGenerico * diasPres * 10) / 10 : null;
+  }
+  let soma = 0;
+  diasSemAbrev.forEach((_, i) => {
+    const st = (f.dias || [])[i] || 'PRESENTE';
+    if (!presenteSet.has(st)) return;
+    const hd = horarioDias[i];
+    const h = (hd && hd.entrada && hd.saida) ? _horasEntreHorarios(hd.entrada, hd.saida) : hDiaGenerico;
+    if (h != null) soma += h;
+  });
+  return Math.round(soma * 10) / 10;
+}
+
 let toastT;
 function toast(msg, tipo='ok') {
   const t = $('toast');
@@ -1571,9 +1609,9 @@ function renderRH() {
   } else {
     const thDias = DIAS_SEM.map(d => `<th style="text-align:center;min-width:32px">${d}</th>`).join('');
     const rowsHtml = escalFuncsFilt.map(f => {
-      const hDia = _parseHorasHorario(f.horario);
       const diasPres = (f.dias || []).filter(s => ESCALA_PRESENTE_SET.has(s || 'PRESENTE')).length;
-      const horasSem = hDia != null ? Math.round(hDia * diasPres * 10) / 10 : null;
+      const horarioDias = Array.isArray(f.horario_dias) ? f.horario_dias : [];
+      const horasSem = _horasSemanaFunc(f, DIAS_SEM, ESCALA_PRESENTE_SET);
 
       // Status especial
       const emFerias = (f.dias || []).some(s => s === 'FÉRIAS');
@@ -1601,12 +1639,18 @@ function renderRH() {
         justCnt>0   ? `<span class="badge" style="font-size:8px;background:rgba(236,72,153,.15);color:#ec4899;border:1px solid rgba(236,72,153,.3)">${justCnt}JT</span>` : '',
       ].filter(Boolean).join(' ');
 
-      // Dia pills
+      // Dia pills — horário do dia (quando cadastrado no Check-list) mostrado embaixo
       const diaCells = DIAS_SEM.map((_, i) => {
         const st = (f.dias || [])[i] || 'PRESENTE';
         const abrev = PRES_ABREV[st] || st.slice(0, 2);
         const cls   = PRES_CLASS[st] || 'day-NW';
-        return `<td style="text-align:center"><span class="day-pill ${cls}" title="${st}">${abrev}</span></td>`;
+        const hd = horarioDias[i];
+        const hdTxt = (hd && hd.entrada && hd.saida) ? `${_fmtHoraCompacta(hd.entrada)}–${_fmtHoraCompacta(hd.saida)}` : '';
+        const tit = hdTxt ? `${st} • ${hd.entrada}–${hd.saida}` : st;
+        return `<td style="text-align:center">
+          <span class="day-pill ${cls}" title="${tit}">${abrev}</span>
+          ${hdTxt ? `<div style="font-size:7px;color:var(--muted);margin-top:1px;font-variant-numeric:tabular-nums">${hdTxt}</div>` : ''}
+        </td>`;
       }).join('');
 
       // Horas semana cor
@@ -3893,24 +3937,15 @@ function _escalaRelatorioTexto(bold){
   if (!funcs.length) return null;
   const DIAS_SEM = ['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
   const PRESENTE_SET = new Set(['PRESENTE','HORISTA','JOVEM APRENDIZ','FOLGA','BANCO DE HORAS','FÉRIAS']);
-  function _parseHoras(h) {
-    if (!h) return null;
-    const m = h.match(/(\d{1,2}):(\d{2})\s*[–\-]\s*(\d{1,2}):(\d{2})/);
-    if (!m) return null;
-    const ini = parseInt(m[1])*60+parseInt(m[2]);
-    let fim = parseInt(m[3])*60+parseInt(m[4]);
-    if (fim < ini) fim += 24*60;
-    return (fim - ini) / 60;
-  }
   const sem = formatSemana(S.rhSemana || getMondayOfWeek());
   const titulo = `Escala & Frequência — ${S.rhLoja.display} — Sem.${sem.num}`;
   let msg = `${bold?'📅 ':''}${b(titulo.toUpperCase())}\n${sem.periodo}\n`;
   funcs.forEach(f => {
-    const hDia = _parseHoras(f.horario);
     const diasPres = (f.dias || []).filter(s => PRESENTE_SET.has(s || 'PRESENTE')).length;
     const faltas = (f.dias || []).filter(s => s === 'FALTA' || s === 'SUSPENSÃO').length;
     const atestados = (f.dias || []).filter(s => s === 'ATESTADO').length;
-    const horasSem = hDia != null ? (hDia * diasPres).toFixed(1) : null;
+    const horasSemNum = _horasSemanaFunc(f, DIAS_SEM, PRESENTE_SET);
+    const horasSem = horasSemNum != null ? horasSemNum.toFixed(1) : null;
     const diasTxt = DIAS_SEM.map((d,i) => `${d} ${PRES_ABREV[(f.dias||[])[i]||'PRESENTE']}`).join(', ');
     const cargo = [f.setor, f.turno, f.horario].filter(Boolean).join(' · ');
     msg += `\n${b(f.nome)}${cargo?` (${cargo})`:''}\n  ${diasTxt}\n  Horas/sem: ${horasSem!=null?horasSem+'h':'—'} | Dias pres.: ${diasPres} | Faltas: ${faltas} | Atestados: ${atestados}\n`;
@@ -3938,23 +3973,14 @@ function exportarEscalaCSV() {
   if (!funcs.length) { toast('Sem dados de escala para exportar', 'err'); return; }
   const DIAS_SEM = ['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
   const PRESENTE_SET = new Set(['PRESENTE','HORISTA','JOVEM APRENDIZ','FOLGA','BANCO DE HORAS','FÉRIAS']);
-  function _parseHoras(h) {
-    if (!h) return null;
-    const m = h.match(/(\d{1,2}):(\d{2})\s*[–\-]\s*(\d{1,2}):(\d{2})/);
-    if (!m) return null;
-    const ini = parseInt(m[1])*60+parseInt(m[2]);
-    let fim = parseInt(m[3])*60+parseInt(m[4]);
-    if (fim < ini) fim += 24*60;
-    return (fim - ini) / 60;
-  }
   const sem = formatSemana(S.rhSemana || getMondayOfWeek());
   const header = ['Funcionário','Setor','Turno','Horário','Seg','Ter','Qua','Qui','Sex','Sáb','Dom','Horas/sem','Dias pres.','Faltas','Atestados'];
   const rows = funcs.map(f => {
-    const hDia = _parseHoras(f.horario);
     const diasPres = (f.dias || []).filter(s => PRESENTE_SET.has(s || 'PRESENTE')).length;
     const faltas = (f.dias || []).filter(s => s === 'FALTA' || s === 'SUSPENSÃO').length;
     const atestados = (f.dias || []).filter(s => s === 'ATESTADO').length;
-    const horasSem = hDia != null ? (hDia * diasPres).toFixed(1) : '';
+    const horasSemNum = _horasSemanaFunc(f, DIAS_SEM, PRESENTE_SET);
+    const horasSem = horasSemNum != null ? horasSemNum.toFixed(1) : '';
     const diasCols = DIAS_SEM.map((_, i) => (f.dias || [])[i] || 'PRESENTE');
     return [f.nome, f.setor||'', f.turno||'', f.horario||'', ...diasCols, horasSem, diasPres, faltas, atestados];
   });
