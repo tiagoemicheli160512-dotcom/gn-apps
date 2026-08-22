@@ -70,7 +70,7 @@ input,select{font-family:inherit;font-size:inherit;outline:none}
 .btn-editar-mapa{background:#EEF1F4;border:1px solid #E1E4E9;border-radius:10px;padding:7px 12px;font-size:12px;font-weight:700;color:#1A1D23}
 .btn-editar-mapa.on{background:var(--cor);border-color:var(--cor);color:#fff}
 .mapa-hint{font-size:11px;color:rgba(0,0,0,.45);margin-bottom:8px}
-.mapa-wrap{position:relative;width:100%;aspect-ratio:4/3;background-image:linear-gradient(#E1E4E9 1px,transparent 1px),linear-gradient(90deg,#E1E4E9 1px,transparent 1px);background-size:12.5% 12.5%;background-color:#FAFBFC;border:1.5px solid #E1E4E9;border-radius:16px;overflow:hidden;touch-action:none}
+.mapa-wrap{position:relative;width:100%;aspect-ratio:0.72;background-image:linear-gradient(#E1E4E9 1px,transparent 1px),linear-gradient(90deg,#E1E4E9 1px,transparent 1px);background-size:12.5% 12.5%;background-color:#FAFBFC;border:1.5px solid #E1E4E9;border-radius:16px;overflow:hidden;touch-action:none}
 .mesa-map{position:absolute;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;justify-content:center;font-weight:800;user-select:none;box-shadow:0 2px 6px rgba(0,0,0,.10)}
 .mesa-map.redonda{width:56px;height:56px;border-radius:50%}
 .mesa-map.quadrada{width:52px;height:52px;border-radius:12px}
@@ -82,6 +82,13 @@ input,select{font-family:inherit;font-size:inherit;outline:none}
 .mesa-map.editando{cursor:grab}
 .mesa-map.arrastando{cursor:grabbing;z-index:20;box-shadow:0 6px 18px rgba(0,0,0,.28)}
 .mesa-map-shape-btn{position:absolute;top:-8px;right:-8px;width:20px;height:20px;border-radius:50%;background:#1A1D23;color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center;z-index:5}
+/* Anotações do mapa (zonas como copa/wc/palco, e nomes de garçom por setor) —
+   não são mesas, só decoração/orientação; arrastáveis no modo edição igual às mesas. */
+.mapa-anot{position:absolute;transform:translate(-50%,-50%);user-select:none;white-space:nowrap;text-align:center;font-weight:800;pointer-events:auto;z-index:2}
+.mapa-anot.zona{font-size:9px;color:rgba(0,0,0,.55);background:rgba(0,0,0,.05);border:1px dashed rgba(0,0,0,.25);border-radius:8px;padding:4px 7px}
+.mapa-anot.nome{font-size:10px;color:#7c3aed;text-shadow:0 1px 3px rgba(255,255,255,.9),0 1px 3px rgba(255,255,255,.9)}
+.mapa-anot.editando{cursor:grab}
+.mapa-anot.arrastando{cursor:grabbing;z-index:21}
 
 /* Comanda */
 .comanda-hdr{display:flex;align-items:center;gap:10px;margin-bottom:12px}
@@ -482,16 +489,41 @@ async function carregarLayoutMesas(){
 
 // Mescla o layout salvo com posições padrão pra mesas que ainda não foram
 // posicionadas manualmente (ex.: número de mesas aumentou depois do último ajuste).
+// O total efetivo nunca fica menor que o maior número de mesa já salvo — assim um
+// layout carregado da nuvem (ex.: importado direto no banco) aparece completo mesmo
+// que "Nº de mesas" desse aparelho ainda esteja com um valor antigo/menor.
 function layoutEfetivo(){
   const salvo = {};
-  (S.mesasLayoutSalvo||[]).forEach(m => { salvo[String(m.mesa)] = m; });
-  const def = defaultLayoutMesas(S.numMesas);
+  (S.mesasLayoutSalvo||[]).forEach(m => { if (!m.anotacao) salvo[String(m.mesa)] = m; });
+  const maiorSalvo = Object.keys(salvo).reduce((mx,k)=>Math.max(mx, parseInt(k)||0), 0);
+  const n = Math.max(S.numMesas, maiorSalvo);
+  const def = defaultLayoutMesas(n);
   const out = [];
-  for (let i = 1; i <= S.numMesas; i++) {
+  for (let i = 1; i <= n; i++) {
     const k = String(i);
     out.push(salvo[k] || def[i-1]);
   }
   return out;
+}
+
+// Anotações do mapa (zonas como copa/descarte/palco/wc, e nomes de garçom marcando
+// setor) — mesma linha do array de layout, distinguidas pela flag anotacao:true, pra
+// não colidir com a sequência numérica 1..N das mesas (usada em porMesa/abrirMesa).
+function anotacoesSalvas(){
+  return (S.mesasLayoutSalvo||[]).filter(m => m.anotacao);
+}
+
+async function _salvarAnotacao(id, patch){
+  const lista = Array.isArray(S.mesasLayoutSalvo) ? [...S.mesasLayoutSalvo] : [];
+  const idx = lista.findIndex(m => m.anotacao && m.id === id);
+  const base = idx>=0 ? lista[idx] : (anotacoesSalvas().find(m=>m.id===id) || {anotacao:true,id,estilo:'zona',label:'',x:50,y:50});
+  const novo = { ...base, ...patch, anotacao:true, id };
+  if (idx>=0) lista[idx] = novo; else lista.push(novo);
+  S.mesasLayoutSalvo = lista;
+  try {
+    await sb('gn_comandas_mesas_layout?on_conflict=loja', { method:'POST', prefer:'return=minimal,resolution=merge-duplicates',
+      body:{ loja:S.loja, layout:lista, atualizado_em:new Date().toISOString(), atualizado_por:S.user.nome } });
+  } catch(e) { toast('⚠️ Erro ao salvar posição.', true); }
 }
 
 async function _salvarPosicaoMesa(mesa, patch){
@@ -532,7 +564,52 @@ function renderMapaMesas(){
       <span class="mesa-num">${escapeHtml(m.mesa)}</span>${info}${shapeBtn}
     </div>`;
   }).join('');
-  area.innerHTML = `<div class="mapa-wrap" id="mapaWrap">${itensHtml}</div>`;
+  const anotHtml = anotacoesSalvas().map(a => {
+    const cls = `mapa-anot ${a.estilo||'zona'}${S.editandoMapa?' editando':''}`;
+    return `<div class="${cls}" id="anotMap-${escapeHtml(a.id)}" style="left:${a.x}%;top:${a.y}%"
+      onpointerdown="onAnotMapPointerDown(event,'${escapeHtml(a.id)}')">${escapeHtml(a.label||'')}</div>`;
+  }).join('');
+  area.innerHTML = `<div class="mapa-wrap" id="mapaWrap">${itensHtml}${anotHtml}</div>`;
+}
+
+let _anotDrag = null;
+
+function onAnotMapPointerDown(ev, id){
+  ev.preventDefault();
+  const wrap = $('mapaWrap'), el = $('anotMap-'+id);
+  if (!wrap || !el) return;
+  _anotDrag = { id, rect: wrap.getBoundingClientRect(), el, startX:ev.clientX, startY:ev.clientY, moved:false };
+  try { el.setPointerCapture(ev.pointerId); } catch(_) {}
+  el.addEventListener('pointermove', onAnotMapPointerMove);
+  el.addEventListener('pointerup', onAnotMapPointerUp);
+  el.addEventListener('pointercancel', onAnotMapPointerUp);
+}
+
+function onAnotMapPointerMove(ev){
+  if (!_anotDrag || !S.editandoMapa) return;
+  const dx = ev.clientX - _anotDrag.startX, dy = ev.clientY - _anotDrag.startY;
+  if (Math.abs(dx) > 4 || Math.abs(dy) > 4) _anotDrag.moved = true;
+  if (!_anotDrag.moved) return;
+  const { rect, el } = _anotDrag;
+  const x = Math.max(2, Math.min(98, ((ev.clientX - rect.left) / rect.width) * 100));
+  const y = Math.max(2, Math.min(98, ((ev.clientY - rect.top) / rect.height) * 100));
+  el.classList.add('arrastando');
+  el.style.left = x + '%';
+  el.style.top = y + '%';
+  _anotDrag.finalX = x; _anotDrag.finalY = y;
+}
+
+function onAnotMapPointerUp(){
+  if (!_anotDrag) return;
+  const { id, el, moved, finalX, finalY } = _anotDrag;
+  el.removeEventListener('pointermove', onAnotMapPointerMove);
+  el.removeEventListener('pointerup', onAnotMapPointerUp);
+  el.removeEventListener('pointercancel', onAnotMapPointerUp);
+  el.classList.remove('arrastando');
+  _anotDrag = null;
+  if (S.editandoMapa && moved && finalX != null) {
+    _salvarAnotacao(id, { x: Math.round(finalX), y: Math.round(finalY) });
+  }
 }
 
 let _mapaDrag = null;
