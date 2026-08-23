@@ -3934,11 +3934,11 @@ function _buildFeriasUmaSemanaCard(){
 // mostra a borda pulsante em tela cheia), aqui é só um resumo — o mestre já
 // sabe que disparou, não precisa do alarme visual pra si mesmo.
 function _buildAlertasUrgentesCard(){
-  if(!_dashAlertasUrgentes || !_dashAlertasUrgentes.length) return '';
+  const lista = _dashAlertasUrgentes || [];
   const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
   const fmtHora = iso => { const d=new Date(iso); return d.toLocaleDateString('pt-BR')+' '+d.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}); };
-  const ativos = _dashAlertasUrgentes.filter(a=>!a.resolvido);
-  const resolvidos = _dashAlertasUrgentes.filter(a=>a.resolvido).slice(0,5);
+  const ativos = lista.filter(a=>!a.resolvido);
+  const resolvidos = lista.filter(a=>a.resolvido).slice(0,5);
   const linhaAtivo = a => `<div style="padding:5px 0;border-top:1px solid rgba(0,0,0,.06)">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
       <span style="font-size:11px;font-weight:700;color:#1A1D23">🔴 ${esc(LOJA_DISPLAY[a.loja]||a.loja)}</span>
@@ -3951,12 +3951,44 @@ function _buildAlertasUrgentesCard(){
     <span style="font-size:9px;color:rgba(0,0,0,.4);text-align:right">resolvido por ${esc(a.resolvido_por||'—')} · ${fmtHora(a.resolvido_em)}</span>
   </div>`;
   const cor = ativos.length ? '#ef4444' : '#22c55e';
-  const titulo = ativos.length ? `🚨 Alertas urgentes · ${ativos.length} ativo${ativos.length>1?'s':''}` : '🚨 Alertas urgentes · tudo resolvido';
+  const titulo = ativos.length ? `🚨 Alertas urgentes · ${ativos.length} ativo${ativos.length>1?'s':''}` : (lista.length ? '🚨 Alertas urgentes · tudo resolvido' : '🚨 Alertas urgentes');
   return `<div style="background:${ativos.length?'rgba(239,68,68,.05)':'rgba(34,197,94,.05)'};border:1px solid ${cor}30;border-left:3px solid ${cor};border-radius:14px;padding:14px 16px;margin:0 0 14px">
-    <div style="font-size:12px;font-weight:800;color:#1A1D23;margin-bottom:2px">${titulo}</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+      <div style="font-size:12px;font-weight:800;color:#1A1D23">${titulo}</div>
+      <button onclick="enviarAlertaTodasLojas()" style="background:#ef4444;border:none;border-radius:7px;color:#fff;font-size:11px;font-weight:700;cursor:pointer;padding:5px 10px;white-space:nowrap;flex-shrink:0">🚨 Alertar todas</button>
+    </div>
     ${ativos.map(linhaAtivo).join('')}
     ${resolvidos.map(linhaResolvido).join('')}
   </div>`;
+}
+
+// Reenvia _dashAlertasUrgentes sozinho (sem repetir o resto do _loadDashAll, que é caro)
+// e re-renderiza o dashboard — usado depois de enviarAlertaTodasLojas() pra refletir os
+// novos alertas na hora sem esperar o próximo ciclo de carregamento.
+async function _recarregarAlertasUrgentes() {
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  try {
+    _dashAlertasUrgentes = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_alertas_urgentes?order=criado_em.desc&limit=50&select=loja,criado_por,criado_em,resolvido,resolvido_por,resolvido_em,motivo`, H, 'dash:alertasUrgentesRows', []);
+  } catch(e) { window.gnLogError('dash:_recarregarAlertasUrgentes', e); }
+  renderDashboard();
+}
+
+// Envia o alerta urgente pra todas as lojas de uma vez (exceto Maglia, que segue a regra
+// padrão de exclusão do consolidado — ver _lojasFatConsolidado), num único motivo/confirm,
+// em vez de precisar ir loja a loja pelo botão individual.
+async function enviarAlertaTodasLojas() {
+  const motivo = prompt('O que está acontecendo? Esse texto vai aparecer na tela de todas as lojas.');
+  if (motivo === null) return;
+  const lojasAlvo = _lojasFatConsolidado(LOJAS_TODAS);
+  if (!confirm(`Enviar alerta urgente pra ${lojasAlvo.length} lojas?\n\nA tela de quem estiver com o Home aberto vai piscar em vermelho até alguém tocar pra marcar como resolvido.`)) return;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' };
+  const criado_por = session ? session.nome : null;
+  const resultados = await Promise.allSettled(lojasAlvo.map(loja =>
+    fetch(`${SB_URL}/rest/v1/gn_alertas_urgentes`, { method: 'POST', headers: H, body: JSON.stringify({ loja, criado_por, motivo: motivo || null }) })
+  ));
+  const falhas = resultados.filter(r => r.status === 'rejected' || (r.value && !r.value.ok)).length;
+  alert(falhas ? `🚨 Alerta enviado, mas ${falhas} de ${lojasAlvo.length} lojas falharam. Tente reenviar pra elas.` : `🚨 Alerta enviado pras ${lojasAlvo.length} lojas!`);
+  _recarregarAlertasUrgentes();
 }
 
 // Card "📍 Visitas do Dia" — fica no topo do Painel de Gestão, visível em qualquer
