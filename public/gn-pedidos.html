@@ -473,6 +473,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
         <div class="header-data" id="header-data"></div>
         <div style="display:flex;gap:6px;align-items:center">
           <button id="btn-salvar-pedidos" onclick="flushPendingItems(true)" title="Forçar salvamento" style="display:none;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.4);color:#1A1D23;border-radius:6px;padding:4px 10px;font-size:11px;font-weight:700;cursor:pointer">💾 Salvar</button>
+          <button id="btn-alertas-compras" onclick="_abrirPainelAlertasCompras()" title="Avisos das lojas (urgência / pedido finalizado)" style="position:relative;background:transparent;border:1px solid rgba(0,0,0,.15);border-radius:6px;padding:4px 9px;font-size:13px;color:rgba(0,0,0,.55);cursor:pointer">🔔<span id="badge-alertas-compras" style="display:none;position:absolute;top:-6px;right:-6px;background:#ef4444;color:#fff;font-size:9px;font-weight:800;min-width:16px;height:16px;border-radius:8px;line-height:16px;text-align:center;padding:0 3px"></span></button>
           <button id="btn-notif-ped" onclick="ativarNotifPedidos()" title="Ativar alertas de pedidos" style="background:transparent;border:1px solid rgba(0,0,0,.15);border-radius:6px;padding:4px 9px;font-size:13px;color:rgba(0,0,0,.35);cursor:pointer">🔕</button>
           <button class="btn-logout" onclick="window.location.href='/gn-home.html'" title="Voltar ao início" style="font-size:15px;padding:4px 8px">←</button>
           <button class="btn-logout" onclick="logout()">Sair</button>
@@ -1651,6 +1652,105 @@ async function _carregarFaltasBadge() {
     const {data:rows}=await db.from('checklist_diario').select('faltas').eq('data_operacao',hoje());
     _atualizarFaltasBadge((rows||[]).reduce((n,r)=>n+(Array.isArray(r.faltas)?r.faltas.length:0),0));
   }catch(e){}
+}
+
+// ── ALERTAS DE COMPRAS (loja → comprador) ────────────────────────────────
+// Toda vez que uma loja gera urgência ou finaliza o pedido da semana no app
+// Lojas, ela grava uma linha em gn_alertas_compras (ver confirmarPedido() em
+// gn-lojas.html). Aqui só faz polling dessa tabela e mostra um sino com badge
+// no cabeçalho — igual o comprador já vê quando um pedido chega, sem precisar
+// ficar checando WhatsApp/telefone.
+let _alertasComprasTimer = null;
+let _alertasComprasCache = [];
+
+function _lojaDisplayPorUserKey(userKey) {
+  const l = (window.GN_LOJAS || []).find(x => x.userKey === userKey);
+  return l ? l.display : userKey;
+}
+
+function _atualizarBadgeAlertasCompras() {
+  const n = _alertasComprasCache.length;
+  const el = $('badge-alertas-compras');
+  if (!el) return;
+  el.textContent = n > 99 ? '99+' : n;
+  el.style.display = n > 0 ? '' : 'none';
+  const btn = $('btn-alertas-compras');
+  if (btn) btn.style.color = n > 0 ? '#ef4444' : 'rgba(0,0,0,.55)';
+}
+
+async function _carregarAlertasCompras() {
+  try {
+    const { data, error } = await db.from('gn_alertas_compras')
+      .select('id,loja,tipo,qtd_itens,detalhes,criado_por,criado_em')
+      .eq('lido', false)
+      .order('criado_em', { ascending: false })
+      .limit(50);
+    if (error) return;
+    _alertasComprasCache = data || [];
+    _atualizarBadgeAlertasCompras();
+    if ($('modal-bg')?.classList.contains('ativo') && $('modal-box')?.dataset.tipo === 'alertas-compras') {
+      _renderPainelAlertasCompras();
+    }
+  } catch(e) {}
+}
+
+function _iniciarPollAlertasCompras() {
+  _carregarAlertasCompras();
+  if (_alertasComprasTimer) clearInterval(_alertasComprasTimer);
+  _alertasComprasTimer = setInterval(_carregarAlertasCompras, 20000);
+}
+
+function _renderPainelAlertasCompras() {
+  const fmtHora = iso => { const d = new Date(iso); return d.toLocaleDateString('pt-BR') + ' ' + d.toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit' }); };
+  const linha = a => {
+    const icone = a.tipo === 'finalizado' ? '✅' : '⚡';
+    const label = a.tipo === 'finalizado' ? 'finalizou o pedido' : 'gerou urgência';
+    return `<div style="padding:10px 0;border-top:1px solid var(--border);display:flex;gap:10px;align-items:flex-start">
+      <span style="font-size:16px;flex-shrink:0">${icone}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:700;color:var(--text)">${esc(_lojaDisplayPorUserKey(a.loja))} ${label} <span style="font-weight:400;color:var(--muted)">— ${a.qtd_itens||0} item${a.qtd_itens===1?'':'s'}</span></div>
+        ${a.detalhes ? `<div style="font-size:11px;color:var(--muted);margin-top:2px">${esc(a.detalhes)}</div>` : ''}
+        <div style="font-size:10px;color:var(--muted);margin-top:3px">${esc(a.criado_por||'—')} · ${fmtHora(a.criado_em)}</div>
+      </div>
+      <button class="btn-sm btn-outline" style="flex-shrink:0;padding:3px 8px;font-size:10px" onclick="_marcarAlertaCompraLido(${a.id})">✓ Lido</button>
+    </div>`;
+  };
+  const corpoHtml = `
+    <div class="modal-titulo">🔔 Avisos das lojas
+      <button class="modal-close" onclick="$('modal-bg').classList.remove('ativo')">×</button>
+    </div>
+    ${_alertasComprasCache.length ? `
+      <div style="text-align:right;margin-bottom:4px">
+        <button class="btn-sm btn-outline" style="font-size:10px;padding:3px 8px" onclick="_marcarTodosAlertasComprasLidos()">Marcar todos como lidos</button>
+      </div>
+      ${_alertasComprasCache.map(linha).join('')}
+    ` : `<div style="font-size:12px;color:var(--muted);padding:16px 0;text-align:center">Nenhum aviso novo.</div>`}
+  `;
+  abrirModal(corpoHtml);
+  const box = $('modal-box');
+  if (box) box.dataset.tipo = 'alertas-compras';
+}
+
+function _abrirPainelAlertasCompras() {
+  _renderPainelAlertasCompras();
+}
+
+async function _marcarAlertaCompraLido(id) {
+  const sess = (() => { try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch(e) { return null; } })();
+  try {
+    await db.from('gn_alertas_compras').update({ lido: true, lido_por: sess?.nome || null, lido_em: new Date().toISOString() }).eq('id', id);
+  } catch(e) {}
+  await _carregarAlertasCompras();
+}
+
+async function _marcarTodosAlertasComprasLidos() {
+  const ids = _alertasComprasCache.map(a => a.id);
+  if (!ids.length) return;
+  const sess = (() => { try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch(e) { return null; } })();
+  try {
+    await db.from('gn_alertas_compras').update({ lido: true, lido_por: sess?.nome || null, lido_em: new Date().toISOString() }).in('id', ids);
+  } catch(e) {}
+  await _carregarAlertasCompras();
 }
 
 async function salvarItem(catalogoId, lojaSlug, qtd, custo, cxUnd) {
@@ -6787,6 +6887,10 @@ async function iniciarApp() {
 
   // Carregar badge de faltas do dia em background
   setTimeout(_carregarFaltasBadge, 4000);
+
+  // Avisos das lojas (urgência/pedido finalizado) — carrega já e depois fica
+  // checando a cada 20s, pra aparecer no sino sem precisar atualizar a página.
+  setTimeout(_iniciarPollAlertasCompras, 2000);
 }
 
 
