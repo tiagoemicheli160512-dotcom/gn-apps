@@ -744,6 +744,8 @@ let S = {
   oseasAtivo: false, // aba "Oseas" — espelho do Pedido, só com itens de OSEAS_FORNECEDORES
   matheusAtivo: false, // aba "Matheus" — espelho do Pedido, com todo o resto (fora Edu/Oseas)
   pedFiltro: '',    // '' | 'urgencia' | 'vazios' | 'preenchidos'
+  relLojasFiltro: null,   // null = todas as lojas | [slug_pedido,...] — filtro dos relatórios pra fornecedor (todas as lojas)
+  triosRelFiltro: null,   // null = todas as lojas | [slug_pedido,...] — filtro do relatório de Trios
   urgenciaTemplate: {}, // userKey (mesma chave de gn_lojas.loja) -> [item_id_string, ...]
   gruposAbertos: new Set(['BEBIDAS','PROTEÍNA','PRODUÇÃO']),
   provGruposAbertos: new Set(), // loja/fornecedor abertos na aba Provisões — começam fechados
@@ -3143,10 +3145,13 @@ function renderPedido() {
 
     ${fornsTodasLojas.length ? `
     <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px">
-      <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:10px;letter-spacing:.5px">📋 Relatórios para Fornecedores — Todas as Lojas</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px">
+        <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">📋 Relatórios para Fornecedores</div>
+        <button onclick="abrirModalLojasRelatorioPedido()" style="background:${S.relLojasFiltro?'rgba(37,99,235,.15)':'var(--card2)'};border:1px solid ${S.relLojasFiltro?'rgba(37,99,235,.4)':'var(--border)'};border-radius:8px;padding:5px 10px;color:${S.relLojasFiltro?'#2563eb':'var(--muted)'};font-weight:700;font-size:11px;cursor:pointer;white-space:nowrap">🏬 ${S.relLojasFiltro?S.relLojasFiltro.length+' loja'+(S.relLojasFiltro.length>1?'s':''):'Todas as lojas'}</button>
+      </div>
       <div style="display:flex;flex-direction:column;gap:8px">
         <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:rgba(232,88,10,.08);border:1px solid rgba(232,88,10,.25);border-radius:10px">
-          <span style="flex:1;font-size:12px;font-weight:700;color:var(--text)">Pedido Completo — Todas as Lojas</span>
+          <span style="flex:1;font-size:12px;font-weight:700;color:var(--text)">Pedido Completo — ${_lojasFiltroLabel()}</span>
           <button onclick="gerarWppFornAllLojas(null)" style="background:rgba(37,211,102,.2);border:1px solid rgba(37,211,102,.5);border-radius:8px;padding:6px 12px;color:#1A1D23;font-weight:700;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:4px">📲 WPP</button>
           <button onclick="gerarPDFFornAllLojas(null)" style="background:rgba(192,57,43,.15);border:1px solid rgba(192,57,43,.4);border-radius:8px;padding:6px 12px;color:#1A1D23;font-weight:700;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:4px">📄 PDF</button>
           <button onclick="enviarPDFFornAllLojasWpp(null)" title="Enviar PDF pelo WhatsApp" style="background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);border-radius:8px;padding:6px 12px;color:#1A1D23;font-weight:700;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:4px">📄📲</button>
@@ -4671,9 +4676,79 @@ function gerarWppPedidoForn(fornecedor) {
   window.open('https://wa.me/?text='+encodeURIComponent(msg));
 }
 
-// ── Relatório para fornecedor — SEMPRE todas as lojas ──────────────────
+// ── Seletor de lojas reutilizável — relatórios de fornecedor (Pedido) e de Trios.
+// Abre um modal com checkbox por loja (todas marcadas por padrão), mesmo padrão do
+// seletor de alertas do Painel de Gestão (gn-home.html). null = sem filtro (todas as
+// lojas); array = só as lojas marcadas.
+let _selLojasModalState = null;
+function abrirModalSelecionarLojas(titulo, lojas, selecionadasAtuais, onConfirm) {
+  _selLojasModalState = { onConfirm };
+  const semFiltro = !selecionadasAtuais || !selecionadasAtuais.length;
+  abrirModal(`
+    <div class="modal-titulo">🏬 ${titulo}
+      <button class="modal-close" onclick="$('modal-bg').classList.remove('ativo')">×</button>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:10px;margin-bottom:8px">
+      <button class="btn-sm btn-outline" onclick="_selLojasMarcarTodas(true)">Marcar todas</button>
+      <button class="btn-sm btn-outline" onclick="_selLojasMarcarTodas(false)">Limpar</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px;max-height:50vh;overflow-y:auto">
+      ${lojas.map(l => `
+        <label style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:rgba(0,0,0,.04);border-radius:8px;cursor:pointer">
+          <input type="checkbox" class="selLojas-chk" value="${l.slug}" ${semFiltro || selecionadasAtuais.includes(l.slug) ? 'checked' : ''} style="width:16px;height:16px;flex-shrink:0">
+          <span style="flex:1">${l.nome}</span>
+        </label>`).join('')}
+    </div>
+    <div class="modal-acoes">
+      <button class="btn-sm btn-success" onclick="_confirmarSelecaoLojas()">✓ Aplicar</button>
+    </div>
+  `);
+}
+function _selLojasMarcarTodas(v) {
+  document.querySelectorAll('.selLojas-chk').forEach(el => { el.checked = v; });
+}
+function _confirmarSelecaoLojas() {
+  const chks = Array.from(document.querySelectorAll('.selLojas-chk'));
+  const marcadas = chks.filter(el => el.checked).map(el => el.value);
+  if (!marcadas.length) { toast('Selecione pelo menos uma loja.', 'err'); return; }
+  $('modal-bg').classList.remove('ativo');
+  const cb = _selLojasModalState && _selLojasModalState.onConfirm;
+  _selLojasModalState = null;
+  if (cb) cb(marcadas.length === chks.length ? null : marcadas);
+}
+
+function abrirModalLojasRelatorioPedido() {
+  abrirModalSelecionarLojas(
+    'Lojas no relatório',
+    S.lojas.map(l => ({ slug: l.slug_pedido, nome: l.nome_display })),
+    S.relLojasFiltro,
+    (sel) => {
+      S.relLojasFiltro = sel;
+      toast(sel ? `Relatório restrito a ${sel.length} loja${sel.length>1?'s':''}` : 'Relatório volta a incluir todas as lojas', 'ok');
+      renderPedido();
+    }
+  );
+}
+
+// Lojas a considerar no relatório de fornecedor — respeita S.relLojasFiltro quando ativo.
+function _lojasRelatorioAtivas() {
+  return S.relLojasFiltro && S.relLojasFiltro.length
+    ? S.lojas.filter(l => S.relLojasFiltro.includes(l.slug_pedido))
+    : S.lojas;
+}
+
+// Texto do cabeçalho do relatório — "TODAS AS LOJAS" sem filtro, ou a lista/contagem
+// das lojas selecionadas.
+function _lojasFiltroLabel() {
+  if (!S.relLojasFiltro || !S.relLojasFiltro.length) return 'TODAS AS LOJAS';
+  const nomes = _lojasRelatorioAtivas().map(l => l.nome_display);
+  return nomes.length <= 3 ? nomes.join(', ').toUpperCase() : `${nomes.length} LOJAS SELECIONADAS`;
+}
+
+// ── Relatório para fornecedor — todas as lojas, ou só as selecionadas em
+// S.relLojasFiltro (ver abrirModalLojasRelatorioPedido) ─────────────────
 function _buildRelatorioFornAllLojas(fornecedor) {
-  // Retorna { porForn, totalGeral } com dados de todas as lojas
+  // Retorna { porForn, totalGeral } com dados das lojas ativas no filtro
   const porForn = {};
   // Sem fornecedor específico ("Pedido Completo"), respeita o escopo da aba
   // Edu/Oseas/Matheus ativa — mesma regra usada na listagem de itens.
@@ -4681,7 +4756,7 @@ function _buildRelatorioFornAllLojas(fornecedor) {
     ? S.catalogo.filter(p => p.ativo && p.fornecedor === fornecedor)
     : S.catalogo.filter(p => p.ativo && _fornecedorNoEscopoAtivo(p.fornecedor));
   prods.forEach(prod => {
-    S.lojas.forEach(loja => {
+    _lojasRelatorioAtivas().forEach(loja => {
       const qtd = S.pedidoItens[prod.id]?.[loja.slug_pedido]?.qtd || 0;
       if (qtd <= 0) return;
       (porForn[prod.fornecedor] = porForn[prod.fornecedor] || []).push({
@@ -4700,9 +4775,10 @@ function gerarWppFornAllLojas(fornecedor) {
   const fns = Object.keys(porForn).sort();
   if (!fns.length) { toast('Nenhum item no pedido.', 'err'); return; }
 
+  const lojasLabel = _lojasFiltroLabel();
   const cabecalho = fornecedor
-    ? `🛒 *PEDIDO — ${fornecedor}*\nSemana ${sem.num}/${sem.ano} (${sem.periodo})\n📍 TODAS AS LOJAS`
-    : `🛒 *PEDIDO GERAL — TODAS AS LOJAS*\nSemana ${sem.num}/${sem.ano} (${sem.periodo})`;
+    ? `🛒 *PEDIDO — ${fornecedor}*\nSemana ${sem.num}/${sem.ano} (${sem.periodo})\n📍 ${lojasLabel}`
+    : `🛒 *PEDIDO GERAL — ${lojasLabel}*\nSemana ${sem.num}/${sem.ano} (${sem.periodo})`;
   let msg = cabecalho + '\n━━━━━━━━━━━━━━━━━━\n';
   let totalGeral = 0;
 
@@ -4737,7 +4813,7 @@ function _relatorioFornAllLojasMsgETitulo(fornecedor) {
   if (!fns.length) return null;
 
   const tituloLabel = fornecedor ? fornecedor : 'PEDIDO GERAL';
-  let msg = `${tituloLabel} — TODAS AS LOJAS\nSemana ${sem.num}/${sem.ano} (${sem.periodo})\n${'─'.repeat(40)}\n`;
+  let msg = `${tituloLabel} — ${_lojasFiltroLabel()}\nSemana ${sem.num}/${sem.ano} (${sem.periodo})\n${'─'.repeat(40)}\n`;
   let totalGeral = 0;
 
   fns.forEach(forn => {
@@ -7636,6 +7712,7 @@ async function renderTrios(silent) {
       <span style="font-size:12px;color:var(--muted);font-weight:700">${registros.length} apresent.${S.triosLoja?' — '+_lojaDisplay(S.triosLoja):''}</span>
       <div style="display:flex;gap:6px;flex-wrap:wrap">
         ${totalApresent > 0 ? `
+          <button class="btn-sm btn-outline" onclick="abrirModalLojasRelatorioTrios()" title="Lojas incluídas no relatório" style="${S.triosRelFiltro?'color:#2563eb;border-color:rgba(37,99,235,.4);background:rgba(37,99,235,.1)':''}">🏬 ${S.triosRelFiltro?S.triosRelFiltro.length+' loja'+(S.triosRelFiltro.length>1?'s':''):'Todas'}</button>
           <button class="btn-sm" onclick="_triosWpp()" style="background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);color:#1A1D23">📲</button>
           <button class="btn-sm btn-outline" onclick="_triosPDF()">📄 PDF</button>` : ''}
         ${podeCadastrar ? `
@@ -7649,10 +7726,27 @@ async function renderTrios(silent) {
   if (_contentEl) _contentEl.scrollTop = _scrollAnterior;
 }
 
+// Abre o seletor de lojas do relatório de Trios — mesmo componente do relatório de
+// fornecedor (Pedido), independente da aba/loja ativa na tela (S.triosLoja), que só
+// filtra a listagem em tela, não o relatório.
+function abrirModalLojasRelatorioTrios() {
+  abrirModalSelecionarLojas(
+    'Lojas no relatório de Trios',
+    S.lojas.map(l => ({ slug: l.slug_pedido, nome: l.nome_display })),
+    S.triosRelFiltro,
+    (sel) => {
+      S.triosRelFiltro = sel;
+      toast(sel ? `Relatório restrito a ${sel.length} loja${sel.length>1?'s':''}` : 'Relatório volta a incluir todas as lojas', 'ok');
+      renderTrios(true);
+    }
+  );
+}
+
 function _triosRelatorioTexto() {
   const fmtR = v => 'R$ ' + Number(v).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const _lojaDisplay = (slug) => lojasComTeste().find(l => l.slug_pedido === slug)?.nome_display || slug;
-  const triosDataReais = S.triosData.filter(r => r.loja !== LOJA_TESTE_PEDIDO.slug_pedido);
+  const triosDataReais = S.triosData.filter(r => r.loja !== LOJA_TESTE_PEDIDO.slug_pedido
+    && (!S.triosRelFiltro || S.triosRelFiltro.length === 0 || S.triosRelFiltro.includes(r.loja)));
 
   const totalApresent = triosDataReais.length;
   const totalCache = triosDataReais.reduce((sum, r) => sum + (parseFloat(r.cache) || 0), 0);
@@ -7686,7 +7780,9 @@ function _triosRelatorioTexto() {
     return { ...sem, res, acumulado, semInfo: formatarSemana(sem.monday) };
   });
 
-  let txt = `🎵 *RELATÓRIO DE TRIOS — ${_triosMesLabel(S.triosMes)}*\n\n`;
+  const lojasLabelTrios = (!S.triosRelFiltro || !S.triosRelFiltro.length) ? null
+    : S.lojas.filter(l => S.triosRelFiltro.includes(l.slug_pedido)).map(l => l.nome_display).join(', ');
+  let txt = `🎵 *RELATÓRIO DE TRIOS — ${_triosMesLabel(S.triosMes)}*${lojasLabelTrios ? '\n📍 ' + lojasLabelTrios : ''}\n\n`;
   txt += `📊 RESUMO\n`;
   txt += `Apresentações: ${totalApresent}\n`;
   txt += `Total Cachê: ${fmtR(totalCache)}\n`;
