@@ -335,6 +335,8 @@
 
   <div id="pendencias-loja-home-card"></div>
 
+  <div id="mes-anterior-home-card"></div>
+
   <div id="docs-rh-home-card"></div>
 
   <!-- Banner de permissão de notificações — aparece só se não concedida -->
@@ -926,6 +928,66 @@ async function _confirmarXmlMesHome(comKey, mesRef) {
   } catch (e) {
     window.gnLogError && window.gnLogError('xmlMes:confirmar', e);
     alert('Erro ao confirmar envio. Tente novamente.');
+  }
+}
+
+// Card "Desempenho do mês anterior" — aparece só nos 3 primeiros dias de cada mês,
+// resumindo faturamento e avarias do mês que acabou de fechar pra loja em questão.
+// Fica de fora a margem: no sistema ela só existe por ciclo semanal (aba Produção do
+// app Lojas), sem nenhum agregado mensal validado hoje — mostrar um número aproximado
+// arriscaria não bater com o real, então preferimos deixar de fora por enquanto.
+async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
+  const el = document.getElementById('mes-anterior-home-card');
+  if (!el) return;
+  if (!mostrar || !sess) { el.innerHTML = ''; return; }
+  const hoje = new Date();
+  if (hoje.getDate() > 3) { el.innerHTML = ''; return; }
+  const loja = (isMasterAtivo && masterLoja) ? masterLoja : sess.loja;
+  if (!LOJAS_LISTA.includes(loja)) { el.innerHTML = ''; return; }
+  const comKey = LOJA_COM_KEY[loja] || loja;
+  const chkKey = LOJA_DB_KEY[loja] || loja;
+  const fimMesAnterior = new Date(hoje.getFullYear(), hoje.getMonth(), 0);
+  const iniMesAnterior = new Date(fimMesAnterior.getFullYear(), fimMesAnterior.getMonth(), 1);
+  const iso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const iniISO = iso(iniMesAnterior), fimISO = iso(fimMesAnterior);
+  const MESES_PT_RESUMO = ['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+  const mesNome = MESES_PT_RESUMO[iniMesAnterior.getMonth()];
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  try {
+    const [vendaRows, lojaRows] = await Promise.all([
+      window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${iniISO}&data_operacao=lte.${fimISO}&select=venda_salao,venda_delivery`, H, 'mesAnt:venda', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'mesAnt:lojas', []),
+    ]);
+    const faturamento = (vendaRows || []).reduce((s, r) => s + (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0), 0);
+    const avariasLoja = ((lojaRows[0] && lojaRows[0].all_data && lojaRows[0].all_data.avariasAll) || {})[comKey] || [];
+    const avariasMes = avariasLoja.filter(a => a.status !== 'cancelado' && a.tipo !== 'transferencia_dinheiro' && a.tipo !== 'saida_terceiro'
+      && a.ts && a.ts.slice(0, 10) >= iniISO && a.ts.slice(0, 10) <= fimISO);
+    const avariasValor = avariasMes.reduce((s, a) => s + (parseFloat(a.valorTotal) || 0), 0);
+    const fR = v => v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    el.innerHTML = `<details style="background:rgba(79,70,229,.06);border:1px solid rgba(79,70,229,.2);border-left:3px solid #4F46E5;border-radius:14px;padding:0;margin:0 16px 14px;overflow:hidden">
+      <summary style="list-style:none;cursor:pointer;padding:14px 16px;display:flex;align-items:center;gap:10px">
+        <span style="font-size:18px;flex-shrink:0">📊</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;font-weight:800;color:#1A1D23">Veja o desempenho de ${mesNome}</div>
+          <div style="font-size:10px;color:rgba(0,0,0,.45);margin-top:2px">Toque pra expandir o resumo do mês anterior</div>
+        </div>
+        <span style="font-size:12px;color:#4F46E5;flex-shrink:0">▾</span>
+      </summary>
+      <div style="padding:0 16px 16px;display:flex;flex-direction:column;gap:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;background:#fff;border-radius:10px;padding:10px 12px">
+          <span style="font-size:11px;color:rgba(0,0,0,.55)">💰 Faturamento</span>
+          <span style="font-size:14px;font-weight:900;color:#1A1D23">R$ ${fR(faturamento)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;background:#fff;border-radius:10px;padding:10px 12px">
+          <span style="font-size:11px;color:rgba(0,0,0,.55)">⚠️ Avarias/Desperdício</span>
+          <span style="font-size:14px;font-weight:900;color:#1A1D23">${avariasMes.length} · R$ ${fR(avariasValor)}</span>
+        </div>
+        <div style="font-size:9px;color:rgba(0,0,0,.35)">Margem fica na aba Produção (app Lojas) — calculada por semana, ainda sem resumo mensal aqui.</div>
+      </div>
+    </details>`;
+  } catch (e) {
+    window.gnLogError && window.gnLogError('mesAnteriorHome', e);
+    el.innerHTML = '';
   }
 }
 
@@ -1862,6 +1924,7 @@ function _refreshPermUI(sess) {
   loadBadges(sess, isMaster);
   const _mostrarCards = (!isMaster || !!masterLoja) && !_ehCargoModuloUnico(sess);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
+  _renderMesAnteriorHome(_mostrarCards, sess, isMaster);
   _renderDocsRHHome(_mostrarCards, sess, isMaster);
   _renderDataComemorativaHome(_mostrarCards, sess, isMaster);
   _renderContagemSegundaHome(_mostrarCards);
@@ -2090,6 +2153,7 @@ function showHome(sess) {
   loadBadges(sess, isMaster);
   const _mostrarCards = (!isMaster || !!masterLoja) && !_ehCargoModuloUnico(sess);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
+  _renderMesAnteriorHome(_mostrarCards, sess, isMaster);
   _renderDocsRHHome(_mostrarCards, sess, isMaster);
   _renderDataComemorativaHome(_mostrarCards, sess, isMaster);
   _renderContagemSegundaHome(_mostrarCards);
