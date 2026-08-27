@@ -321,6 +321,7 @@ summary.loja-card-header::-webkit-details-marker{display:none}
 
 </style>
 <script src="gn-lojas-config.js"></script>
+<script src="gn-avaliacoes-setores.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 </head>
 <body>
@@ -538,6 +539,7 @@ let S = {
   dossComData: null,     // gn_comissoes all_data for selected loja
   dossBH: [],            // gn_banco_horas rows
   dossAvaliacoesColab: [], // gn_avaliacoes_colab all_data for selected loja (app Avaliações)
+  dossAvalExpandido: new Set(), // ids de avaliação com o painel de detalhe (critérios/autoavaliação/plano de ação) aberto
   dossArquivados: [], // gn_lojas.all_data.funcionarios_arquivados for selected loja (fim de contrato)
   dossArquivoAberto: false, // seção Arquivo — Funcionários Encerrados retraída por padrão
   dossExpanded: null,    // expanded employee name
@@ -4214,6 +4216,61 @@ function _dossAvaliacoes(nome) {
             .sort((a, b) => (b.data || '').localeCompare(a.data || ''));
 }
 
+function _dossAvaliacaoPct(av) {
+  const nota = (av.pontualidade || 0) + (av.uniforme || 0) + (av.criteriosSetor || []).reduce((a, v) => a + (v || 0), 0);
+  const mx   = 10 + (av.criteriosSetor?.length > 0 ? av.criteriosSetor.length * 5 : 0);
+  return mx > 0 ? Math.round(nota / mx * 100) : 0;
+}
+function _dossAvaliacaoCor(p) {
+  if (p >= 85) return '#D4A017';
+  if (p >= 60) return 'var(--green)';
+  if (p >= 40) return '#fbbf24';
+  return 'var(--red)';
+}
+function _toggleDossAval(id) {
+  if (S.dossAvalExpandido.has(id)) S.dossAvalExpandido.delete(id);
+  else S.dossAvalExpandido.add(id);
+  renderDossie();
+}
+// Painel expansível com o espelho completo da avaliação feita no app Avaliações: critérios
+// do setor (mesmos textos de lá, via SETORES em gn-avaliacoes-setores.js — compartilhado
+// com o Check-list), autoavaliação e plano de ação. Mesma função já usada no Painel de
+// Gestão (aba Férias da gerência) e no Check-list, aplicada aqui a cada avaliação da lista
+// (não só a gerência — o Dossiê cobre todos os funcionários).
+function _dossAvaliacaoDetalheHtml(av) {
+  if (!S.dossAvalExpandido.has(av.id)) return '';
+  const p   = _dossAvaliacaoPct(av);
+  const cor = _dossAvaliacaoCor(p);
+  const crits = SETORES[av.cargo] || [];
+  const linhasCrit = crits.map((c, i) => {
+    const v  = av.criteriosSetor?.[i] || 0;
+    const op = c.o.find(x => x.p === v);
+    return `<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">
+      <div style="display:flex;justify-content:space-between;gap:8px">
+        <span style="font-size:10px;font-weight:700">${esc(c.t)}</span>
+        <span style="font-size:11px;font-weight:800;color:${v ? cor : 'var(--muted)'}">${v || '—'}/5</span>
+      </div>
+      ${op ? `<div style="font-size:10px;color:var(--muted);margin-top:2px">${esc(op.tx)}</div>` : ''}
+    </div>`;
+  }).join('');
+  const autoAv = AUTOAV.find(x => x.key === av.autoavaliacao);
+  return `<div style="background:var(--surf2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-top:6px">
+    <div style="display:flex;gap:14px;font-size:11px">
+      <span>Pontualidade: <b>${av.pontualidade || 0}/5</b></span>
+      <span>Uniforme: <b>${av.uniforme || 0}/5</b></span>
+    </div>
+    ${linhasCrit}
+    ${autoAv ? `<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
+      <div style="font-size:10px;font-weight:700">Autoavaliação: ${autoAv.key}) ${esc(autoAv.label)}</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:2px">"${esc(autoAv.texto)}"</div>
+    </div>` : ''}
+    ${av.planoAcao ? `<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
+      <div style="font-size:10px;font-weight:700">Plano de Ação</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:2px">${esc(av.planoAcao)}</div>
+    </div>` : ''}
+  </div>`;
+}
+
 // ══════════════════════════════════════════════
 // ACTIONS — DOSSIÊ edit
 // ══════════════════════════════════════════════
@@ -4336,16 +4393,18 @@ function renderDossie() {
           avalRows = `<div style="font-size:12px;color:var(--muted)">Sem avaliações registradas no app Avaliações</div>`;
         } else {
           avalRows = avs.slice(0, 5).map(av => {
-            const nota = (av.pontualidade || 0) + (av.uniforme || 0) + (av.criteriosSetor || []).reduce((a, v) => a + (v || 0), 0);
-            const mx   = 10 + (av.criteriosSetor?.length > 0 ? av.criteriosSetor.length * 5 : 0);
-            const p    = mx > 0 ? Math.round(nota / mx * 100) : 0;
+            const p    = _dossAvaliacaoPct(av);
             const acls = p >= 85 ? 'badge-ok' : p >= 60 ? 'badge-info' : p >= 40 ? 'badge-warn' : 'badge-err';
-            return `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border)">
-              <div>
-                <div style="font-size:12px;font-weight:600">${fmtBR(av.data)}</div>
-                <div style="font-size:10px;color:var(--muted)">${av.avaliador || '—'} · ${av.cargo || '—'}</div>
+            const expandido = S.dossAvalExpandido.has(av.id);
+            return `<div style="padding:6px 0;border-bottom:1px solid var(--border)">
+              <div onclick="_toggleDossAval(${JSON.stringify(String(av.id))})" style="display:flex;justify-content:space-between;align-items:center;cursor:pointer">
+                <div>
+                  <div style="font-size:12px;font-weight:600">${fmtBR(av.data)}</div>
+                  <div style="font-size:10px;color:var(--muted)">${av.avaliador || '—'} · ${av.cargo || '—'}</div>
+                </div>
+                <span class="badge ${acls}">${p}% ${expandido ? '▲' : '▼'}</span>
               </div>
-              <span class="badge ${acls}">${p}%</span>
+              ${_dossAvaliacaoDetalheHtml(av)}
             </div>`;
           }).join('');
         }
