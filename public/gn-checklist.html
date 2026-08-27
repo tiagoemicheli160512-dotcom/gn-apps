@@ -6182,10 +6182,11 @@ function removeComissoesFunc(i,btnEl){
 // simples por loja, independente de semana. Cada período, ao ser salvo,
 // marca "FÉRIAS" na Escala em TODAS as semanas do intervalo (não só a semana
 // aberta no momento), usando o nome como identificador do funcionário.
-let feriasGeralData = null;   // [{id, nome, setor, inicio, fim, aq_ini, aq_fim, criadoEm}]
+let feriasGeralData = null;   // [{id, nome, setor, inicio, fim, tipo, aq_ini, aq_fim, criadoEm}]
 let feriasGeralLoading = false;
 let feriasAno = new Date().getFullYear();
 let feriasFormAberto = null;  // nome do funcionário com o form de novo período aberto
+let feriasFormTipo = {};      // key(nome) -> 'ferias'|'afastamento', tipo selecionado no form aberto
 let _feriasAllDataCache = null; // allData completo (todas as semanas) — reusado pra contar faltas sem refetch
 
 function _semanaIdxDeData(dataISO){
@@ -6193,12 +6194,13 @@ function _semanaIdxDeData(dataISO){
   return COMISSOES_CAL.findIndex(w=>w.days.some(x=>x.d===dt.getDate() && x.m===(dt.getMonth()+1)));
 }
 
-// Marca (ou desmarca) FÉRIAS na Escala em todas as semanas cobertas pelo
+// Marca (ou desmarca) FÉRIAS/AFASTAMENTO na Escala em todas as semanas cobertas pelo
 // período, achando o funcionário pelo nome em cada semana. Não persiste —
 // só muta o `allData` em memória; quem chama faz o PATCH.
-function _aplicarFeriasNaEscala(allData, nomeAlvo, inicioISO, fimISO, marcar){
+function _aplicarFeriasNaEscala(allData, nomeAlvo, inicioISO, fimISO, marcar, tipo){
   const nomeNorm=(nomeAlvo||'').trim().toLowerCase();
   if(!nomeNorm || !inicioISO || !fimISO) return;
+  const status=tipo==='afastamento'?'AFASTAMENTO':'FÉRIAS';
   const ini=new Date(inicioISO+'T12:00:00'), fim=new Date(fimISO+'T12:00:00');
   if(fim<ini) return;
   const posIni=_semanaIdxDeData(inicioISO), posFim=_semanaIdxDeData(fimISO);
@@ -6217,10 +6219,10 @@ function _aplicarFeriasNaEscala(allData, nomeAlvo, inicioISO, fimISO, marcar){
         let dt=new Date(`${iniY}-${mm}-${dd}T12:00:00`);
         if(dt<ini) dt=new Date(`${iniY+1}-${mm}-${dd}T12:00:00`);
         if(dt>=ini && dt<=fim){
-          if(marcar) novos[di]='FÉRIAS';
-          else if(novos[di]==='FÉRIAS') novos[di]='PRESENTE';
-        } else if(novos[di]==='FÉRIAS'){
-          // Fora do intervalo atual mas ainda marcado FÉRIAS: sobra de uma marcação anterior
+          if(marcar) novos[di]=status;
+          else if(novos[di]===status) novos[di]='PRESENTE';
+        } else if(novos[di]===status){
+          // Fora do intervalo atual mas ainda marcado: sobra de uma marcação anterior
           // deste mesmo período (ex: editar pra encurtar a data fim) — limpa.
           novos[di]='PRESENTE';
         }
@@ -6391,26 +6393,32 @@ async function _atualizarInfoAquisitivoFeriasChk(key, nome){
 
 async function salvarFeriasGeral(nome, setor){
   const key=_feriasFormKey(nome);
-  const aqIni=document.getElementById('ferias-aq-ini-'+key)?.value;
-  const aqFim=document.getElementById('ferias-aq-fim-'+key)?.value;
+  const tipo=feriasFormTipo[key]==='afastamento'?'afastamento':'ferias';
   const ini=document.getElementById('ferias-ini-'+key)?.value;
   const fim=document.getElementById('ferias-fim-'+key)?.value;
-  if(!aqIni || !aqFim){ showToast('Preencha o período aquisitivo (obrigatório).','error'); return; }
-  if(aqFim<aqIni){ showToast('Fim do período aquisitivo não pode ser antes do início.','error'); return; }
-  if(!ini || !fim){ showToast('Preencha início e fim das férias.','error'); return; }
+  if(!ini || !fim){ showToast(tipo==='afastamento'?'Preencha início e fim do afastamento.':'Preencha início e fim das férias.','error'); return; }
   if(fim<ini){ showToast('Fim não pode ser antes do início.','error'); return; }
-  const prazoInterno=_prazoInternoAquisitivoISO(aqFim);
-  if(prazoInterno && ini>prazoInterno){
-    showToast(`⚠️ Início das férias ultrapassa o prazo interno de segurança (${_fmtDataBRChk(prazoInterno)}, 11 meses após o fim do aquisitivo) — evita o risco de estourar o prazo legal.`,'error');
-    return;
+
+  let aqIni='', aqFim='';
+  if(tipo==='ferias'){
+    aqIni=document.getElementById('ferias-aq-ini-'+key)?.value;
+    aqFim=document.getElementById('ferias-aq-fim-'+key)?.value;
+    if(!aqIni || !aqFim){ showToast('Preencha o período aquisitivo (obrigatório).','error'); return; }
+    if(aqFim<aqIni){ showToast('Fim do período aquisitivo não pode ser antes do início.','error'); return; }
+    const prazoInterno=_prazoInternoAquisitivoISO(aqFim);
+    if(prazoInterno && ini>prazoInterno){
+      showToast(`⚠️ Início das férias ultrapassa o prazo interno de segurança (${_fmtDataBRChk(prazoInterno)}, 11 meses após o fim do aquisitivo) — evita o risco de estourar o prazo legal.`,'error');
+      return;
+    }
+    const restricao=_inicioProibidoDSRFeriado(ini, nome);
+    if(restricao){
+      showToast(`⚠️ Férias não podem começar em ${_fmtDataBRChk(ini)}: ${restricao} — regra dos 2 dias antes de folga/feriado.`,'error');
+      return;
+    }
   }
-  const restricao=_inicioProibidoDSRFeriado(ini, nome);
-  if(restricao){
-    showToast(`⚠️ Férias não podem começar em ${_fmtDataBRChk(ini)}: ${restricao} — regra dos 2 dias antes de folga/feriado.`,'error');
-    return;
-  }
+
   const diasNovo=_diasPeriodoFerias(ini,fim);
-  if(diasNovo<5){ showToast('Cada período de férias precisa ter no mínimo 5 dias corridos.','error'); return; }
+  if(tipo==='ferias' && diasNovo<5){ showToast('Cada período de férias precisa ter no mínimo 5 dias corridos.','error'); return; }
 
   let allData;
   try{
@@ -6421,34 +6429,42 @@ async function salvarFeriasGeral(nome, setor){
     return;
   }
   const lista=Array.isArray(allData.ferias_geral)?[...allData.ferias_geral]:[];
-  const nomeNorm=nome.trim().toLowerCase();
-  const mesmoAquisitivo=lista.filter(p=>(p.nome||'').trim().toLowerCase()===nomeNorm && p.aq_ini===aqIni && p.aq_fim===aqFim);
-  if(mesmoAquisitivo.length>=3){
-    showToast('⚠️ Máximo de 3 períodos por período aquisitivo (fracionamento).','error');
-    return;
-  }
-  const faltas=_contarFaltasAquisitivoChk(allData, nome, aqIni, aqFim);
-  const diasDireito=_diasDireitoFerias(faltas);
-  const diasJaUsados=mesmoAquisitivo.reduce((s,p)=>s+_diasPeriodoFerias(p.inicio,p.fim),0);
-  if(diasJaUsados+diasNovo>diasDireito){
-    showToast(`⚠️ Total de dias (${diasJaUsados+diasNovo}) excede o direito de ${diasDireito} dias corridos (${faltas} faltas no período aquisitivo).`,'error');
-    return;
+
+  let mesmoAquisitivo=[];
+  if(tipo==='ferias'){
+    const nomeNorm=nome.trim().toLowerCase();
+    mesmoAquisitivo=lista.filter(p=>(p.nome||'').trim().toLowerCase()===nomeNorm && p.aq_ini===aqIni && p.aq_fim===aqFim);
+    if(mesmoAquisitivo.length>=3){
+      showToast('⚠️ Máximo de 3 períodos por período aquisitivo (fracionamento).','error');
+      return;
+    }
+    const faltas=_contarFaltasAquisitivoChk(allData, nome, aqIni, aqFim);
+    const diasDireito=_diasDireitoFerias(faltas);
+    const diasJaUsados=mesmoAquisitivo.reduce((s,p)=>s+_diasPeriodoFerias(p.inicio,p.fim),0);
+    if(diasJaUsados+diasNovo>diasDireito){
+      showToast(`⚠️ Total de dias (${diasJaUsados+diasNovo}) excede o direito de ${diasDireito} dias corridos (${faltas} faltas no período aquisitivo).`,'error');
+      return;
+    }
   }
 
   feriasFormAberto=null;
   try{
-    lista.push({ id:'fer_'+Date.now()+'_'+Math.random().toString(36).slice(2,6), nome, setor:setor||'', inicio:ini, fim, aq_ini:aqIni, aq_fim:aqFim, criadoEm:new Date().toISOString() });
+    const entry={ id:'fer_'+Date.now()+'_'+Math.random().toString(36).slice(2,6), nome, setor:setor||'', inicio:ini, fim, tipo, criadoEm:new Date().toISOString() };
+    if(tipo==='ferias'){ entry.aq_ini=aqIni; entry.aq_fim=aqFim; }
+    lista.push(entry);
     allData.ferias_geral=lista;
-    _aplicarFeriasNaEscala(allData, nome, ini, fim, true);
+    _aplicarFeriasNaEscala(allData, nome, ini, fim, true, tipo);
     await patchComissoesAllData(comissoesLojaKey(), allData);
     feriasGeralData=lista;
     _feriasAllDataCache=allData;
     // A semana aberta agora pode ter mudado — recarrega pra refletir na Escala
     if(comissoesWeekIdx!=null) loadComissoesData();
-    showToast('🏖 Férias salvas e marcadas na Escala');
-    const grupoFinal=[...mesmoAquisitivo, {inicio:ini, fim}];
-    if(grupoFinal.length>=2 && !grupoFinal.some(p=>_diasPeriodoFerias(p.inicio,p.fim)>=14)){
-      showToast('⚠️ Nenhum dos períodos fracionados deste aquisitivo tem 14 dias corridos ainda (exigência legal do fracionamento).','error');
+    showToast(tipo==='afastamento'?'🩺 Afastamento salvo e marcado na Escala':'🏖 Férias salvas e marcadas na Escala');
+    if(tipo==='ferias'){
+      const grupoFinal=[...mesmoAquisitivo, {inicio:ini, fim}];
+      if(grupoFinal.length>=2 && !grupoFinal.some(p=>_diasPeriodoFerias(p.inicio,p.fim)>=14)){
+        showToast('⚠️ Nenhum dos períodos fracionados deste aquisitivo tem 14 dias corridos ainda (exigência legal do fracionamento).','error');
+      }
     }
   }catch(e){
     console.error('Erro ao salvar férias:', e.message||e);
@@ -6458,7 +6474,9 @@ async function salvarFeriasGeral(nome, setor){
 }
 
 async function excluirFeriasGeral(periodoId){
-  if(!confirm('Excluir este período? Os dias marcados como FÉRIAS na Escala voltam pra PRESENTE.')) return;
+  const periodoPrev=(feriasGeralData||[]).find(f=>f.id===periodoId);
+  const statusLabel=periodoPrev?.tipo==='afastamento'?'AFASTAMENTO':'FÉRIAS';
+  if(!confirm(`Excluir este período? Os dias marcados como ${statusLabel} na Escala voltam pra PRESENTE.`)) return;
   try{
     const allData=await fetchComissoesAllData(comissoesLojaKey());
     const lista=Array.isArray(allData.ferias_geral)?[...allData.ferias_geral]:[];
@@ -6467,7 +6485,7 @@ async function excluirFeriasGeral(periodoId){
     const periodo=lista[idx];
     lista.splice(idx,1);
     allData.ferias_geral=lista;
-    _aplicarFeriasNaEscala(allData, periodo.nome, periodo.inicio, periodo.fim, false);
+    _aplicarFeriasNaEscala(allData, periodo.nome, periodo.inicio, periodo.fim, false, periodo.tipo);
     await patchComissoesAllData(comissoesLojaKey(), allData);
     feriasGeralData=lista;
     _feriasAllDataCache=allData;
@@ -6482,8 +6500,9 @@ async function excluirFeriasGeral(periodoId){
 }
 
 function _feriasFormKey(nome){ return (nome||'').replace(/[^a-zA-Z0-9]/g,'_'); }
-function abrirFormFerias(nome){ feriasFormAberto=nome; renderFeriasStore(); }
+function abrirFormFerias(nome){ feriasFormAberto=nome; feriasFormTipo[_feriasFormKey(nome)]='ferias'; renderFeriasStore(); }
 function fecharFormFerias(){ feriasFormAberto=null; renderFeriasStore(); }
+function _setFeriasFormTipo(key,tipo){ feriasFormTipo[key]=tipo; renderFeriasStore(); }
 function feriasAnoNav(dir){ feriasAno+=dir; renderFeriasStore(); }
 
 function _mesesCobertosFeriasChk(periodo, ano){
@@ -6597,6 +6616,7 @@ function renderFeriasStore(){
           return `<div style="display:flex;align-items:center;justify-content:space-between;background:rgba(0,0,0,.03);border-radius:8px;padding:6px 10px;margin-top:4px">
             <div>
               <span style="font-size:11px;color:#1A1D23">${_fmtDataBRChk(p.inicio)} – ${_fmtDataBRChk(p.fim)} (${_diasPeriodoFerias(p.inicio,p.fim)}d)</span>
+              ${p.tipo==='afastamento'?`<span style="font-size:9px;font-weight:800;color:#0d9488;background:rgba(20,184,166,.15);border-radius:6px;padding:1px 6px;margin-left:6px">AFASTAMENTO</span>`:''}
               ${p.aq_ini&&p.aq_fim?`<div style="font-size:9px;color:#475569;margin-top:1px">Aquisitivo: ${_fmtDataBRChk(p.aq_ini)} – ${_fmtDataBRChk(p.aq_fim)}${prazoInterno?` · prazo interno ${_fmtDataBRChk(prazoInterno)}`:''}</div>`:''}
             </div>
             <button onclick="excluirFeriasGeral('${p.id}')" style="background:none;border:none;color:rgba(0,0,0,.3);font-size:14px;cursor:pointer;padding:0 4px">✕</button>
@@ -6604,8 +6624,13 @@ function renderFeriasStore(){
         }).join('')
       : `<div style="font-size:10px;color:#475569;margin-top:4px">Nenhuma férias em ${feriasAno}</div>`;
     const key=_feriasFormKey(nome);
+    const tipoAtual=feriasFormTipo[key]==='afastamento'?'afastamento':'ferias';
     const formHtml=feriasFormAberto===nome ? `<div style="margin-top:8px;padding:10px;background:rgba(0,0,0,.02);border:1px solid rgba(0,0,0,.08);border-radius:10px">
-        <div style="font-size:9px;font-weight:700;color:#1A1D23;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Período aquisitivo (obrigatório)</div>
+        <div style="display:flex;gap:6px;margin-bottom:10px">
+          <button type="button" onclick="_setFeriasFormTipo('${key}','ferias')" style="flex:1;background:${tipoAtual==='ferias'?'var(--gn-color,#E8580A)':'rgba(0,0,0,.06)'};color:${tipoAtual==='ferias'?'#fff':'#1A1D23'};border:1px solid ${tipoAtual==='ferias'?'var(--gn-color,#E8580A)':'rgba(0,0,0,.12)'};border-radius:8px;padding:6px;font-size:11px;font-weight:800;cursor:pointer">🏖 Férias</button>
+          <button type="button" onclick="_setFeriasFormTipo('${key}','afastamento')" style="flex:1;background:${tipoAtual==='afastamento'?'#0d9488':'rgba(0,0,0,.06)'};color:${tipoAtual==='afastamento'?'#fff':'#1A1D23'};border:1px solid ${tipoAtual==='afastamento'?'#0d9488':'rgba(0,0,0,.12)'};border-radius:8px;padding:6px;font-size:11px;font-weight:800;cursor:pointer">🩺 Afastamento</button>
+        </div>
+        ${tipoAtual==='ferias' ? `<div style="font-size:9px;font-weight:700;color:#1A1D23;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Período aquisitivo (obrigatório)</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px">
           <div>
             <div style="font-size:9px;color:#1A1D23;margin-bottom:2px">Aquisitivo início</div>
@@ -6617,8 +6642,8 @@ function renderFeriasStore(){
           </div>
         </div>
         <div id="ferias-prazo-${key}" style="font-size:10px;color:#475569;margin-bottom:10px"></div>
-        <div style="font-size:9px;color:#475569;margin-bottom:8px;line-height:1.4">Máx. 3 períodos por aquisitivo (fracionamento), um com 14+ dias e nenhum com menos de 5. Início não pode cair 2 dias antes da folga fixa ou de feriado. Avise o funcionário por escrito com 30 dias de antecedência.</div>
-        <div style="font-size:9px;font-weight:700;color:#1A1D23;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Período de gozo</div>
+        <div style="font-size:9px;color:#475569;margin-bottom:8px;line-height:1.4">Máx. 3 períodos por aquisitivo (fracionamento), um com 14+ dias e nenhum com menos de 5. Início não pode cair 2 dias antes da folga fixa ou de feriado. Avise o funcionário por escrito com 30 dias de antecedência.</div>` : `<div style="font-size:9px;color:#475569;margin-bottom:10px;line-height:1.4">Afastamento (licença médica, INSS, etc.) — sem as regras de dias/fracionamento da CLT que valem só pra férias. Preencha só o período.</div>`}
+        <div style="font-size:9px;font-weight:700;color:#1A1D23;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">${tipoAtual==='ferias'?'Período de gozo':'Período de afastamento'}</div>
         <div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap">
           <div>
             <div style="font-size:9px;color:#1A1D23;margin-bottom:2px">Início</div>
