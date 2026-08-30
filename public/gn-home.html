@@ -3296,12 +3296,16 @@ function _visCalDetalheHtml(dataStr) {
   });
   if (ausencia) {
     const info = VIS_AUSENCIA_TIPOS[ausencia.loja];
+    const temHorario = ausencia.hora_chegada && ausencia.hora_chegada !== '00:00';
     html += `<div style="background:${info.cor}15;border:1px solid ${info.cor}44;border-radius:8px;padding:8px 12px">
       <span style="font-size:12px;font-weight:700;color:#1A1D23">${info.emoji} ${info.label}</span>
+      ${temHorario ? `<div style="font-size:11px;color:rgba(0,0,0,.5);margin-top:2px">📍 ${ausencia.hora_chegada} → ${ausencia.hora_saida||'em andamento'}</div>` : ''}
+      ${ausencia.obs ? `<div style="font-size:10px;color:rgba(0,0,0,.4);margin-top:4px">${esc(ausencia.obs)}</div>` : ''}
     </div>`;
   }
-  // Planejar visita / marcar ausência — só faz sentido sem ausência já marcada nesse
-  // dia (folga/férias/viagem já ocupam o dia inteiro do supervisor).
+  // Planejar visita / registrar visita real / marcar ausência — só fazem sentido sem
+  // ausência já marcada nesse dia (folga/férias/viagem já ocupam o dia inteiro do
+  // supervisor).
   if (!ausencia) {
     const lojasDisponiveis = GN_LOJAS.map(l => l.chkKey).filter(l => !planos.some(p => p.loja === l));
     if (lojasDisponiveis.length > 0) {
@@ -3314,6 +3318,30 @@ function _visCalDetalheHtml(dataStr) {
         <div style="display:flex;flex-wrap:wrap;gap:4px">${pickerBtns}</div>
       </div>`;
     }
+    // Registrar visita já realizada (loja ou Viagem SP) com horário real de chegada/saída
+    // — diferente de "Planejar visita" (só uma provisão, sem hora) e das ausências rápidas
+    // abaixo (dia inteiro, sem horário específico).
+    const destinoOpts = [
+      ...GN_LOJAS.map(l => `<option value="${l.chkKey}">${l.chkKey}</option>`),
+      `<option value="VIAGEM_SP">🧳 Viagem SP</option>`,
+    ].join('');
+    html += `<button onclick="_visRegistrarToggle('${dataStr}')" style="width:100%;background:rgba(34,197,94,.1);border:1px dashed rgba(34,197,94,.4);border-radius:10px;padding:8px;color:#1A1D23;font-size:11px;font-weight:700;cursor:pointer;margin-top:6px">✅ Registrar visita realizada</button>
+    <div id="visgestao-registrar-picker-${dataStr}" style="display:none;background:rgba(0,0,0,.03);border:1px solid rgba(34,197,94,.3);border-radius:10px;padding:10px 12px;margin-top:6px">
+      <div style="font-size:9px;color:#1A1D23;margin-bottom:2px">Destino</div>
+      <select id="visreg-destino-${dataStr}" style="width:100%;box-sizing:border-box;background:#F5F6F8;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#1A1D23;font-family:inherit;margin-bottom:8px">${destinoOpts}</select>
+      <div style="display:flex;gap:6px;margin-bottom:8px">
+        <div style="flex:1">
+          <div style="font-size:9px;color:#1A1D23;margin-bottom:2px">Chegada</div>
+          <input type="time" id="visreg-chegada-${dataStr}" style="width:100%;box-sizing:border-box;background:#F5F6F8;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#1A1D23;font-family:inherit">
+        </div>
+        <div style="flex:1">
+          <div style="font-size:9px;color:#1A1D23;margin-bottom:2px">Saída</div>
+          <input type="time" id="visreg-saida-${dataStr}" style="width:100%;box-sizing:border-box;background:#F5F6F8;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#1A1D23;font-family:inherit">
+        </div>
+      </div>
+      <input type="text" id="visreg-obs-${dataStr}" placeholder="Observação (opcional)" style="width:100%;box-sizing:border-box;background:#F5F6F8;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#1A1D23;font-family:inherit;margin-bottom:8px">
+      <button onclick="_visRegistrarVisitaReal('${dataStr}')" style="width:100%;background:#22c55e;color:#fff;border:none;border-radius:8px;padding:8px;font-size:11px;font-weight:800;cursor:pointer">Salvar</button>
+    </div>`;
     if (!reais.length) {
       const ausBtns = Object.entries(VIS_AUSENCIA_TIPOS).map(([tipo,info]) =>
         `<button onclick="_visMarcarAusencia('${dataStr}','${tipo}')" style="flex:1;background:${info.cor}22;border:1px solid ${info.cor}66;border-radius:10px;padding:9px 6px;color:#1A1D23;font-size:12px;font-weight:700;cursor:pointer">${info.emoji} ${info.label}</button>`
@@ -3323,6 +3351,42 @@ function _visCalDetalheHtml(dataStr) {
   }
   html += `</div>`;
   return html;
+}
+
+function _visRegistrarToggle(dataStr) {
+  const picker = document.getElementById('visgestao-registrar-picker-' + dataStr);
+  if (!picker) return;
+  picker.style.display = picker.style.display === 'none' ? 'block' : 'none';
+}
+
+// Registra uma visita já realizada (loja ou Viagem SP) com horário real de chegada/saída,
+// em nome do supervisor selecionado na aba — diferente de _visConfirmarPlano (só cria uma
+// provisão sem hora real) e de _visMarcarAusencia (ocupa o dia inteiro com hora fixa
+// 00:00). Útil pro mestre/gestão lançar depois uma visita ou viagem que já aconteceu, com
+// os horários de verdade.
+async function _visRegistrarVisitaReal(dataStr) {
+  if (!_visSupSelecionado) return;
+  const destino = document.getElementById('visreg-destino-'+dataStr)?.value;
+  const chegada = document.getElementById('visreg-chegada-'+dataStr)?.value;
+  const saida = document.getElementById('visreg-saida-'+dataStr)?.value;
+  const obsInput = document.getElementById('visreg-obs-'+dataStr)?.value?.trim();
+  if (!destino) return;
+  if (!chegada) { alert('Preencha ao menos o horário de chegada.'); return; }
+  if (saida && saida < chegada) { alert('Horário de saída não pode ser antes da chegada.'); return; }
+  const sup = _visSupList.find(u => u.nome === _visSupSelecionado);
+  const obs = 'Registrado por ' + ((session && session.nome) || 'Painel de Gestão') + (obsInput ? ' — ' + obsInput : '');
+  const body = { loja: destino, data: dataStr, visitante: _visSupSelecionado, cargo: sup?.cargo || '', hora_chegada: chegada, hora_saida: saida || null, lat: null, lon: null, endereco: null, obs };
+  try {
+    const res = await fetch(`${SB_URL}/rest/v1/gn_chk_visitas`, {
+      method: 'POST',
+      headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', Prefer: 'return=representation' },
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) throw new Error();
+    const rows = await res.json();
+    if (rows?.[0]) _visCalData.push(rows[0]);
+  } catch(e) { alert('Erro ao registrar visita. Tente novamente.'); return; }
+  _renderVisitasSupContent();
 }
 
 // Marca o dia inteiro como ausência do supervisor (folga/férias/viagem) — mesmo
