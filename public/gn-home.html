@@ -335,6 +335,8 @@
 
   <div id="pendencias-loja-home-card"></div>
 
+  <div id="visita-supervisao-home-card"></div>
+
   <div id="mes-anterior-home-card"></div>
 
   <div id="docs-rh-home-card"></div>
@@ -929,6 +931,43 @@ async function _confirmarXmlMesHome(comKey, mesRef) {
     window.gnLogError && window.gnLogError('xmlMes:confirmar', e);
     alert('Erro ao confirmar envio. Tente novamente.');
   }
+}
+
+// Card "Visita de supervisão hoje" — escopado a uma loja só, mostra se há visita de
+// supervisão planejada, em andamento ou concluída hoje. Mesmo ciclo/status do card
+// "📍 Visitas do Dia" do Painel de Gestão (_buildVisitasHojeCard), que é global (todas as
+// lojas); esse aqui é a versão pra quem está na própria loja saber se/quando alguém da
+// supervisão vem hoje, sem precisar acesso ao Painel de Gestão.
+async function _renderVisitaSupervisaoHome(mostrar, sess, isMasterAtivo) {
+  const el = document.getElementById('visita-supervisao-home-card');
+  if (!el) return;
+  if (!mostrar || !sess) { el.innerHTML = ''; return; }
+  const loja = (isMasterAtivo && masterLoja) ? masterLoja : sess.loja;
+  if (!LOJAS_LISTA.includes(loja)) { el.innerHTML = ''; return; }
+  const chkKey = LOJA_DB_KEY[loja] || loja;
+  const hojeISO = (d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'))(new Date());
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_chk_visitas?loja=eq.${encodeURIComponent(chkKey)}&data=eq.${hojeISO}&select=visitante,cargo,hora_chegada,hora_saida`, H, 'visitaSupHome:rows', []);
+  if (!rows.length) { el.innerHTML = ''; return; }
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  const STATUS_INFO = {
+    planejada: { cor:'#94a3b8', ico:'🕓', label:'Planejada' },
+    andamento: { cor:'#22c55e', ico:'🟢', label:'Em andamento' },
+    concluida: { cor:'#4ade80', ico:'✅', label:'Concluída' },
+  };
+  const itens = rows.map(r => {
+    const status = r.hora_chegada === 'PLAN' ? 'planejada' : !r.hora_saida ? 'andamento' : 'concluida';
+    const si = STATUS_INFO[status];
+    const horaTxt = status === 'planejada' ? '' : ` · ${r.hora_chegada}${r.hora_saida ? ' → ' + r.hora_saida : ''}`;
+    return `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-top:1px solid rgba(0,0,0,.06)">
+      <span style="font-size:11px;font-weight:700;color:#1A1D23">${esc(r.visitante||'—')}${r.cargo?` <span style="font-weight:400;color:rgba(0,0,0,.4)">· ${esc(r.cargo)}</span>`:''}</span>
+      <span style="font-size:10px;font-weight:700;color:${si.cor};white-space:nowrap">${si.ico} ${si.label}${horaTxt}</span>
+    </div>`;
+  }).join('');
+  el.innerHTML = `<div style="background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.2);border-left:3px solid #22c55e;border-radius:14px;padding:14px 16px;margin:0 16px 14px">
+    <div style="font-size:12px;font-weight:800;color:#1A1D23">📍 Visita de supervisão hoje</div>
+    ${itens}
+  </div>`;
 }
 
 // Card "Desempenho do mês anterior" — aparece só nos 3 primeiros dias de cada mês,
@@ -1924,6 +1963,7 @@ function _refreshPermUI(sess) {
   loadBadges(sess, isMaster);
   const _mostrarCards = (!isMaster || !!masterLoja) && !_ehCargoModuloUnico(sess);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
+  _renderVisitaSupervisaoHome(_mostrarCards, sess, isMaster);
   _renderMesAnteriorHome(_mostrarCards, sess, isMaster);
   _renderDocsRHHome(_mostrarCards, sess, isMaster);
   _renderDataComemorativaHome(_mostrarCards, sess, isMaster);
@@ -2153,6 +2193,7 @@ function showHome(sess) {
   loadBadges(sess, isMaster);
   const _mostrarCards = (!isMaster || !!masterLoja) && !_ehCargoModuloUnico(sess);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
+  _renderVisitaSupervisaoHome(_mostrarCards, sess, isMaster);
   _renderMesAnteriorHome(_mostrarCards, sess, isMaster);
   _renderDocsRHHome(_mostrarCards, sess, isMaster);
   _renderDataComemorativaHome(_mostrarCards, sess, isMaster);
@@ -2699,6 +2740,7 @@ async function abrirVisitasSupervisor() {
   if (!_visSupList.length) await _carregarSupervisoresList();
   _renderVisitasSupContent();
   if (_visSupView === 'cobertura') { if (!_coberturaVisData) await _carregarCoberturaVisitas(); }
+  else if (_visSupView === 'provisao') { if (!_visProvData.length) await _carregarVisProvisao(); }
   else if (_visSupSelecionado) {
     if (_visSupView === 'calendario') await _carregarVisCalendario();
     else await _carregarVisitasSupData();
@@ -2868,6 +2910,7 @@ function _setVisSupView(view) {
   _visSupView = view;
   _renderVisitasSupContent();
   if (view === 'cobertura') { if (!_coberturaVisData) _carregarCoberturaVisitas(); }
+  else if (view === 'provisao') { if (!_visProvData.length) _carregarVisProvisao(); }
   else if (_visSupSelecionado) {
     if (view === 'calendario') _carregarVisCalendario();
     else _carregarVisitasSupData();
@@ -2940,7 +2983,7 @@ function _renderVisitasSupContent() {
   const el = document.getElementById('visitas-sup-content');
   if (!el) return;
 
-  const tabs = [['calendario','📅 Calendário'],['relatorio','📊 Relatório'],['cobertura','🗺️ Cobertura']];
+  const tabs = [['calendario','📅 Calendário'],['relatorio','📊 Relatório'],['cobertura','🗺️ Cobertura'],['provisao','🗓 Provisão']];
   const switcherHtml = `<div style="display:flex;gap:6px;margin-bottom:14px;overflow-x:auto;-webkit-overflow-scrolling:touch">${tabs.map(([v,lbl]) => {
     const ativo = _visSupView === v;
     return `<button onclick="_setVisSupView('${v}')" style="flex:1;padding:7px 0;border-radius:8px;border:1px solid ${ativo?'#6366f1':'rgba(0,0,0,.1)'};background:${ativo?'rgba(99,102,241,.25)':'rgba(0,0,0,.04)'};color:#1A1D23;font-size:11px;font-weight:700;font-family:inherit;cursor:pointer;white-space:nowrap">${lbl}</button>`;
@@ -2948,6 +2991,7 @@ function _renderVisitasSupContent() {
 
   const body = _visSupView === 'calendario' ? _renderVisCalendarioTab()
     : _visSupView === 'cobertura' ? _renderVisCoberturaTab()
+    : _visSupView === 'provisao' ? _renderVisProvisaoTab()
     : _renderVisRelatorioTab();
 
   el.innerHTML = switcherHtml + body;
@@ -3618,6 +3662,140 @@ function _renderVisCoberturaTab() {
         <div style="font-size:11px;font-weight:800;color:#1A1D23;white-space:nowrap">${lbl(l.dias)}</div>
       </div>`).join('')}
     ${rankingHtml}`;
+}
+
+// ── Aba Provisão (dentro do modal Visitas) ──────────────────────────────────
+// Cobertura semanal por loja (meta: pelo menos 1 visita/semana), olhando o mês inteiro,
+// qualquer supervisor — mesmo padrão do loadVisitasProvisao() do app Check-list, só que
+// aqui é o mestre/gestão vendo a rede toda de uma vez (a visão não depende de supervisor
+// selecionado; só o botão "Planejar" de cada semana em falta precisa de um, pra saber em
+// nome de quem criar o plano).
+let _visProvData = [];
+let _visProvMes = new Date().toISOString().slice(0,7); // 'YYYY-MM'
+
+function _visProvSemanasDoMes(ano, mes) {
+  const ultimoDiaMes = new Date(ano, mes, 0);
+  const inicio = new Date(ano, mes-1, 1);
+  inicio.setDate(inicio.getDate() - ((inicio.getDay()+6)%7)); // volta pra segunda-feira
+  const semanas = [];
+  let cursor = new Date(inicio);
+  while (cursor <= ultimoDiaMes) {
+    const fim = new Date(cursor); fim.setDate(fim.getDate()+6);
+    semanas.push({ inicio: new Date(cursor), fim });
+    cursor = new Date(cursor); cursor.setDate(cursor.getDate()+7);
+  }
+  return semanas;
+}
+function _visProvFmtData(d) { return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function _visProvFmtBR(d) { return String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0'); }
+
+async function _carregarVisProvisao() {
+  const [ano, mes] = _visProvMes.split('-').map(Number);
+  const semanas = _visProvSemanasDoMes(ano, mes);
+  const inicio = _visProvFmtData(semanas[0].inicio);
+  const fim = _visProvFmtData(semanas[semanas.length-1].fim);
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  _visProvData = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_chk_visitas?loja=neq.FOLGA&loja=neq.${encodeURIComponent('FÉRIAS')}&loja=neq.VIAGEM_SP&data=gte.${inicio}&data=lte.${fim}&select=loja,data,hora_chegada`, H, 'visProv:rows', []);
+  _renderVisitasSupContent();
+}
+function _visProvNav(delta) {
+  const [ano, mes] = _visProvMes.split('-').map(Number);
+  const d = new Date(ano, mes-1+delta, 1);
+  _visProvMes = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+  _carregarVisProvisao();
+}
+
+function _renderVisProvisaoTab() {
+  const chipsSupervisor = _visSupChipsHtml();
+  const hojeStr = (d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'))(new Date());
+  const [anoSel, mesSel] = _visProvMes.split('-').map(Number);
+  const semanas = _visProvSemanasDoMes(anoSel, mesSel);
+  const meses = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+  // As 11 lojas originais — Maglia fica de fora dessa meta de cobertura semanal por
+  // padrão (regra combinada: só entra se o pedido citar "Maglia" explicitamente).
+  const lojasProvisao = GN_LOJAS.filter(l => l.userKey !== 'MAGLIA').map(l => l.chkKey);
+
+  const porLojaSemana = {};
+  _visProvData.forEach(v => {
+    const semIdx = semanas.findIndex(s => v.data >= _visProvFmtData(s.inicio) && v.data <= _visProvFmtData(s.fim));
+    if (semIdx < 0) return;
+    if (!porLojaSemana[v.loja]) porLojaSemana[v.loja] = {};
+    if (!porLojaSemana[v.loja][semIdx]) porLojaSemana[v.loja][semIdx] = { real:false, plan:false, datasReal:[], datasPlan:[] };
+    if (v.hora_chegada === 'PLAN') { porLojaSemana[v.loja][semIdx].plan = true; porLojaSemana[v.loja][semIdx].datasPlan.push(v.data); }
+    else { porLojaSemana[v.loja][semIdx].real = true; porLojaSemana[v.loja][semIdx].datasReal.push(v.data); }
+  });
+  const diasRealPorLoja = {};
+  _visProvData.forEach(v => {
+    if (v.hora_chegada === 'PLAN') return;
+    if (!diasRealPorLoja[v.loja]) diasRealPorLoja[v.loja] = new Set();
+    diasRealPorLoja[v.loja].add(v.data);
+  });
+
+  const cardsHtml = lojasProvisao.map(loja => {
+    const totalReal = diasRealPorLoja[loja]?.size || 0;
+    const semanasHtml = semanas.map((sem, idx) => {
+      const status = (porLojaSemana[loja]||{})[idx] || { real:false, plan:false, datasReal:[], datasPlan:[] };
+      const semanaJaPassou = _visProvFmtData(sem.fim) < hojeStr;
+      const coberta = status.real || status.plan;
+      const label = `${_visProvFmtBR(sem.inicio)}–${_visProvFmtBR(sem.fim)}`;
+      if (coberta) {
+        const cor = status.real ? '#22c55e' : '#f59e0b';
+        const datas = [...new Set(status.real ? status.datasReal : status.datasPlan)];
+        const datasTxt = datas.map(d=>d.slice(8,10)+'/'+d.slice(5,7)).join(', ');
+        const txt = (status.real ? '✓ visitada' : '📅 planejada') + (datasTxt ? ' — ' + datasTxt : '');
+        return `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;background:${cor}14;border:1px solid ${cor}44;border-radius:8px;margin-bottom:4px;gap:8px">
+          <span style="font-size:10px;color:rgba(0,0,0,.55)">${label}</span>
+          <span style="font-size:10px;font-weight:700;color:${cor};text-align:right">${txt}</span>
+        </div>`;
+      }
+      if (semanaJaPassou) {
+        return `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);border-radius:8px;margin-bottom:4px">
+          <span style="font-size:10px;color:rgba(0,0,0,.55)">${label}</span>
+          <span style="font-size:10px;font-weight:700;color:#ef4444">✕ sem visita</span>
+        </div>`;
+      }
+      const sugestao = hojeStr > _visProvFmtData(sem.inicio) ? hojeStr : _visProvFmtData(sem.inicio);
+      return `<div style="padding:6px 8px;background:rgba(251,191,36,.08);border:1px dashed rgba(251,191,36,.5);border-radius:8px;margin-bottom:4px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
+          <span style="font-size:10px;color:rgba(0,0,0,.55)">${label}</span>
+          <span style="font-size:10px;font-weight:700;color:#f59e0b">⚠️ falta</span>
+        </div>
+        <div style="display:flex;gap:4px">
+          <input type="date" id="visprov-data-${loja}-${idx}" value="${sugestao}" min="${_visProvFmtData(sem.inicio)}" max="${_visProvFmtData(sem.fim)}" style="flex:1;font-size:10px;padding:4px 6px;background:#F5F6F8;border:1px solid rgba(0,0,0,.12);border-radius:6px;color:#1A1D23;font-family:inherit">
+          <button onclick="_visProvCriarPlano('${loja}',${idx})" style="background:#f59e0b;border:none;color:#000;font-size:10px;font-weight:700;padding:4px 10px;border-radius:6px;cursor:pointer;white-space:nowrap">📅 Planejar</button>
+        </div>
+      </div>`;
+    }).join('');
+    return `<div style="background:rgba(0,0,0,.03);border:1px solid rgba(0,0,0,.08);border-radius:12px;padding:10px 12px;margin-bottom:10px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <span style="font-size:13px;font-weight:700;color:#1A1D23">${loja}</span>
+        <span style="font-size:11px;color:rgba(0,0,0,.4)">${totalReal} visita${totalReal!==1?'s':''} este mês</span>
+      </div>
+      ${semanasHtml}
+    </div>`;
+  }).join('');
+
+  return chipsSupervisor + `<div style="display:flex;align-items:center;justify-content:space-between;margin:12px 0 8px">
+    <button onclick="_visProvNav(-1)" style="background:rgba(0,0,0,.06);border:1px solid rgba(0,0,0,.14);border-radius:8px;padding:6px 12px;color:#1A1D23;cursor:pointer;font-size:14px">‹</button>
+    <div style="font-size:13px;font-weight:700;color:#1A1D23">${meses[mesSel-1]} ${anoSel}</div>
+    <button onclick="_visProvNav(1)" style="background:rgba(0,0,0,.06);border:1px solid rgba(0,0,0,.14);border-radius:8px;padding:6px 12px;color:#1A1D23;cursor:pointer;font-size:14px">›</button>
+  </div>
+  <div style="font-size:10px;color:rgba(0,0,0,.4);margin-bottom:10px">Meta de pelo menos 1 visita por semana em cada loja. Pra planejar uma semana em falta, selecione um supervisor acima primeiro.</div>
+  ${cardsHtml}`;
+}
+
+async function _visProvCriarPlano(loja, semIdx) {
+  if (!_visSupSelecionado) { alert('Selecione um supervisor no topo pra planejar essa visita.'); return; }
+  const inp = document.getElementById('visprov-data-'+loja+'-'+semIdx);
+  if (!inp || !inp.value) return;
+  const dataEscolhida = inp.value;
+  const outrasLojas = [...new Set(_visProvData.filter(v => v.data === dataEscolhida && v.loja !== loja).map(v=>v.loja))];
+  if (outrasLojas.length) {
+    const ok = confirm(`${_visSupSelecionado} já tem visita (real ou planejada) em ${outrasLojas.join(', ')} no dia ${dataEscolhida.split('-').reverse().join('/')}.\n\nConfirma que também vai visitar ${loja} nesse mesmo dia?`);
+    if (!ok) return;
+  }
+  await _visConfirmarPlano(dataEscolhida, loja);
+  await _carregarVisProvisao();
 }
 
 // ── DASHBOARD ────────────────────────────────────────────────────────────────
