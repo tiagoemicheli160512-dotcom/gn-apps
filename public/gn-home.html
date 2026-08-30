@@ -1995,6 +1995,7 @@ async function forcarAtualizacao() {
     _dashLoading = false; // reseta guard para permitir nova carga mesmo se anterior travou
     renderDashboard();
     _loadDashAll();
+    _iniciarPollVisitasHoje();
     _renderHealthChips();
   } else if (isMaster && masterLoja) {
     // Vista loja específica: recarrega chips da loja
@@ -2090,6 +2091,7 @@ function doLogout() {
   localStorage.removeItem('gn_nav_loja');
   localStorage.removeItem('gn_last_loja');
   _pararAlertaUrgentePoll();
+  _pararPollVisitasHoje();
   session = null; masterLoja = null;
   document.getElementById('inp-nome').value = '';
   document.getElementById('inp-senha').value = '';
@@ -2221,8 +2223,10 @@ function showHome(sess) {
       _dashFat = null; _dashFatPrev = null;
       renderDashboard();
       _loadDashAll();
+      _iniciarPollVisitasHoje();
     } else {
       dashEl.style.display = 'none';
+      _pararPollVisitasHoje();
     }
   }
   _renderBotNav(sess, isMaster);
@@ -4622,6 +4626,38 @@ function _buildVisitasHojeCard(){
   </div>`;
 }
 
+// Poll leve do card "📍 Visitas do Dia" — sozinho, sem passar por _loadDashAll() (que é
+// caro e recarrega o painel inteiro). O ciclo planejada→andamento→concluída muda em tempo
+// real (alguém chega, alguém sai), mas até aqui o card só atualizava numa carga completa
+// do Painel — ficava "parado" mostrando um status antigo até a pessoa lembrar de dar um
+// refresh manual. Roda enquanto a vista "Todas as lojas" está aberta.
+let _visitasHojePollTimer = null;
+function _iniciarPollVisitasHoje() {
+  _pararPollVisitasHoje();
+  _visitasHojePollTimer = setInterval(_refreshVisitasHojeCard, 60000);
+}
+function _pararPollVisitasHoje() {
+  if (_visitasHojePollTimer) { clearInterval(_visitasHojePollTimer); _visitasHojePollTimer = null; }
+}
+async function _refreshVisitasHojeCard() {
+  const dashEl = document.getElementById('dash-section');
+  if (!dashEl || dashEl.style.display === 'none') { _pararPollVisitasHoje(); return; }
+  const hoje = (d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'))(new Date());
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_chk_visitas?data=eq.${hoje}&select=loja,visitante,cargo,hora_chegada,hora_saida`, H, 'visitasHojePoll:rows', null);
+  if (!rows) return; // erro de rede — mantém o que já tinha, tenta de novo no próximo ciclo
+  const visitasHojePorLoja = {};
+  rows.forEach(r => {
+    const lk = _normLoja(r.loja);
+    if (!LOJAS_LISTA.includes(lk)) return;
+    const status = r.hora_chegada === 'PLAN' ? 'planejada' : !r.hora_saida ? 'andamento' : 'concluida';
+    (visitasHojePorLoja[lk] = visitasHojePorLoja[lk] || []).push({ nome: r.visitante, cargo: r.cargo, status });
+  });
+  _dashVisitasHoje = visitasHojePorLoja;
+  const holder = document.getElementById('visitas-hoje-card-holder');
+  if (holder) holder.innerHTML = _buildVisitasHojeCard();
+}
+
 // Atalho do card "Visitas do Dia": abre o modal Visitas já na aba Calendário, no dia
 // de hoje, poupando o mestre de abrir o modal e navegar até lá na mão. A escolha de
 // qual supervisor programar continua no modal (o card agrupa por loja, não por
@@ -5977,7 +6013,7 @@ function renderDashboard() {
       </div>
       ${_buildAlertasUrgentesCard()}
       ${_buildFeriasUmaSemanaCard()}
-      ${_buildVisitasHojeCard()}
+      <div id="visitas-hoje-card-holder">${_buildVisitasHojeCard()}</div>
       <div class="dash-tabs">
         <button class="dash-tab${_dashTab==='fat'?' on':''}" onclick="_setDashTab('fat')">↓ Faturamento</button>
         <button class="dash-tab${_dashTab==='att'?' on':''}" onclick="_setDashTab('att')">⚠ Atenção</button>
