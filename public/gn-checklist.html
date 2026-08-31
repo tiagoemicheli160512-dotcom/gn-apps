@@ -2258,6 +2258,27 @@ const CARNES_DEF = [
   { key:'carne_seca', label:'Carne Seca',   icon:'🥩', unit:'kg' },
   { key:'camarao',    label:'Camarão',      icon:'🦐', unit:'kg' }
 ];
+
+// Mapeamento das 4 carnes rastreadas pro item correspondente no catálogo do app Lojas
+// (gn_catalogo/gn_contagens_pedido) — usado pra puxar automaticamente a Contagem de 2ª
+// (mesma contagem física — "Est. Atual" — que a loja já faz toda 2ª pra gerar o Pedido
+// semanal) e as Entradas (mesmas notas já lançadas em "📥 Entradas de Mercadoria" lá),
+// sem precisar lançar tudo de novo aqui. item_id vem de gn_catalogo — carne_sol=207
+// "Carne de Sol", carne_seca=209 "Carne Seca", picanha=392 "PICANHA MATURATA" (é essa que
+// as lojas realmente contam toda semana — "Picanha de Sol" existe no catálogo mas nenhuma
+// loja usa), camarao=237 "Camarão Limpo Drenado 61X70 CRU, S/ VICERA IQF cx 20 kg".
+const CARNES_PEDIDO_ITEM_ID = { carne_sol:207, carne_seca:209, picanha:392, camarao:237 };
+// Pra casar as Entradas de Mercadoria (texto livre digitado pela loja) com cada carne —
+// nomes reais variam bastante ("PICANHA MATURATA", "PICANHA GRILL CONG. (MATURATTA)",
+// "CAMARÃO SEM CABEÇA 61/70", "CAMARAO 61/70 P&D CX 12KG"...), então casa por
+// palavra-chave em vez de nome exato. Exclusões evitam falso-positivo (Picanha Suína não
+// é a carne rastreada; Xique de Camarão é petisco pronto, não estoque cru).
+const CARNES_ENTRADA_MATCH = {
+  carne_sol:  { inc:[/CARNE\s*DE\s*SOL/], exc:[] },
+  carne_seca: { inc:[/CARNE\s*SECA/],     exc:[] },
+  picanha:    { inc:[/PICANHA/],          exc:[/SU[IÍ]NA/] },
+  camarao:    { inc:[/CAMAR[AÃ]O/],       exc:[/XIQUE/] },
+};
 // Sub-abas: inicial(2a), entradas(diario), vendas(dom), contagem(dom), resultado(auto)
 const CARNE_TABS = ['contagem','diario','entradas','inicial','resumo','diario_ver'];
 const DIAS_SEMANA = ['seg','ter','qua','qui','sex','sab','dom'];
@@ -4461,12 +4482,14 @@ async function loadSupabaseDay(data){
 
 async function loadSupabaseWeek(semanaIni){
   if(!semanaIni) return;
+  _carnesAutoCarregado = false; // nova semana carregada — pode puxar do Lojas de novo
   try{
     const {data:rows,error}=await sb.from('checklist_carnes')
       .select('*').eq('semana_inicio',semanaIni).eq('loja',LOJA).single();
     if(error||!rows){
       // Semana ainda sem registro — tenta semear inicial a partir da contagem final da semana anterior
       await _seedInicialFromPrevWeek(semanaIni);
+      _carregarCarnesAutoLojas();
       renderCarnes();
       return;
     }
@@ -4474,6 +4497,7 @@ async function loadSupabaseWeek(semanaIni){
     // Se o inicial ainda estiver todo em branco, semeia da semana anterior
     const inicialVazio = CARNES_DEF.every(c=>(stateWeek.carnes[c.key]?.inicial||'')==='');
     if(inicialVazio) await _seedInicialFromPrevWeek(semanaIni);
+    _carregarCarnesAutoLojas();
     renderCarnes();
   }catch(e){}
 }
@@ -7036,6 +7060,114 @@ function updateSummary(){
 // =============================================
 let diaAtivoIdx = 1; // 0=seg,1=ter...6=dom — padrão terça
 let _carneInicialEditando = false;
+let _carneContagemEditando = false;
+let _carneEntradasEditando = false;
+let _carnesCatalogoIds = null; // {item_id: catalogo_uuid} — resolvido uma vez por sessão
+let _carnesAutoCarregando = false;
+let _carnesAutoErro = false;
+let _carnesAutoCarregado = false; // já tentou puxar do Lojas nesta semana carregada
+
+// Resolve o id (uuid) de gn_catalogo pra cada item_id de CARNES_PEDIDO_ITEM_ID — uma
+// query só, cacheada pelo resto da sessão (os ids do catálogo não mudam).
+async function _resolverCarnesCatalogoIds(){
+  if(_carnesCatalogoIds) return _carnesCatalogoIds;
+  try{
+    const ids = Object.values(CARNES_PEDIDO_ITEM_ID);
+    const {data,error} = await sb.from('gn_catalogo').select('id,item_id').in('item_id', ids);
+    if(error) throw error;
+    const map={};
+    (data||[]).forEach(r=>{ map[r.item_id]=r.id; });
+    _carnesCatalogoIds = map;
+  }catch(e){ _carnesCatalogoIds = {}; }
+  return _carnesCatalogoIds;
+}
+
+// userKey (chave da linha gn_lojas do app Lojas) e lojaSlug (chave em gn_contagens_pedido)
+// a partir do LOJA (chkKey) usado no Check-list — mesma fonte única GN_LOJAS.
+function _lojaInfoParaCarnes(){
+  const userKey = (typeof LOJA_MAP!=='undefined' && LOJA_MAP[LOJA]) ? LOJA_MAP[LOJA] : LOJA.toUpperCase();
+  const l = (window.GN_LOJAS||[]).find(x=>x.userKey===userKey);
+  return { userKey, lojaSlug: l?l.lojaSlug:null };
+}
+
+// Dia da semana (chave DIAS_SEMANA) a partir de uma data ISO — usado pra jogar cada
+// Entrada de Mercadoria no dia certo (Ter→Dom; entradas de Segunda não contam aqui, viram
+// a própria Contagem de 2ª).
+function _diaSemanaKeyFromISO(iso){
+  if(!iso) return null;
+  const d = new Date(iso+'T12:00:00');
+  return ['dom','seg','ter','qua','qui','sex','sab'][d.getDay()];
+}
+
+// Puxa do app Lojas a Contagem de 2ª (gn_contagens_pedido) e as Entradas de Mercadoria
+// (gn_lojas.all_data.entradasAll) da semana ativa, pras 4 carnes rastreadas. Por padrão só
+// preenche campos ainda vazios (nunca sobrescreve edição manual) — force=true (botão
+// "🔄 Atualizar") sobrescreve com o valor mais recente do Lojas mesmo se já tiver algo.
+async function _carregarCarnesAutoLojas(force){
+  if(!state.semanaInicio || _carnesAutoCarregando) return;
+  _carnesAutoCarregando = true;
+  _carnesAutoErro = false;
+  try{
+    const { userKey, lojaSlug } = _lojaInfoParaCarnes();
+    if(!lojaSlug) throw new Error('loja sem lojaSlug');
+    const catIds = await _resolverCarnesCatalogoIds();
+    const semanaIni = state.semanaInicio;
+    const dNext = new Date(semanaIni+'T12:00:00'); dNext.setDate(dNext.getDate()+7);
+    const semanaProxima = toISO(dNext);
+    const idsRelevantes = Object.values(catIds).filter(Boolean);
+
+    let contagensRows = [];
+    if(idsRelevantes.length){
+      const {data,error} = await sb.from('gn_contagens_pedido')
+        .select('catalogo_id,atual,data_contagem')
+        .eq('loja_slug', lojaSlug)
+        .in('catalogo_id', idsRelevantes)
+        .in('data_contagem', [semanaIni, semanaProxima]);
+      if(error) throw error;
+      contagensRows = data||[];
+    }
+
+    const {data:lojaRows, error:eLoja} = await sb.from('gn_lojas').select('all_data').eq('loja', userKey).limit(1);
+    if(eLoja) throw eLoja;
+    const entradasAllLojas = (lojaRows && lojaRows[0] && lojaRows[0].all_data && lojaRows[0].all_data.entradasAll) || {};
+    const entradasSemana = entradasAllLojas[userKey+'|'+semanaIni] || [];
+
+    let changed=false;
+    CARNES_DEF.forEach(c=>{
+      if(!stateWeek.carnes[c.key]) stateWeek.carnes[c.key]={};
+      const cd = stateWeek.carnes[c.key];
+      const catId = catIds[CARNES_PEDIDO_ITEM_ID[c.key]];
+      const rowIni = contagensRows.find(r=>r.catalogo_id===catId && r.data_contagem===semanaIni);
+      const rowFim = contagensRows.find(r=>r.catalogo_id===catId && r.data_contagem===semanaProxima);
+      if(rowIni && (force || cd.inicial===undefined || cd.inicial==='')){ cd.inicial=parseFloat(rowIni.atual)||0; changed=true; }
+      if(rowFim && (force || cd.contagem_final===undefined || cd.contagem_final==='')){ cd.contagem_final=parseFloat(rowFim.atual)||0; changed=true; }
+
+      const totaisDia = {ter:0,qua:0,qui:0,sex:0,sab:0,dom:0};
+      entradasSemana.forEach(e=>{
+        const nome = (e.insumo||'').toUpperCase();
+        const m = CARNES_ENTRADA_MATCH[c.key];
+        if(!m.inc.some(re=>re.test(nome))) return;
+        if(m.exc.some(re=>re.test(nome))) return;
+        const diaKey = _diaSemanaKeyFromISO(e.dataNF);
+        if(!diaKey || totaisDia[diaKey]===undefined) return;
+        totaisDia[diaKey] += parseFloat(e.qtd)||0;
+      });
+      Object.keys(totaisDia).forEach(d=>{
+        if(totaisDia[d]<=0) return;
+        if(force || cd['ent_'+d]===undefined || cd['ent_'+d]===''){ cd['ent_'+d]=totaisDia[d]; changed=true; }
+      });
+    });
+    // autoSave (local) + envio pro servidor — o card de resumo de Carnes na Home lê
+    // direto de checklist_carnes, então o valor puxado aqui precisa chegar lá mesmo sem
+    // nenhuma edição manual acontecer depois (esse é o ponto de não precisar mais editar).
+    if(changed){ autoSave(); _debouncedSaveAll(); }
+  }catch(e){ _carnesAutoErro = true; }
+  finally{
+    _carnesAutoCarregando = false;
+    _carnesAutoCarregado = true;
+    renderCarnes();
+  }
+}
 
 function setCarneTab(tab){
   carneTabAtiva = tab;
@@ -7043,6 +7175,7 @@ function setCarneTab(tab){
     const b=document.getElementById('ctab-'+t);
     if(b){ b.style.background=t===tab?'#E8580A':'#EBEEF2'; b.style.color=t===tab?'#fff':'#1A1D23'; }
   });
+  if((tab==='contagem'||tab==='entradas') && !_carnesAutoCarregado) _carregarCarnesAutoLojas();
   renderCarnes();
 }
 
@@ -7161,7 +7294,8 @@ function renderCarnes(){
     return;
   }
 
-  // ---- ABA ENTRADA (só entradas, todos os dias) ----
+  // ---- ABA ENTRADA (agora puxada automaticamente das Entradas de Mercadoria do app
+  // Lojas — mesma nota que a loja já lança lá; só edita manualmente se necessário) ----
   if(carneTabAtiva==='entradas'){
     const diasHtml2 = DIAS_SEMANA.slice(1).map((d,i)=>{
       const idx=i+1; const ativo=idx===diaAtivoIdx;
@@ -7172,27 +7306,40 @@ function renderCarnes(){
       </button>`;
     }).join('');
     const diaKey = DIAS_SEMANA[diaAtivoIdx];
-    c.innerHTML=`<div>
-      <div style="font-size:11px;color:#555;margin-bottom:8px;line-height:1.5;">➕ Registre entradas (compras reais que chegam de fora) para o dia selecionado.</div>
+    if(_carneEntradasEditando){
+      c.innerHTML=`<div style="background:rgba(232,88,10,.1);border:1px solid rgba(232,88,10,.3);border-radius:10px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
+        <div style="font-size:11px;color:#1A1D23;">✏️ Modo edição — altere apenas se necessário</div>
+        <button onclick="_carneEntradasEditando=false;renderCarnes()" style="background:#E8580A;border:none;border-radius:7px;padding:6px 12px;color:#fff;font-size:11px;font-weight:700;cursor:pointer;">✓ Concluir</button>
+      </div>
       <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:12px;">${diasHtml2}</div>
-      ${renderInputTab('➕ Entrada — '+DIAS_LABEL[diaAtivoIdx],'','#6bcb77','ent_'+diaKey)}
-    </div>`;
+      ${renderInputTab('➕ Editar Entrada — '+DIAS_LABEL[diaAtivoIdx],'','#6bcb77','ent_'+diaKey)}`;
+      return;
+    }
+    const rows = CARNES_DEF.map(carne=>{
+      const val = parseFloat(stateWeek.carnes[carne.key]?.['ent_'+diaKey])||0;
+      return `<div style="background:#FFFFFF;border:1px solid #4a4a4a;border-radius:10px;padding:11px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
+        <div style="font-size:12px;font-weight:700;color:#1A1D23;">${carne.icon} ${carne.label}</div>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:700;color:#1A1D23;">${val>0?val.toFixed(1)+' '+carne.unit:'—'}</span>
+      </div>`;
+    }).join('');
+    c.innerHTML=`<div style="background:rgba(107,203,119,.1);border:1px solid rgba(107,203,119,.3);border-radius:10px;padding:10px 14px;margin-bottom:12px;">
+      <div style="font-size:11px;font-weight:700;color:#1A1D23;margin-bottom:3px;">➕ Entradas puxadas do app Lojas</div>
+      <div style="font-size:10px;color:#1A1D23;">Mesmas notas já lançadas em "📥 Entradas de Mercadoria" no app Lojas — não precisa lançar de novo aqui. Edite só se necessário.</div>
+      <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
+        <button onclick="_carregarCarnesAutoLojas(true)" ${_carnesAutoCarregando?'disabled':''} style="background:#6bcb77;border:none;border-radius:7px;padding:6px 12px;color:#1A1D23;font-size:11px;font-weight:700;cursor:pointer;">${_carnesAutoCarregando?'⏳ Atualizando…':'🔄 Atualizar do Lojas'}</button>
+        <button onclick="_carneEntradasEditando=true;renderCarnes()" style="background:#EBEEF2;border:1px solid #555;border-radius:7px;padding:6px 12px;color:#1A1D23;font-size:11px;font-weight:700;cursor:pointer;">✏️ Editar</button>
+      </div>
+    </div>
+    ${_carnesAutoErro?`<div style="background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:11px;color:#1A1D23;">⚠️ Não consegui buscar as entradas no app Lojas agora. Tente ↻ Atualizar de novo.</div>`:''}
+    <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:12px;">${diasHtml2}</div>
+    ${rows}`;
     return;
   }
 
-  // ---- ABA CONTAGEM DE 2ª (fecha semana anterior + inicia semana atual) ----
+  // ---- ABA CONTAGEM DE 2ª (fecha semana anterior + inicia semana atual) — puxada
+  // automaticamente do Pedido semanal (Est. Atual) do app Lojas, mesma contagem física
+  // que a loja já pesa toda 2ª pra gerar o pedido; não precisa pesar/lançar de novo aqui ----
   if(carneTabAtiva==='contagem'){
-    const _hoje = new Date();
-    const _isSegunda = _hoje.getDay()===1;
-    const _inicialVazioContagem = CARNES_DEF.every(c2=>(stateWeek.carnes[c2.key]?.inicial||'')==='');
-    const _bannerSegunda = _isSegunda && _inicialVazioContagem ? `
-      <div style="background:rgba(240,192,80,.15);border:2px solid rgba(240,192,80,.5);border-radius:10px;padding:12px 14px;margin-bottom:12px;display:flex;align-items:flex-start;gap:10px;">
-        <div style="font-size:20px;line-height:1;">⚠️</div>
-        <div>
-          <div style="font-size:12px;font-weight:700;color:#1A1D23;margin-bottom:3px;">Preencha a Contagem de 2ª hoje!</div>
-          <div style="font-size:11px;color:#1A1D23;line-height:1.5;">Pese o estoque agora e insira abaixo. Isso fecha a semana anterior e define o início desta semana.</div>
-        </div>
-      </div>` : '';
     // Calcula datas da semana anterior para mostrar no contexto
     let _prevLabel = '';
     if(state.semanaInicio){
@@ -7201,15 +7348,36 @@ function renderCarnes(){
       const dPrevFim=new Date(dPrev); dPrevFim.setDate(dPrevFim.getDate()+6);
       _prevLabel=`${dPrev.getDate().toString().padStart(2,'0')}/${(dPrev.getMonth()+1).toString().padStart(2,'0')} → ${dPrevFim.getDate().toString().padStart(2,'0')}/${(dPrevFim.getMonth()+1).toString().padStart(2,'0')}`;
     }
-    c.innerHTML=_bannerSegunda+`<div style="background:#F6F6E9;border:1px solid #3a3a1a;border-radius:10px;padding:12px;margin-bottom:10px;">
-      <div style="font-size:12px;font-weight:700;color:#1A1D23;margin-bottom:6px;">📋 Contagem de Segunda-feira</div>
+    if(_carneContagemEditando){
+      c.innerHTML=`<div style="background:rgba(232,88,10,.1);border:1px solid rgba(232,88,10,.3);border-radius:10px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
+        <div style="font-size:11px;color:#1A1D23;">✏️ Modo edição — altere apenas se necessário</div>
+        <button onclick="_carneContagemEditando=false;renderCarnes()" style="background:#E8580A;border:none;border-radius:7px;padding:6px 12px;color:#fff;font-size:11px;font-weight:700;cursor:pointer;">✓ Concluir</button>
+      </div>`
+      +renderInputTab('📋 Editar Contagem de 2ª','','#f0c050','contagem_final');
+      return;
+    }
+    const rows = CARNES_DEF.map(carne=>{
+      const val = parseFloat(stateWeek.carnes[carne.key]?.contagem_final)||0;
+      return `<div style="background:#FFFFFF;border:1px solid #4a4a4a;border-radius:10px;padding:11px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
+        <div style="font-size:12px;font-weight:700;color:#1A1D23;">${carne.icon} ${carne.label}</div>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:700;color:#1A1D23;">${val>0?val.toFixed(1)+' '+carne.unit:'—'}</span>
+      </div>`;
+    }).join('');
+    const _semVazio = CARNES_DEF.every(c2=>(stateWeek.carnes[c2.key]?.contagem_final||'')==='');
+    c.innerHTML=`<div style="background:#F6F6E9;border:1px solid #3a3a1a;border-radius:10px;padding:12px;margin-bottom:10px;">
+      <div style="font-size:12px;font-weight:700;color:#1A1D23;margin-bottom:6px;">📋 Contagem de Segunda-feira — puxada do app Lojas</div>
       <div style="font-size:11px;color:#1A1D23;line-height:1.6;">
-        Pese o estoque ao <strong style="color:#1A1D23;">abrir a loja na 2ª feira</strong>.<br>
+        Mesma pesagem do <strong style="color:#1A1D23;">Pedido semanal (Est. Atual)</strong> feita no app Lojas — não precisa pesar de novo aqui.<br>
         ${_prevLabel?`✅ Fecha a semana anterior <strong style="color:#1A1D23;">(${_prevLabel})</strong><br>`:''}
         ✅ Define o <strong style="color:#1A1D23;">Início desta semana</strong> automaticamente.
       </div>
+      <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
+        <button onclick="_carregarCarnesAutoLojas(true)" ${_carnesAutoCarregando?'disabled':''} style="background:#f0c050;border:none;border-radius:7px;padding:6px 12px;color:#1A1D23;font-size:11px;font-weight:700;cursor:pointer;">${_carnesAutoCarregando?'⏳ Atualizando…':'🔄 Atualizar do Lojas'}</button>
+        <button onclick="_carneContagemEditando=true;renderCarnes()" style="background:#EBEEF2;border:1px solid #555;border-radius:7px;padding:6px 12px;color:#1A1D23;font-size:11px;font-weight:700;cursor:pointer;">✏️ Editar</button>
+      </div>
     </div>
-    ${renderInputTab('📋 Contagem de Segunda-feira','','#f0c050','contagem_final')}`;
+    ${_semVazio?`<div style="background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:11px;color:#1A1D23;">⚠️ Ainda sem contagem — confirme o Pedido semanal no app Lojas (aba Pedido) que ela aparece aqui automaticamente, ou toque em 🔄 Atualizar do Lojas.</div>`:''}
+    ${rows}`;
     return;
   }
 
