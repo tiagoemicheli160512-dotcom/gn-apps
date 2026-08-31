@@ -1970,15 +1970,32 @@ function abrirModalReabrir() {
 function fecharModalReabrir() {
   $('modalReabrirAuth').classList.add('hidden');
   _reabrirTargetId = null;
+  _reabrirOrigin = null;
 }
 
 // CARGOS_REABRIR vem de gn-lojas-config.js (fonte única de grupos de cargo)
 
 let _reabrirTargetId = null;
+let _reabrirOrigin = null; // null (Recentes/tela do caixa) | 'mes' (modal Histórico do mês)
 
-function reabrirDoHome(id) {
+function reabrirDoHome(id, origin) {
   _reabrirTargetId = id;
+  _reabrirOrigin = origin || null;
   abrirModalReabrir();
+}
+
+// Caixa já CONFERIDO pelo RH (sem divergência aberta) só reabre com senha mestra — as
+// demais faixas de CARGOS_REABRIR (gerente/sub-gerente/supervisor/administrador) ainda
+// reabrem normalmente turnos não conferidos, ou com divergência (que é justamente o que
+// pede reabertura pra corrigir). Mesma leitura de gn_lojas.all_data.caixa_conferencias
+// já usada em mostrarHome()/_carregarHistoricoMes() pros badges "✅ Conferido".
+async function _caixaJaConferido(fechamentoId) {
+  try {
+    const comKey = LOJA_COM_MAP[S.loja] || S.loja;
+    const lojaRow = await sb(`gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`);
+    const conf = (lojaRow?.[0]?.all_data?.caixa_conferencias || {})[fechamentoId];
+    return !!conf && !conf.tem_divergencia;
+  } catch(_) { return false; }
 }
 
 async function confirmarReabrir() {
@@ -1992,20 +2009,27 @@ async function confirmarReabrir() {
     const rows = await sb(`gn_usuarios?nome=ilike.${encodeURIComponent(nome)}&senha=eq.${encodeURIComponent(senha)}&ativo=eq.true&select=nome,cargo`);
     if (!rows.length) { $('reabrirErro').textContent = 'Usuário ou senha incorretos.'; return; }
     const u = rows[0];
-    if (!CARGOS_REABRIR.includes((u.cargo||'').toLowerCase())) {
+    const cargo = (u.cargo||'').toLowerCase();
+    if (!CARGOS_REABRIR.includes(cargo)) {
       $('reabrirErro').textContent = 'Cargo sem permissão para reabrir. (' + u.cargo + ')';
       return;
     }
     const fromHome = !!_reabrirTargetId;
     const targetId = _reabrirTargetId || S.fech?.id;
+    if (cargo !== 'mestre' && await _caixaJaConferido(targetId)) {
+      $('reabrirErro').textContent = 'Este caixa já foi conferido pelo RH — só senha mestra reabre.';
+      return;
+    }
     const upd = await sb(`gn_caixa_fechamento?id=eq.${targetId}`, {
       method: 'PATCH', prefer: 'return=representation',
       body: { status: 'ABERTO', gerente: u.nome }
     });
+    const origin = _reabrirOrigin;
     fecharModalReabrir();
     if (fromHome) {
       toast('Caixa reaberto por ' + u.nome);
-      mostrarHome();
+      if (origin === 'mes') _carregarHistoricoMes();
+      else mostrarHome();
     } else {
       S.fech = upd[0];
       $('btnFechar').textContent = 'Marcar caixa como FECHADO';
@@ -2198,7 +2222,7 @@ const GUIA_SECOES = [
   { id:'modos', num:'01', titulo:'Como funciona', roles:['operador','gestao'],
     resumo:'Como o app decide quem entra e o que cada ação exige.',
     corpo: _guiaCallout('info','ℹ️','O acesso ao app inteiro depende de permissão de caixa no cadastro do usuário, ou cargo <b>admin/gerente/mestre</b> — não existe restrição de aba por usuário aqui: quem entra no app vê todas as abas.')
-      + _guiaCallout('warn','🔒','Reabrir um caixa já FECHADO, ou excluir um caixa ABERTO, exige uma segunda senha — de alguém com cargo gerente, sub-gerente, supervisor, administrador ou mestre — mesmo que quem esteja logado já seja o operador do turno.')
+      + _guiaCallout('warn','🔒','Reabrir um caixa já FECHADO, ou excluir um caixa ABERTO, exige uma segunda senha — de alguém com cargo gerente, sub-gerente, supervisor, administrador ou mestre — mesmo que quem esteja logado já seja o operador do turno. Se o caixa já foi <b>conferido pelo RH</b> (sem divergência aberta), só senha <b>mestre</b> reabre.')
       + _guiaCallout('tip','🔄','Tudo que é lançado aqui (vendas, repique, despesas, dinheiro em caixa) alimenta automaticamente a aba Caixa do app Check-list, e o repique vai direto pro app de Gorjetas/Comissões — não precisa lançar de novo em outro lugar.')
   },
   { id:'receb', num:'02', titulo:'Recebido', roles:['operador'],
@@ -2852,6 +2876,9 @@ async function _carregarHistoricoMes() {
         difBadge = `<div style="font-size:10px;color:var(--mut);margin-top:2px">Valor encontrado: ${money(realN)}</div>`;
       }
 
+      const reabrirBtn = f.status === 'FECHADO'
+        ? `<button onclick="reabrirDoHome('${f.id}','mes')" style="margin-top:8px;align-self:flex-start;padding:3px 9px;font-size:10px;font-weight:600;background:transparent;border:1px solid var(--erro);border-radius:6px;color:var(--erro);cursor:pointer">↩ Reabrir</button>`
+        : '';
       return `<div class="hist-item" style="flex-direction:column;align-items:stretch">
         <div style="display:flex;justify-content:space-between;align-items:flex-start">
           <div>
@@ -2862,6 +2889,7 @@ async function _carregarHistoricoMes() {
         </div>
         ${difBadge}
         ${resumo}
+        ${reabrirBtn}
       </div>`;
     }).join('');
     el.innerHTML = resumoMes + lista;
