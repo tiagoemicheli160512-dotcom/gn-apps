@@ -1385,8 +1385,14 @@ const CORRECAO_SETOR_PREFIX = '🏢 Compras: ';
 function corrigirEstVig(catalogoId, lojaSlug, nomeProduto) {
   const prod = S.catalogo.find(p => p.id === catalogoId);
   const contagemAtual = S.contagens[catalogoId]?.[lojaSlug];
-  const isCaixa = prod && (prod.und === 'CX' || prod.und === 'BB');
   const fator = prod && prod.und_por_caixa > 1 ? prod.und_por_caixa : null;
+  // Precisa do fator (und_por_caixa) pra decompor/recompor o total em Cx+Avulso — sem ele,
+  // cai no campo único de total mesmo pra produto CX/BB (havia item no catálogo com und=CX
+  // e und_por_caixa vazio: o modal mostrava os campos Cx+Avulso, mas _salvarCorrecaoEstVig()
+  // recebia fator=null e tentava ler o campo #corrigir-ev-total — que nunca foi renderizado
+  // nesse caso — e quebrava antes de chegar no try/catch, sem toast de erro, "Salvar" não
+  // fazia nada).
+  const isCaixa = !!fator;
 
   let corpoHtml;
   if (isCaixa) {
@@ -1433,37 +1439,42 @@ function corrigirEstVig(catalogoId, lojaSlug, nomeProduto) {
 }
 
 async function _salvarCorrecaoEstVig(catalogoId, lojaSlug, fator) {
-  const contagemAtual = S.contagens[catalogoId]?.[lojaSlug];
-  const { monISO, sunISO } = _semanaAtivaBounds();
-  const { estAnt } = _estAntVigEfetivo(contagemAtual, monISO, sunISO);
-
-  let novoValor, atualCx = null, atualUnd = null;
-  if (fator) {
-    const cx = parseFloat(($('corrigir-ev-cx').value || '0').replace(',', '.')) || 0;
-    const und = parseFloat(($('corrigir-ev-und').value || '0').replace(',', '.')) || 0;
-    if (cx < 0 || und < 0) { toast('⚠️ Informe valores válidos.', 'err'); return; }
-    novoValor = cx * fator + und;
-    atualCx = cx; atualUnd = und;
-  } else {
-    novoValor = parseFloat(($('corrigir-ev-total').value || '').replace(',', '.'));
-    if (isNaN(novoValor) || novoValor < 0) { toast('⚠️ Informe um valor válido.', 'err'); return; }
-  }
-
-  const nome = (() => {
-    try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null')?.nome || 'Compras'; }
-    catch(e) { return 'Compras'; }
-  })();
-  const hoje = new Date().toISOString().slice(0,10);
-  const criadoPor = CORRECAO_SETOR_PREFIX + nome;
-  const payload = {
-    catalogo_id: catalogoId, loja_slug: lojaSlug,
-    atual: novoValor, atual_cx: atualCx, atual_und: atualUnd, data_contagem: hoje, criado_por: criadoPor
-  };
-  // Preserva o Est.ant (não sobrescreve com null) — só a contagem "atual" está sendo corrigida.
-  if (estAnt != null) payload.ul_estoque = estAnt;
-  if (contagemAtual?.ul_pedido != null) payload.ul_pedido = contagemAtual.ul_pedido;
-
+  // Tudo dentro do try, inclusive a leitura dos campos do modal — antes só o upsert estava
+  // protegido, então um mismatch entre o modal renderizado (Cx+Avulso ou total único, ver
+  // corrigirEstVig) e o `fator` recebido aqui fazia _$('corrigir-ev-total') (ou -cx/-und)
+  // voltar null e a leitura de .value quebrar ANTES do try — sem toast de erro, "Salvar"
+  // simplesmente não fazia nada.
   try {
+    const contagemAtual = S.contagens[catalogoId]?.[lojaSlug];
+    const { monISO, sunISO } = _semanaAtivaBounds();
+    const { estAnt } = _estAntVigEfetivo(contagemAtual, monISO, sunISO);
+
+    let novoValor, atualCx = null, atualUnd = null;
+    if (fator) {
+      const cx = parseFloat(($('corrigir-ev-cx').value || '0').replace(',', '.')) || 0;
+      const und = parseFloat(($('corrigir-ev-und').value || '0').replace(',', '.')) || 0;
+      if (cx < 0 || und < 0) { toast('⚠️ Informe valores válidos.', 'err'); return; }
+      novoValor = cx * fator + und;
+      atualCx = cx; atualUnd = und;
+    } else {
+      novoValor = parseFloat(($('corrigir-ev-total').value || '').replace(',', '.'));
+      if (isNaN(novoValor) || novoValor < 0) { toast('⚠️ Informe um valor válido.', 'err'); return; }
+    }
+
+    const nome = (() => {
+      try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null')?.nome || 'Compras'; }
+      catch(e) { return 'Compras'; }
+    })();
+    const hoje = new Date().toISOString().slice(0,10);
+    const criadoPor = CORRECAO_SETOR_PREFIX + nome;
+    const payload = {
+      catalogo_id: catalogoId, loja_slug: lojaSlug,
+      atual: novoValor, atual_cx: atualCx, atual_und: atualUnd, data_contagem: hoje, criado_por: criadoPor
+    };
+    // Preserva o Est.ant (não sobrescreve com null) — só a contagem "atual" está sendo corrigida.
+    if (estAnt != null) payload.ul_estoque = estAnt;
+    if (contagemAtual?.ul_pedido != null) payload.ul_pedido = contagemAtual.ul_pedido;
+
     await db.from('gn_contagens_pedido').upsert(payload, { onConflict: 'catalogo_id,loja_slug,data_contagem' });
     if (!S.contagens[catalogoId]) S.contagens[catalogoId] = {};
     S.contagens[catalogoId][lojaSlug] = {
