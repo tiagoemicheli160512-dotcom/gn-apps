@@ -5017,6 +5017,73 @@ function getProdutosPedidoOrdenados() {
   return result.filter(p => !removidos.has(String(p.item)));
 }
 
+// Lista de contagem física = ordem do Pedido. Pra cada item: se tem mapeamento, usa o
+// insumo mapeado; senão usa o nome do produto. Inclui também insumos de fichas que não
+// aparecem no pedido. Extraída do render da aba Contagem pra ser reaproveitada também
+// no relatório de WhatsApp (gerarRelatorioContagemWpp).
+function _itensContagemFisica() {
+  const todosOrdemPedido = getProdutosPedidoOrdenados();
+  const itensContagem = [];
+  const vistos = new Set();
+  todosOrdemPedido.forEach(prod => {
+    const idStr = String(prod.item);
+    const insumoKey = mapeamentoPedido[idStr]
+      ? mapeamentoPedido[idStr]
+      : prod.produto.trim().toUpperCase();
+    if (vistos.has(insumoKey)) return;
+    vistos.add(insumoKey);
+    itensContagem.push({
+      nome: insumoKey,
+      label: prod.produto.trim().toUpperCase(),
+      fatorExib: mapeamentoPedido[idStr]
+        ? '⛓ ' + prod.produto.trim().toUpperCase()
+        : null,
+      grupo: prod.grupo
+    });
+  });
+  getTodosInsumos().forEach(n => {
+    if (!vistos.has(n)) {
+      vistos.add(n);
+      itensContagem.push({ nome: n, label: n, fatorExib: null, grupo: '' });
+    }
+  });
+  return itensContagem;
+}
+
+// Relatório de WhatsApp da aba Contagem — o botão "Enviar Contagem — WPP" chamava essa
+// função sem ela existir no arquivo (dead button, dava erro ao clicar). Mesmo padrão de
+// texto/emoji do gerarRelatorioWpp().
+function gerarRelatorioContagemWpp() {
+  const teo = getTeorico(), ct = getCont();
+  const contados = _itensContagemFisica().filter(item => ct[item.nome] != null);
+  if (!contados.length) { showToast('⚠️ Nenhum item contado ainda pra gerar relatório.', 'err'); return; }
+
+  const dom = addDays(semana, 6);
+  const linhas = [];
+  linhas.push("🍽️ *GIGANTE NORDESTINO*");
+  linhas.push("📍 *Loja:* " + lojaDisp(loja));
+  linhas.push("📅 *Semana:* " + fmt(semana) + " a " + fmt(dom));
+  linhas.push("🔢 *Contagem Física*");
+  linhas.push("━━━━━━━━━━━━━━━━━━");
+  const grupos = {};
+  contados.forEach(item => { (grupos[item.grupo || 'Outros'] = grupos[item.grupo || 'Outros'] || []).push(item); });
+  Object.keys(grupos).sort().forEach(g => {
+    linhas.push("\n*" + g.toUpperCase() + "*");
+    grupos[g].forEach(item => {
+      const c = ct[item.nome], t = teo[item.nome] || 0;
+      const df = c - t;
+      const emoji = Math.abs(df) < 0.001 ? "✅" : df > 0 ? "🔵" : "🔴";
+      linhas.push("  • " + item.label + ": *" + c.toFixed(3) + "* (teórico " + t.toFixed(3) + ") " + emoji + (Math.abs(df) > 0.001 ? " " + (df > 0 ? "+" : "") + df.toFixed(3) : ""));
+    });
+  });
+  linhas.push("\n━━━━━━━━━━━━━━━━━━");
+  linhas.push("📊 Total: *" + contados.length + " item(ns) contado(s)*");
+  linhas.push("🕐 Gerado em " + new Date().toLocaleString("pt-BR"));
+
+  window.open("https://wa.me/?text=" + encodeURIComponent(linhas.join("\n")), "_blank");
+  showToast("📲 Abrindo WhatsApp...");
+}
+
 async function gerarExcelPedido() {
   try {
     if (typeof XLSX === 'undefined') {
@@ -7016,34 +7083,7 @@ function render() {
     </div>`;
 
   } else if (tab === "contagem") {
-    const todosOrdemPedido = getProdutosPedidoOrdenados();
-    // Lista de contagem = ordem do Pedido
-    // Para cada item: se tem mapeamento, usa o insumo mapeado; senão usa o nome do produto
-    const itensContagem = [];
-    const vistos = new Set();
-    todosOrdemPedido.forEach(prod => {
-      const idStr = String(prod.item);
-      const insumoKey = mapeamentoPedido[idStr]
-        ? mapeamentoPedido[idStr]
-        : prod.produto.trim().toUpperCase();
-      if (vistos.has(insumoKey)) return;
-      vistos.add(insumoKey);
-      itensContagem.push({
-        nome: insumoKey,
-        label: prod.produto.trim().toUpperCase(),
-        fatorExib: mapeamentoPedido[idStr]
-          ? '⛓ ' + prod.produto.trim().toUpperCase()
-          : null,
-        grupo: prod.grupo
-      });
-    });
-    // Também incluir insumos de fichas que não aparecem no pedido
-    getTodosInsumos().forEach(n => {
-      if (!vistos.has(n)) {
-        vistos.add(n);
-        itensContagem.push({ nome: n, label: n, fatorExib: null, grupo: '' });
-      }
-    });
+    const itensContagem = _itensContagemFisica();
 
     const qc = Object.values(getCont()).filter(v => v != null).length;
     const teo = getTeorico();
