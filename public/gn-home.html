@@ -687,6 +687,7 @@ let _dashContratosVencendo = null; // {lojaKey: [{nome, fimContrato, dias}]} —
 let _dashManutParada = null; // {lojaKey: count} — manutenções pendentes há mais de 5 dias, por loja
 let _dashCaixaSemConferencia = null; // {lojaKey: [{data, turno}]} — fechamentos de caixa sem conferência registrada, há mais de 3 dias
 let _dashVisitasHoje = null; // {lojaKey: [{nome, cargo, status:'planejada'|'andamento'|'concluida'}]} — visitas do dia (Calendário de Visitas)
+let _dashVisitasPerdidas = null; // {lojaKey: [dataISO,...]} — visitas planejadas (PLAN) nos últimos 14 dias que passaram sem nenhuma visita real registrada na mesma loja/data
 let _dashAlertasUrgentes = null; // [{loja, criado_por, criado_em, resolvido, resolvido_por, resolvido_em, motivo}] — últimos alertas urgentes (ver _enviarAlertaUrgente)
 let _dashFeriasTodas = null; // [{id, usuarioId, nome, cargo, inicio, fim, origem}] — férias de gerência+equipe, carregado por _loadDashAll pro card do topo
 let _dashGerentes = null; // {lojaKey: [{id, nome, cargo}]} — gerentes/sub-gerentes ativos por loja (gn_usuarios)
@@ -3399,12 +3400,25 @@ function _visCalDetalheHtml(dataStr) {
     const dur = _calcDuracaoMin(v.hora_chegada, v.hora_saida);
     const emAndamento = !v.hora_saida;
     html += `<div style="border-left:3px solid ${COR_LOJA[_normLoja(v.loja)]||'#888'};padding:8px 10px;margin-bottom:8px;background:rgba(0,0,0,.03);border-radius:0 8px 8px 0">
-      <div style="font-size:12px;font-weight:700;color:#1A1D23">${LOJA_DISPLAY[_normLoja(v.loja)]||v.loja}</div>
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div style="font-size:12px;font-weight:700;color:#1A1D23">${LOJA_DISPLAY[_normLoja(v.loja)]||v.loja}</div>
+        <button onclick="_visExcluirRealToggle('${v.id}')" style="background:none;border:none;color:rgba(0,0,0,.35);font-size:12px;cursor:pointer;padding:2px 4px" title="Excluir (senha mestra)">✕</button>
+      </div>
       <div style="font-size:11px;color:rgba(0,0,0,.5);margin-top:2px">📍 ${v.hora_chegada} → ${v.hora_saida||'em andamento'}${dur?' · '+_fmtDuracao(dur):''}</div>
       ${v.endereco ? `<div style="font-size:9px;color:rgba(0,0,0,.35);margin-top:2px">📌 ${esc(v.endereco)}</div>` : ''}
       ${v.obs ? `<div style="font-size:10px;color:rgba(0,0,0,.4);margin-top:4px">${esc(v.obs)}</div>` : ''}
       ${emAndamento ? `<button id="visreg-said-btn-${v.id}" onclick="_visRegistrarSaida('${v.id}','${dataStr}')" style="margin-top:6px;width:100%;background:#ef4444;color:#fff;border:none;border-radius:8px;padding:7px;font-size:11px;font-weight:800;cursor:pointer">🚪 Registrar Saída (GPS)</button>
       <div id="visreg-said-status-${v.id}" style="font-size:10px;color:rgba(0,0,0,.5);margin-top:4px;min-height:14px"></div>` : ''}
+      <div id="visexcl-picker-${v.id}" style="display:none;margin-top:8px;background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.3);border-radius:8px;padding:8px 10px">
+        <div style="font-size:9px;font-weight:700;color:#991b1b;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Excluir visita — confirme com senha mestra</div>
+        <input type="text" id="visexcl-user-${v.id}" placeholder="Usuário (mestre)" style="width:100%;box-sizing:border-box;background:#fff;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#1A1D23;font-family:inherit;margin-bottom:6px">
+        <input type="password" id="visexcl-pass-${v.id}" placeholder="Senha" style="width:100%;box-sizing:border-box;background:#fff;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#1A1D23;font-family:inherit;margin-bottom:6px">
+        <div id="visexcl-err-${v.id}" style="font-size:10px;color:#dc2626;margin-bottom:6px;min-height:12px"></div>
+        <div style="display:flex;gap:6px">
+          <button id="visexcl-btn-${v.id}" onclick="_visExcluirRealConfirmar('${v.id}')" style="flex:1;background:#ef4444;color:#fff;border:none;border-radius:8px;padding:7px;font-size:11px;font-weight:800;cursor:pointer">Confirmar exclusão</button>
+          <button onclick="_visExcluirRealToggle('${v.id}')" style="flex:1;background:rgba(0,0,0,.06);border:1px solid rgba(0,0,0,.1);color:#1A1D23;border-radius:8px;padding:7px;font-size:11px;cursor:pointer">Cancelar</button>
+        </div>
+      </div>
     </div>`;
   });
   if (ausencia) {
@@ -3585,6 +3599,43 @@ async function _visRegistrarSaida(id, dataStr) {
     if (statusEl) statusEl.textContent = '';
     return;
   }
+  _renderVisitasSupContent();
+}
+
+function _visExcluirRealToggle(id) {
+  const picker = document.getElementById('visexcl-picker-' + id);
+  if (!picker) return;
+  picker.style.display = picker.style.display === 'none' ? 'block' : 'none';
+}
+
+// Exclui uma visita real já registrada (com GPS de chegada/saída) — diferente da
+// exclusão de ausência (_visExcluirAusencia), que não pede senha: apagar uma visita real
+// apaga a prova de presença naquela loja, então só libera com credenciais de um usuário
+// cargo mestre, mesmo padrão de autenticação já usado nos cadeados do app Check-list
+// (nome + senha contra gn_usuarios, cargo e ativo=true).
+async function _visExcluirRealConfirmar(id) {
+  const user = document.getElementById('visexcl-user-'+id)?.value.trim();
+  const pass = document.getElementById('visexcl-pass-'+id)?.value;
+  const errEl = document.getElementById('visexcl-err-'+id);
+  const btnEl = document.getElementById('visexcl-btn-'+id);
+  if (errEl) errEl.textContent = '';
+  if (!user || !pass) { if (errEl) errEl.textContent = 'Preencha usuário e senha.'; return; }
+  if (btnEl) btnEl.disabled = true;
+  try {
+    const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+    const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_usuarios?nome=ilike.${encodeURIComponent(user)}&senha=eq.${encodeURIComponent(pass)}&ativo=eq.true&cargo=ilike.mestre&select=id`, H, 'visExclReal:auth', []);
+    if (!rows.length) { if (errEl) errEl.textContent = 'Usuário/senha inválidos ou não é cargo mestre.'; if (btnEl) btnEl.disabled = false; return; }
+    const res = await fetch(`${SB_URL}/rest/v1/gn_chk_visitas?id=eq.${id}`, {
+      method: 'DELETE',
+      headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY }
+    });
+    if (!res.ok) throw new Error();
+  } catch(e) {
+    if (errEl) errEl.textContent = 'Erro ao excluir. Tente novamente.';
+    if (btnEl) btnEl.disabled = false;
+    return;
+  }
+  _visCalData = _visCalData.filter(v => String(v.id) !== String(id));
   _renderVisitasSupContent();
 }
 
@@ -4039,7 +4090,9 @@ async function _loadDashAll() {
     const from30 = trinta.toISOString().slice(0,10);
     const _errCb = label => e => { window.gnLogError('dash:'+label, e); _dashLoadHadError = true; };
     const comKeysAll = Object.values(LOJA_COM_KEY).join(',');
-    const [fatCur, fatPrv, fatPrvComp, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows, comissoesAllRows, bhConfigRows, caixaFechadosRows, alertasUrgentesRows] = await Promise.all([
+    const catorze = new Date(); catorze.setDate(catorze.getDate()-14);
+    const from14 = catorze.toISOString().slice(0,10);
+    const [fatCur, fatPrv, fatPrvComp, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows, comissoesAllRows, bhConfigRows, caixaFechadosRows, alertasUrgentesRows, visitasPassadasRows] = await Promise.all([
       _fetchFat(range.dates).catch(e=>{ _errCb('fatCur')(e); return {}; }),
       _fetchFat(prevRange.dates).catch(e=>{ _errCb('fatPrv')(e); return {}; }),
       precisaCompSeparada ? _fetchFat(prevRangeCompDates).catch(e=>{ _errCb('fatPrvComp')(e); return {}; }) : Promise.resolve(null),
@@ -4056,6 +4109,7 @@ async function _loadDashAll() {
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_banco_horas?mes=eq.CONFIG&select=loja,registros`, H, 'dash:bhConfigRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?status=eq.FECHADO&data=gte.${from30}&select=id,loja,data,turno`, H, 'dash:caixaFechadosRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_alertas_urgentes?order=criado_em.desc&limit=50&select=id,loja,criado_por,criado_em,resolvido,resolvido_por,resolvido_em,motivo`, H, 'dash:alertasUrgentesRows', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_chk_visitas?data=gte.${from14}&data=lt.${hoje}&select=loja,data,hora_chegada`, H, 'dash:visitasPassadasRows', []),
     ]);
     _dashFat = fatCur; _dashFatPrev = precisaCompSeparada ? fatPrvComp : fatPrv;
     _dashFatPrevParcial = precisaCompSeparada;
@@ -4154,6 +4208,23 @@ async function _loadDashAll() {
       visitasHojePorLoja[lk].push({ nome:r.visitante, cargo:r.cargo, status });
     });
     _dashVisitasHoje = visitasHojePorLoja;
+
+    // Visitas planejadas que passaram do dia sem nenhuma visita real confirmada na mesma
+    // loja/data (últimos 14 dias) — vira alerta na aba Atenção, pra não depender de
+    // reparar o tracejado vermelho no Calendário de Visitas pra notar uma visita perdida.
+    const _confirmadasSet = new Set();
+    (visitasPassadasRows||[]).forEach(r => {
+      if (r.hora_chegada !== 'PLAN' && !_ehAusenciaVisitaLoja(r.loja)) _confirmadasSet.add(r.loja+'|'+r.data);
+    });
+    const visitasPerdidasPorLoja = {};
+    (visitasPassadasRows||[]).forEach(r => {
+      if (r.hora_chegada !== 'PLAN') return;
+      const lk = _normLoja(r.loja);
+      if (!LOJAS_LISTA.includes(lk)) return;
+      if (_confirmadasSet.has(r.loja+'|'+r.data)) return;
+      (visitasPerdidasPorLoja[lk] = visitasPerdidasPorLoja[lk] || []).push(r.data);
+    });
+    _dashVisitasPerdidas = visitasPerdidasPorLoja;
 
     // Cadastro & Escala — funcionários sem horário completo (entrada/saída) nos dias em
     // que trabalham na semana atual, e lojas sem o banco de horas do mês configurado ou
@@ -5684,6 +5755,8 @@ function _computeAlertas() {
     if(manutParadaLoja>0) alerts.push({sev:0,cor:'#ef4444',ico:'⏳',msg:`${nome} com ${manutParadaLoja} manutenção${manutParadaLoja>1?'ões':''} parada${manutParadaLoja>1?'s':''} há mais de 5 dias`,sub:'Toque no banner de manutenção pra ver',loja:k});
     const caixaLoja=_dashCaixaSemConferencia?(_dashCaixaSemConferencia[k]||[]):[];
     if(caixaLoja.length) alerts.push({sev:2,cor:'#38bdf8',ico:'💰',msg:`${nome} com ${caixaLoja.length} fechamento${caixaLoja.length>1?'s':''} de caixa sem conferência`,sub:caixaLoja.slice(0,3).map(c=>`${c.data} (${c.turno})`).join(' · ')+(caixaLoja.length>3?` +${caixaLoja.length-3}`:''),loja:k});
+    const perdidasLoja=_dashVisitasPerdidas?(_dashVisitasPerdidas[k]||[]):[];
+    if(perdidasLoja.length) alerts.push({sev:2,cor:'#f59e0b',ico:'📅',msg:`${nome} com ${perdidasLoja.length} visita${perdidasLoja.length>1?'s':''} planejada${perdidasLoja.length>1?'s':''} não confirmada${perdidasLoja.length>1?'s':''}`,sub:'Últimos 14 dias: '+perdidasLoja.slice(0,3).map(d=>d.split('-').reverse().join('/')).join(' · ')+(perdidasLoja.length>3?` +${perdidasLoja.length-3}`:''),loja:k});
   });
   alerts.sort((a,b)=>a.sev-b.sev);
   return alerts;
