@@ -752,7 +752,7 @@ let pedidoConfs  = {};  // lojaKey -> [{id,ts,usuario,cargo,itens:[{produto,forn
 let pedidoOficialAtual = {};
 let avariasAll   = {};  // loja -> [{id,ts,semana,insumo,qtd,custoUnit,valorTotal,status,loja_conf_por,loja_conf_ts,rh_conf_por,rh_conf_ts}]
 let devolucoesAll = {}; // loja -> [{id,ts,semana,fornecedor,insumo,qtd,motivo,obs,status,loja_conf_por,loja_conf_ts,pedidos_conf_por,pedidos_conf_ts}]
-let urgenciaTemplate = {}; // loja -> [item_id_string, ...] — itens usados na última urgência
+let urgenciaTemplate = {}; // loja -> [item_id_string, ...] — só leitura: espelho do que o app Estoque e Pedido marcou como urgência
 let correcoesSetor = []; // últimas correções de Est.vig feitas pelo setor de Compras (app Estoque e Pedido)
 let fatoresConversao  = {}; // insumo -> numero (ex: {"AGUA TONICA CX C/ 12 UND": 12})
 
@@ -1050,11 +1050,11 @@ async function sbPush() {
       pedidoCustom, pedidoRemovidos, pedidoConfs: filterByLoja(pedidoConfs, loja),
       avariasAll: { [loja]: _mergeArrPorId(avariasAll[loja], (baseAllData.avariasAll||{})[loja], _pendingDelIds.avariasAll) },
       devolucoesAll: { [loja]: _mergeArrPorId(devolucoesAll[loja], (baseAllData.devolucoesAll||{})[loja], _pendingDelIds.devolucoesAll) },
-      // urgenciaTemplate NÃO entra aqui de propósito — também é escrito pelo app Estoque e
-      // Pedido, direto na mesma linha. Se o autosave normal (a cada edição, debounced)
-      // reenviasse o valor local — que só atualiza a cada sbPull (20s) — ele podia sobrescrever
-      // de volta um toggle feito minutos antes no outro app. toggleUrgenciaManual() já grava
-      // essa chave isolada, com leitura fresca na hora (mesmo padrão do app Pedido).
+      // urgenciaTemplate NÃO entra aqui de propósito — é só espelho do que o app Estoque e
+      // Pedido marca, direto na mesma linha (gn_lojas.all_data.urgenciaTemplate). Se o
+      // autosave normal (a cada edição, debounced) reenviasse o valor local — que só
+      // atualiza a cada sbPull (20s) — ele podia sobrescrever de volta uma marcação feita
+      // minutos antes no outro app.
     };
     const mergedAllData = { ...baseAllData, ...payload };
     await sbRequest("gn_lojas?loja=eq." + encodeURIComponent(loja), {
@@ -3972,46 +3972,6 @@ function removerItemPedido(id) {
   render();
 }
 
-// Grava urgenciaTemplate[loja] isolado (não via sbPush/autoSave geral), porque o app
-// Estoque e Pedido escreve na mesma chave — um autosave normal aqui reenviaria o valor
-// local (só atualizado a cada sbPull, 20s) e podia sobrescrever de volta um toggle feito
-// no outro app. Usado tanto pelo toggle manual quanto pelo preenchimento em confirmarPedido.
-async function _persistUrgenciaTemplate(atual) {
-  try {
-    const rows = await sbRequest("gn_lojas?loja=eq." + encodeURIComponent(loja) + "&select=all_data", { method: "GET" });
-    const allData = (rows && rows[0] && rows[0].all_data) || {};
-    allData.urgenciaTemplate = { [loja]: atual };
-    if (rows && rows.length) {
-      await sbRequest("gn_lojas?loja=eq." + encodeURIComponent(loja), {
-        method: "PATCH", headers: { "Prefer": "return=minimal" },
-        body: JSON.stringify({ all_data: allData })
-      });
-    } else {
-      await sbRequest("gn_lojas", {
-        method: "POST", headers: { "Prefer": "return=minimal" },
-        body: JSON.stringify({ loja, all_data: allData })
-      });
-    }
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
-
-// Marca/desmarca manualmente um item como urgência — além do preenchimento automático
-// que acontece ao gerar uma Urgência (confirmarPedido('urgencia')), que já usa esta mesma lista.
-async function toggleUrgenciaManual(id) {
-  const idStr = String(id);
-  const atual = urgenciaTemplate[loja] ? [...urgenciaTemplate[loja]] : [];
-  const idx = atual.indexOf(idStr);
-  if (idx >= 0) { atual.splice(idx, 1); showToast("⚡ Item removido da urgência."); }
-  else { atual.push(idStr); showToast("⚡ Item marcado como urgência."); }
-  urgenciaTemplate[loja] = atual;
-  render();
-  const ok = await _persistUrgenciaTemplate(atual);
-  if (!ok) showToast("⚠️ Urgência salva localmente, mas falhou ao sincronizar.");
-}
-
 function abrirModalNovoProdutoPedido() {
   const grupos = [...new Set(PRODUTOS_PEDIDO.map(x=>x.grupo))].sort();
   const modal = document.createElement("div");
@@ -4707,13 +4667,6 @@ async function confirmarPedido(modo) {
       produtosParaSync.push({ prod, cx, und, pedidoCx: pedCx, pedidoUnd: pedUnd, fator });
     }
   });
-
-  // Salvar template de urgência para reutilização nas próximas semanas — isolado (ver
-  // _persistUrgenciaTemplate), mesmo motivo do toggle manual.
-  if (modo === 'urgencia' && produtosParaSync.length > 0) {
-    urgenciaTemplate[loja] = produtosParaSync.map(p => String(p.prod.item));
-    _persistUrgenciaTemplate(urgenciaTemplate[loja]);
-  }
 
   // Registrar confirmação
   if (!pedidoConfs[k]) pedidoConfs[k] = [];
@@ -7637,9 +7590,8 @@ function render() {
               ${temDiverg?'<span style="font-size:9px;background:rgba(239,68,68,.2);color:#DC2626;padding:2px 6px;border-radius:5px;flex-shrink:0;font-weight:700">⚑ DIVERGÊNCIA</span>':''}
               ${isEstoqueBaixo?'<span style="font-size:9px;background:rgba(245,158,11,.2);color:#D97706;padding:2px 6px;border-radius:5px;flex-shrink:0;font-weight:700">⚠ BAIXO</span>':''}
               ${prod.isCustom?'<span style="font-size:9px;background:rgba(52,211,153,.2);color:#059669;padding:1px 5px;border-radius:5px;flex-shrink:0">NOVO</span>':''}
-              <button onclick="toggleUrgenciaManual('${prod.item}')"
-                title="${isUrgente?'Remover da urgência':'Marcar como urgência'}"
-                style="margin-left:auto;background:${isUrgente?'rgba(180,83,9,.35)':'rgba(0,0,0,.07)'};border:none;border-radius:7px;color:${isUrgente?'#B45309':'#475569'};font-size:11px;padding:2px 7px;flex-shrink:0">⚡</button>
+              <span title="${isUrgente?'Marcado como urgência pelo Estoque e Pedido':'Sem urgência marcada'}"
+                style="margin-left:auto;background:${isUrgente?'rgba(180,83,9,.35)':'rgba(0,0,0,.07)'};border-radius:7px;color:${isUrgente?'#B45309':'#475569'};font-size:11px;padding:2px 7px;flex-shrink:0">⚡</span>
               <button onclick="abrirModalMapeamento('${prod.item}','${prod.produto.replace(/'/g,"\'")}',false)"
                 title="${getMapeamento(prod.item)?'Vinculado: '+getMapeamento(prod.item):'Vincular a insumo de ficha'}"
                 style="background:${getMapeamento(prod.item)?'rgba(245,158,11,.3)':'rgba(0,0,0,.07)'};border:none;border-radius:7px;color:${getMapeamento(prod.item)?'#B45309':'#475569'};font-size:11px;padding:2px 7px;flex-shrink:0">⛓</button>
