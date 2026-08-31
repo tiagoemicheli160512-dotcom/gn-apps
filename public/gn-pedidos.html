@@ -6560,24 +6560,35 @@ async function _fetchSaidasTerceiros() {
 // TODAS as lojas — não só os que já viraram pedido de pagamento em dinheiro/PIX (esses já
 // aparecem acima via _fetchSaidasTerceiros/tipo='transferencia_dinheiro'). Cada transferência
 // fica gravada tanto em gn_lojas.all_data.transferAll da loja origem quanto da destino
-// (mesmo registro duplicado), então dedupa por id. Só pra visão/acompanhamento do Compras —
-// quem define o valor do pagamento em dinheiro continua sendo o card de cima.
+// (mesmo registro duplicado), então dedupa por id.
+//
+// As duas cópias podem estar temporariamente dessincronizadas (uma loja confirmou e já
+// tem quitado=true, a outra ainda não puxou essa atualização e está com false) — mescla
+// os campos de confirmação por OR em vez de ficar só com a primeira cópia encontrada,
+// mesma lógica "monotônica" de TRANSFER_FLAGS_MONOTONICOS no app Lojas. Sem isso, a ordem
+// em que as linhas voltam do banco decidia se um empréstimo já quitado dos dois lados
+// ainda aparecia "aguardando" aqui. Só pra visão/acompanhamento do Compras — quem define
+// o valor do pagamento em dinheiro continua sendo o card de cima.
 async function _fetchEmprestimosAbertos() {
   const chaves = [...new Set((window.GN_LOJAS||[]).flatMap(l => [l.userKey, l.comKey]))];
   const { data, error } = await db.from('gn_lojas').select('loja,all_data').in('loja', chaves);
   if (error) throw error;
-  const vistos = new Set();
-  const abertos = [];
+  const FLAGS_MONOTONICOS = ['confirmadoOrigem','confirmadoDestino','pagDinheiroOrigem','pagDinheiroDestino','quitado'];
+  const porId = new Map();
   (data||[]).forEach(row => {
     const transferAll = row.all_data?.transferAll || {};
     Object.values(transferAll).forEach(lista => {
       (lista||[]).forEach(t => {
-        if (!t || !t.id || vistos.has(t.id) || t.quitado) return;
-        vistos.add(t.id);
-        abertos.push(t);
+        if (!t || !t.id) return;
+        const atual = porId.get(t.id);
+        if (!atual) { porId.set(t.id, t); return; }
+        const mesclado = { ...atual, ...t };
+        FLAGS_MONOTONICOS.forEach(f => { mesclado[f] = !!atual[f] || !!t[f]; });
+        porId.set(t.id, mesclado);
       });
     });
   });
+  const abertos = [...porId.values()].filter(t => !t.quitado);
   abertos.sort((a,b) => new Date(b.data||0) - new Date(a.data||0));
   return abertos;
 }
