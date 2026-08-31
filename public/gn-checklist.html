@@ -4513,6 +4513,11 @@ async function _seedInicialFromPrevWeek(semanaIni){
     const {data:prev,error}=await sb.from('checklist_carnes')
       .select('carnes').eq('semana_inicio',prevIni).eq('loja',LOJA).single();
     if(error||!prev||!prev.carnes) return;
+    // A loja pode ter trocado de semana enquanto essa consulta estava no ar — gravar mesmo
+    // assim escreveria o "inicial" semeado de `semanaIni` dentro da OUTRA semana que ficou
+    // carregada nesse meio tempo (mesmo risco do salvamento geral de carnes, ver comentário
+    // perto de "stateWeek.semanaInicio"). Aborta em silêncio.
+    if(stateWeek.semanaInicio !== semanaIni) return;
     let changed = false;
     CARNES_DEF.forEach(c=>{
       const val = prev.carnes[c.key]?.contagem_final;
@@ -7105,6 +7110,39 @@ function _diaSemanaKeyFromISO(iso){
   return ['dom','seg','ter','qua','qui','sex','sab'][d.getDay()];
 }
 
+// Grava a contagem de abertura desta semana (rowIni, já puxada em _carregarCarnesAutoLojas)
+// também como o fechamento (contagem_final) da SEMANA ANTERIOR — é a mesma pesagem física,
+// só que fecha uma semana e abre a outra ao mesmo tempo. Sem isso, contagem_final da semana
+// anterior nunca era preenchido por nenhum caminho automático (só pelo fluxo manual antigo de
+// "Editar Contagem de 2ª"), deixando o card "Documentos & Carnes (semana anterior)" do Home
+// preso em "sem Contagem" pra sempre, com a Venda estimada sempre errada. Só preenche se a
+// semana anterior já tiver um registro salvo e o campo ainda estiver vazio — nunca sobrescreve
+// edição manual nem inventa uma semana que a loja nunca chegou a salvar.
+async function _propagarFechamentoSemanaAnterior(semanaIni, valores){
+  const chaves = Object.keys(valores);
+  if(!chaves.length) return;
+  try{
+    const d = new Date(semanaIni+'T12:00:00'); d.setDate(d.getDate()-7);
+    const prevIni = toISO(d);
+    const {data:prevRow, error} = await sb.from('checklist_carnes')
+      .select('carnes,semana_fim').eq('semana_inicio',prevIni).eq('loja',LOJA).single();
+    if(error || !prevRow) return;
+    const carnesPrev = JSON.parse(JSON.stringify(prevRow.carnes||{}));
+    let changed = false;
+    chaves.forEach(key=>{
+      if(!carnesPrev[key]) carnesPrev[key]={};
+      if((carnesPrev[key].contagem_final ?? '')!=='') return; // já tem valor, preserva
+      carnesPrev[key].contagem_final = valores[key];
+      changed = true;
+    });
+    if(changed){
+      await sb.from('checklist_carnes').upsert({
+        semana_inicio: prevIni, semana_fim: prevRow.semana_fim, loja: LOJA, carnes: carnesPrev
+      },{onConflict:'semana_inicio,loja'});
+    }
+  }catch(e){}
+}
+
 // Puxa do app Lojas a Contagem de 2ª (gn_contagens_pedido) e as Entradas de Mercadoria
 // (gn_lojas.all_data.entradasAll) da semana ativa, pras 4 carnes rastreadas. Por padrão só
 // preenche campos ainda vazios (nunca sobrescreve edição manual) — force=true (botão
@@ -7138,14 +7176,26 @@ async function _carregarCarnesAutoLojas(force){
     const entradasAllLojas = (lojaRows && lojaRows[0] && lojaRows[0].all_data && lojaRows[0].all_data.entradasAll) || {};
     const entradasSemana = entradasAllLojas[userKey+'|'+semanaIni] || [];
 
+    // A loja pode ter trocado de semana (ou de tudo) enquanto as consultas acima ainda
+    // estavam no ar — gravar mesmo assim escreveria os dados de `semanaIni` dentro de
+    // stateWeek/checklist_carnes da OUTRA semana que ficou carregada nesse meio tempo
+    // (mesmo risco documentado no salvamento geral de carnes, ver comentário perto de
+    // "stateWeek.semanaInicio"). Aborta em silêncio — quem carregou a semana certa dispara
+    // sua própria chamada.
+    if(stateWeek.semanaInicio !== semanaIni){ return; }
+
     let changed=false;
+    const fechamentoPrev = {};
     CARNES_DEF.forEach(c=>{
       if(!stateWeek.carnes[c.key]) stateWeek.carnes[c.key]={};
       const cd = stateWeek.carnes[c.key];
       const catId = catIds[CARNES_PEDIDO_ITEM_ID[c.key]];
       const rowIni = contagensRows.find(r=>r.catalogo_id===catId && r.data_contagem===semanaIni);
       const rowFim = contagensRows.find(r=>r.catalogo_id===catId && r.data_contagem===semanaProxima);
-      if(rowIni && (force || cd.inicial===undefined || cd.inicial==='')){ cd.inicial=parseFloat(rowIni.atual)||0; changed=true; }
+      if(rowIni){
+        if(force || cd.inicial===undefined || cd.inicial===''){ cd.inicial=parseFloat(rowIni.atual)||0; changed=true; }
+        fechamentoPrev[c.key] = parseFloat(rowIni.atual)||0;
+      }
       if(rowFim && (force || cd.contagem_final===undefined || cd.contagem_final==='')){ cd.contagem_final=parseFloat(rowFim.atual)||0; changed=true; }
 
       const totaisDia = {ter:0,qua:0,qui:0,sex:0,sab:0,dom:0};
@@ -7167,6 +7217,7 @@ async function _carregarCarnesAutoLojas(force){
     // direto de checklist_carnes, então o valor puxado aqui precisa chegar lá mesmo sem
     // nenhuma edição manual acontecer depois (esse é o ponto de não precisar mais editar).
     if(changed){ autoSave(); _debouncedSaveAll(); }
+    _propagarFechamentoSemanaAnterior(semanaIni, fechamentoPrev);
   }catch(e){ _carnesAutoErro = true; }
   finally{
     _carnesAutoCarregando = false;
