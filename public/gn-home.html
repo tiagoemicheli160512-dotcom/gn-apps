@@ -1470,6 +1470,52 @@ function _escalaHomeDiaIdx(dataISO) {
   return (dt.getDay()+6)%7; // Seg=0 ... Dom=6
 }
 
+// Réplica de getComissoesFuncsHerdados do app Check-list: quando a semana atual ainda
+// não tem registro próprio salvo em all_data, a escala continua valendo por herança da
+// última semana com funcionários nomeados — só muda de fato quando alguém reabre a aba
+// Escala e salva de novo (troca de horário, etc). Sem essa herança, os cards do Home
+// ficavam em branco pra qualquer loja que não tivesse resalvado a semana, mesmo com
+// escala real vigente (ex.: Boulevard, Campo Grande, Caxias, Norte Shopping).
+function _escalaHomeFuncsHerdados(allData, idx) {
+  for (let i = idx - 1; i >= 0; i--) {
+    const wd = allData[String(i)];
+    if (!wd || !wd.funcs) continue;
+    const comNome = wd.funcs.filter(f => f.nome && f.nome.trim());
+    if (!comNome.length) continue;
+    const semAlvo = (typeof COMISSOES_CAL !== 'undefined' ? COMISSOES_CAL : [])[idx];
+    const MANTER_SEM = new Set(['FOLGA','NÃO TRABALHADO','AFASTAMENTO']);
+    return comNome.filter(f => !f.arquivado).map(f => {
+      let feriasIni=null, feriasFim=null;
+      if (f.ferias_ini && f.ferias_fim) {
+        feriasIni = new Date(f.ferias_ini+'T12:00:00');
+        feriasFim = new Date(f.ferias_fim+'T12:00:00');
+      }
+      const diasHerd = Array(7).fill(null).map((_,di) => {
+        const s = (f.dias||[])[di];
+        if (!s) return 'PRESENTE';
+        if (MANTER_SEM.has(s)) return s;
+        if (s==='FÉRIAS' && feriasIni && feriasFim && semAlvo) {
+          const day = semAlvo.days[di];
+          const iniY = feriasIni.getFullYear();
+          let dt = new Date(`${iniY}-${String(day.m).padStart(2,'0')}-${String(day.d).padStart(2,'0')}T12:00:00`);
+          if (dt<feriasIni) dt = new Date(`${iniY+1}-${String(day.m).padStart(2,'0')}-${String(day.d).padStart(2,'0')}T12:00:00`);
+          if (dt>=feriasIni && dt<=feriasFim) return 'FÉRIAS';
+        }
+        return 'PRESENTE';
+      });
+      return {...f, dias: diasHerd};
+    });
+  }
+  return [];
+}
+// Funcionários nomeados válidos pra semana `idx`: usa o registro salvo se existir,
+// senão cai pra herança da semana anterior mais recente (ver acima).
+function _escalaHomeFuncsAtual(allData, idx) {
+  const wd = allData[String(idx)];
+  if (!wd) return _escalaHomeFuncsHerdados(allData, idx);
+  return (wd.funcs || []).filter(f => f.nome && f.nome.trim());
+}
+
 async function _renderEscalaDiaHome(mostrar, sess, isMasterAtivo) {
   const el = document.getElementById('escala-dia-home-card');
   if (!el) return;
@@ -1483,8 +1529,7 @@ async function _renderEscalaDiaHome(mostrar, sess, isMasterAtivo) {
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
   const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'escalaDia:rows', []);
   const allData = (rows[0] && rows[0].all_data) || {};
-  const wd = allData[String(idx)];
-  const funcs = ((wd && wd.funcs) || []).filter(f => f.nome && f.nome.trim());
+  const funcs = _escalaHomeFuncsAtual(allData, idx);
   if (!funcs.length) { el.innerHTML = ''; return; }
 
   const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
@@ -1606,8 +1651,7 @@ async function _renderPlantaoHome(mostrar, sess, isMasterAtivo) {
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
   const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'plantaoHome:rows', []);
   const allData = (rows[0] && rows[0].all_data) || {};
-  const wd = allData[String(idx)];
-  const funcs = ((wd && wd.funcs) || []).filter(f => f.nome && f.nome.trim());
+  const funcs = _escalaHomeFuncsAtual(allData, idx);
   if (!funcs.length) { el.innerHTML = ''; return; }
 
   const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
@@ -1765,8 +1809,7 @@ async function _renderPendenciasLojaHome(mostrar, sess, isMasterAtivo) {
     let bancoHorasPendente = null;
     if (semIdxAtual != null) {
       const allData = (comRows[0] && comRows[0].all_data) || {};
-      const wd = allData[String(semIdxAtual)];
-      const funcs = ((wd && wd.funcs) || []).filter(f=>f.nome && f.nome.trim());
+      const funcs = _escalaHomeFuncsAtual(allData, semIdxAtual);
       const DIAS_SEM = ['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
       const setoresEmUso = new Set();
       funcs.forEach(f=>{
@@ -4276,8 +4319,7 @@ async function _loadDashAll() {
       (comissoesAllRows||[]).forEach(r=>{
         const lk = _COM_KEY_TO_LOJA[r.loja];
         if (!lk || !LOJAS_LISTA.includes(lk)) return;
-        const wd = (r.all_data||{})[String(semIdxAtual)];
-        const funcs = ((wd && wd.funcs) || []).filter(f=>f.nome && f.nome.trim());
+        const funcs = _escalaHomeFuncsAtual(r.all_data||{}, semIdxAtual);
         const setoresEmUso = new Set();
         funcs.forEach(f=>{
           if (f.setor && f.setor.trim()) setoresEmUso.add(f.setor.trim());
