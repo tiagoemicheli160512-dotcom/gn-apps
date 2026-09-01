@@ -30,6 +30,7 @@ body{background:var(--bg);color:#1A1D23;font-family:-apple-system,BlinkMacSystem
 .hdr-user{font-size:10px;color:var(--mut);max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .btn-logout{background:none;border:none;color:var(--mut);font-size:11px;cursor:pointer;padding:4px 6px;border-radius:6px;font-family:inherit;opacity:.7}
 .btn-logout:hover{opacity:1;color:var(--erro)}
+#selLoja{font-size:11px;font-weight:700;padding:6px 8px;border-radius:10px;border:1px solid rgba(232,88,10,.3);background:rgba(232,88,10,.1);color:var(--laranja);flex-shrink:0;max-width:130px;font-family:inherit}
 
 /* BOTTOM NAV */
 .bot-nav{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--card2);display:flex;z-index:30;padding-bottom:env(safe-area-inset-bottom,0)}
@@ -194,6 +195,7 @@ body{background:var(--bg);color:#1A1D23;font-family:-apple-system,BlinkMacSystem
       <div class="hdr-sub" id="hdr-sub">—</div>
     </div>
     <div class="hdr-right">
+      <select id="selLoja" onchange="changeLojaAtiva(this.value)"></select>
       <span id="cloud-badge" style="font-size:10px;font-weight:700;padding:3px 7px;border-radius:99px;"></span>
       <span class="hdr-user" id="hdr-user"></span>
       <button class="btn-logout" onclick="window.location.href='/gn-home.html'" title="Voltar ao início" style="font-size:16px;padding:2px 6px">←</button>
@@ -257,6 +259,8 @@ const MKT_ITEMS = [
 
 const S = {
   usuario:    null,
+  lojaAtiva:  null,        // loja cujo inventário/marketing está sendo visto/editado
+  lojaForcada:null,        // != null => usuário travado nessa loja, sem seletor
   tab:        'inventario',
   setor:      'Computadores',
   view:       'list',       // 'list' | 'add' | 'addMkt' | 'edit'
@@ -300,7 +304,7 @@ async function sb(path, opts={}){
 
 // ─── STORAGE ─────────────────────────────────────────────
 function storageKey(){
-  return 'gn_inv_v1_'+(S.usuario?.loja||'geral').replace(/[\s/]+/g,'_');
+  return 'gn_inv_v1_'+(S.lojaAtiva||'geral').replace(/[\s/]+/g,'_');
 }
 
 function loadData(){
@@ -330,17 +334,17 @@ function setCloudBadge(mode){
 }
 
 async function saveDataCloud(){
-  if(!S.usuario?.loja) return;
+  if(!S.lojaAtiva) return;
   try{
-    await sb('gn_inventario_cloud',{method:'POST',prefer:'resolution=merge-duplicates',body:{loja:S.usuario.loja,dados:S.data,atualizado_em:new Date().toISOString(),atualizado_por:S.usuario.nome}});
+    await sb('gn_inventario_cloud',{method:'POST',prefer:'resolution=merge-duplicates',body:{loja:S.lojaAtiva,dados:S.data,atualizado_em:new Date().toISOString(),atualizado_por:S.usuario.nome}});
     setCloudBadge('cloud');
   }catch(e){ setCloudBadge('local'); }
 }
 
 async function loadDataCloud(){
-  if(!S.usuario?.loja){ loadData(); return; }
+  if(!S.lojaAtiva){ loadData(); return; }
   try{
-    const rows=await sb(`gn_inventario_cloud?loja=eq.${encodeURIComponent(S.usuario.loja)}&select=dados,atualizado_em`);
+    const rows=await sb(`gn_inventario_cloud?loja=eq.${encodeURIComponent(S.lojaAtiva)}&select=dados,atualizado_em`);
     if(rows&&rows.length&&rows[0].dados){
       S.data=rows[0].dados;
       if(!S.data.mktSaidas) S.data.mktSaidas=[];
@@ -392,22 +396,72 @@ async function iniciarApp(){
     if(!p.inventario&&!p.master&&!cargosOk.includes(S.usuario.cargo||'')){ doLogout(); return; }
     try{ localStorage.setItem(SESSION_KEY,JSON.stringify({...S.usuario,ts:Date.now()})); }catch(_){}
   }catch(_){}
+  _resolverLojaAtiva();
   await loadDataCloud();
   $('login').classList.add('hidden');
   $('app').classList.remove('hidden');
   $('hdr-user').textContent=S.usuario.nome+(S.usuario.loja?' · '+S.usuario.loja:'');
-  $('hdr-sub').textContent=S.usuario.loja||'Sem loja definida';
-  if($('sidebar-loja')) $('sidebar-loja').textContent=S.usuario.loja||'';
+  atualizarHeaderLoja();
   render();
 }
 
 function doLogout(){
   try{ localStorage.removeItem(SESSION_KEY); }catch(_){}
-  S.usuario=null; S.data=null;
+  S.usuario=null; S.data=null; S.lojaAtiva=null; S.lojaForcada=null;
   $('app').classList.add('hidden');
   $('login').classList.remove('hidden');
   $('ln-user').value=''; $('ln-pass').value=''; $('ln-err').textContent='';
   setTimeout(()=>$('ln-user').focus(),100);
+}
+
+// ─── LOJA ATIVA ──────────────────────────────────────────
+// Antes o app usava direto S.usuario.loja pra tudo (chave de storage local,
+// linha de gn_inventario_cloud, auditoria...) — funciona pra um(a) gerente,
+// que só vê a própria loja, mas trava mestre/supervisor/administrador (cuja
+// conta de gn_usuarios normalmente não tem uma loja fixa) numa loja "geral"
+// sem seletor, sem sincronizar com a nuvem (saveDataCloud/loadDataCloud
+// exigem loja) e sem jeito de ver ou editar o inventário de uma loja
+// específica. Mesmo critério de "quem pode alternar loja" já usado no app
+// Lojas (CARGOS_ALTERNAR_LOJA + flag master) — gerente/admin continuam
+// travados na própria loja, sem seletor.
+function _resolverLojaAtiva(){
+  const cargo=(S.usuario.cargo||'').toLowerCase();
+  const podeAlternar=(window.CARGOS_ALTERNAR_LOJA||[]).includes(cargo)
+    || S.usuario.loja==='GERAL' || !!(S.usuario.permissoes && S.usuario.permissoes.master);
+  S.lojaForcada=podeAlternar ? null : (S.usuario.loja||null);
+  if(S.lojaForcada){ S.lojaAtiva=S.lojaForcada; return; }
+  const lojasValidas=(window.GN_LOJAS||[]).map(l=>l.userKey);
+  let salva=null;
+  try{ salva=localStorage.getItem('gn_inv_loja_ativa'); }catch(_){}
+  S.lojaAtiva = lojasValidas.includes(salva) ? salva
+    : lojasValidas.includes(S.usuario.loja) ? S.usuario.loja
+    : (lojasValidas[0]||null);
+}
+
+function atualizarHeaderLoja(){
+  $('hdr-sub').textContent=S.lojaAtiva||'Sem loja definida';
+  if($('sidebar-loja')) $('sidebar-loja').textContent=S.lojaAtiva||'';
+  const sel=$('selLoja');
+  if(!sel) return;
+  if(!sel.dataset.built){
+    (window.GN_LOJAS||[]).forEach(l=>{
+      const o=document.createElement('option');
+      o.value=l.userKey; o.textContent=l.display;
+      sel.appendChild(o);
+    });
+    sel.dataset.built='1';
+  }
+  sel.value=S.lojaAtiva||'';
+  sel.style.display=S.lojaForcada?'none':'';
+}
+
+async function changeLojaAtiva(v){
+  if(S.lojaForcada||!v||v===S.lojaAtiva) return;
+  S.lojaAtiva=v;
+  try{ localStorage.setItem('gn_inv_loja_ativa',v); }catch(_){}
+  atualizarHeaderLoja();
+  await loadDataCloud();
+  setTab('inventario');
 }
 
 // ─── NAVIGATION ──────────────────────────────────────────
@@ -935,7 +989,7 @@ function saveEditItem(){
 
 // ─── RELATÓRIO ───────────────────────────────────────────
 function renderRelatorio(c){
-  const loja=S.usuario?.loja||'Loja';
+  const loja=S.lojaAtiva||'Loja';
   const hoje=new Date().toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',year:'numeric'});
   const itemsAbaixo=S.data.items.filter(i=>i.minimo>0&&i.quantidade<i.minimo);
   const bannerAlerta=itemsAbaixo.length?`
@@ -999,7 +1053,7 @@ function renderRelatorio(c){
 }
 
 function _buildTextoInventario(){
-  const loja=S.usuario?.loja||'Loja';
+  const loja=S.lojaAtiva||'Loja';
   const hoje=new Date().toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',year:'numeric'});
   let txt=`GN Inventário — ${loja}\n${hoje}\n`;
   txt+=`\n─ INVENTÁRIO ─\n`;
@@ -1019,7 +1073,7 @@ function _buildTextoInventario(){
 }
 
 function compartilharWpp(){
-  const loja=S.usuario?.loja||'Loja';
+  const loja=S.lojaAtiva||'Loja';
   const hoje=new Date().toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',year:'numeric'});
   let txt=`📦 *GN Inventário — ${loja}*\n📅 ${hoje}\n`;
 
@@ -1059,7 +1113,7 @@ function gerarPDF(texto,titulo){
   const w=window.open('','_blank');
   if(w){w.document.write(html);w.document.close();}
 }
-function gerarPDFInventario(){gerarPDF(_buildTextoInventario(),`GN Inventário — ${S.usuario?.loja||'Loja'}`);}
+function gerarPDFInventario(){gerarPDF(_buildTextoInventario(),`GN Inventário — ${S.lojaAtiva||'Loja'}`);}
 
 // ─── AUDITORIA (quem fez o quê) ────────────────────────────
 // Log central de ações sensíveis (exclusões, edições diretas, entradas e
@@ -1079,7 +1133,7 @@ const AUD_ACOES_INV = {
 async function _logAuditoriaInv(acao, detalhes){
   try{
     await sb('gn_inv_auditoria',{method:'POST',body:{
-      loja: S.usuario?.loja || null, usuario: S.usuario?.nome || 'SISTEMA', acao, detalhes: detalhes || null
+      loja: S.lojaAtiva || null, usuario: S.usuario?.nome || 'SISTEMA', acao, detalhes: detalhes || null
     }});
   }catch(e){ console.error('Erro ao registrar auditoria:', e.message||e); }
 }
@@ -1100,7 +1154,7 @@ async function renderAuditoria(c){
   c.innerHTML=`<div class="content"><div style="text-align:center;padding:30px;color:var(--mut);font-size:12px">Carregando...</div></div>`;
   let rows=[];
   try{
-    rows=await sb(`gn_inv_auditoria?loja=eq.${encodeURIComponent(S.usuario?.loja||'')}&order=criado_em.desc&limit=150`);
+    rows=await sb(`gn_inv_auditoria?loja=eq.${encodeURIComponent(S.lojaAtiva||'')}&order=criado_em.desc&limit=150`);
   }catch(e){
     c.innerHTML=`<div class="content"><div style="text-align:center;padding:30px;color:var(--erro);font-size:12px">⚠️ Erro ao carregar auditoria.</div></div>`;
     return;
