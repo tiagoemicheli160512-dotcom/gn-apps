@@ -3255,43 +3255,93 @@ function _renderVisRelatorioTab() {
 }
 
 // Monta o texto do relatório do supervisor selecionado (mesmos dados/período exibidos
-// na aba Relatório) — usado tanto pelo PDF de impressão quanto pelo PDF real pro WhatsApp.
-function _buildTextoVisitasSup() {
+// na aba Relatório). Mesmo padrão (seções com divisor, emoji, detalhamento agrupado por
+// dia com dia da semana, status de plano confirmado/previsto, ausências, endereço/
+// observação) já usado no relatório de Visitas do app Check-list (exportarVisitasWpp) —
+// só sem o cruzamento com checklist_diario (nota de Supervisão/Auditoria/Manutenção
+// pendente), que é um recurso à parte, específico daquele app.
+// paraWpp=true acrescenta os marcadores de negrito do WhatsApp (*texto*) — só fazem
+// sentido na mensagem de texto; no PDF (gerarPDFVisitasSup/enviarPDFVisitasSupWpp, que
+// reaproveitam esse mesmo texto) apareceriam como asteriscos literais na folha, por isso
+// os botões de PDF chamam sem esse parâmetro (mesma separação que Férias/Xadrez/Alertas
+// já usam entre o texto "puro" e o texto com negrito do WhatsApp).
+function _buildTextoVisitasSup(paraWpp) {
   if (!_visSupSelecionado) return null;
-  const reaisAll = _visSupData.filter(v => v.loja!=='FOLGA' && v.loja!=='FÉRIAS' && v.loja!=='VIAGEM_SP' && v.hora_chegada!=='PLAN');
+  const DIV = '━━━━━━━━━━━━━━━━━━━━━━━━━━';
+  const b = paraWpp ? '*' : '';
+  const fmtBR = s => s ? s.split('-').reverse().join('/') : '';
+  const reaisAll = _visSupData.filter(v => !_ehAusenciaVisitaLoja(v.loja) && v.hora_chegada!=='PLAN');
   const planosAll = _visSupData.filter(v => v.hora_chegada==='PLAN');
-  const lojasVisitadas = [...new Set(reaisAll.map(v=>v.loja))];
+  const lojasVisitadas = [...new Set(reaisAll.map(v=>v.loja))].sort();
   let totalMins = 0; reaisAll.forEach(v => { const m=_calcDuracaoMin(v.hora_chegada,v.hora_saida); if(m) totalMins+=m; });
   const planosConf = planosAll.filter(p => _visSupData.some(r=>r.data===p.data&&r.loja===p.loja&&r.hora_chegada!=='PLAN'));
   const taxaPct = planosAll.length > 0 ? Math.round(planosConf.length/planosAll.length*100) : null;
-  const todasLojas = [...new Set(_visSupData.filter(v=>v.loja!=='FOLGA'&&v.loja!=='FÉRIAS'&&v.loja!=='VIAGEM_SP').map(v=>v.loja))].sort();
+  const nPorAusencia = {};
+  Object.keys(VIS_AUSENCIA_TIPOS).forEach(t => { nPorAusencia[t] = _visSupData.filter(v => v.loja===t).length; });
+  const todasLojas = [...new Set(_visSupData.filter(v=>!_ehAusenciaVisitaLoja(v.loja)).map(v=>v.loja))].sort();
 
-  let txt = `RELATÓRIO DE VISITAS — ${_visSupSelecionado}\n`;
-  txt += `${_visSupDe.split('-').reverse().join('/')} a ${_visSupAte.split('-').reverse().join('/')}\n\n`;
-  txt += `Visitas realizadas: ${reaisAll.length}\n`;
-  txt += `Lojas visitadas: ${lojasVisitadas.length}\n`;
-  txt += `Tempo em campo: ${totalMins>0?_fmtDuracao(totalMins):'—'}\n`;
-  txt += `Planos cumpridos: ${taxaPct!==null?taxaPct+'%':'—'}\n`;
+  const hAgora = new Date().getHours();
+  const saudacao = hAgora < 12 ? 'Bom dia' : hAgora < 18 ? 'Boa tarde' : 'Boa noite';
+
+  let txt = `${saudacao}! 👋\n\n`;
+  txt += `📍 ${b}RELATÓRIO DE VISITAS${b}\n`;
+  txt += `${_visSupTitulo(_visSupDe, _visSupAte, _visSupPeriodo)}\n`;
+  txt += `👤 ${_visSupSelecionado}\n`;
+  txt += `📅 ${fmtBR(_visSupDe)} a ${fmtBR(_visSupAte)}\n\n`;
+
+  txt += `${DIV}\n`;
+  txt += `📊 ${b}RESUMO DO PERÍODO${b}\n`;
+  txt += `${DIV}\n`;
+  txt += `✅ Visitas realizadas: ${b}${reaisAll.length}${b}\n`;
+  txt += `🏪 Lojas visitadas: ${b}${lojasVisitadas.length}${b}\n`;
+  if (totalMins > 0) txt += `⏱ Tempo em campo: ${b}${_fmtDuracao(totalMins)}${b}\n`;
+  if (taxaPct !== null) txt += `📋 Planos cumpridos: ${b}${taxaPct}%${b} (${planosConf.length}/${planosAll.length})\n`;
+  Object.entries(VIS_AUSENCIA_TIPOS).forEach(([tipo,info]) => {
+    const n = nPorAusencia[tipo];
+    if (n) txt += `${info.emoji} ${info.label}: ${n} dia${n>1?'s':''}\n`;
+  });
 
   if (todasLojas.length) {
-    txt += '\nPLANO × REALIZADO POR LOJA\n';
+    txt += `\n${DIV}\n`;
+    txt += `📈 ${b}PLANO × REALIZADO${b}\n`;
+    txt += `${DIV}\n`;
     todasLojas.forEach(l => {
-      const planosLoja = _visSupData.filter(v=>v.loja===l&&v.hora_chegada==='PLAN');
-      const pl = planosLoja.length;
-      const cumpridos = planosLoja.filter(p=>_visSupData.some(r=>r.data===p.data&&r.loja===l&&r.hora_chegada!=='PLAN')).length;
-      const pct = pl>0 ? Math.round(cumpridos/pl*100) : null;
-      txt += `  ${LOJA_DISPLAY[_normLoja(l)]||l}: ${cumpridos}/${pl>0?pl:'?'}${pct!==null?' ('+pct+'%)':''}\n`;
+      const pl = _visSupData.filter(v=>v.loja===l&&v.hora_chegada==='PLAN').length;
+      const re = _visSupData.filter(v=>v.loja===l&&v.hora_chegada!=='PLAN').length;
+      const pct = pl>0 ? ` (${Math.round(re/pl*100)}%)` : '';
+      txt += `• ${LOJA_DISPLAY[_normLoja(l)]||l}: ${re}/${pl>0?pl:'?'}${pct}\n`;
     });
   }
 
-  if (reaisAll.length) {
-    txt += '\nVISITAS NO PERÍODO\n';
-    reaisAll.slice().reverse().forEach(v => {
-      const dur = _calcDuracaoMin(v.hora_chegada, v.hora_saida);
-      txt += `  ${v.data.split('-').reverse().join('/')} — ${LOJA_DISPLAY[_normLoja(v.loja)]||v.loja} — ${v.hora_chegada}${v.hora_saida?' → '+v.hora_saida:' (em andamento)'}${dur?' · '+_fmtDuracao(dur):''}\n`;
-      if (v.obs) txt += `    📝 ${v.obs}\n`;
+  if (_visSupData.length) {
+    txt += `\n${DIV}\n`;
+    txt += `📅 ${b}DETALHAMENTO${b}\n`;
+    txt += `${DIV}\n`;
+    let dataAtual = '';
+    _visSupData.forEach(v => {
+      if (v.data !== dataAtual) {
+        dataAtual = v.data;
+        const [, m, d] = v.data.split('-');
+        const dsem = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'][new Date(v.data+'T12:00').getDay()];
+        txt += `\n${b}${dsem} ${d}/${m}${b}\n`;
+      }
+      if (v.hora_chegada === 'PLAN') {
+        const conf = _visSupData.some(r=>r.data===v.data&&r.loja===v.loja&&r.hora_chegada!=='PLAN'&&!_ehAusenciaVisitaLoja(r.loja));
+        txt += `  📅 ${LOJA_DISPLAY[_normLoja(v.loja)]||v.loja} ${conf?'✓ Confirmada':'⏳ Prevista'}\n`;
+      } else if (_ehAusenciaVisitaLoja(v.loja)) {
+        const info = VIS_AUSENCIA_TIPOS[v.loja];
+        txt += `  ${info.emoji} ${info.label}\n`;
+        if (v.obs) txt += `     💬 ${v.obs}\n`;
+      } else {
+        const dur = _calcDuracaoMin(v.hora_chegada, v.hora_saida);
+        txt += `  📍 ${LOJA_DISPLAY[_normLoja(v.loja)]||v.loja} — ${v.hora_chegada} → ${v.hora_saida||'em andamento'}${dur?' ('+_fmtDuracao(dur)+')':''}\n`;
+        if (v.endereco) txt += `     📌 ${v.endereco}\n`;
+        if (v.obs) txt += `     💬 ${v.obs}\n`;
+      }
     });
   }
+
+  txt += `\n${paraWpp ? '_GN Operações_' : 'GN Operações'}`;
 
   return { texto: txt, titulo: `Relatório de Visitas — ${_visSupSelecionado}` };
 }
@@ -3309,7 +3359,7 @@ function gerarPDFVisitasSup() {
 // Férias/Xadrez/Alertas). Essa função manda o texto puro via wa.me; quem quiser o PDF
 // anexado usa o botão "PDF no Whats" (enviarPDFVisitasSupWpp), separado.
 function gerarWppVisitasSup() {
-  const r = _buildTextoVisitasSup();
+  const r = _buildTextoVisitasSup(true);
   if (!r) return;
   window.open('https://wa.me/?text=' + encodeURIComponent(r.texto), '_blank');
 }
