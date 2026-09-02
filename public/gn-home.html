@@ -6433,15 +6433,23 @@ const _reportBtnsRowHtml = (prefix) => `<div style="display:flex;gap:8px;flex-wr
 // atualmente navegado ali — senão busca direto (_fetchFat), sem depender do toggle
 // Semanal/Mensal do Painel nem da navegação de semana/mês dele. Cacheia por período
 // (window._relCache) enquanto o modal estiver aberto, pra trocar de volta sem reconsultar.
+// Offset de navegação do relatório, por tipo de período — independente da navegação do
+// Painel (_dashWoff/_dashMoff), pra poder gerar relatório de um mês/semana/trimestre
+// passado sem precisar sair do modal pra mexer no toggle principal. Cada tipo guarda o
+// próprio offset (voltar 2 meses na aba Mensal não mexe onde a aba Semanal estava).
+window._relOffsets = window._relOffsets || { sem:0, mes:0, tri:0 };
+
 async function _relCarregarPeriodo(per) {
-  if (window._relCache && window._relCache[per]) { window._relData = window._relCache[per]; return; }
-  const usaDashAtual = per === _dashPer;
-  const range     = per==='sem' ? _weekRange(usaDashAtual?_dashWoff:0)
-                   : per==='mes' ? _monthRange(usaDashAtual?_dashMoff:0)
-                   : _quarterRange(0);
-  const prevRange = per==='sem' ? _weekRange((usaDashAtual?_dashWoff:0)-1)
-                   : per==='mes' ? _monthRange((usaDashAtual?_dashMoff:0)-1)
-                   : _quarterRange(-1);
+  const off = (window._relOffsets && window._relOffsets[per]) || 0;
+  const cacheKey = per + ':' + off;
+  if (window._relCache && window._relCache[cacheKey]) { window._relData = window._relCache[cacheKey]; return; }
+  // Só reaproveita _dashFat (sem consulta nova) quando período E offset batem exatamente
+  // com o que está navegado no Painel agora — senão (inclusive Trimestral, que não tem
+  // equivalente no Painel) busca direto.
+  const dashOff = per==='sem' ? _dashWoff : per==='mes' ? _dashMoff : null;
+  const usaDashAtual = per === _dashPer && off === dashOff;
+  const range     = per==='sem' ? _weekRange(off) : per==='mes' ? _monthRange(off) : _quarterRange(off);
+  const prevRange = per==='sem' ? _weekRange(off-1) : per==='mes' ? _monthRange(off-1) : _quarterRange(off-1);
   let fat, fatPrev;
   if (usaDashAtual && _dashFat) { fat = _dashFat; fatPrev = _dashFatPrev || {}; }
   else { [fat, fatPrev] = await Promise.all([ _fetchFat(range.dates), _fetchFat(prevRange.dates) ]); }
@@ -6469,9 +6477,9 @@ async function _relCarregarPeriodo(per) {
   lojasDados.sort((a,b) => b.v - a.v);
   const now = new Date();
   const dtGer = `${String(now.getDate()).padStart(2,'0')}/${String(now.getMonth()+1).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-  const data = { per, range, perTipo, total, lojasDados, dtGer, metaFunc, metaFuncAtencao };
+  const data = { per, off, range, perTipo, total, lojasDados, dtGer, metaFunc, metaFuncAtencao };
   window._relCache = window._relCache || {};
-  window._relCache[per] = data;
+  window._relCache[cacheKey] = data;
   window._relData = data;
 }
 
@@ -6485,11 +6493,18 @@ function _relModalHtml() {
     const on = p===per;
     return `<button onclick="_relTrocarPeriodo('${p}')" style="flex:1;padding:7px 4px;border-radius:8px;font-size:11px;font-weight:700;border:1px solid ${on?'#7C83FD':'rgba(255,255,255,.15)'};background:${on?'rgba(124,131,253,.2)':'transparent'};color:${on?'#fff':'rgba(255,255,255,.45)'};cursor:pointer">${lbl}</button>`;
   }).join('');
+  // Navegação (‹ período ›) independente da navegação do Painel — deixa escolher, por
+  // exemplo, "Mensal" de um mês passado sem sair do modal (ver _relNav/_relOffsets).
+  const navHtml = `<div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:16px">
+    <button onclick="_relNav(-1)" style="background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);border-radius:8px;width:30px;height:30px;color:#fff;font-size:15px;cursor:pointer;flex-shrink:0">‹</button>
+    <div style="font-size:12px;font-weight:700;color:rgba(255,255,255,.75);min-width:110px;text-align:center" id="_rel-sub">${range.label}${range.isCurrent?' · atual':''}</div>
+    <button onclick="_relNav(1)" ${range.isCurrent?'disabled':''} style="background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);border-radius:8px;width:30px;height:30px;color:${range.isCurrent?'rgba(255,255,255,.25)':'#fff'};font-size:15px;cursor:${range.isCurrent?'default':'pointer'};flex-shrink:0">›</button>
+  </div>`;
   return `
     <div style="width:36px;height:3px;background:rgba(255,255,255,.18);border-radius:2px;margin:0 auto 16px"></div>
-    <div style="font-size:14px;font-weight:700;color:rgba(255,255,255,.92);margin-bottom:2px" id="_rel-titulo">📄 Relatório ${perTipo}</div>
-    <div style="font-size:11px;color:rgba(255,255,255,.4);margin-bottom:12px" id="_rel-sub">${range.label}</div>
-    <div style="display:flex;gap:6px;margin-bottom:16px">${pills}</div>
+    <div style="font-size:14px;font-weight:700;color:rgba(255,255,255,.92);margin-bottom:12px;text-align:center" id="_rel-titulo">📄 Relatório ${perTipo}</div>
+    <div style="display:flex;gap:6px;margin-bottom:14px">${pills}</div>
+    ${navHtml}
     <button onclick="_relPDF()" style="display:block;width:100%;background:rgba(124,131,253,.16);border:1px solid rgba(124,131,253,.4);border-radius:10px;color:#fff;padding:13px 16px;font-size:13px;font-weight:700;cursor:pointer;margin-bottom:10px;text-align:left;font-family:inherit">
       📥 Gerar PDF
     </button>
@@ -6499,6 +6514,26 @@ function _relModalHtml() {
     <button onclick="document.getElementById('_rel-modal').remove()" style="display:block;width:100%;background:transparent;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:rgba(255,255,255,.5);padding:11px;font-size:12px;cursor:pointer;font-family:inherit">
       Cancelar
     </button>`;
+}
+
+async function _relNav(dir) {
+  const per = window._relData.per;
+  window._relOffsets = window._relOffsets || { sem:0, mes:0, tri:0 };
+  const novoOff = Math.min(0, (window._relOffsets[per]||0) + dir);
+  if (novoOff === window._relOffsets[per]) return; // já no limite (não passa de "atual")
+  window._relOffsets[per] = novoOff;
+  const tit = document.getElementById('_rel-titulo');
+  if (tit) tit.textContent = '⏳ Carregando...';
+  try {
+    await _relCarregarPeriodo(per);
+  } catch(e) {
+    window._relOffsets[per] -= dir; // desfaz a navegação que falhou
+    alert('Erro ao carregar dados do período. Tente de novo.');
+    if (tit) tit.textContent = `📄 Relatório ${window._relData.perTipo}`;
+    return;
+  }
+  const modal = document.getElementById('_rel-modal');
+  if (modal) modal.querySelector('div').innerHTML = _relModalHtml();
 }
 
 async function _relTrocarPeriodo(per) {
@@ -6519,6 +6554,9 @@ async function _relTrocarPeriodo(per) {
 async function _gerarRelatorio() {
   if (!_dashFat) { alert('Aguarde os dados carregarem.'); return; }
   window._relCache = {};
+  // Sempre abre casando com o que está navegado no Painel agora (Trimestral não tem
+  // equivalente lá, então começa no trimestre atual) — dali em diante _relNav navega livre.
+  window._relOffsets = { sem: _dashWoff, mes: _dashMoff, tri: 0 };
   await _relCarregarPeriodo(_dashPer);
 
   const ex = document.getElementById('_rel-modal');
