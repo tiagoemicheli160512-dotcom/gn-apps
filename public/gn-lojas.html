@@ -716,6 +716,34 @@ let transferAll  = {};  // lojaKey -> [{id,data,origem,destino,insumo,qtd,motivo
 let pedidoAll    = {};  // lojaKey -> {item_id: {atual, pedido, obs}}
 let provisoesEntrega = []; // entregas pendentes (AGUARDANDO) desta loja
 let provisoesHistorico = []; // entregas já confirmadas desta loja (últimos 30 dias)
+// Janela do Histórico de Recebimentos (aba Entrega), em dias — 14 é o padrão de sempre pra
+// qualquer usuário; o filtro Semana/Mês/Trimestre (só cargo mestre/compras, ver
+// _epHistFiltroVisivel) troca esse valor e reconsulta o banco com carregarEntregas().
+let _epHistJanelaDias = 14;
+function _epHistFiltroVisivel() {
+  return !!(usuarioAtual && (usuarioAtual.cargo === 'mestre' || usuarioAtual.cargo === 'compras'));
+}
+function _epSetHistJanela(dias) {
+  if (_epHistJanelaDias === dias) return;
+  _epHistJanelaDias = dias;
+  carregarEntregas(false);
+}
+const _EP_HIST_OPCOES = [ {dias:7,lbl:'Semana'}, {dias:30,lbl:'Mês'}, {dias:90,lbl:'Trimestre'} ];
+function _epHistJanelaLabel() {
+  const o = _EP_HIST_OPCOES.find(x => x.dias === _epHistJanelaDias);
+  return o ? o.lbl : ('últimos ' + _epHistJanelaDias + ' dias');
+}
+function _epHistFiltroHtml() {
+  if (!_epHistFiltroVisivel()) return '';
+  const btns = _EP_HIST_OPCOES.map(o => {
+    const on = _epHistJanelaDias === o.dias;
+    return `<button onclick="_epSetHistJanela(${o.dias})" style="flex:1;padding:6px 4px;border-radius:8px;font-size:10.5px;font-weight:700;border:1px solid ${on?'#B45309':'rgba(0,0,0,.12)'};background:${on?'rgba(217,119,6,.14)':'#FFFFFF'};color:${on?'#B45309':'#475569'};cursor:pointer">${o.lbl}</button>`;
+  }).join('');
+  return `<div style="margin-top:14px">
+    <div style="font-size:10px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">🔎 Buscar histórico por período (mestre/compras)</div>
+    <div style="display:flex;gap:6px">${btns}</div>
+  </div>`;
+}
 // Itens confirmados nesta sessão da aba Entrega, guardados aqui até o pedido inteiro
 // daquele fornecedor terminar — sem isso, cada item confirmado sumia na hora da lista
 // (foi pro histórico), fazendo a lista "pular" no meio da conferência de um pedido com
@@ -8085,7 +8113,8 @@ function render() {
       })()}
 
       ${(()=>{
-        if(!provisoesHistorico.length) return '';
+        const filtroHtml=_epHistFiltroHtml();
+        if(!provisoesHistorico.length) return filtroHtml?`${filtroHtml}<div class="card" style="padding:14px;text-align:center;color:#475569;font-size:12px;margin-top:8px">Nenhum recebimento confirmado nesse período.</div>`:'';
         const porForn={};
         provisoesHistorico.forEach(p=>{const f=p.fornecedor||'SEM FORNECEDOR';(porForn[f]=porForn[f]||[]).push(p);});
         const gruposHtml=Object.entries(porForn).sort(([a],[b])=>a.localeCompare(b)).map(([forn,itens])=>{
@@ -8165,7 +8194,7 @@ function render() {
             <div class="ep-grupo-body">${itensHtml}</div>
           </div>`;
         }).join('');
-        return `<div style="margin-top:14px;margin-bottom:6px;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em">📋 Recebimentos Confirmados</div>${gruposHtml}`;
+        return `${filtroHtml}<div style="margin-top:14px;margin-bottom:6px;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em">📋 Recebimentos Confirmados${_epHistJanelaDias!==14?' — '+_epHistJanelaLabel():''}</div>${gruposHtml}`;
       })()}
 
       ${(()=>{
@@ -9247,20 +9276,37 @@ function pularParaFornecedorEntrega(valorDigitado) {
   if (input) { input.value=''; input.blur(); }
 }
 
+// Pagina o histórico de recebimentos em vez de confiar num limit fixo — com a janela
+// ampliada pra Mês/Trimestre (filtro só de mestre/compras, ver _epHistFiltroVisivel), uma
+// loja de movimento alto passa fácil de 300 linhas, e um limit cru cortaria confirmações
+// mais antigas silenciosamente — o mesmo tipo de causa já visto no incidente da Pedreira.
+async function _epFetchHistorico(slug, desde) {
+  const pageSize=300;
+  let offset=0;
+  const all=[];
+  while(true){
+    const page=await sbRequest('gn_provisoes?loja_slug=eq.'+slug+'&status=in.(RECEBIDO_OK,DIVERGENCIA,DEVOLVIDO)&atualizado_em=gte.'+desde+'&select=*,gn_catalogo(produto,und),gn_pedidos(data_pedido,semana_inicio),gn_recebimentos(qtd_recebida,valor_recebido,validado_por,diferenca_qtd)&order=atualizado_em.desc&limit='+pageSize+'&offset='+offset,{method:'GET'});
+    all.push(...(page||[]));
+    if(!page||page.length<pageSize) break;
+    offset+=pageSize;
+  }
+  return all;
+}
 async function carregarEntregas(silent) {
   try{
     const slug=LOJA_SLUG[loja]||loja.toLowerCase().replace(/ /g,'_');
-    // Histórico: janela de 14 dias por atualizado_em (quando foi confirmado), não um
-    // limit fixo de linhas por data_entrega — com um limit de 30 cru, um fornecedor com
-    // vários itens confirmados no mesmo dia (ex.: pedido grande) somia da lista assim que
-    // outros fornecedores também tivessem entregas na mesma data, mesmo já confirmado no
-    // banco (só ficava fora da janela mostrada). atualizado_em também nunca fica em branco
-    // (diferente de data_entrega, que às vezes vem nulo), então não excluímos confirmações
-    // recentes por engano.
-    const desde=new Date(Date.now()-14*86400000).toISOString();
+    // Histórico: janela por atualizado_em (quando foi confirmado), não um limit fixo de
+    // linhas por data_entrega — com um limit de 30 cru, um fornecedor com vários itens
+    // confirmados no mesmo dia (ex.: pedido grande) sumia da lista assim que outros
+    // fornecedores também tivessem entregas na mesma data, mesmo já confirmado no banco (só
+    // ficava fora da janela mostrada). atualizado_em também nunca fica em branco (diferente
+    // de data_entrega, que às vezes vem nulo), então não excluímos confirmações recentes por
+    // engano. Janela padrão de 14 dias pra todo mundo; mestre/compras podem ampliar pra
+    // Semana/Mês/Trimestre (_epHistJanelaDias).
+    const desde=new Date(Date.now()-_epHistJanelaDias*86400000).toISOString();
     const [rowsPend,rowsHist]=await Promise.all([
       sbRequest('gn_provisoes?loja_slug=eq.'+slug+'&status=eq.AGUARDANDO&select=*,gn_catalogo(produto,und),gn_pedidos(data_pedido)&order=data_entrega',{method:'GET'}),
-      sbRequest('gn_provisoes?loja_slug=eq.'+slug+'&status=in.(RECEBIDO_OK,DIVERGENCIA,DEVOLVIDO)&atualizado_em=gte.'+desde+'&select=*,gn_catalogo(produto,und),gn_pedidos(data_pedido,semana_inicio),gn_recebimentos(qtd_recebida,valor_recebido,validado_por,diferenca_qtd)&order=atualizado_em.desc&limit=300',{method:'GET'})
+      _epFetchHistorico(slug, desde)
     ]);
     provisoesEntrega=rowsPend||[];
     provisoesHistorico=rowsHist||[];
