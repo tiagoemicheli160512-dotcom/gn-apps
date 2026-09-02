@@ -4129,6 +4129,26 @@ function _monthRange(off) {
            label:M[first.getMonth()]+' '+first.getFullYear(), isCurrent:off===0 };
 }
 
+function _quarterRange(off) {
+  const now = new Date();
+  const absQ = now.getFullYear()*4 + Math.floor(now.getMonth()/3) + off;
+  const year = Math.floor(absQ/4);
+  const qIdx = absQ - year*4;
+  const first = new Date(year, qIdx*3, 1);
+  const last  = new Date(year, qIdx*3+3, 0);
+  const dates = [];
+  for (let d=new Date(first); d<=last; d.setDate(d.getDate()+1))
+    dates.push(`${d.getFullYear()}-${_p2(d.getMonth()+1)}-${_p2(d.getDate())}`);
+  return { dates, from:dates[0], to:dates[dates.length-1], label:'T'+(qIdx+1)+'/'+year, isCurrent:off===0 };
+}
+
+// Meta de venda por funcionário (R$ 18k/mês/funcionário, padrão já usado no dashboard
+// "Gestão" do Check-list) escalada pro período — semana ≈ 18k×7/30, trimestre = 18k×3.
+// Compartilhada entre o card de loja do Painel e o Relatório, pra nunca desalinhar.
+function _metaFuncPeriodo(per) {
+  return per==='mes' ? 18000 : per==='tri' ? 18000*3 : 18000*7/30;
+}
+
 function _fmtBRL(n) {
   if (!n) return 'R$ 0,00';
   return 'R$ '+n.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -6230,7 +6250,7 @@ function renderDashboard() {
         // _loadDashAll junto com o alerta de escala incompleta) — não varia por período
         // selecionado, é o quadro de agora.
         const funcN = _dashFuncCount ? _dashFuncCount[k] : null;
-        const metaFunc = _dashPer==='mes' ? 18000 : 18000*7/30;
+        const metaFunc = _metaFuncPeriodo(_dashPer);
         const metaFuncAtencao = metaFunc * 15000/18000;
         const vendaPorFunc = (hasData && funcN>0) ? v/funcN : null;
         const vpfCor = vendaPorFunc===null?'rgba(0,0,0,.4)':vendaPorFunc>=metaFunc?'#22c55e':vendaPorFunc>=metaFuncAtencao?'#f59e0b':'#ef4444';
@@ -6408,68 +6428,124 @@ const _reportBtnsRowHtml = (prefix) => `<div style="display:flex;gap:8px;flex-wr
 </div>`;
 
 // ── RELATÓRIOS ────────────────────────────────────────────────────────────────
-function _gerarRelatorio() {
-  if (!_dashFat) { alert('Aguarde os dados carregarem.'); return; }
-  const range   = _dashPer==='sem' ? _weekRange(_dashWoff) : _monthRange(_dashMoff);
-  const perTipo = _dashPer==='sem' ? 'Semanal' : 'Mensal';
+// Monta os dados do relatório pro período `per` ('sem'|'mes'|'tri'). Reaproveita _dashFat/
+// _dashFatPrev (já carregados pro Painel) só quando `per` bate com o período/offset
+// atualmente navegado ali — senão busca direto (_fetchFat), sem depender do toggle
+// Semanal/Mensal do Painel nem da navegação de semana/mês dele. Cacheia por período
+// (window._relCache) enquanto o modal estiver aberto, pra trocar de volta sem reconsultar.
+async function _relCarregarPeriodo(per) {
+  if (window._relCache && window._relCache[per]) { window._relData = window._relCache[per]; return; }
+  const usaDashAtual = per === _dashPer;
+  const range     = per==='sem' ? _weekRange(usaDashAtual?_dashWoff:0)
+                   : per==='mes' ? _monthRange(usaDashAtual?_dashMoff:0)
+                   : _quarterRange(0);
+  const prevRange = per==='sem' ? _weekRange((usaDashAtual?_dashWoff:0)-1)
+                   : per==='mes' ? _monthRange((usaDashAtual?_dashMoff:0)-1)
+                   : _quarterRange(-1);
+  let fat, fatPrev;
+  if (usaDashAtual && _dashFat) { fat = _dashFat; fatPrev = _dashFatPrev || {}; }
+  else { [fat, fatPrev] = await Promise.all([ _fetchFat(range.dates), _fetchFat(prevRange.dates) ]); }
+  const perTipo = per==='sem' ? 'Semanal' : per==='mes' ? 'Mensal' : 'Trimestral';
+  const metaFunc = _metaFuncPeriodo(per);
+  const metaFuncAtencao = metaFunc * 15000/18000;
   let total = 0;
   const lojasDados = [];
   const lojasFiltro = _dashRelSel.size > 0 ? [..._dashRelSel] : LOJAS_LISTA;
   lojasFiltro.forEach(k => {
-    const v    = _dashFat[k]||0;
-    const vP   = _dashFatPrev?(_dashFatPrev[k]||0):0;
-    const meta = _dashMetas[k]||0;
-    const manut= _dashManut?(_dashManut[k]||0):0;
-    const chkOk= _dashChk?_dashChk.has(k):null;
+    const v     = fat[k]||0;
+    const vP    = fatPrev?.[k]||0;
+    const meta  = _dashMetas[k]||0;
+    const manut = _dashManut?(_dashManut[k]||0):0;
+    const chkOk = _dashChk?_dashChk.has(k):null;
+    // Funcionários vêm da escala da semana ATUAL (_dashFuncCount) — não varia por período
+    // do relatório, é o quadro de agora (mesmo critério do card de loja do Painel).
+    const funcN = _dashFuncCount ? _dashFuncCount[k] : null;
+    const vendaPorFunc = (v>0 && funcN>0) ? v/funcN : null;
     // Soma no Total do relatório, exceto Maglia — a menos que o usuário a selecione
     // manualmente na lista (aí é escolha explícita, não o consolidado padrão).
     if (_dashRelSel.size > 0 || k !== LOJA_FORA_CONSOLIDADO) total += v;
-    lojasDados.push({ k, v, vP, meta, manut, chkOk, nome: LOJA_DISPLAY[k]||k });
+    lojasDados.push({ k, v, vP, meta, manut, chkOk, funcN, vendaPorFunc, nome: LOJA_DISPLAY[k]||k });
   });
   lojasDados.sort((a,b) => b.v - a.v);
   const now = new Date();
   const dtGer = `${String(now.getDate()).padStart(2,'0')}/${String(now.getMonth()+1).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-  window._relData = { range, perTipo, total, lojasDados, dtGer };
+  const data = { per, range, perTipo, total, lojasDados, dtGer, metaFunc, metaFuncAtencao };
+  window._relCache = window._relCache || {};
+  window._relCache[per] = data;
+  window._relData = data;
+}
+
+function _relModalHtml() {
+  const { range, perTipo, per } = window._relData;
+  const pills = ['sem','mes','tri'].map(p => {
+    const lbl = p==='sem'?'Semanal':p==='mes'?'Mensal':'Trimestral';
+    const on = p===per;
+    return `<button onclick="_relTrocarPeriodo('${p}')" style="flex:1;padding:7px 4px;border-radius:8px;font-size:11px;font-weight:700;border:1px solid ${on?'#7C83FD':'rgba(0,0,0,.12)'};background:${on?'rgba(124,131,253,.14)':'transparent'};color:${on?'#1A1D23':'rgba(0,0,0,.45)'};cursor:pointer">${lbl}</button>`;
+  }).join('');
+  return `
+    <div style="width:36px;height:3px;background:rgba(0,0,0,.18);border-radius:2px;margin:0 auto 16px"></div>
+    <div style="font-size:14px;font-weight:700;color:#1A1D23;margin-bottom:2px" id="_rel-titulo">📄 Relatório ${perTipo}</div>
+    <div style="font-size:11px;color:rgba(0,0,0,.35);margin-bottom:12px" id="_rel-sub">${range.label}</div>
+    <div style="display:flex;gap:6px;margin-bottom:16px">${pills}</div>
+    <button onclick="_relPDF()" style="display:block;width:100%;background:rgba(124,131,253,.1);border:1px solid rgba(124,131,253,.3);border-radius:10px;color:#1A1D23;padding:13px 16px;font-size:13px;font-weight:700;cursor:pointer;margin-bottom:10px;text-align:left;font-family:inherit">
+      📥 Gerar PDF
+    </button>
+    <button onclick="_relWhatsApp()" style="display:block;width:100%;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);border-radius:10px;color:#1A1D23;padding:13px 16px;font-size:13px;font-weight:700;cursor:pointer;margin-bottom:14px;text-align:left;font-family:inherit">
+      💬 Compartilhar via WhatsApp
+    </button>
+    <button onclick="document.getElementById('_rel-modal').remove()" style="display:block;width:100%;background:transparent;border:1px solid rgba(0,0,0,.08);border-radius:10px;color:rgba(0,0,0,.35);padding:11px;font-size:12px;cursor:pointer;font-family:inherit">
+      Cancelar
+    </button>`;
+}
+
+async function _relTrocarPeriodo(per) {
+  if (window._relData && window._relData.per === per) return;
+  const tit = document.getElementById('_rel-titulo');
+  if (tit) tit.textContent = '⏳ Carregando...';
+  try {
+    await _relCarregarPeriodo(per);
+  } catch(e) {
+    alert('Erro ao carregar dados do período. Tente de novo.');
+    if (tit) tit.textContent = `📄 Relatório ${window._relData.perTipo}`;
+    return;
+  }
+  const modal = document.getElementById('_rel-modal');
+  if (modal) modal.querySelector('div').innerHTML = _relModalHtml();
+}
+
+async function _gerarRelatorio() {
+  if (!_dashFat) { alert('Aguarde os dados carregarem.'); return; }
+  window._relCache = {};
+  await _relCarregarPeriodo(_dashPer);
 
   const ex = document.getElementById('_rel-modal');
   if (ex) ex.remove();
   const modal = document.createElement('div');
   modal.id = '_rel-modal';
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:9999;display:flex;align-items:flex-end;justify-content:center';
-  modal.innerHTML = `
-    <div style="background:#0f0f1a;border:1px solid rgba(0,0,0,.1);border-radius:16px 16px 0 0;padding:20px;width:100%;max-width:480px;padding-bottom:calc(20px + env(safe-area-inset-bottom))">
-      <div style="width:36px;height:3px;background:rgba(0,0,0,.18);border-radius:2px;margin:0 auto 16px"></div>
-      <div style="font-size:14px;font-weight:700;color:#1A1D23;margin-bottom:2px">📄 Relatório ${perTipo}</div>
-      <div style="font-size:11px;color:rgba(0,0,0,.35);margin-bottom:16px">${range.label}</div>
-      <button onclick="_relPDF()" style="display:block;width:100%;background:rgba(124,131,253,.1);border:1px solid rgba(124,131,253,.3);border-radius:10px;color:#1A1D23;padding:13px 16px;font-size:13px;font-weight:700;cursor:pointer;margin-bottom:10px;text-align:left;font-family:inherit">
-        📥 Gerar PDF
-      </button>
-      <button onclick="_relWhatsApp()" style="display:block;width:100%;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);border-radius:10px;color:#1A1D23;padding:13px 16px;font-size:13px;font-weight:700;cursor:pointer;margin-bottom:14px;text-align:left;font-family:inherit">
-        💬 Compartilhar via WhatsApp
-      </button>
-      <button onclick="document.getElementById('_rel-modal').remove()" style="display:block;width:100%;background:transparent;border:1px solid rgba(0,0,0,.08);border-radius:10px;color:rgba(0,0,0,.35);padding:11px;font-size:12px;cursor:pointer;font-family:inherit">
-        Cancelar
-      </button>
-    </div>`;
+  modal.innerHTML = `<div style="background:#0f0f1a;border:1px solid rgba(0,0,0,.1);border-radius:16px 16px 0 0;padding:20px;width:100%;max-width:480px;padding-bottom:calc(20px + env(safe-area-inset-bottom))">${_relModalHtml()}</div>`;
   modal.addEventListener('click', e => { if (e.target===modal) modal.remove(); });
   document.body.appendChild(modal);
 }
 
 function _relPDF() {
-  const { range, perTipo, total, lojasDados, dtGer } = window._relData || {};
+  const { range, perTipo, total, lojasDados, dtGer, metaFunc, metaFuncAtencao } = window._relData || {};
   if (!range) return;
   document.getElementById('_rel-modal')?.remove();
   const storesWithData = lojasDados.filter(l => l.v > 0).length;
-  const rows = lojasDados.map(({ nome, v, vP, meta, manut, chkOk }) => {
+  const rows = lojasDados.map(({ nome, v, vP, meta, manut, chkOk, funcN, vendaPorFunc }) => {
     const pct  = meta>0 ? Math.round(v/meta*100) : null;
     const diff = vP>0  ? Math.round((v-vP)/vP*100) : null;
     const pctC = !pct?'#888':pct>=100?'#15803d':pct>=75?'#b45309':'#b91c1c';
     const difC = diff===null?'#888':diff>=0?'#15803d':'#b91c1c';
+    const vpfC = vendaPorFunc==null?'#888':vendaPorFunc>=metaFunc?'#15803d':vendaPorFunc>=metaFuncAtencao?'#b45309':'#b91c1c';
     return `<tr>
       <td style="padding:7px 10px;font-weight:600;border-bottom:1px solid #f0f0f0">${nome}</td>
       <td style="padding:7px 10px;text-align:right;font-weight:700;border-bottom:1px solid #f0f0f0;font-family:monospace">${v>0?_fmtBRL(v):'—'}</td>
       <td style="padding:7px 10px;text-align:right;border-bottom:1px solid #f0f0f0;color:${difC};font-weight:700">${diff!==null?(diff>=0?'+':'')+diff+'%':'—'}</td>
       <td style="padding:7px 10px;text-align:right;border-bottom:1px solid #f0f0f0;color:${pctC};font-weight:700">${pct!==null?pct+'%':'—'}</td>
+      <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0f0f0">${funcN!=null?funcN:'—'}</td>
+      <td style="padding:7px 10px;text-align:right;border-bottom:1px solid #f0f0f0;color:${vpfC};font-weight:700">${vendaPorFunc!=null?_fmtBRLs(vendaPorFunc):'—'}</td>
       <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0f0f0">${chkOk===true?'✅':chkOk===false?'⚠':'—'}</td>
       <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0f0f0">${manut>0?'🔧 '+manut:'—'}</td>
     </tr>`;
@@ -6483,8 +6559,8 @@ function _relPDF() {
     .kpi-label{font-size:7.5pt;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
     .kpi-val{font-size:14pt;font-weight:700;color:#CA8A04;font-family:monospace}
     table{width:100%;border-collapse:collapse;margin-bottom:16px}
-    thead{background:#FACC15}thead th{padding:8px 10px;text-align:left;color:#1a1a1a;font-size:8pt;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
-    thead th:not(:first-child){text-align:right}thead th:nth-child(5),thead th:nth-child(6){text-align:center}
+    thead{background:#FACC15}thead th{padding:8px 8px;text-align:left;color:#1a1a1a;font-size:7.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.3px}
+    thead th:not(:first-child){text-align:right}thead th:nth-child(5){text-align:center}thead th:nth-child(7),thead th:nth-child(8){text-align:center}
     .footer{font-size:7.5pt;color:#aaa;border-top:1px solid #eee;padding-top:8px;margin-top:4px}
     @media print{body{padding:0}@page{margin:1.5cm}}</style>
   </head><body>
@@ -6495,9 +6571,9 @@ function _relPDF() {
       <div class="kpi"><div class="kpi-label">Lojas com dados</div><div class="kpi-val">${storesWithData}/${lojasDados.length}</div></div>
       <div class="kpi"><div class="kpi-label">Período</div><div class="kpi-val" style="font-size:10pt">${range.label}</div></div>
     </div>
-    <table><thead><tr><th>Loja</th><th>Faturamento</th><th>Δ vs Ant.</th><th>% Meta</th><th>CHK</th><th>Manut.</th></tr></thead>
+    <table><thead><tr><th>Loja</th><th>Faturamento</th><th>Δ vs Ant.</th><th>% Meta</th><th>Func.</th><th>R$/Func</th><th>CHK</th><th>Manut.</th></tr></thead>
     <tbody>${rows}</tbody></table>
-    <div class="footer">GN Operações · ${perTipo} · ${range.label}</div>
+    <div class="footer">GN Operações · ${perTipo} · ${range.label} · meta de venda por funcionário: ${_fmtBRLs(metaFunc)}</div>
     <script>window.onload=function(){window.print()}<\/script>
   </body></html>`;
   const w = window.open('','_blank');
@@ -6505,7 +6581,7 @@ function _relPDF() {
 }
 
 function _relWhatsApp() {
-  const { range, perTipo, total, lojasDados, dtGer } = window._relData || {};
+  const { range, perTipo, total, lojasDados, dtGer, metaFunc, metaFuncAtencao } = window._relData || {};
   if (!range) return;
   document.getElementById('_rel-modal')?.remove();
   const comDados  = lojasDados.filter(l => l.v > 0);
@@ -6516,15 +6592,18 @@ function _relWhatsApp() {
   txt += `${comDados.length} de ${lojasDados.length} lojas com dados\n\n`;
   if (comDados.length) {
     txt += `📍 *Por loja:*\n`;
-    comDados.forEach(({ nome, v, vP, meta }) => {
+    comDados.forEach(({ nome, v, vP, meta, funcN, vendaPorFunc }) => {
       const pct  = meta>0 ? ` · meta ${Math.round(v/meta*100)}%` : '';
       const diff = vP>0  ? ` (${v>=vP?'+':''}${Math.round((v-vP)/vP*100)}% vs ant.)` : '';
-      txt += `• ${nome}: ${_fmtBRL(v)}${pct}${diff}\n`;
+      const vpfIcone = vendaPorFunc==null?'':vendaPorFunc>=metaFunc?' ✅':vendaPorFunc>=metaFuncAtencao?' ⚠️':' 🔴';
+      const func = funcN!=null ? ` · 👥${funcN}${vendaPorFunc!=null?' · '+_fmtBRLs(vendaPorFunc)+'/func'+vpfIcone:''}` : '';
+      txt += `• ${nome}: ${_fmtBRL(v)}${pct}${diff}${func}\n`;
     });
     txt += '\n';
   }
   if (semDados.length)  txt += `⚠ *Sem dados:* ${semDados.map(l=>l.nome).join(', ')}\n`;
   if (comManut.length)  txt += `🔧 *Manutenção:* ${comManut.map(l=>`${l.nome} (${l.manut})`).join(', ')}\n`;
+  txt += `\n_Meta de venda por funcionário: ${_fmtBRLs(metaFunc)}_`;
   txt += `\n_GN Operações · ${dtGer}_`;
   if (navigator.share) {
     navigator.share({ text: txt }).catch(() => {});
