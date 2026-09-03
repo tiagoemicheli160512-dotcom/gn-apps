@@ -170,6 +170,7 @@ body{background:var(--bg);color:#1A1D23;font-family:-apple-system,BlinkMacSystem
   <button class="sidebar-link" id="sl-marketing" onclick="setTab('marketing')"><span class="sl-icon">📣</span>Marketing</button>
   <button class="sidebar-link" id="sl-relatorio" onclick="setTab('relatorio')"><span class="sl-icon">📊</span>Relatório</button>
   <button class="sidebar-link" id="sl-auditoria" onclick="setTab('auditoria')"><span class="sl-icon">📜</span>Auditoria</button>
+  <button class="sidebar-link" id="sl-patrimonio" onclick="setTab('patrimonio')"><span class="sl-icon">🏛️</span>Patrimônio</button>
 </nav>
 
 <!-- LOGIN -->
@@ -225,6 +226,10 @@ body{background:var(--bg);color:#1A1D23;font-family:-apple-system,BlinkMacSystem
       <span class="ti">📜</span>
       <span>Auditoria</span>
     </button>
+    <button class="bot-tab" id="tab-pat" onclick="setTab('patrimonio')">
+      <span class="ti">🏛️</span>
+      <span>Patrimônio</span>
+    </button>
   </nav>
 </div>
 
@@ -270,7 +275,12 @@ const S = {
   editCtx:    null,         // index into S.data.items
   invBusca:   '',
   data:       null,
+  patTransferCtx: null,     // { itemId } — item de patrimônio sendo transferido (form aberto)
 };
+
+// Catálogo global de nomes de patrimônio (gn_patrimonio_catalogo) — compartilhado entre
+// todas as lojas, carregado uma vez no login. {id, nome}[]
+let _patCatalogo = [];
 
 // ─── UTILS ───────────────────────────────────────────────
 function $(id){ return document.getElementById(id); }
@@ -316,6 +326,8 @@ function loadData(){
   if(!S.data.mktSaidas) S.data.mktSaidas=[];
   if(!S.data.mktCustomItems) S.data.mktCustomItems=[];
   if(!S.data.entradas) S.data.entradas=[];
+  if(!S.data.patrimonio) S.data.patrimonio=[];
+  if(!S.data.patrimonioTransferencias) S.data.patrimonioTransferencias=[];
   MKT_ITEMS.forEach(m=>{ if(S.data.mkt[m.key]==null) S.data.mkt[m.key]=0; });
   S.data.mktCustomItems.forEach(m=>{ if(S.data.mkt[m.id]==null) S.data.mkt[m.id]=0; });
 }
@@ -350,6 +362,8 @@ async function loadDataCloud(){
       if(!S.data.mktSaidas) S.data.mktSaidas=[];
       if(!S.data.mktCustomItems) S.data.mktCustomItems=[];
       if(!S.data.entradas) S.data.entradas=[];
+      if(!S.data.patrimonio) S.data.patrimonio=[];
+      if(!S.data.patrimonioTransferencias) S.data.patrimonioTransferencias=[];
       MKT_ITEMS.forEach(m=>{ if(S.data.mkt[m.key]==null) S.data.mkt[m.key]=0; });
       S.data.mktCustomItems.forEach(m=>{ if(S.data.mkt[m.id]==null) S.data.mkt[m.id]=0; });
       try{ localStorage.setItem(storageKey(),JSON.stringify(S.data)); }catch(_){}
@@ -398,6 +412,7 @@ async function iniciarApp(){
   }catch(_){}
   _resolverLojaAtiva();
   await loadDataCloud();
+  _carregarCatalogoPatrimonio();
   $('login').classList.add('hidden');
   $('app').classList.remove('hidden');
   $('hdr-user').textContent=S.usuario.nome+(S.usuario.loja?' · '+S.usuario.loja:'');
@@ -473,7 +488,7 @@ async function changeLojaAtiva(v){
 
 // ─── NAVIGATION ──────────────────────────────────────────
 function setTab(tab){
-  S.tab=tab; S.view='list'; S.saidaCtx=null; S.histCtx=null; S.entradaCtx=null; S.editCtx=null; S.invBusca='';
+  S.tab=tab; S.view='list'; S.saidaCtx=null; S.histCtx=null; S.entradaCtx=null; S.editCtx=null; S.invBusca=''; S.patTransferCtx=null;
   render();
 }
 
@@ -481,13 +496,14 @@ function setSetor(idx){ S.setor=SETORES[idx].key; render(); }
 
 function onFabClick(){
   if(S.tab==='marketing'){ S.view='addMkt'; render(); }
+  else if(S.tab==='patrimonio'){ S.view='addPat'; render(); }
   else{ S.view='add'; render(); }
 }
 
 function render(){
   // Bottom nav highlight
-  ['inv','mkt','rel','aud'].forEach(k=>{
-    const t={inv:'inventario',mkt:'marketing',rel:'relatorio',aud:'auditoria'}[k];
+  ['inv','mkt','rel','aud','pat'].forEach(k=>{
+    const t={inv:'inventario',mkt:'marketing',rel:'relatorio',aud:'auditoria',pat:'patrimonio'}[k];
     $('tab-'+k)?.classList.toggle('sel',S.tab===t);
   });
   // Badge de alertas na aba Inventário
@@ -500,12 +516,12 @@ function render(){
     if(slInv){ slInv.innerHTML=`<span class="sl-icon">📦</span>Inventário${badge}`; slInv.classList.toggle('active',S.tab==='inventario'); }
   }
   // Sidebar highlight (others)
-  ['marketing','relatorio','auditoria'].forEach(t=>{
+  ['marketing','relatorio','auditoria','patrimonio'].forEach(t=>{
     document.getElementById('sl-'+t)?.classList.toggle('active',S.tab===t);
   });
-  // FAB on inventory or marketing list
+  // FAB on inventory, marketing or patrimônio list
   const fab=$('fab');
-  const showFab=(S.tab==='inventario'||S.tab==='marketing')&&S.view==='list'&&!S.saidaCtx&&!S.histCtx&&!S.entradaCtx;
+  const showFab=(S.tab==='inventario'||S.tab==='marketing'||S.tab==='patrimonio')&&S.view==='list'&&!S.saidaCtx&&!S.histCtx&&!S.entradaCtx&&!S.patTransferCtx;
   if(showFab) fab.classList.remove('hidden');
   else fab.classList.add('hidden');
 
@@ -522,6 +538,10 @@ function render(){
     else renderMarketing(c);
   } else if(S.tab==='auditoria'){
     renderAuditoria(c);
+  } else if(S.tab==='patrimonio'){
+    if(S.patTransferCtx) renderTransferPatrimonio(c);
+    else if(S.view==='addPat') renderAddPatrimonioItem(c);
+    else renderPatrimonio(c);
   } else {
     renderRelatorio(c);
   }
@@ -615,7 +635,7 @@ function renderAddItem(c){
   setTimeout(()=>$('f-nome')?.focus(),60);
 }
 
-function cancelView(){ S.view='list'; S.saidaCtx=null; S.histCtx=null; S.entradaCtx=null; S.editCtx=null; render(); }
+function cancelView(){ S.view='list'; S.saidaCtx=null; S.histCtx=null; S.entradaCtx=null; S.editCtx=null; S.patTransferCtx=null; render(); }
 
 function addItem(){
   const nome=($('f-nome')?.value||'').trim();
@@ -1122,6 +1142,327 @@ function gerarPDF(texto,titulo){
 }
 function gerarPDFInventario(){gerarPDF(_buildTextoInventario(),`GN Inventário — ${S.lojaAtiva||'Loja'}`);}
 
+// ─── PATRIMÔNIO ──────────────────────────────────────────
+// Bem fixo (freezer, balcão, prateleira, TV...), diferente do estoque de insumo: sem
+// entrada/saída, sem mínimo/alerta — só cadastro com quantidade ajustada manualmente e
+// movimentação entre lojas. O catálogo de nomes (gn_patrimonio_catalogo) é global, igual
+// pra todas as lojas; cada loja tem sua própria lista de itens com quantidade
+// (S.data.patrimonio) e suas próprias transferências (S.data.patrimonioTransferencias).
+//
+// Transferência: mesmo espírito do Empréstimo de Mercadorias do app Lojas — registro
+// duplicado (mesmo id) na linha de gn_inventario_cloud das duas lojas, uma escreve
+// diretamente na linha da outra pra ambas enxergarem o mesmo registro. Diferente do
+// empréstimo de insumo (que tem devolução, confirmação dupla), patrimônio normalmente não
+// volta — é uma transferência definitiva: quem envia debita na hora, quem recebe só
+// confirma o recebimento (1 confirmação) pra creditar na loja de destino.
+
+async function _carregarCatalogoPatrimonio(){
+  try{ _patCatalogo=await sb('gn_patrimonio_catalogo?select=id,nome&order=nome.asc'); }
+  catch(e){ _patCatalogo=[]; }
+}
+
+function _lojaDisplay(userKey){
+  return (window.GN_LOJAS||[]).find(l=>l.userKey===userKey)?.display || userKey || '—';
+}
+
+// Lê/grava a linha de OUTRA loja em gn_inventario_cloud — necessário pra registrar a
+// transferência dos dois lados (mesma técnica de sbPushLoja() do app Lojas). A mesma linha
+// guarda TODOS os dados do Inventário/Marketing daquela loja (não só patrimônio) — por
+// isso precisa completar todos os campos que loadDataCloud()/loadData() esperam (senão o
+// próximo carregamento da OUTRA loja quebra em MKT_ITEMS.forEach por causa de "mkt"
+// undefined, cai no catch, e descarta os dados da nuvem voltando pro armazenamento local).
+async function _fetchDadosLoja(lojaKey){
+  const rows=await sb(`gn_inventario_cloud?loja=eq.${encodeURIComponent(lojaKey)}&select=dados`);
+  const d=(rows&&rows[0]&&rows[0].dados)||{};
+  if(!d.items) d.items=[];
+  if(!d.saidas) d.saidas=[];
+  if(!d.entradas) d.entradas=[];
+  if(!d.mkt) d.mkt={};
+  if(!d.mktSaidas) d.mktSaidas=[];
+  if(!d.mktCustomItems) d.mktCustomItems=[];
+  if(!d.patrimonio) d.patrimonio=[];
+  if(!d.patrimonioTransferencias) d.patrimonioTransferencias=[];
+  return d;
+}
+async function _pushDadosLoja(lojaKey,dados){
+  await sb('gn_inventario_cloud',{method:'POST',prefer:'resolution=merge-duplicates',body:{loja:lojaKey,dados,atualizado_em:nowISO(),atualizado_por:S.usuario.nome}});
+}
+
+function _patPendentesDestino(){ return (S.data.patrimonioTransferencias||[]).filter(t=>t.destino===S.lojaAtiva&&!t.confirmado); }
+function _patPendentesOrigem(){ return (S.data.patrimonioTransferencias||[]).filter(t=>t.origem===S.lojaAtiva&&!t.confirmado); }
+
+function renderPatrimonio(c){
+  const chips=SETORES.map((s,i)=>
+    `<button class="chip${S.setor===s.key?' sel':''}" onclick="setSetor(${i})">${s.icon} ${esc(s.key)}</button>`
+  ).join('');
+
+  const pendDestino=_patPendentesDestino(), pendOrigem=_patPendentesOrigem();
+  const pendHtml=(pendDestino.length||pendOrigem.length)?`<div class="content" style="padding-bottom:0">
+    ${pendDestino.map(t=>`<div class="form-card" style="border-color:rgba(22,163,74,.3);background:rgba(22,163,74,.06)">
+      <div style="font-size:12px;font-weight:700;color:var(--ok)">📥 Recebendo de ${esc(_lojaDisplay(t.origem))}</div>
+      <div style="font-size:13px;font-weight:700;margin:4px 0">${esc(t.item_nome)} — ${t.quantidade}</div>
+      ${t.motivo?`<div style="font-size:11px;color:var(--mut);margin-bottom:8px">${esc(t.motivo)}</div>`:''}
+      <button class="btn-sm pri" onclick="confirmarRecebimentoPatrimonio('${esc(t.id)}')">✅ Confirmar recebimento</button>
+    </div>`).join('')}
+    ${pendOrigem.map(t=>`<div class="form-card" style="border-color:rgba(217,119,6,.3);background:rgba(217,119,6,.06)">
+      <div style="font-size:12px;font-weight:700;color:var(--warn)">📤 Aguardando ${esc(_lojaDisplay(t.destino))} confirmar</div>
+      <div style="font-size:13px;font-weight:700;margin:4px 0">${esc(t.item_nome)} — ${t.quantidade}</div>
+      ${t.motivo?`<div style="font-size:11px;color:var(--mut);margin-bottom:8px">${esc(t.motivo)}</div>`:''}
+      <button class="btn-sm dan" onclick="cancelarTransferPatrimonio('${esc(t.id)}')">✖ Cancelar</button>
+    </div>`).join('')}
+  </div>`:'';
+
+  const items=(S.data.patrimonio||[]).filter(i=>i.setor===S.setor);
+  const list=items.length?items.map(item=>{
+    const idx=S.data.patrimonio.indexOf(item);
+    return `<div class="icard">
+      <div class="icard-head">
+        <div class="icard-icon">${setorIcon(item.setor)}</div>
+        <div class="icard-info">
+          <div class="icard-nome">${esc(item.nome)}</div>
+          <div class="icard-meta">${esc(item.setor)}</div>
+        </div>
+      </div>
+      <div class="mkt-controls" style="padding:0 12px 10px">
+        <div class="qty-wrap">
+          <button class="qty-btn" onclick="patAdj(${idx},-1)">−</button>
+          <input class="qty-input" type="number" min="0" id="pat-q-${idx}" value="${item.quantidade}"
+            onchange="patSetQty(${idx},this.value)" onblur="patSetQty(${idx},this.value)">
+          <button class="qty-btn" onclick="patAdj(${idx},1)">+</button>
+        </div>
+        <button class="btn-sm pri" onclick="openTransferPatrimonio('${esc(item.id)}')">🔁 Transferir</button>
+        <button class="btn-sm dan" onclick="delPatrimonioItem('${esc(item.id)}')">🗑️</button>
+      </div>
+    </div>`;
+  }).join('')
+    :`<div class="empty-state"><div class="empty-icon">🏛️</div><div>Nenhum item em ${esc(S.setor)}</div><div class="empty-hint">Toque + para adicionar</div></div>`;
+
+  c.innerHTML=`<div class="chips-wrap">${chips}</div>${pendHtml}<div class="content">${list}</div>`;
+}
+
+function renderAddPatrimonioItem(c){
+  const options=_patCatalogo.map(it=>`<option value="${esc(it.id)}">${esc(it.nome)}</option>`).join('');
+  c.innerHTML=`
+    <div class="back-hdr">
+      <button class="back-btn" onclick="cancelView()">← Voltar</button>
+      <div class="back-title">➕ Novo Item de Patrimônio</div>
+    </div>
+    <div class="content">
+      <div class="form-card">
+        <div class="form-title">Adicionar item de patrimônio</div>
+        <div class="form-field">
+          <label class="form-label">Item do catálogo</label>
+          <select class="form-input" id="fp-catalogo" onchange="_toggleFpNomeNovo()">
+            ${options}
+            <option value="__novo__">➕ Novo item (não está na lista)</option>
+          </select>
+        </div>
+        <div class="form-field hidden" id="fp-nome-novo-wrap">
+          <label class="form-label">Nome do novo item *</label>
+          <input class="form-input" id="fp-nome-novo" placeholder="Ex: Freezer vertical branco">
+        </div>
+        <div class="form-row">
+          <div class="form-field">
+            <label class="form-label">Setor</label>
+            <select class="form-input" id="fp-setor">
+              ${SETORES.map(s=>`<option value="${esc(s.key)}"${s.key===S.setor?' selected':''}>${s.icon} ${esc(s.key)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-field">
+            <label class="form-label">Quantidade</label>
+            <input class="form-input" id="fp-qty" type="number" min="0" value="1">
+          </div>
+        </div>
+        <div class="form-btns">
+          <button class="form-btn sec" onclick="cancelView()">Cancelar</button>
+          <button class="form-btn pri" onclick="addPatrimonioItem()">✅ Salvar</button>
+        </div>
+      </div>
+    </div>`;
+  _toggleFpNomeNovo();
+}
+
+function _toggleFpNomeNovo(){
+  const sel=$('fp-catalogo'), wrap=$('fp-nome-novo-wrap');
+  if(!sel||!wrap) return;
+  wrap.classList.toggle('hidden',sel.value!=='__novo__');
+}
+
+async function addPatrimonioItem(){
+  const catId=$('fp-catalogo')?.value||'';
+  const setor=$('fp-setor')?.value||S.setor;
+  const qty=Math.max(0,parseInt($('fp-qty')?.value||0,10)||0);
+  let nome,catalogoId;
+  if(catId==='__novo__'){
+    nome=($('fp-nome-novo')?.value||'').trim();
+    if(!nome){ toast('Digite o nome do novo item'); return; }
+    try{
+      const rows=await sb('gn_patrimonio_catalogo',{method:'POST',prefer:'return=representation',body:{nome,criado_por:S.usuario.nome}});
+      catalogoId=rows[0].id;
+      _patCatalogo.push({id:catalogoId,nome});
+      _patCatalogo.sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR'));
+    }catch(e){ toast('⚠️ Erro ao criar item no catálogo'); return; }
+  }else{
+    const cat=_patCatalogo.find(it=>it.id===catId);
+    if(!cat){ toast('Escolha um item'); return; }
+    nome=cat.nome; catalogoId=cat.id;
+  }
+  if(!S.data.patrimonio) S.data.patrimonio=[];
+  S.data.patrimonio.push({id:uid(),catalogo_id:catalogoId,nome,setor,quantidade:qty,criado_em:nowISO(),criado_por:S.usuario.nome});
+  saveData(); S.setor=setor; S.view='list';
+  toast('✅ Item adicionado!');
+  _logAuditoriaInv('ADICIONAR_PATRIMONIO',{item:nome,quantidade:qty,setor});
+  render();
+}
+
+function patAdj(idx,delta){
+  const it=S.data.patrimonio[idx]; if(!it) return;
+  it.quantidade=Math.max(0,it.quantidade+delta);
+  saveData();
+  const qi=$(`pat-q-${idx}`); if(qi) qi.value=it.quantidade;
+}
+function patSetQty(idx,val){
+  const it=S.data.patrimonio[idx]; if(!it) return;
+  it.quantidade=Math.max(0,parseInt(val,10)||0);
+  saveData();
+  const qi=$(`pat-q-${idx}`); if(qi) qi.value=it.quantidade;
+}
+
+function delPatrimonioItem(id){
+  if(!confirm('Excluir este item de patrimônio desta loja?')) return;
+  const item=(S.data.patrimonio||[]).find(i=>i.id===id);
+  S.data.patrimonio=(S.data.patrimonio||[]).filter(i=>i.id!==id);
+  saveData(); toast('Excluído'); render();
+  if(item) _logAuditoriaInv('EXCLUIR_PATRIMONIO',{item:item.nome});
+}
+
+function openTransferPatrimonio(itemId){ S.patTransferCtx={itemId}; render(); }
+
+function renderTransferPatrimonio(c){
+  const item=(S.data.patrimonio||[]).find(i=>i.id===S.patTransferCtx.itemId);
+  if(!item){ S.patTransferCtx=null; render(); return; }
+  const destinos=(window.GN_LOJAS||[]).filter(l=>l.userKey!==S.lojaAtiva);
+  c.innerHTML=`
+    <div class="back-hdr">
+      <button class="back-btn" onclick="cancelView()">← Voltar</button>
+      <div class="back-title">🔁 Transferir item</div>
+    </div>
+    <div class="content">
+      <div class="form-card">
+        <div class="form-title">${esc(item.nome)}</div>
+        <div class="form-field">
+          <label class="form-label">Loja de destino</label>
+          <select class="form-input" id="ft-destino">
+            ${destinos.map(l=>`<option value="${esc(l.userKey)}">${esc(l.display)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-field">
+          <label class="form-label">Quantidade (disponível: ${item.quantidade})</label>
+          <input class="form-input" id="ft-qty" type="number" min="1" max="${item.quantidade}" value="1">
+        </div>
+        <div class="form-field">
+          <label class="form-label">Motivo</label>
+          <input class="form-input" id="ft-motivo" placeholder="Ex: sobrando aqui, está fazendo falta lá">
+        </div>
+        <div class="form-btns">
+          <button class="form-btn sec" onclick="cancelView()">Cancelar</button>
+          <button class="form-btn pri" onclick="confirmarTransferPatrimonio()">✅ Enviar</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function confirmarTransferPatrimonio(){
+  const item=(S.data.patrimonio||[]).find(i=>i.id===S.patTransferCtx.itemId);
+  if(!item) return;
+  const destino=$('ft-destino')?.value;
+  const qty=Math.max(0,parseInt($('ft-qty')?.value||0,10)||0);
+  const motivo=($('ft-motivo')?.value||'').trim();
+  if(!destino){ toast('Escolha a loja de destino'); return; }
+  if(qty<=0||qty>item.quantidade){ toast('Quantidade inválida'); return; }
+
+  const registro={
+    id:uid(), origem:S.lojaAtiva, destino, catalogo_id:item.catalogo_id,
+    item_nome:item.nome, setor:item.setor, quantidade:qty, motivo,
+    criado_em:nowISO(), criado_por:S.usuario.nome,
+    confirmado:false, confirmado_em:null, confirmado_por:null,
+  };
+
+  // Debita na hora, igual ao empréstimo de mercadorias do app Lojas
+  item.quantidade-=qty;
+  if(!S.data.patrimonioTransferencias) S.data.patrimonioTransferencias=[];
+  S.data.patrimonioTransferencias.push(registro);
+  saveData();
+
+  // Grava o mesmo registro (mesmo id) na linha da loja de destino, pra ela ver a pendência
+  try{
+    const dadosDestino=await _fetchDadosLoja(destino);
+    dadosDestino.patrimonioTransferencias.push(registro);
+    await _pushDadosLoja(destino,dadosDestino);
+  }catch(e){
+    toast('⚠️ Salvo aqui, mas não consegui avisar a loja de destino agora — tente novamente mais tarde');
+  }
+
+  _logAuditoriaInv('TRANSFERIR_PATRIMONIO',{item:item.nome,quantidade:qty,destino:_lojaDisplay(destino)});
+  S.patTransferCtx=null;
+  toast('✅ Transferência enviada!');
+  render();
+}
+
+async function cancelarTransferPatrimonio(id){
+  const t=(S.data.patrimonioTransferencias||[]).find(r=>r.id===id);
+  if(!t||t.origem!==S.lojaAtiva||t.confirmado) return;
+  if(!confirm('Cancelar esta transferência? A quantidade volta pro seu patrimônio.')) return;
+
+  const item=(S.data.patrimonio||[]).find(i=>(t.catalogo_id&&i.catalogo_id===t.catalogo_id)||i.nome===t.item_nome);
+  if(item) item.quantidade+=t.quantidade;
+  S.data.patrimonioTransferencias=(S.data.patrimonioTransferencias||[]).filter(r=>r.id!==id);
+  saveData();
+
+  try{
+    const dadosDestino=await _fetchDadosLoja(t.destino);
+    dadosDestino.patrimonioTransferencias=(dadosDestino.patrimonioTransferencias||[]).filter(r=>r.id!==id);
+    await _pushDadosLoja(t.destino,dadosDestino);
+  }catch(e){}
+
+  _logAuditoriaInv('CANCELAR_TRANSFERENCIA_PATRIMONIO',{item:t.item_nome,quantidade:t.quantidade});
+  toast('Cancelado'); render();
+}
+
+async function confirmarRecebimentoPatrimonio(id){
+  const t=(S.data.patrimonioTransferencias||[]).find(r=>r.id===id);
+  if(!t||t.destino!==S.lojaAtiva||t.confirmado) return;
+  t.confirmado=true; t.confirmado_em=nowISO(); t.confirmado_por=S.usuario.nome;
+
+  // Credita no patrimônio desta loja — reaproveita um item já existente (mesmo catálogo
+  // ou mesmo nome) em vez de duplicar, se a loja já tiver esse item cadastrado.
+  let item=(S.data.patrimonio||[]).find(i=>(t.catalogo_id&&i.catalogo_id===t.catalogo_id)||i.nome===t.item_nome);
+  if(!item){
+    item={id:uid(),catalogo_id:t.catalogo_id,nome:t.item_nome,setor:t.setor||'Outros',quantidade:0,criado_em:nowISO(),criado_por:S.usuario.nome};
+    if(!S.data.patrimonio) S.data.patrimonio=[];
+    S.data.patrimonio.push(item);
+  }
+  item.quantidade+=t.quantidade;
+  saveData();
+
+  // Avisa a loja de origem que foi confirmado (best-effort — se a origem tiver cancelado
+  // nesse meio-tempo, o registro já não existe lá e essa parte só não faz nada).
+  try{
+    const dadosOrigem=await _fetchDadosLoja(t.origem);
+    const idx=dadosOrigem.patrimonioTransferencias.findIndex(r=>r.id===id);
+    if(idx>=0){
+      dadosOrigem.patrimonioTransferencias[idx].confirmado=true;
+      dadosOrigem.patrimonioTransferencias[idx].confirmado_em=t.confirmado_em;
+      dadosOrigem.patrimonioTransferencias[idx].confirmado_por=t.confirmado_por;
+      await _pushDadosLoja(t.origem,dadosOrigem);
+    }
+  }catch(e){}
+
+  _logAuditoriaInv('CONFIRMAR_RECEBIMENTO_PATRIMONIO',{item:t.item_nome,quantidade:t.quantidade,origem:_lojaDisplay(t.origem)});
+  toast('✅ Recebimento confirmado!');
+  render();
+}
+
 // ─── AUDITORIA (quem fez o quê) ────────────────────────────
 // Log central de ações sensíveis (exclusões, edições diretas, entradas e
 // saídas), pra ter rastro de quem fez o quê e quando — mesmo padrão do
@@ -1135,6 +1476,11 @@ const AUD_ACOES_INV = {
   EXCLUIR_ITEM:     { icon: '🗑️', label: 'Excluiu item do inventário', cor: '#DC2626' },
   EXCLUIR_ITEM_MKT: { icon: '🗑️', label: 'Excluiu item de marketing', cor: '#DC2626' },
   EDITAR_ITEM:      { icon: '✏️', label: 'Editou item diretamente',  cor: '#2563EB' },
+  ADICIONAR_PATRIMONIO:  { icon: '🏛️', label: 'Adicionou item de patrimônio', cor: '#16A34A' },
+  EXCLUIR_PATRIMONIO:    { icon: '🗑️', label: 'Excluiu item de patrimônio',   cor: '#DC2626' },
+  TRANSFERIR_PATRIMONIO: { icon: '🔁', label: 'Transferiu patrimônio pra outra loja', cor: '#D97706' },
+  CANCELAR_TRANSFERENCIA_PATRIMONIO: { icon: '✖', label: 'Cancelou transferência de patrimônio', cor: '#DC2626' },
+  CONFIRMAR_RECEBIMENTO_PATRIMONIO:  { icon: '✅', label: 'Confirmou recebimento de patrimônio',  cor: '#16A34A' },
 };
 
 async function _logAuditoriaInv(acao, detalhes){
@@ -1153,6 +1499,11 @@ function _fmtDetalhesAuditoriaInv(acao, d){
     if(acao==='EXCLUIR_ITEM')     return d.item||'';
     if(acao==='EXCLUIR_ITEM_MKT') return d.item||'';
     if(acao==='EDITAR_ITEM')      return `${d.item||''} — qtd ${d.qty_antigo}→${d.qty_novo}`;
+    if(acao==='ADICIONAR_PATRIMONIO') return `${d.item||''} — qtd ${d.quantidade||0} (${d.setor||''})`;
+    if(acao==='EXCLUIR_PATRIMONIO')   return d.item||'';
+    if(acao==='TRANSFERIR_PATRIMONIO')return `${d.item||''} — ${d.quantidade||0} un. para ${d.destino||''}`;
+    if(acao==='CANCELAR_TRANSFERENCIA_PATRIMONIO') return `${d.item||''} — ${d.quantidade||0} un.`;
+    if(acao==='CONFIRMAR_RECEBIMENTO_PATRIMONIO')  return `${d.item||''} — ${d.quantidade||0} un. de ${d.origem||''}`;
   }catch(e){}
   return '';
 }
