@@ -969,6 +969,11 @@ async function _confirmarXmlMesHome(comKey, mesRef) {
 // "📍 Visitas do Dia" do Painel de Gestão (_buildVisitasHojeCard), que é global (todas as
 // lojas); esse aqui é a versão pra quem está na própria loja saber se/quando alguém da
 // supervisão vem hoje, sem precisar acesso ao Painel de Gestão.
+// Pedido do usuário: antes só mostrava algo quando havia visita HOJE — se a
+// visita da semana caiu em outro dia (real ou só planejada), o card sumia
+// inteiro, dando a impressão de que a semana não tinha cobertura nenhuma.
+// Agora busca a semana corrente (segunda a domingo, mesmo cálculo da aba
+// Provisão) e, sem visita hoje, mostra a provisão da semana em vez de nada.
 async function _renderVisitaSupervisaoHome(mostrar, sess, isMasterAtivo) {
   const el = document.getElementById('visita-supervisao-home-card');
   if (!el) return;
@@ -976,27 +981,55 @@ async function _renderVisitaSupervisaoHome(mostrar, sess, isMasterAtivo) {
   const loja = (isMasterAtivo && masterLoja) ? masterLoja : sess.loja;
   if (!LOJAS_LISTA.includes(loja)) { el.innerHTML = ''; return; }
   const chkKey = LOJA_DB_KEY[loja] || loja;
-  const hojeISO = (d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'))(new Date());
-  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
-  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_chk_visitas?loja=eq.${encodeURIComponent(chkKey)}&data=eq.${hojeISO}&select=visitante,cargo,hora_chegada,hora_saida`, H, 'visitaSupHome:rows', []);
-  if (!rows.length) { el.innerHTML = ''; return; }
   const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
-  const STATUS_INFO = {
-    planejada: { cor:'#94a3b8', ico:'🕓', label:'Planejada' },
-    andamento: { cor:'#22c55e', ico:'🟢', label:'Em andamento' },
-    concluida: { cor:'#4ade80', ico:'✅', label:'Concluída' },
-  };
-  const itens = rows.map(r => {
-    const status = r.hora_chegada === 'PLAN' ? 'planejada' : !r.hora_saida ? 'andamento' : 'concluida';
-    const si = STATUS_INFO[status];
-    const horaTxt = status === 'planejada' ? '' : ` · ${r.hora_chegada}${r.hora_saida ? ' → ' + r.hora_saida : ''}`;
-    return `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-top:1px solid rgba(0,0,0,.06)">
-      <span style="font-size:11px;font-weight:700;color:#1A1D23">${esc(r.visitante||'—')}${r.cargo?` <span style="font-weight:400;color:rgba(0,0,0,.4)">· ${esc(r.cargo)}</span>`:''}</span>
-      <span style="font-size:10px;font-weight:700;color:${si.cor};white-space:nowrap">${si.ico} ${si.label}${horaTxt}</span>
+  const iso = d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  const hoje = new Date();
+  const hojeISO = iso(hoje);
+  const seg = new Date(hoje); seg.setDate(seg.getDate() - ((seg.getDay()+6)%7));
+  const dom = new Date(seg); dom.setDate(dom.getDate()+6);
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_chk_visitas?loja=eq.${encodeURIComponent(chkKey)}&data=gte.${iso(seg)}&data=lte.${iso(dom)}&select=visitante,cargo,data,hora_chegada,hora_saida`, H, 'visitaSupHome:rows', []);
+  if (!rows.length) { el.innerHTML = ''; return; }
+
+  const rowsHoje = rows.filter(r => r.data === hojeISO);
+  if (rowsHoje.length) {
+    const STATUS_INFO = {
+      planejada: { cor:'#94a3b8', ico:'🕓', label:'Planejada' },
+      andamento: { cor:'#22c55e', ico:'🟢', label:'Em andamento' },
+      concluida: { cor:'#4ade80', ico:'✅', label:'Concluída' },
+    };
+    const itens = rowsHoje.map(r => {
+      const status = r.hora_chegada === 'PLAN' ? 'planejada' : !r.hora_saida ? 'andamento' : 'concluida';
+      const si = STATUS_INFO[status];
+      const horaTxt = status === 'planejada' ? '' : ` · ${r.hora_chegada}${r.hora_saida ? ' → ' + r.hora_saida : ''}`;
+      return `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-top:1px solid rgba(0,0,0,.06)">
+        <span style="font-size:11px;font-weight:700;color:#1A1D23">${esc(r.visitante||'—')}${r.cargo?` <span style="font-weight:400;color:rgba(0,0,0,.4)">· ${esc(r.cargo)}</span>`:''}</span>
+        <span style="font-size:10px;font-weight:700;color:${si.cor};white-space:nowrap">${si.ico} ${si.label}${horaTxt}</span>
+      </div>`;
+    }).join('');
+    el.innerHTML = `<div style="background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.2);border-left:3px solid #22c55e;border-radius:14px;padding:14px 16px;margin:0 16px 14px">
+      <div style="font-size:12px;font-weight:800;color:#1A1D23">📍 Visita de supervisão hoje</div>
+      ${itens}
     </div>`;
-  }).join('');
+    return;
+  }
+
+  // Sem visita hoje — mostra a provisão da semana (visita já feita ou só planejada
+  // em outro dia), priorizando visita real sobre planejada quando existem as duas.
+  const DIAS_SEM = ['Domingo','Segunda','Terça','Quarta','Quinta','Sexta','Sábado'];
+  const fmtDia = dISO => { const d = new Date(dISO+'T12:00:00'); return DIAS_SEM[d.getDay()]+' ('+String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+')'; };
+  const jaVisitada = rows.filter(r => r.hora_chegada !== 'PLAN');
+  const planejadas = rows.filter(r => r.hora_chegada === 'PLAN');
+  const usar = jaVisitada.length ? jaVisitada : planejadas;
+  const tituloLinha = jaVisitada.length ? 'Já teve visita essa semana:' : 'Visita planejada pra essa semana:';
+  const ico = jaVisitada.length ? '✅' : '📅';
+  const itens = usar.map(r => `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-top:1px solid rgba(0,0,0,.06)">
+      <span style="font-size:11px;font-weight:700;color:#1A1D23">${esc(r.visitante||'—')}${r.cargo?` <span style="font-weight:400;color:rgba(0,0,0,.4)">· ${esc(r.cargo)}</span>`:''}</span>
+      <span style="font-size:10px;font-weight:700;color:rgba(0,0,0,.5);white-space:nowrap">${ico} ${fmtDia(r.data)}</span>
+    </div>`).join('');
   el.innerHTML = `<div style="background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.2);border-left:3px solid #22c55e;border-radius:14px;padding:14px 16px;margin:0 16px 14px">
-    <div style="font-size:12px;font-weight:800;color:#1A1D23">📍 Visita de supervisão hoje</div>
+    <div style="font-size:12px;font-weight:800;color:#1A1D23">📍 Visita de supervisão desta semana</div>
+    <div style="font-size:10.5px;color:rgba(0,0,0,.5);margin-top:4px">${tituloLinha}</div>
     ${itens}
   </div>`;
 }
