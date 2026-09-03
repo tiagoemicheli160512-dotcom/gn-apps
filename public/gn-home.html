@@ -1947,6 +1947,49 @@ async function _renderPendenciasLojaHome(mostrar, sess, isMasterAtivo) {
   }
 }
 
+// ── BLOQUEIO: caixa de ontem não fechado ─────────────────────────────────────
+// Pedido do usuário: caixa é obrigatório todo dia — se a loja (login direto, não
+// supervisão/mestre no Painel de Gestão) chegar na Home sem ter fechado os dois
+// turnos (DIA e NOITE) do dia anterior, trava tudo e só libera o card do Caixa,
+// até o fechamento ser feito.
+async function _verificarBloqueioCaixaOntem(sess, isMaster) {
+  document.getElementById('caixa-bloqueio-overlay')?.remove();
+  if (isMaster) return; // supervisão/mestre no Painel de Gestão nunca é bloqueado
+  if (!sess || !sess.loja || sess.loja === 'GERAL') return;
+  // Sem permissão de Caixa a pessoa não tem como resolver a pendência — travar
+  // só deixaria ela sem saída, então quem não mexe em Caixa não é bloqueado.
+  const temAcessoCaixa = !!(sess.permissoes||{}).caixa || (window.CARGOS_CAIXA_BYPASS||[]).includes(sess.cargo);
+  if (!temAcessoCaixa) return;
+
+  const ontemD = new Date(); ontemD.setDate(ontemD.getDate()-1);
+  const ontem = ontemD.getFullYear()+'-'+String(ontemD.getMonth()+1).padStart(2,'0')+'-'+String(ontemD.getDate()).padStart(2,'0');
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const rows = await window.gnFetchJson(
+    `${SB_URL}/rest/v1/gn_caixa_fechamento?loja=eq.${encodeURIComponent(sess.loja)}&data=eq.${ontem}&select=turno,status`,
+    H, 'bloqueioCaixaOntem', null);
+  if (rows === null) return; // falha de rede — não bloqueia por erro de conexão
+
+  const fechados = new Set((rows||[]).filter(r=>r.status==='FECHADO').map(r=>r.turno));
+  if (fechados.has('DIA') && fechados.has('NOITE')) return; // os dois turnos fechados — liberado
+
+  const faltando = ['DIA','NOITE'].filter(t=>!fechados.has(t));
+  const dataDisp = String(ontemD.getDate()).padStart(2,'0')+'/'+String(ontemD.getMonth()+1).padStart(2,'0');
+  const overlay = document.createElement('div');
+  overlay.id = 'caixa-bloqueio-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:99998;display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.innerHTML = `
+    <div style="background:#FFFFFF;border-radius:18px;padding:26px 22px;width:100%;max-width:380px;text-align:center">
+      <div style="font-size:38px;margin-bottom:10px">🔒</div>
+      <div style="font-size:16px;font-weight:800;color:#1A1D23;margin-bottom:8px">Caixa de ontem (${dataDisp}) não fechado</div>
+      <div style="font-size:13px;color:#475569;line-height:1.5;margin-bottom:18px">
+        Turno${faltando.length>1?'s':''} <b>${faltando.join(' e ')}</b> ainda ${faltando.length>1?'estão':'está'} pendente${faltando.length>1?'s':''}.
+        O fechamento do dia anterior é obrigatório — os outros módulos ficam bloqueados até isso ser resolvido.
+      </div>
+      <button onclick="navTo('gn-caixa.html')" style="display:block;width:100%;background:#E8580A;border:none;border-radius:10px;color:#fff;padding:13px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">💵 Ir fechar o Caixa</button>
+    </div>`;
+  document.body.appendChild(overlay);
+}
+
 // ── Sino de notificações no cabeçalho ──────────────────────────────────────
 // Ponto único e sempre visível (não depende de rolar a tela) pro que já é
 // calculado em outros lugares: os alertas do Painel de Gestão consolidado
@@ -2209,6 +2252,7 @@ function showHome(sess) {
   const isMaster = sess.loja === 'GERAL' || !!(sess.permissoes||{}).master;
   const lojaEfetiva = masterLoja || sess.loja;
   setTheme(lojaEfetiva);
+  _verificarBloqueioCaixaOntem(sess, isMaster);
 
   // Header: nome do usuário
   document.getElementById('hdr-user').textContent = sess.nome + (sess.cargo ? ' · ' + sess.cargo : '');
