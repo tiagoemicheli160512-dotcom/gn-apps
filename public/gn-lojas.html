@@ -267,6 +267,11 @@ input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-
     <span class="nav-label">Pedido</span>
     <span class="nav-dot hidden" id="dot-pedido" style="background:#D97706"></span>
   </button>
+  <button class="nav-btn" id="nav-hortifruti" onclick="goTab('hortifruti')">
+    <span class="nav-icon">&#129388;</span>
+    <span class="nav-label">Hortifruti</span>
+    <span class="nav-dot hidden" id="dot-hortifruti" style="background:#16A34A"></span>
+  </button>
   <button class="nav-btn" id="nav-fichas" onclick="goTab('fichas')">
     <span class="nav-icon">&#128218;</span>
     <span class="nav-label">Fichas</span>
@@ -2722,6 +2727,7 @@ function goTab(t) {
   busca = "";   // limpa busca ao trocar de aba
   if (t === "pedido") { window._divergLojaSet = new Set(); carregarDivergencias().then(() => render()); carregarPedidoOficial(); _carregarEstAntHistorico(); }
   if (t === "vendas" && checklistFat === null) { loadChecklistFat(); } // só carrega se ainda não foi carregado (reset ocorre ao trocar loja/semana)
+  if (t === "hortifruti") { carregarHortifruti(); }
   render();
   if (t === 'entrega') carregarEntregas(true);
   // foco automático na busca se a aba tem campo de busca
@@ -4262,6 +4268,16 @@ function campoComBadge(valor, badge, badgeCor, bgExtra, oninputAttr) {
   '</div>';
 }
 
+// Igual campoComBadge, mas sem onblur="autoSave()" — pra campos que não fazem parte do
+// blob pedidoAll/all_data (ex.: Hortifruti, que só persiste no banco quando o pedido é
+// enviado, não em cada tecla digitada).
+function campoComBadgeSemAutoSave(valor, badge, badgeCor, oninputAttr) {
+  return '<div style="position:relative">' +
+    '<span style="position:absolute;left:5px;top:50%;transform:translateY(-50%);background:' + badgeCor + ';color:#fff;font-size:9px;font-weight:800;padding:2px 5px;border-radius:5px;pointer-events:none;z-index:1;letter-spacing:.3px;white-space:nowrap">' + badge + '</span>' +
+    '<input class="inp-full" type="number" step="0.001" min="0" value="' + valor + '" placeholder="0" ' + oninputAttr + ' style="font-size:12px;padding:5px 8px 5px 36px"/>' +
+  '</div>';
+}
+
 function getTotalUn(itemId, prodNome) {
   const entry = (pedidoAll[lojaKey()]||{})[itemId] || {};
   const prod = PRODUTOS_PEDIDO.find(x => x.item === itemId) || { produto: prodNome };
@@ -4515,10 +4531,12 @@ async function _carregarCatalogo() {
 // Fonte única de verdade pra itens/preços do Pedido: o Catálogo do app Estoque e Pedidos
 // (gn_catalogo). Substitui a lista estática PRODUTOS_PEDIDO pelos itens ativos do catálogo
 // sempre que o app abre, pra evitar desalinhamento quando o catálogo é atualizado lá.
+// Exclui HORTIFRUTI — esse grupo saiu do ciclo semanal e agora tem fluxo próprio na aba
+// Hortifruti (pedido direto da loja, terça/quinta — ver carregarHortifruti()).
 async function _sincronizarProdutosPedidoComCatalogo() {
   try {
     const rows = await sbRequest(
-      'gn_catalogo?ativo=eq.true&select=item_id,fornecedor,grupo,subgrupo,produto,und,custo,und_por_caixa&order=grupo,fornecedor,produto',
+      'gn_catalogo?ativo=eq.true&grupo=neq.HORTIFRUTI&select=item_id,fornecedor,grupo,subgrupo,produto,und,custo,und_por_caixa&order=grupo,fornecedor,produto',
       { method: 'GET' }
     );
     const atualizados = (rows || [])
@@ -4538,6 +4556,105 @@ async function _sincronizarProdutosPedidoComCatalogo() {
       PRODUTOS_PEDIDO.push(...atualizados);
     }
   } catch(e) {}
+}
+
+/* ── HORTIFRUTI (pedido próprio, terça/quinta) ─────────────
+   Fora do ciclo semanal de Pedido: a loja digita direto a quantidade que quer (não é
+   contagem de estoque pro Compras decidir depois) e envia só terça/quinta. O pedido usa
+   a mesma gn_pedidos/gn_pedido_itens/gn_provisoes de sempre, só com regiao='HORTIFRUTI'
+   e achado/criado por data_pedido exata (o dia do envio) em vez de semana_inicio — assim
+   terça e quinta viram lotes separados automaticamente, sem esbarrar no pedido semanal
+   nem na lógica de dedupe que já existe pra ele (ver _buscarOuCriarPedidoAtivo). */
+let hortifrutiCatalogo = [];  // [{id (catalogo uuid), fornecedor, subgrupo, produto, und, custo}]
+let hortifrutiQtd = {};       // catalogo_id -> quantidade digitada (ainda não enviada)
+let hortifrutiEnviado = null; // { pedidoId, itens:[{catalogo_id,produto,und,qtd_pedida}] } quando já mandou hoje
+let hortifrutiCarregando = false;
+
+function _hortifrutiPodeEnviarHoje() {
+  return [2, 4].includes(new Date().getDay()); // 2=terça, 4=quinta
+}
+
+async function carregarHortifruti() {
+  hortifrutiCarregando = true;
+  try {
+    const [catalogo, hoje] = await Promise.all([
+      sbRequest('gn_catalogo?grupo=eq.HORTIFRUTI&ativo=eq.true&select=id,fornecedor,subgrupo,produto,und,custo&order=subgrupo,produto', { method: 'GET' }),
+      Promise.resolve(wkKey(new Date())),
+    ]);
+    hortifrutiCatalogo = catalogo || [];
+
+    const slug = LOJA_SLUG[loja];
+    hortifrutiEnviado = null;
+    if (slug) {
+      const pedidos = await sbRequest('gn_pedidos?regiao=eq.HORTIFRUTI&data_pedido=eq.' + hoje + '&limit=1', { method: 'GET' });
+      const pedidoHoje = pedidos && pedidos[0];
+      if (pedidoHoje) {
+        const itens = await sbRequest(
+          'gn_pedido_itens?pedido_id=eq.' + pedidoHoje.id + '&loja_slug=eq.' + slug + '&qtd_pedida=gt.0&select=catalogo_id,qtd_pedida',
+          { method: 'GET' }
+        );
+        if (itens && itens.length > 0) {
+          hortifrutiEnviado = {
+            pedidoId: pedidoHoje.id,
+            itens: itens.map(function(it) {
+              const prod = hortifrutiCatalogo.find(function(p) { return p.id === it.catalogo_id; });
+              return { catalogo_id: it.catalogo_id, qtd_pedida: it.qtd_pedida, produto: prod ? prod.produto : '—', und: prod ? prod.und : '' };
+            }),
+          };
+        }
+      }
+    }
+    if (!hortifrutiEnviado) hortifrutiQtd = {};
+  } catch (e) {
+    showToast('⚠️ Erro ao carregar Hortifruti — tente de novo.');
+  } finally {
+    hortifrutiCarregando = false;
+    render();
+  }
+}
+
+function setHortifrutiQtd(catalogoId, val) {
+  hortifrutiQtd[catalogoId] = Math.max(0, parseFloat(val) || 0);
+}
+
+async function enviarPedidoHortifruti() {
+  if (!_hortifrutiPodeEnviarHoje()) { showToast('⚠️ Pedido de Hortifruti só pode ser enviado terça ou quinta.'); return; }
+  const slug = LOJA_SLUG[loja];
+  if (!slug) { showToast('⚠️ Loja sem slug de pedido configurado.'); return; }
+  const itensParaEnviar = hortifrutiCatalogo
+    .filter(function(p) { return (hortifrutiQtd[p.id] || 0) > 0; })
+    .map(function(p) { return { catalogo_id: p.id, qtd_pedida: hortifrutiQtd[p.id] }; });
+  if (itensParaEnviar.length === 0) { showToast('⚠️ Digite a quantidade de pelo menos um item.'); return; }
+  if (!confirm('Enviar pedido de Hortifruti com ' + itensParaEnviar.length + ' item' + (itensParaEnviar.length > 1 ? 's' : '') + '? Depois de enviado, só o Estoque e Pedido pode ajustar.')) return;
+
+  showToast('Enviando...');
+  try {
+    const hoje = wkKey(new Date());
+    let pedidos = await sbRequest('gn_pedidos?regiao=eq.HORTIFRUTI&data_pedido=eq.' + hoje + '&limit=1', { method: 'GET' });
+    let pedidoHoje = pedidos && pedidos[0];
+    if (!pedidoHoje) {
+      const novo = await sbRequest('gn_pedidos', {
+        method: 'POST',
+        headers: { 'Prefer': 'return=representation' },
+        body: JSON.stringify({ data_pedido: hoje, semana_inicio: wkKey(semana), status: 'RASCUNHO', regiao: 'HORTIFRUTI' }),
+      });
+      pedidoHoje = Array.isArray(novo) ? novo[0] : novo;
+    }
+    if (!pedidoHoje) throw new Error('Não foi possível criar o pedido de Hortifruti.');
+
+    const body = itensParaEnviar.map(function(it) {
+      return { pedido_id: pedidoHoje.id, catalogo_id: it.catalogo_id, loja_slug: slug, qtd_pedida: it.qtd_pedida };
+    });
+    await sbRequest('gn_pedido_itens?on_conflict=pedido_id,catalogo_id,loja_slug', {
+      method: 'POST',
+      headers: { 'Prefer': 'return=minimal,resolution=merge-duplicates' },
+      body: JSON.stringify(body),
+    });
+    showToast('✅ Pedido de Hortifruti enviado!');
+    await carregarHortifruti();
+  } catch (e) {
+    showToast('⚠️ Erro ao enviar — tente de novo. ' + (e.message || ''));
+  }
 }
 
 // Resolve o id do catálogo pro item do Pedido: prioriza o vínculo estável por item_id
@@ -6689,7 +6806,7 @@ function render() {
   if (navGestao) navGestao.style.display = _fichasOk ? "" : "none";
   // Tab permissions
   if (abasPermitidas) {
-    ['home','pedido','fichas','gestao','estoque','vendas','contagem','entradas','vinculos','transf','entrega','avarias','relatorio'].forEach(function(tid) {
+    ['home','pedido','hortifruti','fichas','gestao','estoque','vendas','contagem','entradas','vinculos','transf','entrega','avarias','relatorio'].forEach(function(tid) {
       const nb = document.getElementById('nav-' + tid);
       if (nb) nb.style.display = abasPermitidas.includes(tid) ? '' : 'none';
       const sb = document.getElementById('sidebar-' + tid);
@@ -7986,6 +8103,51 @@ function render() {
     </div>`;
 
 
+  } else if (tab === "hortifruti") {
+    const podeEnviar = _hortifrutiPodeEnviarHoje();
+    if (hortifrutiCarregando) {
+      c.innerHTML = `<div class="section"><div style="text-align:center;padding:30px;color:#64748b">Carregando...</div></div>`;
+    } else if (hortifrutiEnviado) {
+      c.innerHTML = `
+      <div class="section">
+        <div class="sec-label">🥬 Hortifruti — ${lojaDisp(loja)}</div>
+        <div style="background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.25);border-radius:13px;padding:12px 14px;font-size:12px;color:#065F46;margin-bottom:10px">
+          <strong>✅ Pedido de hoje já enviado</strong> — aguardando validação do Estoque e Pedido.
+        </div>
+        <div class="card">
+          ${hortifrutiEnviado.itens.map(function(it) {
+            return `<div class="row-item">
+              <div style="flex:1;min-width:0"><span class="item-name">${it.produto}</span></div>
+              <div style="font-weight:800;font-size:13px;color:#059669">${Number(it.qtd_pedida).toLocaleString('pt-BR',{maximumFractionDigits:3})} ${it.und}</div>
+            </div>`;
+          }).join('')}
+        </div>
+      </div>`;
+    } else {
+      c.innerHTML = `
+      <div class="section">
+        <div class="sec-label">🥬 Hortifruti — ${lojaDisp(loja)}</div>
+        <div style="font-size:11px;color:#475569;margin-bottom:10px">Pedido direto — digite a quantidade que quer de cada item. Envio só terça e quinta.</div>
+        ${!podeEnviar ? `<div style="background:rgba(217,119,6,.08);border:1px solid rgba(217,119,6,.25);border-radius:13px;padding:10px 12px;font-size:11px;color:#B45309;margin-bottom:10px">⚠️ Hoje não é terça nem quinta — pode preparar a lista, mas o envio só libera nesses dias.</div>` : ''}
+        <div class="card">
+          ${hortifrutiCatalogo.map(function(p) {
+            return `<div class="row-item" style="flex-direction:column;align-items:flex-start;gap:6px">
+              <div style="display:flex;width:100%;align-items:center;gap:6px">
+                <span class="item-name" style="font-weight:700;font-size:12px;flex:1;min-width:0">${p.produto}</span>
+                <span style="font-size:9px;color:#64748b;flex-shrink:0">${p.subgrupo||''}</span>
+              </div>
+              <div style="width:100%">
+                ${campoComBadgeSemAutoSave(hortifrutiQtd[p.id]||'', p.und||'UN', '#059669', "oninput=\"setHortifrutiQtd('"+p.id+"',this.value)\"")}
+              </div>
+            </div>`;
+          }).join('')}
+        </div>
+        <button onclick="enviarPedidoHortifruti()" ${!podeEnviar?'disabled':''} style="width:100%;padding:13px;border-radius:12px;border:none;font-weight:800;font-size:14px;cursor:${podeEnviar?'pointer':'not-allowed'};background:${podeEnviar?'#059669':'rgba(0,0,0,.12)'};color:${podeEnviar?'#fff':'#64748b'}">
+          📤 Enviar Pedido${!podeEnviar?' (só terça/quinta)':''}
+        </button>
+      </div>`;
+    }
+
   } else if (tab === "entrega") {
     c.innerHTML=`
     <div class="section">
@@ -8758,7 +8920,7 @@ function render() {
 
 /* ═══════════ GERENCIAMENTO DE USUÁRIOS ═══════════ */
 const LOJAS_TABS_CONFIG = [
-  {id:"home",lb:"Home"},{id:"pedido",lb:"Pedido"},{id:"fichas",lb:"Fichas"},
+  {id:"home",lb:"Home"},{id:"pedido",lb:"Pedido"},{id:"hortifruti",lb:"Hortifruti"},{id:"fichas",lb:"Fichas"},
   {id:"estoque",lb:"Estoque"},{id:"vendas",lb:"Vendas"},{id:"contagem",lb:"Contagem"},
   {id:"entradas",lb:"Entradas"},{id:"transf",lb:"Transfer."},
   {id:"entrega",lb:"Entrega"},{id:"relatorio",lb:"Relatório"}
