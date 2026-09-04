@@ -1425,6 +1425,69 @@ function _semanaAtivaBounds() {
   };
 }
 
+// Itens que ficariam com quantidade ZERADA nesse pedido apesar de já terem contagem de
+// estoque FRESCA (feita essa semana) — sinal comum de esquecimento: a loja contou, mas
+// ninguém decidiu quanto comprar. Usado em confirmarPedido() (Pedido/Edu/Oseas/Matheus)
+// pra dar uma última chance de revisar, com o espelho Est.ant/Prov.ant/Est.vig, antes de
+// travar o fornecedor. `fornecedoresEscopo` é a lista de fornecedores sendo confirmados
+// agora (já filtrada pela aba ativa quando for o caso). Hortifruti não entra aqui: desde
+// que saiu do ciclo semanal, a loja não conta mais estoque desses itens no Pedido, então
+// nunca existe contagem fresca pra eles nessa função — sem precisar de exclusão especial.
+function _itensZeradosComContagem(fornecedoresEscopo) {
+  const fornsSet = new Set(fornecedoresEscopo);
+  const { monISO, sunISO } = _semanaAtivaBounds();
+  const resultado = [];
+  S.catalogo.filter(p => p.ativo && p.grupo !== 'HORTIFRUTI' && fornsSet.has(p.fornecedor)).forEach(prod => {
+    S.lojas.forEach(loja => {
+      const qtd = S.pedidoItens[prod.id]?.[loja.slug_pedido]?.qtd || 0;
+      if (qtd > 0) return;
+      const contagem = S.contagens[prod.id]?.[loja.slug_pedido];
+      if (!_contagemNaSemana(contagem, monISO, sunISO)) return;
+      const { estAnt, estVig } = _estAntVigEfetivo(contagem, monISO, sunISO);
+      const provAnt = S.provisaoAnterior[prod.id]?.[loja.slug_pedido] ?? null;
+      resultado.push({
+        catalogoId: prod.id, produto: prod.produto, custo: prod.custo,
+        lojaSlug: loja.slug_pedido, lojaNome: loja.nome_display,
+        estoqueContado: contagem.atual, estAnt, estVig, provAnt
+      });
+    });
+  });
+  return resultado;
+}
+
+// Monta o bloco de aviso pra dentro do modal de confirmarPedido() — cada item mostra o
+// espelho Est.ant/Prov.ant/Est.vig (mesmos rótulos da grade normal) e um campo pra editar
+// a quantidade ali mesmo, sem fechar o modal, caso tenha ficado zerado por esquecimento.
+function _htmlAvisoZerados(itens) {
+  if (!itens.length) return '';
+  return `
+    <div style="background:#FEF3C7;border:1px solid #D97706;border-radius:10px;padding:10px 12px;margin-bottom:14px">
+      <div style="font-size:12px;font-weight:700;color:#92400E;margin-bottom:8px">⚠️ ${itens.length} item(ns) com estoque contado essa semana ficaram com quantidade ZERADA — confere se não foi esquecimento antes de confirmar:</div>
+      <div style="display:flex;flex-direction:column;gap:8px;max-height:34vh;overflow-y:auto">
+        ${itens.map((it,i) => `
+          <div class="zerado-row" id="zerado-row-${i}" style="background:#fff;border:1px solid #FDE68A;border-radius:8px;padding:8px 10px">
+            <div style="font-size:12px;font-weight:600;color:#1A1D23;margin-bottom:4px">${esc(it.produto)} <span style="font-weight:400;color:var(--muted)">— ${esc(it.lojaNome)}</span></div>
+            <div style="display:flex;gap:10px;font-size:10px;color:var(--muted);margin-bottom:6px;flex-wrap:wrap">
+              <span>Est.ant: ${fmtQtd(it.estAnt)}</span>
+              <span>Prov.ant: ${fmtQtd(it.provAnt)}</span>
+              <span>Est.vig (estoque contado: ${fmtQtd(it.estoqueContado)}): <b style="color:#1A1D23">${fmtQtd(it.estVig)}</b></span>
+            </div>
+            <input type="text" inputmode="decimal" class="form-input" placeholder="0" style="width:100px;padding:4px 8px;font-size:12px"
+              oninput="_qtdZeradoChanged(this,'${it.catalogoId}','${it.lojaSlug}',${it.custo||0},${i})">
+          </div>`).join('')}
+      </div>
+    </div>`;
+}
+
+// oninput do campo de quantidade dentro do aviso de zerados — reaproveita o mesmo
+// qtdChanged/debounce/salvamento já usado na grade normal, só marca a linha como
+// resolvida visualmente assim que o valor deixa de ser zero.
+function _qtdZeradoChanged(el, catalogoId, lojaSlug, custo, idx) {
+  qtdChanged(catalogoId, lojaSlug, custo, el.value);
+  const row = document.getElementById('zerado-row-' + idx);
+  if (row) row.style.opacity = (parseFloat((el.value||'').replace(',','.')) || 0) > 0 ? '0.5' : '1';
+}
+
 // Prefixo que marca uma contagem como corrigida manualmente pelo setor de Compras (em
 // vez de uma contagem física feita pela loja) — usado tanto pra colorir/rotular aqui
 // quanto pra a loja identificar essas correções no app Lojas (carregarCorrecoesSetor).
@@ -1879,10 +1942,13 @@ async function confirmarPedido() {
     return;
   }
 
+  const itensZerados = _itensZeradosComContagem(pendentes);
+
   abrirModal(`
     <div class="modal-titulo">✓ Confirmar Pedido${escopoAtivo?' — '+(S.eduAtivo?'Edu':S.oseasAtivo?'Oseas':S.hortifrutiAtivo?'Hortifruti':'Matheus'):''}
       <button class="modal-close" onclick="$('modal-bg').classList.remove('ativo')">×</button>
     </div>
+    ${_htmlAvisoZerados(itensZerados)}
     <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Selecione os fornecedores pra gerar as provisões agora. Os demais continuam em aberto pra confirmar depois.</div>
     <div style="display:flex;justify-content:flex-end;margin-bottom:6px">
       <button class="btn-sm btn-outline" onclick="_toggleTodosFornConfirm(this)" data-marcados="1">Desmarcar todos</button>
