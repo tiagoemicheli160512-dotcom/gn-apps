@@ -434,6 +434,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   <button class="sidebar-link" data-sidebar-tab="provisoes" onclick="setTab('provisoes')"><span class="sl-icon">🧾</span>Provisões</button>
   <div class="sidebar-section">Logística</div>
   <button class="sidebar-link" data-sidebar-tab="entrega" onclick="setTab('entrega')"><span class="sl-icon">🚚</span>Entrega</button>
+  <button class="sidebar-link" data-sidebar-tab="barris" onclick="setTab('barris')"><span class="sl-icon">🍺</span>Barris</button>
   <button class="sidebar-link" data-sidebar-tab="fichas" onclick="setTab('fichas')"><span class="sl-icon">📝</span>Fichas</button>
   <button class="sidebar-link" data-sidebar-tab="faltas-dia" onclick="setTab('faltas-dia')"><span class="sl-icon">⚠️</span>Faltas<span id="sl-faltas-badge" style="display:none;margin-left:5px;background:#ef4444;color:#fff;font-size:9px;font-weight:800;padding:1px 5px;border-radius:8px;vertical-align:middle"></span></button>
   <div class="sidebar-section">Gestão</div>
@@ -537,6 +538,10 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
     <button class="nav-btn grp-log" data-tab="entrega" onclick="setTab('entrega')">
       <span class="nav-icon">&#9989;</span>
       <span class="nav-label">Entrega</span>
+    </button>
+    <button class="nav-btn" data-tab="barris" onclick="setTab('barris')">
+      <span class="nav-icon">&#127866;</span>
+      <span class="nav-label">Barris</span>
     </button>
     <button class="nav-btn" data-tab="fichas" onclick="setTab('fichas')">
       <span class="nav-icon">&#128218;</span>
@@ -765,6 +770,8 @@ let S = {
   entregasConfirmadas: [],
   provisoesAtrasadas: [],
   devolucoesLojas: [], // [{lojaKey, lojaDisplay, ...dev}]
+  barris: [], // espelho de gn_barris_validade (status ATIVO) de todas as lojas — ver renderBarris()
+  barrisGruposAbertos: new Set(),
 
   // Faltas do dia
   faltaDiaLoja: '',
@@ -1673,6 +1680,18 @@ async function carregarEntregasConfirmadas() {
   S.entregasConfirmadas = data || [];
 }
 
+// Espelho de leitura de gn_barris_validade (AMBEV chopp claro / DuGomes chopp de vinho) —
+// alimentado pelo app Lojas ao confirmar a entrega desses itens (ver abrirModalValidadeBarris
+// em gn-lojas.html). Aqui é só visualização pro setor de Compras, sem ação de finalizar —
+// isso continua sendo feito pela loja, que é quem sabe quando o barril esvazia no tirador.
+async function carregarBarris() {
+  const { data } = await db.from('gn_barris_validade')
+    .select('*')
+    .eq('status', 'ATIVO')
+    .order('validade');
+  S.barris = data || [];
+}
+
 // ═══════════════════════════════════════════════
 // SUPABASE — MUTATIONS
 // ═══════════════════════════════════════════════
@@ -2463,6 +2482,7 @@ function renderContent() {
     case 'fornecedores':renderFornecedores(); break;
     case 'provisoes':   renderProvisoes(); break;
     case 'entrega':     renderEntrega(); break;
+    case 'barris':      renderBarris(); break;
     case 'fichas':      renderFichas(); break;
     case 'faltas-dia':  renderFaltaDia(); break;
     case 'carnes':      renderCarnesCtrl(); break;
@@ -5860,6 +5880,113 @@ async function renderEntrega() {
   `;
 }
 
+// Os dois únicos catalogo_id de barril de chopp rastreados (mesma config de
+// gn-lojas.html/abrirModalValidadeBarris) — cada um com seu limiar de "crítico" combinado
+// com o usuário. Duplicado aqui de propósito: cada app da suíte é independente.
+const BARRIS_VALIDADE_CONFIG = {
+  'd8d457b1-0fb9-4c58-952b-27c175700f1f': { label: 'Chopp Claro (AMBEV)', diasCritico: 4 },
+  '60bbc4c5-a781-485b-9454-091d376d124a': { label: 'Chopp de Vinho (DuGomes)', diasCritico: 12 },
+};
+
+function _diasParaVencerBarril(validadeISO) {
+  const hoje2 = new Date(); hoje2.setHours(0, 0, 0, 0);
+  const v = new Date(validadeISO + 'T00:00:00');
+  return Math.round((v - hoje2) / 86400000);
+}
+
+function _barrilCriticidade(barril) {
+  const cfg = BARRIS_VALIDADE_CONFIG[barril.catalogo_id];
+  const diasCritico = cfg ? cfg.diasCritico : 7;
+  const dias = _diasParaVencerBarril(barril.validade);
+  const nivel = dias < 0 ? 'vencido' : (dias <= diasCritico ? 'critico' : 'ok');
+  return { nivel, dias, diasCritico };
+}
+
+function toggleBarrisGrupo(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.classList.toggle('aberto');
+  if (el.classList.contains('aberto')) S.barrisGruposAbertos.add(id); else S.barrisGruposAbertos.delete(id);
+}
+
+// ═══════════════════════════════════════════════
+// RENDER: BARRIS DE CHOPP (espelho, leitura) — AMBEV claro / DuGomes vinho
+// ═══════════════════════════════════════════════
+async function renderBarris() {
+  $('content').innerHTML = '<div class="empty"><div class="spin"></div></div>';
+  await carregarBarris();
+
+  if (S.barris.length === 0) {
+    $('content').innerHTML = `
+    <div class="sec-header"><div class="sec-titulo">🍺 Barris de Chopp</div></div>
+    <div class="empty" style="padding:20px 0">
+      <div class="empty-icon">🍺</div>
+      <div class="empty-texto">Nenhum barril em acompanhamento no momento.</div>
+    </div>`;
+    return;
+  }
+
+  const nCriticos = S.barris.filter(b => _barrilCriticidade(b).nivel !== 'ok').length;
+
+  const porLoja = new Map();
+  S.barris.forEach(b => {
+    const slug = b.loja_slug || '';
+    if (!porLoja.has(slug)) porLoja.set(slug, []);
+    porLoja.get(slug).push(b);
+  });
+  // Loja com o barril mais urgente primeiro — mesma ideia de ordenação de renderEntrega().
+  const lojasOrdenadas = [...porLoja.entries()].sort((a, b) => {
+    const piorA = Math.min(...a[1].map(x => _diasParaVencerBarril(x.validade)));
+    const piorB = Math.min(...b[1].map(x => _diasParaVencerBarril(x.validade)));
+    return piorA - piorB;
+  });
+
+  const htmlGrupos = lojasOrdenadas.map(([lojaSlug, itens]) => {
+    const lojaDisplay = S.lojas.find(l => l.slug_pedido === lojaSlug)?.nome_display || lojaSlug || 'SEM LOJA';
+    const gid = 'barris_loja_' + String(lojaSlug || 'sem_loja').replace(/[^a-z0-9]/gi, '_');
+    const temCriticoNaLoja = itens.some(b => _barrilCriticidade(b).nivel !== 'ok');
+    const itensOrdenados = [...itens].sort((a, b) => a.validade.localeCompare(b.validade));
+    const itensHtml = itensOrdenados.map(b => {
+      const crit = _barrilCriticidade(b);
+      const cor = crit.nivel === 'vencido' ? '#DC2626' : (crit.nivel === 'critico' ? '#D97706' : 'var(--text)');
+      const diasTxt = crit.nivel === 'vencido'
+        ? `VENCIDO há ${Math.abs(crit.dias)} dia${Math.abs(crit.dias) === 1 ? '' : 's'}`
+        : `Faltam ${crit.dias} dia${crit.dias === 1 ? '' : 's'}`;
+      const validadeFmt = new Date(b.validade + 'T12:00:00').toLocaleDateString('pt-BR');
+      return `<div class="prov-item">
+        <div class="prov-item-header">
+          <div>
+            <div class="prov-forn">${b.fornecedor || ''}</div>
+            <div class="prov-produto">${b.produto}</div>
+            <div style="font-size:11px;color:var(--muted)">📅 Validade: ${validadeFmt}</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:12px;font-weight:800;color:${cor}">${crit.nivel !== 'ok' ? '⚠️ ' : ''}${diasTxt}</div>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+    return `<div class="grupo-bloco${porLoja.size===1||S.barrisGruposAbertos.has(gid)?' aberto':''}" id="${gid}" style="margin-bottom:8px">
+      <div class="grupo-header" onclick="toggleBarrisGrupo('${gid}')">
+        <span class="grupo-nome">${temCriticoNaLoja ? '⚠️ ' : '🏪 '}${lojaDisplay}</span>
+        <div style="display:flex;gap:12px;align-items:center">
+          <span style="font-size:11px;color:var(--muted)">${itens.length} barril${itens.length > 1 ? 'is' : ''}</span>
+          <span class="grupo-chevron">▼</span>
+        </div>
+      </div>
+      <div class="grupo-body">${itensHtml}</div>
+    </div>`;
+  }).join('');
+
+  $('content').innerHTML = `
+    <div class="sec-header">
+      <div class="sec-titulo">🍺 Barris de Chopp ${nCriticos > 0 ? `<span class="badge badge-r">${nCriticos} crítico${nCriticos>1?'s':''}</span>` : ''}</div>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:12px">Espelho de leitura — validade lançada pela loja ao confirmar a entrega. Finalizar (barril acabou) é feito pelo app Lojas.</div>
+    ${htmlGrupos}
+  `;
+}
+
 // ═══════════════════════════════════════════════
 // RENDER: FALTAS DO DIA
 // ═══════════════════════════════════════════════
@@ -7085,7 +7212,7 @@ async function iniciarApp() {
     const _sess = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
     const abasArr = _sess && _sess.permissoes && _sess.permissoes.pedidos_abas;
     S.abasPermitidas = Array.isArray(abasArr) ? new Set(abasArr) : null;
-    const ALL_TABS = ['pedido','edu','oseas','matheus','hortifruti','catalogo','fornecedores','provisoes','entrega','fichas','faltas-dia','carnes','trios','historico','producao','terceiros'];
+    const ALL_TABS = ['pedido','edu','oseas','matheus','hortifruti','catalogo','fornecedores','provisoes','entrega','barris','fichas','faltas-dia','carnes','trios','historico','producao','terceiros'];
     ALL_TABS.forEach(t => {
       const hidden = S.abasPermitidas && !S.abasPermitidas.has(t);
       document.querySelectorAll(`.sidebar-link[data-sidebar-tab="${t}"], .nav-btn[data-tab="${t}"]`).forEach(b => {
