@@ -4625,10 +4625,96 @@ function setHortifrutiQtd(catalogoId, val) {
   hortifrutiQtd[catalogoId] = Math.max(0, parseFloat(val) || 0);
 }
 
+// Busca a quantidade pedida da última vez que essa loja mandou Hortifruti (não
+// necessariamente hoje — vasculha até 10 pedidos de HORTIFRUTI mais recentes até achar um
+// que tenha item dessa loja) — usado como "Prov.ant" no aviso de itens zerados antes de
+// enviar. Sem Est.ant/Est.vig aqui: Hortifruti não tem contagem de estoque, a loja digita a
+// quantidade desejada direto.
+async function _buscarProvAntHortifruti(slug) {
+  try {
+    const hoje = wkKey(new Date());
+    const pedidosAnt = await sbRequest(
+      'gn_pedidos?regiao=eq.HORTIFRUTI&data_pedido=lt.' + hoje + '&order=data_pedido.desc&limit=10&select=id,data_pedido',
+      { method: 'GET' }
+    );
+    for (const p of (pedidosAnt || [])) {
+      const itens = await sbRequest(
+        'gn_pedido_itens?pedido_id=eq.' + p.id + '&loja_slug=eq.' + slug + '&qtd_pedida=gt.0&select=catalogo_id,qtd_pedida',
+        { method: 'GET' }
+      );
+      if (itens && itens.length > 0) {
+        const map = {};
+        itens.forEach(function(it) { map[it.catalogo_id] = it.qtd_pedida; });
+        return map;
+      }
+    }
+    return {};
+  } catch (e) { return {}; }
+}
+
 async function enviarPedidoHortifruti() {
   if (!_hortifrutiPodeEnviarHoje()) { showToast('⚠️ Pedido de Hortifruti só pode ser enviado segunda ou quinta.'); return; }
   const slug = LOJA_SLUG[loja];
   if (!slug) { showToast('⚠️ Loja sem slug de pedido configurado.'); return; }
+  const itensParaEnviar = hortifrutiCatalogo
+    .filter(function(p) { return (hortifrutiQtd[p.id] || 0) > 0; })
+    .map(function(p) { return { catalogo_id: p.id, qtd_pedida: hortifrutiQtd[p.id] }; });
+  if (itensParaEnviar.length === 0) { showToast('⚠️ Digite a quantidade de pelo menos um item.'); return; }
+
+  const provAntMap = await _buscarProvAntHortifruti(slug);
+  const zerados = hortifrutiCatalogo
+    .filter(function(p) { return (hortifrutiQtd[p.id] || 0) === 0 && (provAntMap[p.id] || 0) > 0; })
+    .map(function(p) { return { id: p.id, produto: p.produto, und: p.und || 'UN', provAnt: provAntMap[p.id] }; });
+  if (zerados.length > 0) { _abrirAvisoZeradosHortifruti(zerados); return; }
+
+  _confirmarEnviarHortifruti();
+}
+
+// Aviso pré-envio: itens que a loja pediu da última vez e ficaram zerados agora — mesma
+// ideia do aviso do Finalizar (ver _htmlAvisoZeradosLoja), com edição inline antes de
+// confirmar. "Continuar mesmo assim" segue pro fluxo normal de envio.
+function _abrirAvisoZeradosHortifruti(zerados) {
+  const existing = document.getElementById('avisoZeradosHortiModal');
+  if (existing) existing.remove();
+  const modal = document.createElement('div');
+  modal.id = 'avisoZeradosHortiModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:9999;display:flex;align-items:flex-end;justify-content:center';
+  modal.innerHTML =
+    '<div style="background:#FFFFFF;border-radius:20px 20px 0 0;width:100%;max-width:480px;display:flex;flex-direction:column;padding-bottom:env(safe-area-inset-bottom,0px)">'
+    + '<div style="padding:16px 16px 12px;border-bottom:1px solid rgba(0,0,0,.08)">'
+    + '<div style="width:36px;height:4px;background:rgba(0,0,0,.2);border-radius:2px;margin:0 auto 14px"></div>'
+    + '<div style="font-size:14px;font-weight:800;color:#1A1D23;text-align:center">⚠️ Itens sem quantidade</div>'
+    + '<div style="font-size:11px;color:#64748b;text-align:center;margin-top:3px">' + zerados.length + ' item(ns) pedido(s) da última vez ficaram zerados agora</div>'
+    + '</div>'
+    + '<div style="overflow-y:auto;max-height:45vh;padding:10px 16px;display:flex;flex-direction:column;gap:8px">'
+    + zerados.map(function(it, i) {
+      return '<div class="zerado-horti-row" id="zerado-horti-row-' + i + '" style="background:#FEF3C7;border:1px solid #FDE68A;border-radius:8px;padding:8px 10px">'
+        + '<div style="font-size:12px;font-weight:700;color:#1A1D23;margin-bottom:4px">' + it.produto + '</div>'
+        + '<div style="font-size:10px;color:#78350F;margin-bottom:6px">Prov.ant: <b>' + it.provAnt + ' ' + it.und + '</b></div>'
+        + '<input type="number" step="0.001" min="0" placeholder="0" class="inp-full" style="width:110px;padding:5px 8px;font-size:12px"'
+        + ' oninput="_qtdZeradoHortiChanged(this,\'' + it.id + '\',' + i + ')">'
+        + '</div>';
+    }).join('')
+    + '</div>'
+    + '<div style="padding:14px 16px;display:grid;grid-template-columns:1fr 1fr;gap:10px;border-top:1px solid rgba(0,0,0,.08)">'
+    + '<button onclick="document.getElementById(\'avisoZeradosHortiModal\').remove()" style="background:rgba(0,0,0,.08);border:none;border-radius:13px;padding:13px;color:#475569;font-weight:700;font-size:13px">Cancelar</button>'
+    + '<button onclick="document.getElementById(\'avisoZeradosHortiModal\').remove();_confirmarEnviarHortifruti()" style="background:linear-gradient(135deg,#059669,#047857);border:none;border-radius:13px;padding:13px;color:#fff;font-weight:900;font-size:13px">Continuar mesmo assim</button>'
+    + '</div></div>';
+  modal.addEventListener('click', function(e) { if (e.target === modal) modal.remove(); });
+  document.body.appendChild(modal);
+}
+
+// oninput do campo dentro do aviso de zerados do Hortifruti — reaproveita setHortifrutiQtd
+// (mesmo estado usado pelo grid normal da aba), só marca a linha como resolvida
+// visualmente assim que o valor deixa de ser zero.
+function _qtdZeradoHortiChanged(el, catalogoId, idx) {
+  setHortifrutiQtd(catalogoId, el.value);
+  const row = document.getElementById('zerado-horti-row-' + idx);
+  if (row) row.style.opacity = (parseFloat(el.value) || 0) > 0 ? '0.5' : '1';
+}
+
+async function _confirmarEnviarHortifruti() {
+  const slug = LOJA_SLUG[loja];
   const itensParaEnviar = hortifrutiCatalogo
     .filter(function(p) { return (hortifrutiQtd[p.id] || 0) > 0; })
     .map(function(p) { return { catalogo_id: p.id, qtd_pedida: hortifrutiQtd[p.id] }; });
@@ -5100,6 +5186,69 @@ function _scrollProximoVazio() {
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
+// Itens sem NENHUM valor lançado no Finalizar dessa semana, mas que têm sinal histórico de
+// que são item ativo (pedido confirmado na semana passada, ou estoque oficial já
+// sincronizado essa semana pelo app Estoque e Pedido) — mesmas duas fontes já usadas no
+// alerta de "estoque baixo" da grade normal (ver isEstoqueBaixo), só que aqui reunidas numa
+// lista revisável antes de enviar. Sem Est.ant de propósito: mostrar o que foi contado ANTES
+// da contagem atual abriria brecha pra loja "ajustar" a contagem baseada no valor antigo em
+// vez de contar de verdade (mesma razão que já mantém Est.ant oculto na grade — ver
+// comentário logo acima de "Ped.ant"/"Est.vig" no render da aba Pedido).
+function _itensZeradosLoja() {
+  const pedido = getPedido();
+  const k = lojaKey();
+  const kAnterior = loja + "|" + wkKey(addDays(semana, -7));
+  const prods = getProdutosPedidoOrdenados();
+  const resultado = [];
+  prods.forEach(function(prod) {
+    const entry = pedido[prod.item] || {};
+    if (_pedidoPreenchido(entry)) return;
+    const destLS = mapeamentoPedido[String(prod.item)] || prod.produto.trim().toUpperCase();
+    const estVig = (estIniAll[k] || {})[destLS];
+    const entryAnt = (pedidoAll[kAnterior] || {})[prod.item];
+    const provAnt = entryAnt != null ? parseFloat(entryAnt._cxConfirmado) : null;
+    const temEstVig = estVig != null && !isNaN(estVig) && estVig > 0;
+    const temProvAnt = provAnt != null && !isNaN(provAnt) && provAnt > 0;
+    if (!temEstVig && !temProvAnt) return;
+    resultado.push({
+      item: prod.item, produto: prod.produto, und: prod.und || 'UN',
+      estVig: temEstVig ? estVig : 0, provAnt: temProvAnt ? provAnt : 0
+    });
+  });
+  return resultado;
+}
+
+// Monta o bloco de aviso pro modal de prévia do Finalizar — cada item mostra o espelho
+// Prov.ant/Est.vig (sem Est.ant, ver _itensZeradosLoja) e um campo pra lançar a contagem ali
+// mesmo, sem fechar o modal e caçar o item na lista.
+function _htmlAvisoZeradosLoja(itens) {
+  if (!itens.length) return '';
+  return '<div style="margin:12px 16px 0;background:#FEF3C7;border:1px solid #D97706;border-radius:12px;padding:10px 12px">'
+    + '<div style="font-size:12px;font-weight:800;color:#92400E;margin-bottom:8px">⚠️ ' + itens.length + ' item(ns) com pedido/estoque anterior ficaram sem contagem essa semana — confere se não foi esquecimento:</div>'
+    + '<div style="display:flex;flex-direction:column;gap:8px;max-height:32vh;overflow-y:auto">'
+    + itens.map(function(it, i) {
+      return '<div class="zerado-loja-row" id="zerado-loja-row-' + i + '" style="background:#fff;border:1px solid #FDE68A;border-radius:8px;padding:8px 10px">'
+        + '<div style="font-size:12px;font-weight:700;color:#1A1D23;margin-bottom:4px">' + it.produto + '</div>'
+        + '<div style="display:flex;gap:10px;font-size:10px;color:#64748b;margin-bottom:6px;flex-wrap:wrap">'
+        + '<span>Prov.ant: <b>' + it.provAnt + '</b></span>'
+        + '<span>Est.vig: <b>' + it.estVig + '</b></span>'
+        + '</div>'
+        + '<input type="number" step="0.001" min="0" placeholder="0" class="inp-full" style="width:110px;padding:5px 8px;font-size:12px"'
+        + ' oninput="_qtdZeradoLojaChanged(this,\'' + it.item + '\',' + i + ')">'
+        + '</div>';
+    }).join('')
+    + '</div></div>';
+}
+
+// oninput do campo dentro do aviso de zerados do Finalizar — reaproveita o mesmo
+// setPedidoVal já usado no campo "Est. Atual" da grade normal (mesmo autoSave), só marca a
+// linha como resolvida visualmente assim que o valor deixa de ser zero.
+function _qtdZeradoLojaChanged(el, itemId, idx) {
+  setPedidoVal(itemId, 'cx', parseFloat(el.value) || 0);
+  const row = document.getElementById('zerado-loja-row-' + idx);
+  if (row) row.style.opacity = (parseFloat(el.value) || 0) > 0 ? '0.5' : '1';
+}
+
 function _abrirPreviaConfirmar(modo) {
   const pedido = getPedido();
   const prods = getProdutosPedidoOrdenados();
@@ -5121,6 +5270,10 @@ function _abrirPreviaConfirmar(modo) {
   }).join('');
   const tipoCor = modo === 'urgencia' ? '#b45309' : '#1d4ed8';
   const tipoLabel = modo === 'urgencia' ? '⚡ Confirmar Urgência' : '✅ Confirmar Pedido';
+  // Aviso de itens zerados só no Finalizar — Urgência é de propósito uma atualização
+  // rápida de poucos itens, avisar sobre os demais aí seria ruído (decisão combinada
+  // com o usuário).
+  const avisoZerados = modo === 'final' ? _htmlAvisoZeradosLoja(_itensZeradosLoja()) : '';
   const modal = document.createElement('div');
   modal.id = '_pedidoPreviaModal';
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:9999;display:flex;align-items:flex-end;justify-content:center';
@@ -5131,6 +5284,7 @@ function _abrirPreviaConfirmar(modo) {
     + '<div style="font-size:14px;font-weight:800;color:#1A1D23;text-align:center">' + tipoLabel + '</div>'
     + '<div style="font-size:11px;color:#64748b;text-align:center;margin-top:3px">' + itens.length + ' item(s) · R$ ' + totalCusto.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}) + ' estimado</div>'
     + '</div>'
+    + avisoZerados
     + '<div style="overflow-y:auto;max-height:45vh;padding:4px 16px">' + linhas + '</div>'
     + '<div style="margin:2px 16px 0;padding:9px 12px;background:rgba(220,38,38,.06);border:1px solid rgba(220,38,38,.22);border-left:3px solid #DC2626;border-radius:10px;font-size:11px;color:#991B1B;line-height:1.4">'
     + '⚠️ Toque em "' + tipoLabel + '" só se tiver certeza que é isso mesmo que quer enviar — confira a lista de itens acima antes.'
