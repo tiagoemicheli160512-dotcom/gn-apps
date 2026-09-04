@@ -6531,21 +6531,13 @@ async function renderProducao(silent) {
   const sunday = getSundayOfWeek(semAtiva).toISOString().split('T')[0];
   const semAnterior = datePlusWeeks(semAtiva, -1);
 
-  let baseMap = {}, saidaMap = {}, saidaPorLoja = {}, pedidoItensSemana = [];
+  let baseMap = {}, saidaMap = {}, saidaPorLoja = {};
   try {
-    const { data: pedidosSemana } = await db.from('gn_pedidos').select('id')
-      .or(`semana_inicio.eq.${monday},and(data_pedido.gte.${monday},data_pedido.lte.${sunday})`);
-    const pedidoIds = (pedidosSemana || []).map(p => p.id);
-
-    const [atual, anterior, itensSem] = await Promise.all([
+    const [atual, anterior] = await Promise.all([
       _producaoDadosSemana(ids, semAtiva),
       _producaoDadosSemana(ids, semAnterior),
-      pedidoIds.length
-        ? _fetchTodasPaginas(() => db.from('gn_pedido_itens').select('catalogo_id,loja_slug,qtd_pedida')
-            .in('pedido_id', pedidoIds).in('catalogo_id', ids))
-        : Promise.resolve([]),
     ]);
-    baseMap = atual.baseMap; saidaMap = atual.saidaMap; saidaPorLoja = atual.saidaPorLoja; pedidoItensSemana = itensSem || [];
+    baseMap = atual.baseMap; saidaMap = atual.saidaMap; saidaPorLoja = atual.saidaPorLoja;
 
     // Semeia (só quando ainda não existe registro nesta semana) o Sexta a partir do
     // resultado final da semana anterior, e a Margem 2 também é herdada — só preenche
@@ -6575,14 +6567,6 @@ async function renderProducao(silent) {
     $('content').innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-texto">Erro ao carregar Produção</div></div>`;
     return;
   }
-
-  const contagemMap = {};
-  pedidoItensSemana.forEach(it => {
-    if (S.producaoLoja && it.loja_slug !== S.producaoLoja) return;
-    const qtd = parseFloat(it.qtd_pedida) || 0;
-    if (qtd <= 0) return;
-    contagemMap[it.catalogo_id] = (contagemMap[it.catalogo_id]||0) + qtd;
-  });
 
   const lojaTabs = [{ slug_pedido:'', nome_display:'Todas as lojas' }, ...S.lojas].map(l =>
     `<button class="store-tab${S.producaoLoja===l.slug_pedido?' ativo':''}" onclick="S.producaoLoja='${l.slug_pedido}';renderProducao()">${l.nome_display}</button>`
@@ -6625,7 +6609,6 @@ async function renderProducao(silent) {
       const sexta = parseFloat(base.sexta)||0;
       const entrada = parseFloat(base.entrada)||0;
       const saida = saidaMap[prod.id] || 0;
-      const contagem = contagemMap[prod.id] || 0;
       // Mesma fórmula da planilha original: Estoque = Sexta + Entrada − Saída. Não é
       // digitado — sempre recalculado, pra Entrada (e Saída) refletirem na hora.
       const estoqueAtual = sexta + entrada - saida;
@@ -6638,7 +6621,7 @@ async function renderProducao(silent) {
       // ainda está sobrando ou faltando depois do que já chegou.
       const diffMargem = margem2 > 0 ? estoqueAtual - margem2 : 0;
 
-      rowsData.push({ produto: prod.produto, margem2, estoqueAtual, sexta, entrada, saida, contagem, diffMargem, abaixoMargem });
+      rowsData.push({ produto: prod.produto, margem2, estoqueAtual, sexta, entrada, saida, diffMargem, abaixoMargem });
 
       const campoEdit = (label, campoNome, valor) => `
         <div>
@@ -6665,7 +6648,6 @@ async function renderProducao(silent) {
           ${campoView('Saída', saida, saida>0?'#fbbf24':'var(--muted)')}
           ${campoView('Estoque Real', estoqueAtual, corEstoque)}
         </div>
-        ${contagem>0 ? `<div style="margin-top:6px;font-size:9px;color:var(--muted);text-align:center">Qtd. pedida na semana: ${fmtQtd(contagem)}</div>` : ''}
         ${margem2<=0 ? '' : diffMargem===0
           ? `<div style="margin-top:8px;padding:6px 8px;background:rgba(96,165,250,.1);border:1px solid rgba(96,165,250,.35);border-radius:6px;font-size:11px;color:#1A1D23;font-weight:700">🔵 Bateu a margem certinho</div>`
           : diffMargem>0
@@ -6746,7 +6728,6 @@ function _producaoRelatorioTexto() {
     msg += `\n${r.produto}\n`;
     msg += `  Margem: ${fmtQtd(r.margem2)} | Entrada: ${fmtQtd(r.entrada)} | Contagem Sexta: ${fmtQtd(r.sexta)}\n`;
     msg += `  Saída: ${fmtQtd(r.saida)} | Estoque Real: ${fmtQtd(r.estoqueAtual)}${r.abaixoMargem ? ' (abaixo da margem)' : ''}\n`;
-    if (r.contagem > 0) msg += `  Qtd. pedida na semana: ${fmtQtd(r.contagem)}\n`;
     if (r.margem2 > 0) {
       if (r.diffMargem === 0) msg += `  Bateu a margem certinho\n`;
       else if (r.diffMargem > 0) msg += `  ${fmtQtd(r.diffMargem)} a mais que a margem\n`;
@@ -6772,7 +6753,6 @@ function gerarWppProducao() {
     msg += `\n${icon} *${r.produto}*\n`;
     msg += `  Margem: ${fmtQtd(r.margem2)} | Entrada: ${fmtQtd(r.entrada)} | Contagem Sexta: ${fmtQtd(r.sexta)}\n`;
     msg += `  Saída: ${fmtQtd(r.saida)} | Estoque Real: ${fmtQtd(r.estoqueAtual)}\n`;
-    if (r.contagem > 0) msg += `  Qtd. pedida na semana: ${fmtQtd(r.contagem)}\n`;
     if (r.margem2 > 0) {
       if (r.diffMargem === 0) msg += `  🔵 Bateu a margem certinho\n`;
       else if (r.diffMargem > 0) msg += `  🟢 ${fmtQtd(r.diffMargem)} a mais que a margem\n`;
