@@ -259,6 +259,14 @@ input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-
   <button onclick="fecharAvisoHortifruti()" style="background:none;border:none;color:#fff;opacity:.75;font-size:16px;cursor:pointer;flex-shrink:0;font-family:inherit;padding:2px 4px">×</button>
 </div>
 
+<!-- ALERTA CRÍTICO: barril de chopp vencido ou perto de vencer — ver mostrarAvisoBarrisSeNecessario() -->
+<div id="aviso-barris-bar" style="display:none;align-items:center;gap:10px;background:linear-gradient(135deg,#DC2626,#991B1B);color:#fff;padding:10px 14px;margin:8px 12px 0;border-radius:10px;font-size:12.5px;line-height:1.4">
+  <span style="font-size:18px;flex-shrink:0">🍺</span>
+  <span id="aviso-barris-txt" style="flex:1;min-width:0"></span>
+  <button onclick="irParaBarrisPeloAviso()" style="background:rgba(255,255,255,.22);border:none;border-radius:8px;color:#fff;font-weight:700;font-size:11.5px;padding:6px 12px;cursor:pointer;flex-shrink:0;font-family:inherit;white-space:nowrap">Ver barris</button>
+  <button onclick="fecharAvisoBarris()" style="background:none;border:none;color:#fff;opacity:.75;font-size:16px;cursor:pointer;flex-shrink:0;font-family:inherit;padding:2px 4px">×</button>
+</div>
+
 <div id="content"></div>
 
 <div id="nav">
@@ -315,6 +323,11 @@ input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-
     <span class="nav-icon">&#9989;</span>
     <span class="nav-label">Entrega</span>
     <span class="nav-dot hidden" id="dot-entrega" style="background:#D97706"></span>
+  </button>
+  <button class="nav-btn" id="nav-barris" onclick="goTab('barris')">
+    <span class="nav-icon">&#127866;</span>
+    <span class="nav-label">Barris</span>
+    <span class="nav-dot hidden" id="dot-barris" style="background:#DC2626"></span>
   </button>
   <button class="nav-btn" id="nav-relatorio" onclick="goTab('relatorio')">
     <span class="nav-icon">&#128202;</span>
@@ -729,6 +742,13 @@ let transferAll  = {};  // lojaKey -> [{id,data,origem,destino,insumo,qtd,motivo
 let pedidoAll    = {};  // lojaKey -> {item_id: {atual, pedido, obs}}
 let provisoesEntrega = []; // entregas pendentes (AGUARDANDO) desta loja
 let provisoesHistorico = []; // entregas já confirmadas desta loja (últimos 30 dias)
+let barrisAtivos = []; // barris de chopp (AMBEV claro / DuGomes vinho) em acompanhamento de validade
+// Os dois únicos catalogo_id de barril de chopp hoje (grupo BEBIDAS/subgrupo CHOPP no
+// catálogo) — cada um com seu próprio limiar de "crítico" combinado com o usuário.
+const BARRIS_VALIDADE_CONFIG = {
+  'd8d457b1-0fb9-4c58-952b-27c175700f1f': { label: 'Chopp Claro (AMBEV)', diasCritico: 4 },
+  '60bbc4c5-a781-485b-9454-091d376d124a': { label: 'Chopp de Vinho (DuGomes)', diasCritico: 12 },
+};
 // Janela do Histórico de Recebimentos (aba Entrega), em dias — 14 é o padrão de sempre pra
 // qualquer usuário; o filtro Semana/Mês/Trimestre (só cargo mestre/compras, ver
 // _epHistFiltroVisivel) troca esse valor e reconsulta o banco com carregarEntregas().
@@ -2738,6 +2758,7 @@ function goTab(t) {
   if (t === "hortifruti") { carregarHortifruti(); }
   render();
   if (t === 'entrega') carregarEntregas(true);
+  if (t === 'barris') carregarBarris(true);
   // foco automático na busca se a aba tem campo de busca
   if (["estoque","vendas","contagem"].includes(t)) {
     setTimeout(() => {
@@ -6906,10 +6927,47 @@ function irParaHortifrutiPeloAviso() {
   goTab('hortifruti');
 }
 
+// Alerta crítico de barril de chopp vencido/perto de vencer — diferente do aviso de
+// novidade acima, esse é um alerta operacional de verdade (custo de barril perdido), então
+// "fechar" só esconde NESTA sessão do app (não persiste em localStorage) — reaparece toda
+// vez que o app for reaberto enquanto o barril continuar crítico, em vez de sumir "pro dia"
+// como as novidades. Chamado por carregarBarris() sempre que os dados são atualizados.
+let _avisoBarrisFechadoNestaSessao = false;
+function mostrarAvisoBarrisSeNecessario() {
+  const el = document.getElementById('aviso-barris-bar');
+  if (!el) return;
+  if (_avisoBarrisFechadoNestaSessao || (abasPermitidas && !abasPermitidas.includes('barris')) || !_temBarrilCritico()) {
+    el.style.display = 'none';
+    return;
+  }
+  const criticos = barrisAtivos
+    .filter(function(b) { return _barrilCriticidade(b).nivel !== 'ok'; })
+    .sort(function(a, b) { return a.validade.localeCompare(b.validade); });
+  const pior = criticos[0];
+  const crit = _barrilCriticidade(pior);
+  const txt = crit.nivel === 'vencido'
+    ? ('<b>' + pior.produto + '</b> vencido há ' + Math.abs(crit.dias) + ' dia' + (Math.abs(crit.dias) === 1 ? '' : 's') + '!')
+    : ('<b>' + pior.produto + '</b> vence em ' + crit.dias + ' dia' + (crit.dias === 1 ? '' : 's') + '!');
+  const extra = criticos.length > 1 ? ' (+' + (criticos.length - 1) + ' outro' + (criticos.length - 1 === 1 ? '' : 's') + ' crítico)' : '';
+  const txtEl = document.getElementById('aviso-barris-txt');
+  if (txtEl) txtEl.innerHTML = txt + extra;
+  el.style.display = 'flex';
+}
+function fecharAvisoBarris() {
+  _avisoBarrisFechadoNestaSessao = true;
+  const el = document.getElementById('aviso-barris-bar');
+  if (el) el.style.display = 'none';
+}
+function irParaBarrisPeloAviso() {
+  fecharAvisoBarris();
+  goTab('barris');
+}
+
 /* ═══════════ RENDER ═══════════ */
 function render() {
   mostrarAvisoGuiaSeNecessario();
   mostrarAvisoHortifrutiSeNecessario();
+  mostrarAvisoBarrisSeNecessario();
   const cor  = COR[loja] || "#1a2b4a";
   // Maglia: mix verde/branco/vermelho só no cabeçalho Home — demais usos de `cor` (pontos, badges, gráficos) continuam verde sólido
   const heroBg = loja === "MAGLIA" ? "linear-gradient(135deg,#059669,#F8FAFC,#DC2626)" : `linear-gradient(135deg,${cor}ee,${cor}99)`;
@@ -6993,7 +7051,7 @@ function render() {
   if (navGestao) navGestao.style.display = _fichasOk ? "" : "none";
   // Tab permissions
   if (abasPermitidas) {
-    ['home','pedido','hortifruti','fichas','gestao','estoque','vendas','contagem','entradas','vinculos','transf','entrega','avarias','relatorio'].forEach(function(tid) {
+    ['home','pedido','hortifruti','fichas','gestao','estoque','vendas','contagem','entradas','vinculos','transf','entrega','barris','avarias','relatorio'].forEach(function(tid) {
       const nb = document.getElementById('nav-' + tid);
       if (nb) nb.style.display = abasPermitidas.includes(tid) ? '' : 'none';
       const sb = document.getElementById('sidebar-' + tid);
@@ -8429,7 +8487,7 @@ function render() {
                     style="width:100%;background:#FFFFFF;border:1px solid #E1E4E9;border-radius:8px;color:#475569;padding:7px 8px;font-size:13px;box-sizing:border-box"/>
                 </div>
               </div>
-              <button onclick="confirmarEntrega('${prov.id}')" style="width:100%;background:linear-gradient(135deg,#059669,#047857);border:none;border-radius:13px;padding:11px;color:#fff;font-weight:800;font-size:13px">
+              <button onclick="${BARRIS_VALIDADE_CONFIG[prov.catalogo_id] ? "abrirModalValidadeBarris('"+prov.id+"')" : "confirmarEntrega('"+prov.id+"')"}" style="width:100%;background:linear-gradient(135deg,#059669,#047857);border:none;border-radius:13px;padding:11px;color:#fff;font-weight:800;font-size:13px">
                 ✅ Confirmar Recebimento
               </button>
             </div>`;
@@ -8859,6 +8917,39 @@ function render() {
       </div>
     </div>`;
 
+  } else if (tab === "barris") {
+    const _barrisOrdenados = [...barrisAtivos].sort((a, b) => a.validade.localeCompare(b.validade));
+    c.innerHTML = `
+    <div class="section">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div class="sec-label" style="margin-bottom:0">🍺 Barris — ${lojaDisp(loja)}</div>
+        <button onclick="carregarBarris(false)" style="background:rgba(0,0,0,.07);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:5px 10px;color:#475569;font-size:11px">↻ Atualizar</button>
+      </div>
+      <div style="font-size:11px;color:#64748b;margin-top:6px;line-height:1.4">Validade lançada ao confirmar a entrega na aba Entrega. Toque em "Finalizar" quando o barril acabar no tirador.</div>
+      ${_barrisOrdenados.length === 0
+        ? `<div class="card" style="padding:16px;text-align:center;color:#475569;font-size:12px;margin-top:10px">Nenhum barril em acompanhamento no momento.</div>`
+        : `<div class="card" style="margin-top:10px;padding:0">
+            ${_barrisOrdenados.map(b => {
+              const crit = _barrilCriticidade(b);
+              const cor = crit.nivel === 'vencido' ? '#DC2626' : (crit.nivel === 'critico' ? '#D97706' : '#059669');
+              const bg = crit.nivel === 'vencido' ? 'rgba(220,38,38,.06)' : (crit.nivel === 'critico' ? 'rgba(217,119,6,.06)' : 'transparent');
+              const diasTxt = crit.nivel === 'vencido' ? `VENCIDO há ${Math.abs(crit.dias)} dia${Math.abs(crit.dias) === 1 ? '' : 's'}` : `Faltam ${crit.dias} dia${crit.dias === 1 ? '' : 's'}`;
+              const validadeFmt = new Date(b.validade + 'T12:00:00').toLocaleDateString('pt-BR');
+              return `<div style="padding:12px 14px;border-bottom:1px solid rgba(0,0,0,.05);background:${bg}">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+                  <div style="flex:1;min-width:0">
+                    <div style="font-size:13px;font-weight:700;color:#1A1D23">${escapeHtml(b.produto)}</div>
+                    <div style="font-size:10px;color:#64748b;margin-top:2px">📅 Validade: ${validadeFmt} · ${escapeHtml(b.fornecedor || '')}</div>
+                    <div style="font-size:12px;font-weight:800;color:${cor};margin-top:4px">${crit.nivel !== 'ok' ? '⚠️ ' : ''}${diasTxt}</div>
+                  </div>
+                  <button onclick="finalizarBarril('${b.id}')" style="flex-shrink:0;background:rgba(0,0,0,.07);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 10px;color:#475569;font-size:11px;font-weight:700">✓ Finalizar</button>
+                </div>
+              </div>`;
+            }).join('')}
+          </div>`
+      }
+    </div>`;
+
   } else if (tab === "relatorio") {
     const _vendasTodas = Object.entries(v).filter(([,x])=>x>0).sort((a,b)=>b[1]-a[1]);
     const vendasSorted = window._relVerTodosV ? _vendasTodas : _vendasTodas.slice(0,12);
@@ -9110,7 +9201,7 @@ const LOJAS_TABS_CONFIG = [
   {id:"home",lb:"Home"},{id:"pedido",lb:"Pedido"},{id:"hortifruti",lb:"Hortifruti"},{id:"fichas",lb:"Fichas"},
   {id:"estoque",lb:"Estoque"},{id:"vendas",lb:"Vendas"},{id:"contagem",lb:"Contagem"},
   {id:"entradas",lb:"Entradas"},{id:"transf",lb:"Transfer."},
-  {id:"entrega",lb:"Entrega"},{id:"relatorio",lb:"Relatório"}
+  {id:"entrega",lb:"Entrega"},{id:"barris",lb:"Barris"},{id:"relatorio",lb:"Relatório"}
 ];
 let _usuariosCache = [];
 
@@ -9698,6 +9789,153 @@ async function carregarCorrecoesSetor(silent) {
     if(!silent) render();
   }catch(e){}
 }
+
+async function carregarBarris(silent) {
+  try {
+    const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+    const rows = await sbRequest('gn_barris_validade?loja_slug=eq.' + slug + '&status=eq.ATIVO&select=*&order=validade', { method: 'GET' });
+    barrisAtivos = rows || [];
+    const dot = document.getElementById('dot-barris');
+    if (dot) dot.classList.toggle('hidden', !_temBarrilCritico());
+    mostrarAvisoBarrisSeNecessario();
+    if (!silent || tab === 'barris') render();
+  } catch (e) {
+    if (typeof window.gnLogError === 'function') window.gnLogError('lojas:carregarBarris', e);
+  }
+}
+
+function _diasParaVencerBarril(validadeISO) {
+  const hoje = new Date(); hoje.setHours(0, 0, 0, 0);
+  const v = new Date(validadeISO + 'T00:00:00');
+  return Math.round((v - hoje) / 86400000);
+}
+
+// nivel: 'vencido' (já passou), 'critico' (dentro do limiar combinado por produto — 4 dias
+// pro chopp claro AMBEV, 12 pro chopp de vinho DuGomes) ou 'ok'.
+function _barrilCriticidade(barril) {
+  const cfg = BARRIS_VALIDADE_CONFIG[barril.catalogo_id];
+  const diasCritico = cfg ? cfg.diasCritico : 7;
+  const dias = _diasParaVencerBarril(barril.validade);
+  const nivel = dias < 0 ? 'vencido' : (dias <= diasCritico ? 'critico' : 'ok');
+  return { nivel: nivel, dias: dias, diasCritico: diasCritico };
+}
+
+function _temBarrilCritico() {
+  return barrisAtivos.some(function(b) { const c = _barrilCriticidade(b); return c.nivel !== 'ok'; });
+}
+
+async function finalizarBarril(id) {
+  const b = barrisAtivos.find(function(x) { return x.id === id; });
+  if (!b) return;
+  if (!confirm('Marcar "' + b.produto + '" (validade ' + new Date(b.validade + 'T12:00:00').toLocaleDateString('pt-BR') + ') como finalizado?\n\nUse isso quando o barril acabar no tirador.')) return;
+  try {
+    await sbRequest('gn_barris_validade?id=eq.' + id, {
+      method: 'PATCH', headers: { 'Prefer': 'return=minimal' },
+      body: JSON.stringify({ status: 'FINALIZADO', finalizado_por: (usuarioAtual && usuarioAtual.nome) || loja, finalizado_em: new Date().toISOString() }),
+    });
+    showToast('✅ Barril finalizado.');
+    carregarBarris();
+  } catch (e) {
+    showToast('⚠️ Erro ao finalizar — tente de novo. ' + (e.message || ''));
+  }
+}
+
+function _renderCamposValidadeBarris(qtd, valoresAtuais) {
+  const n = Math.max(1, Math.round(qtd) || 1);
+  let html = '';
+  for (let i = 0; i < n; i++) {
+    const val = valoresAtuais[i] || '';
+    html += '<div style="margin-bottom:8px">'
+      + '<label style="font-size:9px;color:#64748b;font-weight:700;text-transform:uppercase;display:block;margin-bottom:3px">Validade — Barril ' + (i + 1) + '</label>'
+      + '<input type="date" class="barril-validade-input" data-idx="' + i + '" value="' + val + '"'
+      + ' style="width:100%;background:#FFFFFF;border:1px solid #E1E4E9;border-radius:8px;color:#475569;padding:8px;font-size:13px;box-sizing:border-box"/>'
+      + '</div>';
+  }
+  return html;
+}
+
+// oninput do campo "Quantidade de barris" dentro do modal — regenera os campos de
+// validade mantendo o que já foi digitado nos índices que ainda existem.
+function _atualizarCamposValidadeBarris() {
+  const qtdInput = document.getElementById('barrilModalQtd');
+  const qtd = parseInt(qtdInput.value, 10) || 1;
+  const atuais = Array.from(document.querySelectorAll('.barril-validade-input')).map(function(i){ return i.value; });
+  document.getElementById('barrilModalValidades').innerHTML = _renderCamposValidadeBarris(qtd, atuais);
+}
+
+// Confirmação de recebimento pra barril de chopp (AMBEV claro / DuGomes vinho): antes do
+// fluxo normal de confirmarEntrega(), pede a quantidade de barris e a validade de CADA um
+// (barril físico tem validade impressa própria — podem vir diferentes numa mesma entrega).
+function abrirModalValidadeBarris(id) {
+  const prov = provisoesEntrega.find(function(p){ return p.id === id; });
+  if (!prov) return;
+  const cfg = BARRIS_VALIDADE_CONFIG[prov.catalogo_id];
+  if (!cfg) { confirmarEntrega(id); return; } // segurança: não é item de barril rastreado, segue o fluxo normal
+  const qtdEl = document.getElementById('ep_qtd_' + id);
+  const qtdAtual = Math.max(1, Math.round(parseFloat(qtdEl ? qtdEl.value : '') || parseFloat(prov.qtd_prevista) || 1));
+  const produto = (prov.gn_catalogo && prov.gn_catalogo.produto) || cfg.label;
+
+  const existing = document.getElementById('modalBarrilValidade');
+  if (existing) existing.remove();
+  const modal = document.createElement('div');
+  modal.id = 'modalBarrilValidade';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:9999;display:flex;align-items:flex-end;justify-content:center';
+  modal.innerHTML =
+    '<div style="background:#FFFFFF;border-radius:20px 20px 0 0;width:100%;max-width:480px;display:flex;flex-direction:column;max-height:90vh;padding-bottom:env(safe-area-inset-bottom,0px)">'
+    + '<div style="padding:16px 16px 12px;border-bottom:1px solid rgba(0,0,0,.08)">'
+    + '<div style="width:36px;height:4px;background:rgba(0,0,0,.2);border-radius:2px;margin:0 auto 14px"></div>'
+    + '<div style="font-size:14px;font-weight:800;color:#1A1D23;text-align:center">🍺 ' + produto + '</div>'
+    + '<div style="font-size:11px;color:#64748b;text-align:center;margin-top:3px">Fator: 50 litros por barril</div>'
+    + '</div>'
+    + '<div style="overflow-y:auto;padding:14px 16px">'
+    + '<label style="font-size:9px;color:#64748b;font-weight:700;text-transform:uppercase;display:block;margin-bottom:3px">Quantidade de barris recebida</label>'
+    + '<input id="barrilModalQtd" type="number" min="1" step="1" value="' + qtdAtual + '" oninput="_atualizarCamposValidadeBarris()"'
+    + ' style="width:100%;background:#FFFFFF;border:1px solid #E1E4E9;border-radius:8px;color:#475569;padding:8px;font-size:14px;box-sizing:border-box;margin-bottom:12px"/>'
+    + '<div id="barrilModalValidades">' + _renderCamposValidadeBarris(qtdAtual, []) + '</div>'
+    + '</div>'
+    + '<div style="padding:14px 16px;display:grid;grid-template-columns:1fr 1fr;gap:10px;border-top:1px solid rgba(0,0,0,.08)">'
+    + '<button onclick="document.getElementById(\'modalBarrilValidade\').remove()" style="background:rgba(0,0,0,.08);border:none;border-radius:13px;padding:13px;color:#475569;font-weight:700;font-size:13px">Cancelar</button>'
+    + '<button onclick="_confirmarValidadeBarrisEProsseguir(\'' + id + '\')" style="background:linear-gradient(135deg,#059669,#047857);border:none;border-radius:13px;padding:13px;color:#fff;font-weight:900;font-size:13px">Confirmar Recebimento</button>'
+    + '</div></div>';
+  modal.addEventListener('click', function(e) { if (e.target === modal) modal.remove(); });
+  document.body.appendChild(modal);
+}
+
+async function _confirmarValidadeBarrisEProsseguir(id) {
+  const prov = provisoesEntrega.find(function(p){ return p.id === id; });
+  if (!prov) return;
+  const qtd = parseInt((document.getElementById('barrilModalQtd') || {}).value, 10) || 0;
+  if (qtd < 1) { showToast('⚠️ Informe pelo menos 1 barril.'); return; }
+  const validades = Array.from(document.querySelectorAll('.barril-validade-input')).map(function(i){ return i.value; });
+  if (validades.length !== qtd || validades.some(function(v){ return !v; })) { showToast('⚠️ Informe a validade de todos os barris.'); return; }
+
+  document.getElementById('modalBarrilValidade').remove();
+  // Ajusta o campo QTD da linha antes de seguir o fluxo normal — confirmarEntrega() lê
+  // esse valor direto do input, então isso garante que o recebimento registra a mesma
+  // quantidade de barris informada aqui.
+  const qtdEl = document.getElementById('ep_qtd_' + id);
+  if (qtdEl) qtdEl.value = qtd;
+
+  try {
+    const cfg = BARRIS_VALIDADE_CONFIG[prov.catalogo_id];
+    const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+    const body = validades.map(function(v) {
+      return {
+        loja: loja, loja_slug: slug, catalogo_id: prov.catalogo_id, provisao_id: prov.id,
+        produto: (prov.gn_catalogo && prov.gn_catalogo.produto) || (cfg ? cfg.label : ''),
+        fornecedor: prov.fornecedor || '', validade: v, status: 'ATIVO',
+        criado_por: (usuarioAtual && usuarioAtual.nome) || loja,
+      };
+    });
+    await sbRequest('gn_barris_validade', { method: 'POST', headers: { 'Prefer': 'return=minimal' }, body: JSON.stringify(body) });
+    if (typeof carregarBarris === 'function') carregarBarris(true);
+  } catch (e) {
+    showToast('⚠️ Recebimento confirmado, mas não deu pra salvar a validade dos barris — avise o suporte. ' + (e.message || ''));
+  }
+
+  confirmarEntrega(id);
+}
+
 function confirmarEntrega(id){
   const prov=provisoesEntrega.find(p=>p.id===id);
   if(!prov) return;
@@ -9887,6 +10125,7 @@ if ('serviceWorker' in navigator) {
 }
 carregarEntregas(true);
 carregarCorrecoesSetor(true);
+carregarBarris(true);
 
 // Recupera confirmações de entrega que ficaram pendentes de sincronizar (ex.: app fechado
 // com internet ruim antes do retry terminar) e já tenta reenviar assim que a sessão carrega.
