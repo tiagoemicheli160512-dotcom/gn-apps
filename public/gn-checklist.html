@@ -3990,6 +3990,7 @@ async function salvarRegistroBancoHoras(){
   if(tabEl && tabEl.classList.contains('active')) renderBancoHoras();
   // Atualizar badge do tab
   _bhAtualizarBadge();
+  if(_pendenciasEssenciaisAtivas.some(p=>p.chave==='banco')) _atualizarPendenciasEssenciais();
 }
 
 /* ─── Carregar do Supabase ─── */
@@ -4169,6 +4170,7 @@ async function salvarSalariosSetor(){
     showToast('✓ Salários salvos','success');
     renderBancoHoras();
     _logAuditoriaChk('SALVAR_SALARIOS_SETOR',{setores:Object.keys(salariosSetor)});
+    if(_pendenciasEssenciaisAtivas.some(p=>p.chave==='salario')) _atualizarPendenciasEssenciais();
   }catch(e){
     showToast('⚠️ Erro ao salvar salários','error');
   }
@@ -5689,6 +5691,16 @@ function updComissoesHorarioDia(i,diaIdx,campo,val){
   scheduleComissoesOp(mutator);
   // Re-render para atualizar total de horas
   renderComissoesFuncs();
+  _agendarRecheckEscalaPendencia();
+}
+// Debounce próprio (mais longo que o de scheduleComissoesOp/900ms) — só reavalia depois que
+// o horário digitado já teve tempo de sincronizar com a nuvem, senão a trava reapareceria
+// achando o campo ainda vazio.
+let _escalaPendRecheckTimer = null;
+function _agendarRecheckEscalaPendencia() {
+  if (!_pendenciasEssenciaisAtivas.some(p => p.chave === 'escala')) return;
+  clearTimeout(_escalaPendRecheckTimer);
+  _escalaPendRecheckTimer = setTimeout(_atualizarPendenciasEssenciais, 1500);
 }
 async function salvarAvalExperiencia(i,campo,decisaoId,obsId){
   const decisao=document.getElementById(decisaoId)?.value;
@@ -11453,15 +11465,21 @@ function aplicarRestricaoAbasMaglia() {
 }
 
 /* ═══════════ TRAVA: PENDÊNCIAS ESSENCIAIS (mesmo princípio do bloqueio de Caixa) ═══════════
-   Contagem de Carne e Banda de ontem sem resolver travam o app inteiro (menos Guia) até
-   isso ser feito — mesmo padrão do "Caixa de ontem não fechado" do app Home/Caixa. Sem
-   retroatividade (constantes ..._TRAVA_DESDE = dia do deploy) e sem valer pra Maglia
-   (CLAUDE.md: mudança só afeta a Maglia se citada explicitamente — ela já nem usa essas
-   duas abas, ver ABAS_FORA_MAGLIA acima). Desenhado pra crescer: outras pendências
-   (Escala/Banco de Horas/Salário) entram só adicionando outra função de checagem ao
-   Promise.all de _atualizarPendenciasEssenciais(), sem mexer no overlay/switchTab. */
+   Carnes/Banda/Escala de ontem sem resolver, Banco de Horas do mês anterior sem lançar (a
+   partir do dia 1) e Salários por Setor incompletos travam o app inteiro (menos Guia) até
+   ser resolvido — mesmo padrão do "Caixa de ontem não fechado" do app Home/Caixa. Sem
+   retroatividade (constantes ..._TRAVA_DESDE = dia/mês do deploy) e sem valer pra Maglia
+   (CLAUDE.md: mudança só afeta a Maglia se citada explicitamente — ela já nem usa Carnes/
+   Banda, ver ABAS_FORA_MAGLIA acima). */
 const CARNE_TRAVA_DESDE = '2026-09-06';
 const BANDA_TRAVA_DESDE = '2026-09-06';
+const ESCALA_TRAVA_DESDE = '2026-09-06';
+// Formato YYYY-MM — primeiro mês cujo lançamento passa a ser obrigatório (o mês do deploy
+// em si fica de fora, já que só começou a valer no meio dele). Ex.: deploy em 06/09/2026 →
+// setembro fica de fora, outubro é o primeiro mês cobrado — só checado a partir de 1º de
+// novembro/2026 (dia 1 do mês seguinte a outubro), nunca antes disso.
+const BANCO_HORAS_TRAVA_DESDE_MES = '2026-10';
+const SALARIO_MIN_SETORES = 5;
 let _pendenciasEssenciaisAtivas = [];
 
 function _abasChecklistPermitidas() {
@@ -11547,12 +11565,113 @@ async function _checarBandaPendenteOntem() {
   };
 }
 
+async function _checarEscalaPendenteOntem() {
+  if (LOJA === 'Maglia') return null;
+  if (!_temAcessoAbaChecklist('escala')) return null;
+  const ontem = _ontemISOChecklist();
+  if (ESCALA_TRAVA_DESDE > ontem) return null;
+  const idx = comissoesSemIdx(ontem);
+  if (idx == null) return null; // fora do calendário conhecido — não trava
+  const diaIdx = comissoesDiaIdx(ontem);
+  let funcs;
+  try {
+    const allData = await fetchComissoesAllData(comissoesLojaKey());
+    funcs = getComissoesWD(allData, idx).funcs || [];
+  } catch (e) { return null; }
+  const faltando = funcs.filter(f => {
+    if (!f.nome || !f.nome.trim() || f.arquivado) return false;
+    const status = (f.dias || [])[diaIdx] || 'PRESENTE';
+    if (!ESCALA_PRESENTE_SET.has(status)) return false; // folga/falta/férias etc. não precisam de horário
+    const hd = (f.horario_dias || [])[diaIdx];
+    return !(hd && hd.entrada && hd.saida);
+  });
+  if (!faltando.length) return null;
+  return {
+    chave: 'escala',
+    titulo: '📅 Escala de ontem sem horário',
+    mensagem: 'Sem horário (entrada/saída) cadastrado ontem pra: ' + faltando.map(f => f.nome).join(', ') + '.',
+    tabAlvo: 'escala',
+    // A Escala também opera sobre o dia/semana selecionados (onDataChange recarrega
+    // comissoesWD pra semana de "ontem") — mesmo raciocínio já usado pra Banda.
+    acaoExtra: async () => {
+      const inp = document.getElementById('data-dia-atual');
+      if (inp) inp.value = ontem;
+      await onDataChange(ontem);
+      switchTab('escala', document.querySelector('.tab-btn'));
+      setEscalaModo('diaria');
+      setEscalaDia(diaIdx);
+    },
+  };
+}
+
+async function _checarBancoHorasPendente() {
+  if (LOJA === 'Maglia') return null;
+  if (!_temAcessoAbaChecklist('banco')) return null;
+  const hoje = new Date();
+  if (hoje.getDate() !== 1) return null; // só liga no dia 1 do mês, cobrando o mês anterior
+  const mesAnteriorDate = new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1);
+  const mesAnterior = mesAnteriorDate.getFullYear() + '-' + String(mesAnteriorDate.getMonth() + 1).padStart(2, '0');
+  if (BANCO_HORAS_TRAVA_DESDE_MES > mesAnterior) return null; // sem retroatividade
+  const idxHoje = comissoesSemIdx(hojeLocal());
+  let funcs = [], registros = [];
+  try {
+    const [allData, bh] = await Promise.all([
+      idxHoje != null ? fetchComissoesAllData(comissoesLojaKey()) : Promise.resolve(null),
+      sb.from('gn_banco_horas').select('registros').eq('loja', LOJA).eq('mes', mesAnterior).maybeSingle(),
+    ]);
+    if (allData && idxHoje != null) funcs = getComissoesWD(allData, idxHoje).funcs || [];
+    registros = (bh.data && bh.data.registros) || [];
+  } catch (e) { return null; }
+  const nomes = new Map();
+  funcs.forEach(f => { if (f.nome && f.nome.trim() && !f.arquivado) nomes.set(_bhNormNome(f.nome), f.nome.trim()); });
+  if (!nomes.size) return null;
+  const faltando = [...nomes.values()].filter(nome => !_bhFindReg(registros, nome));
+  if (!faltando.length) return null;
+  return {
+    chave: 'banco',
+    titulo: '⏱ Banco de Horas do mês anterior pendente',
+    mensagem: 'Falta lançar o banco de horas de ' + _bhMesLabel(mesAnterior) + ' pra: ' + faltando.join(', ') + '.',
+    tabAlvo: 'banco',
+  };
+}
+
+// Diferente das outras — não é "pendência de ontem", é uma exigência estrutural permanente
+// (não faz sentido calcular saldo de banco de horas em R$ sem salário cadastrado pra pelo
+// menos algumas funções da loja). Passa a valer a partir do deploy, sem checagem de data.
+async function _checarSalarioIncompleto() {
+  if (LOJA === 'Maglia') return null;
+  if (!_temAcessoAbaChecklist('escala')) return null;
+  let salariosSetor;
+  try {
+    const { data } = await sb.from('gn_banco_horas').select('registros').eq('loja', LOJA).eq('mes', 'CONFIG').maybeSingle();
+    salariosSetor = (data && data.registros && data.registros.salariosSetor) || {};
+  } catch (e) { return null; }
+  const qtd = Object.keys(salariosSetor).length;
+  if (qtd >= SALARIO_MIN_SETORES) return null;
+  return {
+    chave: 'salario',
+    titulo: '💰 Salários por Setor incompletos',
+    mensagem: 'Só ' + qtd + ' de pelo menos ' + SALARIO_MIN_SETORES + ' funções têm salário cadastrado.',
+    tabAlvo: 'escala',
+    acaoExtra: () => {
+      switchTab('escala', document.querySelector('.tab-btn'));
+      setTimeout(() => {
+        const el = document.getElementById('card-salarios-setor');
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 300);
+    },
+  };
+}
+
 async function _atualizarPendenciasEssenciais() {
   let resultados;
   try {
     resultados = await Promise.all([
       _checarCarnePendenteOntem(),
       _checarBandaPendenteOntem(),
+      _checarEscalaPendenteOntem(),
+      _checarBancoHorasPendente(),
+      _checarSalarioIncompleto(),
     ]);
   } catch (e) { resultados = []; }
   _pendenciasEssenciaisAtivas = resultados.filter(Boolean);
