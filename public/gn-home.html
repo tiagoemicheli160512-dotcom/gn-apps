@@ -703,6 +703,7 @@ let _dashCaixaSemConferencia = null; // {lojaKey: [{data, turno}]} — fechament
 let _dashVisitasHoje = null; // {lojaKey: [{nome, cargo, status:'planejada'|'andamento'|'concluida'}]} — visitas do dia (Calendário de Visitas)
 let _dashVisitasPerdidas = null; // {lojaKey: [dataISO,...]} — visitas planejadas (PLAN) nos últimos 14 dias que passaram sem nenhuma visita real registrada na mesma loja/data
 let _dashAlertasUrgentes = null; // [{loja, criado_por, criado_em, resolvido, resolvido_por, resolvido_em, motivo}] — últimos alertas urgentes (ver _enviarAlertaUrgente)
+let _dashPendenciasEssenciais = null; // {lojaKey: [{chave,emoji,label}]} — mesmas 6 travas essenciais dos apps Lojas/Check-list (Nota Fiscal, Carnes, Banda, Escala, Banco de Horas, Salário), agregadas aqui só pra visão/ranking (ver _computePendenciasEssenciais)
 let _dashFeriasTodas = null; // [{id, usuarioId, nome, cargo, inicio, fim, origem}] — férias de gerência+equipe, carregado por _loadDashAll pro card do topo
 let _dashGerentes = null; // {lojaKey: [{id, nome, cargo}]} — gerentes/sub-gerentes ativos por loja (gn_usuarios)
 let _dashFuncCount = null; // {lojaKey: nº de funcionários nomeados na escala da semana atual} — pro card mostrar venda/funcionário
@@ -1346,6 +1347,203 @@ const CARNES_DEF_HOME = [
   { key:'camarao',    label:'Camarão',      icon:'🦐', unit:'kg' }
 ];
 const DIAS_SEMANA_HOME = ['seg','ter','qua','qui','sex','sab','dom'];
+
+// ── PENDÊNCIAS ESSENCIAIS — visão consolidada (Painel de Gestão) ──────────────
+// Mesmos 6 critérios que já travam os apps Lojas (Nota Fiscal) e Check-list (Carnes,
+// Banda, Escala, Banco de Horas, Salário) loja a loja — aqui só agregados pra dar
+// visibilidade de quem está deixando de resolver (card + ranking), sem duplicar a
+// trava em si, que continua vivendo em cada app. Constantes replicadas (não
+// importadas) porque cada app roda isolado, sem módulos compartilhados — precisam
+// ficar em sincronia manual com CARNE_TRAVA_DESDE/BANDA_TRAVA_DESDE/etc. de
+// gn-checklist.html e NOTA_TRAVA_DESDE de gn-lojas.html se algum dia mudarem.
+// Maglia fica de fora por padrão (CLAUDE.md: só entra se citada explicitamente).
+const NOTA_TRAVA_DESDE_HOME = '2026-09-06';
+const CARNE_TRAVA_DESDE_HOME = '2026-09-06';
+const BANDA_TRAVA_DESDE_HOME = '2026-09-06';
+const ESCALA_TRAVA_DESDE_HOME = '2026-09-06';
+const BANCO_HORAS_TRAVA_DESDE_MES_HOME = '2026-10';
+const SALARIO_MIN_SETORES_HOME = 5;
+const LOJA_SLUG_HOME = Object.fromEntries(GN_LOJAS.map(l=>[l.userKey,l.lojaSlug]));
+const SLUG_TO_LOJA_HOME = Object.fromEntries(GN_LOJAS.map(l=>[l.lojaSlug,l.userKey]));
+const CHK_TO_LOJA_HOME = Object.fromEntries(GN_LOJAS.map(l=>[l.chkKey,l.userKey]));
+const PENDENCIA_ESSENCIAL_LABEL = { nota:'🧾 Nota Fiscal', carnes:'🥩 Carnes', banda:'🎵 Banda', escala:'📅 Escala', banco:'⏱ Banco de Horas', salario:'💰 Salário' };
+
+function _segundaFeiraISOHome(d) {
+  const dt = new Date(d);
+  const day = dt.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  dt.setDate(dt.getDate() + diff);
+  return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
+}
+function _bhNormNomeHome(n){
+  return (n||'').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[\s\-]+/g,'');
+}
+function _bhFindRegHome(arr, nome){
+  const key = _bhNormNomeHome(nome);
+  return (arr||[]).find(x => _bhNormNomeHome(x.nome) === key);
+}
+
+// Recebe todas as rows já buscadas em _loadDashAll (sem request extra além das 4
+// novas: provisoesRows, carnesRows, trioAgendaOntemRows, bhMesAnteriorRows) e devolve
+// {lojaKey: [{chave,emoji,label}]} — mesma forma de _dashEscalaIncompleta/etc.
+function _computePendenciasEssenciais(ctx) {
+  const { provisoesRows, lojasOfRows, carnesRows, trioAgendaOntemRows, comissoesAllRows,
+          bhPorLoja, bhMesAnteriorRows, hoje, ontemISO, segueBH, mesAnteriorStr } = ctx;
+  const pend = {};
+  const add = (userKey, chave, label) => {
+    if (!userKey || userKey === 'MAGLIA' || !LOJAS_LISTA.includes(userKey)) return;
+    (pend[userKey] = pend[userKey] || []).push({ chave, label });
+  };
+
+  // 1) Nota Fiscal — mesma lógica de _calcularNotasFiscaisPendentes (gn-lojas.html):
+  // agrupa confirmações (RECEBIDO_OK/DIVERGENCIA) por loja+fornecedor desde
+  // NOTA_TRAVA_DESDE_HOME até antes de hoje, e cruza contra entradasAll (já vem em
+  // lojasOfRows.all_data, sem query extra) — pendente quando nada foi lançado.
+  if (NOTA_TRAVA_DESDE_HOME <= hoje) {
+    const entradasPorLoja = {};
+    (lojasOfRows||[]).forEach(lr => { if (LOJAS_LISTA.includes(lr.loja)) entradasPorLoja[lr.loja] = (lr.all_data||{}).entradasAll || {}; });
+    const inicioHojeISO = (() => { const d=new Date(); d.setHours(0,0,0,0); return d.toISOString(); })();
+    const grupos = {};
+    (provisoesRows||[]).forEach(p => {
+      const userKey = SLUG_TO_LOJA_HOME[p.loja_slug];
+      if (!userKey || userKey === 'MAGLIA') return;
+      if (!p.atualizado_em || p.atualizado_em >= inicioHojeISO) return;
+      const fornDisp = (p.fornecedor || 'Sem fornecedor').trim();
+      const key = userKey + '|' + fornDisp.toUpperCase();
+      if (!grupos[key]) grupos[key] = { userKey, fornecedor: fornDisp, semanas: new Set() };
+      grupos[key].semanas.add(_segundaFeiraISOHome(new Date(p.atualizado_em)));
+    });
+    Object.values(grupos).forEach(g => {
+      const entradasLoja = entradasPorLoja[g.userKey] || {};
+      let lancado = 0;
+      g.semanas.forEach(semKey => {
+        const ent = entradasLoja[g.userKey + '|' + semKey] || [];
+        lancado += ent.filter(e => (e.fornecedor || '').trim().toUpperCase() === g.fornecedor.toUpperCase())
+          .reduce((s, e) => s + (parseFloat(e.qtd) || 0) * (parseFloat(e.custoUnit) || 0), 0);
+      });
+      if (lancado === 0) add(g.userKey, 'nota', 'Nota fiscal pendente — ' + g.fornecedor);
+    });
+  }
+
+  // 2) Carnes — mesma lógica de _checarCarnePendenteOntem (gn-checklist.html): só
+  // considera lojas que já têm linha salva pra semana de ontem (sem linha = nunca
+  // usou a aba, não vira pendência — igual à trava original).
+  if (CARNE_TRAVA_DESDE_HOME <= ontemISO) {
+    const diaIdxOntem = (new Date(ontemISO + 'T12:00:00').getDay() + 6) % 7; // 0=seg..6=dom
+    if (diaIdxOntem !== 0) { // segunda usa "inicial" (auto-preenchido) — evita falso positivo
+      const diaKey = DIAS_SEMANA_HOME[diaIdxOntem];
+      (carnesRows || []).forEach(row => {
+        const userKey = CHK_TO_LOJA_HOME[row.loja] || _COM_KEY_TO_LOJA[row.loja];
+        if (!userKey || userKey === 'MAGLIA') return;
+        const carnes = row.carnes || {};
+        const faltando = CARNES_DEF_HOME.some(c => {
+          const v = carnes[c.key] && carnes[c.key][diaKey];
+          return v === '' || v === undefined || v === null;
+        });
+        if (faltando) add(userKey, 'carnes', 'Contagem de carne de ontem incompleta');
+      });
+    }
+  }
+
+  // 3) Banda — mesma lógica de _checarBandaPendenteOntem: presença nunca confirmada
+  // OU couvert do horário principal (1º por horario_inicio) nunca lançado.
+  if (BANDA_TRAVA_DESDE_HOME <= ontemISO) {
+    const porLoja = {};
+    (trioAgendaOntemRows || []).forEach(r => { (porLoja[r.loja] = porLoja[r.loja] || []).push(r); });
+    Object.keys(porLoja).forEach(slug => {
+      const userKey = SLUG_TO_LOJA_HOME[slug];
+      if (!userKey || userKey === 'MAGLIA') return;
+      const rows = porLoja[slug];
+      const presencaPendente = rows.some(r => !r.presenca_confirmada && !r.banda_nao_veio);
+      const principal = rows[0];
+      const couvertPendente = !principal.banda_nao_veio && (principal.couver_valor === null || principal.couver_valor === undefined);
+      if (presencaPendente || couvertPendente) add(userKey, 'banda', 'Banda de ontem sem confirmação');
+    });
+  }
+
+  // 4) Escala — mesma lógica de _checarEscalaPendenteOntem: reaproveita
+  // comissoesAllRows (já buscado) e os helpers de semana/dia já usados pro card de
+  // "hoje" (_escalaHomeSemIdx/_escalaHomeDiaIdx/_escalaHomeFuncsAtual), só que pra
+  // "ontem".
+  if (ESCALA_TRAVA_DESDE_HOME <= ontemISO) {
+    const idxOntem = _escalaHomeSemIdx(ontemISO);
+    if (idxOntem != null) {
+      const diaIdxOntem = _escalaHomeDiaIdx(ontemISO);
+      (comissoesAllRows || []).forEach(r => {
+        const userKey = _COM_KEY_TO_LOJA[r.loja];
+        if (!userKey || userKey === 'MAGLIA') return;
+        const funcs = _escalaHomeFuncsAtual(r.all_data || {}, idxOntem);
+        const faltando = funcs.some(f => {
+          if (!f.nome || !f.nome.trim() || f.arquivado) return false;
+          const status = (f.dias || [])[diaIdxOntem] || 'PRESENTE';
+          if (!ESCALA_HOME_PRESENTE_SET.has(status)) return false;
+          const hd = (f.horario_dias || [])[diaIdxOntem];
+          return !(hd && hd.entrada && hd.saida);
+        });
+        if (faltando) add(userKey, 'escala', 'Escala de ontem sem horário completo');
+      });
+    }
+  }
+
+  // 5) Banco de Horas — mesma lógica de _checarBancoHorasPendente: só liga no dia 1
+  // do mês (sem tolerância — decisão já validada), cobrando o mês anterior.
+  if (segueBH && BANCO_HORAS_TRAVA_DESDE_MES_HOME <= mesAnteriorStr) {
+    const idxHoje = _escalaHomeSemIdx(hoje);
+    if (idxHoje != null) {
+      const bhMesAnteriorPorLoja = {};
+      (bhMesAnteriorRows || []).forEach(r => { bhMesAnteriorPorLoja[r.loja] = r.registros || []; });
+      (comissoesAllRows || []).forEach(r => {
+        const userKey = _COM_KEY_TO_LOJA[r.loja];
+        if (!userKey || userKey === 'MAGLIA') return;
+        const funcs = _escalaHomeFuncsAtual(r.all_data || {}, idxHoje);
+        const nomes = new Map();
+        funcs.forEach(f => { if (f.nome && f.nome.trim() && !f.arquivado) nomes.set(_bhNormNomeHome(f.nome), f.nome.trim()); });
+        if (!nomes.size) return;
+        const chkKey = LOJA_DB_KEY[userKey] || userKey;
+        const registros = bhMesAnteriorPorLoja[chkKey] || [];
+        const faltando = [...nomes.values()].some(nome => !_bhFindRegHome(registros, nome));
+        if (faltando) add(userKey, 'banco', 'Banco de Horas do mês anterior pendente');
+      });
+    }
+  }
+
+  // 6) Salário por Setor — mesma lógica de _checarSalarioIncompleto: reaproveita
+  // bhPorLoja (mesma linha mes='CONFIG' já buscada pra Banco de Horas/Escala do
+  // topo do painel), exigência estrutural sem data de corte.
+  GN_LOJAS.forEach(l => {
+    if (l.userKey === 'MAGLIA') return;
+    const cfg = (bhPorLoja || {})[l.chkKey] || {};
+    const qtd = Object.keys(cfg.salariosSetor || {}).length;
+    if (qtd < SALARIO_MIN_SETORES_HOME) add(l.userKey, 'salario', 'Salários por Setor incompletos (' + qtd + '/' + SALARIO_MIN_SETORES_HOME + ')');
+  });
+
+  return pend;
+}
+
+function _buildPendenciasEssenciaisCard(){
+  const mapa = _dashPendenciasEssenciais || {};
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  const lojas = Object.keys(mapa).filter(k => mapa[k] && mapa[k].length);
+  if (!lojas.length) return '';
+  const ranking = lojas.map(k => ({ loja:k, nome: LOJA_DISPLAY[k]||k, itens: mapa[k] }))
+    .sort((a,b) => b.itens.length - a.itens.length || a.nome.localeCompare(b.nome));
+  const totalCasos = lojas.reduce((s,k)=>s+mapa[k].length,0);
+  const linha = (r, i) => `<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;padding:7px 0;border-top:1px solid rgba(0,0,0,.06)">
+      <div style="display:flex;align-items:center;gap:8px;min-width:0;flex-shrink:0">
+        <span style="font-size:10px;font-weight:800;color:rgba(0,0,0,.35);width:18px;flex-shrink:0">${i+1}º</span>
+        <span style="width:8px;height:8px;border-radius:50%;background:${COR_LOJA[r.loja]||'#999'};flex-shrink:0"></span>
+        <span style="font-size:12px;font-weight:700;color:#1A1D23;white-space:nowrap">${esc(r.nome)}</span>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-end">
+        ${r.itens.map(it=>`<span title="${esc(it.label)}" style="font-size:9.5px;font-weight:700;color:#1A1D23;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.25);border-radius:999px;padding:2px 7px;white-space:nowrap">${PENDENCIA_ESSENCIAL_LABEL[it.chave]||it.chave}</span>`).join('')}
+      </div>
+    </div>`;
+  return `<div style="background:rgba(239,68,68,.05);border:1px solid rgba(239,68,68,.2);border-left:3px solid #ef4444;border-radius:14px;padding:14px 16px;margin:0 0 14px">
+    <div style="font-size:12px;font-weight:800;color:#1A1D23;margin-bottom:2px">🔒 Pendências essenciais · ${lojas.length} loja${lojas.length>1?'s':''} · ${totalCasos} caso${totalCasos>1?'s':''}</div>
+    <div style="font-size:10px;color:rgba(0,0,0,.45);margin-bottom:4px">Ranking de lojas travadas agora (Nota Fiscal, Carnes, Banda, Escala, Banco de Horas, Salário)</div>
+    ${ranking.map(linha).join('')}
+  </div>`;
+}
 
 let _carnesDocsHomeData = null;
 let _carnesDocsHomeExpanded = false;
@@ -4376,6 +4574,16 @@ async function _loadDashAll() {
   // a visita de amanhã e o CHK Hoje não bater com o checklist do dia certo.
   const hoje  = (d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'))(new Date());
   const H     = {apikey:SB_KEY,Authorization:'Bearer '+SB_KEY};
+  // Pendências essenciais (Nota Fiscal/Carnes/Banda/Escala/Banco de Horas) olham pra
+  // "ontem" e, no caso do Banco de Horas, só ligam no dia 1 do mês — mesmos critérios
+  // exatos das travas em gn-lojas.html/gn-checklist.html (ver _computePendenciasEssenciais).
+  const ontemDate = new Date(); ontemDate.setDate(ontemDate.getDate()-1);
+  const ontemISO = (d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'))(ontemDate);
+  const segundaOntemISO = _segundaFeiraISOHome(ontemDate);
+  const hojeDate = new Date();
+  const segueBH = hojeDate.getDate() === 1;
+  const mesAnteriorDate = new Date(hojeDate.getFullYear(), hojeDate.getMonth()-1, 1);
+  const mesAnteriorStr = mesAnteriorDate.getFullYear()+'-'+String(mesAnteriorDate.getMonth()+1).padStart(2,'0');
   try {
     const weekRange = _weekRange(_dashPer==='sem' ? _dashWoff : 0);
     const trinta = new Date(); trinta.setDate(trinta.getDate()-30);
@@ -4384,7 +4592,7 @@ async function _loadDashAll() {
     const comKeysAll = Object.values(LOJA_COM_KEY).join(',');
     const catorze = new Date(); catorze.setDate(catorze.getDate()-14);
     const from14 = catorze.toISOString().slice(0,10);
-    const [fatCur, fatPrv, fatPrvComp, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows, comissoesAllRows, bhConfigRows, caixaFechadosRows, alertasUrgentesRows, visitasPassadasRows] = await Promise.all([
+    const [fatCur, fatPrv, fatPrvComp, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows, comissoesAllRows, bhConfigRows, caixaFechadosRows, alertasUrgentesRows, visitasPassadasRows, provisoesRows, carnesRows, trioAgendaOntemRows, bhMesAnteriorRows] = await Promise.all([
       _fetchFat(range.dates).catch(e=>{ _errCb('fatCur')(e); return {}; }),
       _fetchFat(prevRange.dates).catch(e=>{ _errCb('fatPrv')(e); return {}; }),
       precisaCompSeparada ? _fetchFat(prevRangeCompDates).catch(e=>{ _errCb('fatPrvComp')(e); return {}; }) : Promise.resolve(null),
@@ -4402,6 +4610,18 @@ async function _loadDashAll() {
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?status=eq.FECHADO&data=gte.${from30}&select=id,loja,data,turno`, H, 'dash:caixaFechadosRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_alertas_urgentes?order=criado_em.desc&limit=50&select=id,loja,criado_por,criado_em,resolvido,resolvido_por,resolvido_em,motivo`, H, 'dash:alertasUrgentesRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_chk_visitas?data=gte.${from14}&data=lt.${hoje}&select=loja,data,hora_chegada`, H, 'dash:visitasPassadasRows', []),
+      NOTA_TRAVA_DESDE_HOME <= hoje
+        ? window.gnFetchJson(`${SB_URL}/rest/v1/gn_provisoes?status=in.(RECEBIDO_OK,DIVERGENCIA)&atualizado_em=gte.${NOTA_TRAVA_DESDE_HOME}T00:00:00&select=loja_slug,fornecedor,valor_previsto,atualizado_em`, H, 'dash:provisoesRows', [])
+        : Promise.resolve([]),
+      CARNE_TRAVA_DESDE_HOME <= ontemISO
+        ? window.gnFetchJson(`${SB_URL}/rest/v1/checklist_carnes?semana_inicio=eq.${segundaOntemISO}&select=loja,carnes`, H, 'dash:carnesRows', [])
+        : Promise.resolve([]),
+      BANDA_TRAVA_DESDE_HOME <= ontemISO
+        ? window.gnFetchJson(`${SB_URL}/rest/v1/gn_trios_agenda?data=eq.${ontemISO}&select=loja,presenca_confirmada,banda_nao_veio,couver_valor,horario_inicio&order=loja.asc,horario_inicio.asc`, H, 'dash:trioAgendaOntemRows', [])
+        : Promise.resolve([]),
+      segueBH
+        ? window.gnFetchJson(`${SB_URL}/rest/v1/gn_banco_horas?mes=eq.${mesAnteriorStr}&select=loja,registros`, H, 'dash:bhMesAnteriorRows', [])
+        : Promise.resolve([]),
     ]);
     _dashFat = fatCur; _dashFatPrev = precisaCompSeparada ? fatPrvComp : fatPrv;
     _dashFatPrevParcial = precisaCompSeparada;
@@ -4614,6 +4834,10 @@ async function _loadDashAll() {
     const spark={}; LOJAS_LISTA.forEach(k=>{spark[k]=[(fat3[k]||0),(fat2[k]||0),(fatPrv[k]||0),(fatCur[k]||0)];});
     _dashSparkData=spark;
     _dashAlertasUrgentes = alertasUrgentesRows || [];
+    _dashPendenciasEssenciais = _computePendenciasEssenciais({
+      provisoesRows, lojasOfRows, carnesRows, trioAgendaOntemRows, comissoesAllRows,
+      bhPorLoja, bhMesAnteriorRows, hoje, ontemISO, segueBH, mesAnteriorStr,
+    });
   } catch(e) {
     window.gnLogError('dash:_loadDashAll', e);
     _dashLoadHadError = true;
@@ -4625,6 +4849,7 @@ async function _loadDashAll() {
     _dashCaixaSemConferencia=_dashCaixaSemConferencia||{};
     _dashVisitasHoje=_dashVisitasHoje||{};
     _dashAlertasUrgentes=_dashAlertasUrgentes||[];
+    _dashPendenciasEssenciais=_dashPendenciasEssenciais||{};
   } finally { _dashLoading=false; _dashLoadedAt=new Date(); }
   renderDashboard();
 }
@@ -6453,6 +6678,7 @@ function renderDashboard() {
         </div>
       </div>
       ${_buildAlertasUrgentesCard()}
+      ${_buildPendenciasEssenciaisCard()}
       ${_buildFeriasUmaSemanaCard()}
       <div id="visitas-hoje-card-holder">${_buildVisitasHojeCard()}</div>
       <div class="dash-tabs">
