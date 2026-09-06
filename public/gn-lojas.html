@@ -1747,6 +1747,96 @@ function dispararAlertasNotaFiscal() {
   });
 }
 
+/* ═══════════ TRAVA: NOTA FISCAL PENDENTE (mesmo princípio do bloqueio de Caixa) ═══════════
+   Entrega confirmada (gn_provisoes RECEBIDO_OK/DIVERGENCIA) sem a nota do fornecedor
+   lançada até o dia seguinte trava o app inteiro na aba Entradas até resolver — igual ao
+   "Caixa de ontem não fechado" do app Home/Caixa, só que pra nota fiscal. Reaproveita a
+   mesma lógica de comparação (previsto x lançado, por fornecedor) de getAvisosNotaFiscal(),
+   mas olhando pra QUALQUER confirmação com atualizado_em desde NOTA_TRAVA_DESDE até ontem
+   (não só a semana navegada na tela) — uma pendência de anteontem não some sozinha. */
+const NOTA_TRAVA_DESDE = '2026-09-06'; // dia do deploy — nunca cobra pendência anterior a isso
+let _notaFiscalPendenciasAtivas = [];
+
+async function _calcularNotasFiscaisPendentes() {
+  if (!usuarioAtual) return [];
+  if (loja === 'Maglia') return []; // Maglia fora por padrão (CLAUDE.md) — só entra se citada
+  if (abasPermitidas && !abasPermitidas.includes('entradas')) return []; // sem acesso pra resolver, não trava
+  const hoje = wkKey(new Date());
+  if (NOTA_TRAVA_DESDE > hoje) return [];
+  const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+  let rows;
+  try {
+    rows = await sbRequest(
+      'gn_provisoes?loja_slug=eq.' + slug + '&status=in.(RECEBIDO_OK,DIVERGENCIA)&atualizado_em=gte.' + NOTA_TRAVA_DESDE + 'T00:00:00&select=fornecedor,valor_previsto,atualizado_em',
+      { method: 'GET' }
+    );
+  } catch (e) { return []; } // falha de rede não trava — mesmo princípio do bloqueio de Caixa
+
+  const _inicioHoje = new Date(); _inicioHoje.setHours(0,0,0,0);
+  const inicioHojeISO = _inicioHoje.toISOString();
+  const confirmadasAntesDeHoje = (rows || []).filter(p => p.atualizado_em && p.atualizado_em < inicioHojeISO);
+  if (!confirmadasAntesDeHoje.length) return [];
+
+  const grupos = {};
+  confirmadasAntesDeHoje.forEach(p => {
+    const fornDisp = (p.fornecedor || 'Sem fornecedor').trim();
+    const key = fornDisp.toUpperCase();
+    if (!grupos[key]) grupos[key] = { fornecedor: fornDisp, valorPrevisto: 0, semanas: new Set() };
+    grupos[key].valorPrevisto += parseFloat(p.valor_previsto) || 0;
+    grupos[key].semanas.add(wkKey(getMonday(new Date(p.atualizado_em))));
+  });
+
+  const pendencias = [];
+  Object.values(grupos).forEach(g => {
+    let lancado = 0;
+    g.semanas.forEach(semKey => {
+      const ent = entradasAll[loja + '|' + semKey] || [];
+      lancado += ent
+        .filter(e => (e.fornecedor || '').trim().toUpperCase() === g.fornecedor.toUpperCase())
+        .reduce((s, e) => s + (parseFloat(e.qtd) || 0) * (parseFloat(e.custoUnit) || 0), 0);
+    });
+    if (lancado === 0) pendencias.push({ fornecedor: g.fornecedor, valorPrevisto: g.valorPrevisto });
+  });
+  return pendencias;
+}
+
+async function _atualizarTravaNotaFiscal() {
+  try { _notaFiscalPendenciasAtivas = await _calcularNotasFiscaisPendentes(); }
+  catch (e) { _notaFiscalPendenciasAtivas = []; }
+  _renderTravaNotaFiscal();
+}
+
+function _renderTravaNotaFiscal() {
+  const idEl = 'nota-fiscal-trava-overlay';
+  let el = document.getElementById(idEl);
+  // Libera visualmente a tela enquanto o usuário está na própria aba de lançamento —
+  // continua "travado" de verdade porque goTab() barra sair pra qualquer outra aba
+  // enquanto _notaFiscalPendenciasAtivas não esvaziar.
+  if (!_notaFiscalPendenciasAtivas.length || tab === 'entradas') { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = idEl;
+    el.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;box-sizing:border-box';
+    document.body.appendChild(el);
+  }
+  const itensHtml = _notaFiscalPendenciasAtivas.map(p => `
+    <div style="background:rgba(0,0,0,.04);border-radius:10px;padding:10px 12px;margin-bottom:8px;text-align:left">
+      <div style="font-weight:800;font-size:13px;color:#1A1D23">${p.fornecedor}</div>
+      <div style="font-size:11px;color:#64748b">Previsto: R$ ${p.valorPrevisto.toFixed(2).replace('.',',')}</div>
+    </div>`).join('');
+  el.innerHTML = `
+    <div style="background:#FFFFFF;border-radius:18px;padding:26px 22px;width:100%;max-width:380px;text-align:center">
+      <div style="font-size:38px;margin-bottom:10px">🧾</div>
+      <div style="font-size:16px;font-weight:800;color:#1A1D23;margin-bottom:8px">Nota fiscal pendente</div>
+      <div style="font-size:13px;color:#475569;line-height:1.5;margin-bottom:14px">
+        Entrega já confirmada sem a nota do fornecedor lançada até hoje. O app fica travado
+        nas outras abas até isso ser resolvido.
+      </div>
+      ${itensHtml}
+      <button onclick="goTab('entradas')" style="display:block;width:100%;background:#E8580A;border:none;border-radius:10px;color:#fff;padding:13px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;margin-top:8px">🧾 Lançar Nota</button>
+    </div>`;
+}
+
 function _podeCfgMinimos() {
   try {
     const cargo = usuarioAtual ? usuarioAtual.cargo : null;
@@ -2748,6 +2838,10 @@ async function carregarDivergencias() {
 
 function goTab(t) {
   if (t !== 'guia' && abasPermitidas && !abasPermitidas.includes(t)) return;
+  // Nota fiscal pendente trava qualquer troca de aba que não seja pra Entradas (onde a
+  // pendência se resolve) ou Guia — mesmo princípio do bloqueio de Caixa, mas sem tela de
+  // boot própria: o overlay reaparece por cima da aba atual em vez de deixar sair dela.
+  if (_notaFiscalPendenciasAtivas.length && t !== 'entradas' && t !== 'guia') { _renderTravaNotaFiscal(); return; }
   tab = t;
   document.querySelectorAll('.sidebar-link').forEach(l => l.classList.remove('active'));
   const sl = document.querySelector(`.sidebar-link[data-sidebar-tab="${t}"]`);
@@ -2759,6 +2853,7 @@ function goTab(t) {
   render();
   if (t === 'entrega') carregarEntregas(true);
   if (t === 'barris') carregarBarris(true);
+  _renderTravaNotaFiscal();
   // foco automático na busca se a aba tem campo de busca
   if (["estoque","vendas","contagem"].includes(t)) {
     setTimeout(() => {
@@ -5801,6 +5896,7 @@ function _continuarSalvarNota(dataNF, nf, fornecedor, vencimentos, itensValidos)
   if (cont) cont.innerHTML = '';
   addLinhaEntrada();
   render();
+  _atualizarTravaNotaFiscal();
 }
 
 function delEntrada(id) {
@@ -10168,6 +10264,7 @@ sbPull(false).then(() => {
   }
   // Carrega dados do check-list (faturamento + vendas por produto) em background para home já mostrar correto
   loadChecklistFat();
+  _atualizarTravaNotaFiscal();
 });
 // Atualiza a lista de itens/preços do Pedido a partir do Catálogo (gn_catalogo) assim que abrir,
 // e reexibe a tela se o Pedido já estiver na tela pra refletir os dados atualizados.
