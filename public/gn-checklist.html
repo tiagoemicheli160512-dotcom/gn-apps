@@ -4813,6 +4813,7 @@ async function saveAll(){
     showToast('✓ Salvo no servidor!','success');
     try{ localStorage.setItem('gn_cl_last_save_'+LOJA,'Salvo às '+hh+' de '+agora.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'})); }catch(_){}
     _updateLastSaveIndicator();
+    if(_pendenciasEssenciaisAtivas.some(p=>p.chave==='carnes')) _atualizarPendenciasEssenciais();
   }catch(e){
     setSyncStatus('offline','Falha');
     const _emsg = e?.message||e?.code||e?.details||JSON.stringify(e||'?');
@@ -7933,6 +7934,12 @@ function expandTabsBar(){
 }
 
 function switchTab(tab,btn){
+  // Pendências essenciais (Carnes/Banda de ontem) travam qualquer troca de aba que não
+  // seja pra uma das abas que resolvem alguma pendência ativa, ou Guia.
+  if (tab !== 'guia' && _pendenciasEssenciaisAtivas.length && !_pendenciasEssenciaisAtivas.some(p => p.tabAlvo === tab)) {
+    _renderPendenciasEssenciaisLock();
+    return;
+  }
   _activeTab = tab;
   const tcb = document.getElementById('tabsCollapsedLabel');
   if(tcb) tcb.textContent = TAB_LABELS[tab] || tab;
@@ -11384,6 +11391,8 @@ async function initAppWithLoja(){
 
   // Preenche aba Dados com a banda de hoje da agenda
   _carregarBandaHoje();
+
+  _atualizarPendenciasEssenciais();
 }
 
 function aplicarPermissaoAbas() {
@@ -11441,6 +11450,151 @@ function aplicarRestricaoAbasMaglia() {
       switchTab('dados', document.querySelector('.tab-btn'));
     }
   });
+}
+
+/* ═══════════ TRAVA: PENDÊNCIAS ESSENCIAIS (mesmo princípio do bloqueio de Caixa) ═══════════
+   Contagem de Carne e Banda de ontem sem resolver travam o app inteiro (menos Guia) até
+   isso ser feito — mesmo padrão do "Caixa de ontem não fechado" do app Home/Caixa. Sem
+   retroatividade (constantes ..._TRAVA_DESDE = dia do deploy) e sem valer pra Maglia
+   (CLAUDE.md: mudança só afeta a Maglia se citada explicitamente — ela já nem usa essas
+   duas abas, ver ABAS_FORA_MAGLIA acima). Desenhado pra crescer: outras pendências
+   (Escala/Banco de Horas/Salário) entram só adicionando outra função de checagem ao
+   Promise.all de _atualizarPendenciasEssenciais(), sem mexer no overlay/switchTab. */
+const CARNE_TRAVA_DESDE = '2026-09-06';
+const BANDA_TRAVA_DESDE = '2026-09-06';
+let _pendenciasEssenciaisAtivas = [];
+
+function _abasChecklistPermitidas() {
+  try {
+    const s = JSON.parse(localStorage.getItem('gn_session_v1') || 'null');
+    if (!s || Date.now() - s.ts > 43200000) return null;
+    const abas = s.permissoes && s.permissoes.checklist_abas;
+    return Array.isArray(abas) ? abas : null;
+  } catch (e) { return null; }
+}
+// Sem acesso à aba que resolveria a pendência, não trava — mesmo raciocínio do
+// temAcessoCaixa em gn-home.html ("travar quem não tem como resolver só deixa sem saída").
+function _temAcessoAbaChecklist(tabId) {
+  const abas = _abasChecklistPermitidas();
+  return !abas || abas.includes(tabId);
+}
+function _ontemISOChecklist() {
+  const d = new Date(); d.setDate(d.getDate() - 1);
+  return toISO(d);
+}
+
+async function _checarCarnePendenteOntem() {
+  if (LOJA === 'Maglia') return null;
+  if (!_temAcessoAbaChecklist('carnes')) return null;
+  const ontem = _ontemISOChecklist();
+  if (CARNE_TRAVA_DESDE > ontem) return null;
+  const diaIdx = (new Date(ontem + 'T12:00:00').getDay() + 6) % 7; // 0=seg..6=dom
+  if (diaIdx === 0) return null; // segunda usa "inicial" (auto-preenchido de outro app) — evita falso positivo
+  const diaKey = DIAS_SEMANA[diaIdx];
+  const semanaIni = toISO(getSegundaFeira(new Date(ontem + 'T12:00:00')));
+  let carnes;
+  try {
+    const { data } = await sb.from('checklist_carnes').select('carnes').eq('semana_inicio', semanaIni).eq('loja', LOJA).single();
+    carnes = (data && data.carnes) || {};
+  } catch (e) { return null; } // falha de rede/linha inexistente não trava
+  const faltando = CARNES_DEF.filter(c => {
+    const v = carnes[c.key] && carnes[c.key][diaKey];
+    return v === '' || v === undefined || v === null;
+  });
+  if (!faltando.length) return null;
+  return {
+    chave: 'carnes',
+    titulo: '🥩 Contagem de carne pendente',
+    mensagem: 'A contagem de ontem (' + DIAS_LABEL[diaIdx] + ') não foi preenchida pra: ' + faltando.map(c => c.label).join(', ') + '.',
+    tabAlvo: 'carnes',
+    acaoExtra: () => { switchTab('carnes', document.querySelector('.tab-btn')); setCarneTab('diario'); },
+  };
+}
+
+async function _checarBandaPendenteOntem() {
+  if (LOJA === 'Maglia') return null;
+  if (!_temAcessoAbaChecklist('banda')) return null;
+  const ontem = _ontemISOChecklist();
+  if (BANDA_TRAVA_DESDE > ontem) return null;
+  const slug = _triosLojaSlug();
+  if (!slug) return null;
+  let rows;
+  try {
+    const { data } = await sb.from('gn_trios_agenda').select('*').eq('loja', slug).eq('data', ontem).order('horario_inicio', { ascending: true });
+    rows = data || [];
+  } catch (e) { return null; }
+  if (!rows.length) return null; // sem apresentação agendada ontem, nada a cobrar
+  const presencaPendente = rows.some(r => !r.presenca_confirmada && !r.banda_nao_veio);
+  const principal = rows[0];
+  const couvertPendente = !principal.banda_nao_veio && (principal.couver_valor === null || principal.couver_valor === undefined);
+  if (!presencaPendente && !couvertPendente) return null;
+  return {
+    chave: 'banda',
+    titulo: '🎵 Banda de ontem sem confirmação',
+    mensagem: presencaPendente
+      ? 'A presença da banda de ontem ainda não foi confirmada.'
+      : 'O couvert da banda de ontem ainda não foi lançado.',
+    tabAlvo: 'banda',
+    // O card de banda sempre opera sobre state.data (a "Banda de hoje" é, na real, a banda
+    // do dia selecionado em Dados) — sem trocar state.data pra ontem primeiro, "Resolver"
+    // levaria pra aba Banda mostrando a apresentação de HOJE, não a pendência de ontem.
+    acaoExtra: async () => {
+      const inp = document.getElementById('data-dia-atual');
+      if (inp) inp.value = ontem;
+      await onDataChange(ontem);
+      switchTab('banda', document.querySelector('.tab-btn'));
+    },
+  };
+}
+
+async function _atualizarPendenciasEssenciais() {
+  let resultados;
+  try {
+    resultados = await Promise.all([
+      _checarCarnePendenteOntem(),
+      _checarBandaPendenteOntem(),
+    ]);
+  } catch (e) { resultados = []; }
+  _pendenciasEssenciaisAtivas = resultados.filter(Boolean);
+  _renderPendenciasEssenciaisLock();
+}
+
+function _renderPendenciasEssenciaisLock() {
+  const idEl = 'pendencias-essenciais-lock';
+  let el = document.getElementById(idEl);
+  const tabsAlvo = new Set(_pendenciasEssenciaisAtivas.map(p => p.tabAlvo));
+  // Libera visualmente a tela enquanto o usuário está numa aba que resolve alguma
+  // pendência ativa — continua "travado" de verdade porque switchTab() barra ir pra
+  // qualquer outra aba enquanto a lista não esvaziar.
+  if (!_pendenciasEssenciaisAtivas.length || tabsAlvo.has(_activeTab)) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = idEl;
+    el.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9000;display:flex;align-items:center;justify-content:center;padding:20px;box-sizing:border-box';
+    document.body.appendChild(el);
+  }
+  const itensHtml = _pendenciasEssenciaisAtivas.map(p => `
+    <div style="background:rgba(0,0,0,.04);border-radius:10px;padding:12px;margin-bottom:8px;text-align:left">
+      <div style="font-weight:800;font-size:13px;color:#1A1D23;margin-bottom:4px">${p.titulo}</div>
+      <div style="font-size:11px;color:#64748b;margin-bottom:8px">${p.mensagem}</div>
+      <button onclick="_irResolverPendenciaEssencial('${p.chave}')" style="width:100%;background:#E8580A;border:none;border-radius:8px;color:#fff;padding:9px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">Resolver</button>
+    </div>`).join('');
+  el.innerHTML = `
+    <div style="background:#FFFFFF;border-radius:18px;padding:24px 20px;width:100%;max-width:380px;text-align:center;max-height:86vh;overflow-y:auto">
+      <div style="font-size:36px;margin-bottom:8px">🔒</div>
+      <div style="font-size:16px;font-weight:800;color:#1A1D23;margin-bottom:6px">Pendências de ontem</div>
+      <div style="font-size:12px;color:#475569;line-height:1.5;margin-bottom:14px">
+        O app fica travado nas outras abas até isso ser resolvido.
+      </div>
+      ${itensHtml}
+    </div>`;
+}
+
+async function _irResolverPendenciaEssencial(chave) {
+  const p = _pendenciasEssenciaisAtivas.find(x => x.chave === chave);
+  if (!p) return;
+  if (p.acaoExtra) await p.acaoExtra();
+  else switchTab(p.tabAlvo, document.querySelector('.tab-btn'));
 }
 
 function checkSavedSession(){
@@ -12325,6 +12479,7 @@ async function _salvarCouvertBandaHoje(){
     _renderBandaHoje();
     _preencherBandaDiaFromAgenda();
     showToast('✓ Couvert salvo!', 'success');
+    if(_pendenciasEssenciaisAtivas.some(p=>p.chave==='banda')) _atualizarPendenciasEssenciais();
   }catch(e){
     if(btn){ btn.disabled=false; btn.textContent='💾 Salvar Couvert'; }
     alert('Erro ao salvar couvert: '+(e.message||e));
@@ -12353,6 +12508,7 @@ async function _confirmarPresencaBandaCard(id){
     _preencherBandaDiaFromAgenda();
     showToast('✓ Presença confirmada!', 'success');
     _logAuditoriaChk('CONFIRMAR_PRESENCA_BANDA',{artista:_triosHojeRecords[idx].artista});
+    if(_pendenciasEssenciaisAtivas.some(p=>p.chave==='banda')) _atualizarPendenciasEssenciais();
   }catch(e){
     alert('Erro ao confirmar: '+(e.message||e));
   }
@@ -12385,6 +12541,7 @@ async function _registrarBandaNaoVeioCard(id){
     _preencherBandaDiaFromAgenda();
     showToast('Registrado: banda não veio.', 'error');
     _logAuditoriaChk('BANDA_NAO_VEIO',{artista:_triosHojeRecords[idx].artista,motivo});
+    if(_pendenciasEssenciaisAtivas.some(p=>p.chave==='banda')) _atualizarPendenciasEssenciais();
   }catch(e){
     alert('Erro ao registrar: '+(e.message||e));
   }
