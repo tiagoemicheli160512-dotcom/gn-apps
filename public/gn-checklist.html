@@ -4825,7 +4825,7 @@ async function saveAll(){
     showToast('✓ Salvo no servidor!','success');
     try{ localStorage.setItem('gn_cl_last_save_'+LOJA,'Salvo às '+hh+' de '+agora.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'})); }catch(_){}
     _updateLastSaveIndicator();
-    if(_pendenciasEssenciaisAtivas.some(p=>p.chave==='carnes')) _atualizarPendenciasEssenciais();
+    if(_pendenciasEssenciaisAtivas.some(p=>p.chave==='carnes')) _recheckCarnesPendenciaEVoltarSemana();
   }catch(e){
     setSyncStatus('offline','Falha');
     const _emsg = e?.message||e?.code||e?.details||JSON.stringify(e||'?');
@@ -11539,7 +11539,24 @@ async function _checarCarnePendenteOntem() {
     titulo: '🥩 Contagem de carne pendente',
     mensagem: 'A contagem de ontem (' + DIAS_LABEL[diaIdx] + ') não foi preenchida pra: ' + faltando.map(c => c.label).join(', ') + '.',
     tabAlvo: 'carnes',
-    acaoExtra: () => { switchTab('carnes', document.querySelector('.tab-btn')); setCarneTab('diario'); },
+    // "Ontem" pode cair numa semana diferente da que está carregada em stateWeem — só
+    // acontece quando hoje é 2ª e ontem (domingo) pertence à semana que acabou de fechar.
+    // Sem trocar stateWeek pra essa semana antes de abrir a aba Diário, o "Resolver"
+    // levava pra aba certa mas com a semana ERRADA carregada por baixo: a pessoa
+    // preenchia o Domingo pensando estar corrigindo a pendência, mas o valor ia pro
+    // campo "dom" da semana NOVA (que representa o próximo domingo, não o que passou) —
+    // ficava tudo salvo mas a trava nunca resolvia, porque olhava pra linha antiga, que
+    // continuava vazia. Foi exatamente esse o caso relatado da Nova América.
+    acaoExtra: async () => {
+      if (semanaIni !== stateWeek.semanaInicio) {
+        await loadSupabaseWeek(semanaIni);
+        showToast('📅 Abrindo a semana de ' + fmtBR(semanaIni) + ' pra completar o domingo pendente.', 'info');
+      }
+      switchTab('carnes', document.querySelector('.tab-btn'));
+      setCarneTab('diario');
+      diaAtivoIdx = diaIdx;
+      renderCarnes();
+    },
   };
 }
 
@@ -11690,6 +11707,22 @@ async function _atualizarPendenciasEssenciais() {
   } catch (e) { resultados = []; }
   _pendenciasEssenciaisAtivas = resultados.filter(Boolean);
   _renderPendenciasEssenciaisLock();
+}
+
+// Chamado depois de salvar Carnes quando havia pendência ativa (ver saveAll()). Se
+// resolver o Domingo pendente exigiu carregar uma semana passada (ver acaoExtra de
+// _checarCarnePendenteOntem — 2ª-feira cobrando o domingo da semana que acabou de
+// fechar), a tela ficaria "presa" mostrando a semana errada depois de salvar. Assim
+// que a pendência de carnes some, volta sozinho pra semana atual.
+async function _recheckCarnesPendenciaEVoltarSemana() {
+  const semanaCarregada = stateWeek.semanaInicio;
+  await _atualizarPendenciasEssenciais();
+  const aindaPendente = _pendenciasEssenciaisAtivas.some(p => p.chave === 'carnes');
+  const semanaAtualReal = toISO(getSegundaFeira(new Date()));
+  if (!aindaPendente && semanaCarregada && semanaCarregada !== semanaAtualReal) {
+    await loadSupabaseWeek(semanaAtualReal);
+    showToast('✅ Domingo resolvido — voltando pra semana atual.', 'success');
+  }
 }
 
 function _renderPendenciasEssenciaisLock() {
