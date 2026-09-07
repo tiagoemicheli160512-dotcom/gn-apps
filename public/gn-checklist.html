@@ -11504,6 +11504,13 @@ const ESCALA_TRAVA_DESDE = '2026-09-06';
 // ANTEONTEM (o que prova que o gap já durava 2 dias) seja depois desse corte, o que só
 // passa a ser matematicamente possível 2 dias depois do deploy.
 const CARNE_HARD_TRAVA_DESDE = '2026-09-07';
+// Mesmo corte, mesmo motivo, agora pro bloqueio escalado de Banda e Escala — confirmado
+// direto no banco antes deste deploy: Rancho tem ~25 funcionários sem horário cadastrado
+// há semanas (gap crônico, gn_comissoes), Boulevard/Caxias/Norte/Pedreira também têm
+// casos isolados. Sem esse corte, essas lojas virariam "hard" (bloqueio total) já no
+// primeiro dia — exatamente a retroatividade que o resto da feature sempre evitou.
+const BANDA_HARD_TRAVA_DESDE = '2026-09-07';
+const ESCALA_HARD_TRAVA_DESDE = '2026-09-07';
 // Formato YYYY-MM — primeiro mês cujo lançamento passa a ser obrigatório (o mês do deploy
 // em si fica de fora, já que só começou a valer no meio dele). Ex.: deploy em 06/09/2026 →
 // setembro fica de fora, outubro é o primeiro mês cobrado — só checado a partir de 1º de
@@ -11596,30 +11603,48 @@ async function _checarCarnePendenteOntem() {
   };
 }
 
-async function _checarBandaPendenteOntem() {
-  if (LOJA === 'Maglia') return null;
-  if (!_temAcessoAbaChecklist('banda')) return null;
-  const ontem = _ontemISOChecklist();
-  if (BANDA_TRAVA_DESDE > ontem) return null;
+// Resolve o gap de banda pro dia "diasAtras" dias antes de hoje — mesma lógica
+// parametrizada usada pelo Carnes (ver _carneGapNoDia) pra saber se o mesmo tipo de gap
+// já estava aberto há 2 dias, sem precisar guardar estado novo.
+async function _bandaGapNoDia(diasAtras) {
+  const d = new Date(); d.setDate(d.getDate() - diasAtras);
+  const dataAlvo = toISO(d);
+  if (BANDA_TRAVA_DESDE > dataAlvo) return null;
   const slug = _triosLojaSlug();
   if (!slug) return null;
   let rows;
   try {
-    const { data } = await sb.from('gn_trios_agenda').select('*').eq('loja', slug).eq('data', ontem).order('horario_inicio', { ascending: true });
+    const { data } = await sb.from('gn_trios_agenda').select('*').eq('loja', slug).eq('data', dataAlvo).order('horario_inicio', { ascending: true });
     rows = data || [];
   } catch (e) { return null; }
-  if (!rows.length) return null; // sem apresentação agendada ontem, nada a cobrar
+  if (!rows.length) return null; // sem apresentação agendada nesse dia, nada a cobrar
   const presencaPendente = rows.some(r => !r.presenca_confirmada && !r.banda_nao_veio);
   const principal = rows[0];
   const couvertPendente = !principal.banda_nao_veio && (principal.couver_valor === null || principal.couver_valor === undefined);
-  if (!presencaPendente && !couvertPendente) return null;
+  return { dataAlvo, presencaPendente, couvertPendente, pendente: presencaPendente || couvertPendente };
+}
+
+async function _checarBandaPendenteOntem() {
+  if (LOJA === 'Maglia') return null;
+  if (!_temAcessoAbaChecklist('banda')) return null;
+  const gap = await _bandaGapNoDia(1);
+  if (!gap || !gap.pendente) return null;
+  const ontem = gap.dataAlvo;
+  // "hard": mesma apresentação-tipo-de-gap já estava pendente há 2 dias (ver comentário
+  // em _checarCarnePendenteOntem sobre por que só isso já basta como sinal — nunca
+  // precisa resolver retroativamente o gap de anteontem em si). Corte próprio evita
+  // travar total lojas que já tinham um gap crônico de antes desse deploy.
+  const gapAnteontem = await _bandaGapNoDia(2);
+  const hard = !!(gapAnteontem && gapAnteontem.pendente && gapAnteontem.dataAlvo >= BANDA_HARD_TRAVA_DESDE);
   return {
     chave: 'banda',
     titulo: '🎵 Banda de ontem sem confirmação',
-    mensagem: presencaPendente
+    mensagem: gap.presencaPendente
       ? 'A presença da banda de ontem ainda não foi confirmada.'
       : 'O couvert da banda de ontem ainda não foi lançado.',
     tabAlvo: 'banda',
+    hard,
+    ontem,
     // O card de banda sempre opera sobre state.data (a "Banda de hoje" é, na real, a banda
     // do dia selecionado em Dados) — sem trocar state.data pra ontem primeiro, "Resolver"
     // levaria pra aba Banda mostrando a apresentação de HOJE, não a pendência de ontem.
@@ -11632,14 +11657,15 @@ async function _checarBandaPendenteOntem() {
   };
 }
 
-async function _checarEscalaPendenteOntem() {
-  if (LOJA === 'Maglia') return null;
-  if (!_temAcessoAbaChecklist('escala')) return null;
-  const ontem = _ontemISOChecklist();
-  if (ESCALA_TRAVA_DESDE > ontem) return null;
-  const idx = comissoesSemIdx(ontem);
+// Resolve o gap de escala pro dia "diasAtras" dias antes de hoje — mesmo padrão
+// parametrizado do Carnes/Banda.
+async function _escalaGapNoDia(diasAtras) {
+  const d = new Date(); d.setDate(d.getDate() - diasAtras);
+  const dataAlvo = toISO(d);
+  if (ESCALA_TRAVA_DESDE > dataAlvo) return null;
+  const idx = comissoesSemIdx(dataAlvo);
   if (idx == null) return null; // fora do calendário conhecido — não trava
-  const diaIdx = comissoesDiaIdx(ontem);
+  const diaIdx = comissoesDiaIdx(dataAlvo);
   let funcs;
   try {
     const allData = await fetchComissoesAllData(comissoesLojaKey());
@@ -11652,12 +11678,31 @@ async function _checarEscalaPendenteOntem() {
     const hd = (f.horario_dias || [])[diaIdx];
     return !(hd && hd.entrada && hd.saida);
   });
-  if (!faltando.length) return null;
+  return { dataAlvo, idx, diaIdx, faltando };
+}
+
+async function _checarEscalaPendenteOntem() {
+  if (LOJA === 'Maglia') return null;
+  if (!_temAcessoAbaChecklist('escala')) return null;
+  const gap = await _escalaGapNoDia(1);
+  if (!gap || !gap.faltando.length) return null;
+  const { diaIdx, faltando } = gap;
+  const ontem = gap.dataAlvo;
+  // "hard": mesma checagem 2 dias atrás — se algum funcionário TAMBÉM estava sem horário
+  // anteontem, o gap já durava um dia inteiro sem resolver. Corte próprio
+  // (ESCALA_HARD_TRAVA_DESDE) evita travar total lojas com gap crônico de antes desse
+  // deploy — confirmado direto no banco: Rancho tem ~25 funcionários sem horário há
+  // semanas, Boulevard/Caxias/Norte/Pedreira também têm alguns casos.
+  const gapAnteontem = await _escalaGapNoDia(2);
+  const hard = !!(gapAnteontem && gapAnteontem.faltando.length && gapAnteontem.dataAlvo >= ESCALA_HARD_TRAVA_DESDE);
   return {
     chave: 'escala',
     titulo: '📅 Escala de ontem sem horário',
     mensagem: 'Sem horário (entrada/saída) cadastrado ontem pra: ' + faltando.map(f => f.nome).join(', ') + '.',
     tabAlvo: 'escala',
+    hard,
+    ontem, diaIdx,
+    faltandoNomes: faltando.map(f => f.nome),
     // A Escala também opera sobre o dia/semana selecionados (onDataChange recarrega
     // comissoesWD pra semana de "ontem") — mesmo raciocínio já usado pra Banda.
     acaoExtra: async () => {
@@ -11800,6 +11845,8 @@ async function _recheckCarnesPendenciaEVoltarSemana() {
 const INLINE_HARD_RESOLVERS = {
   carnes: _renderInlineHardCarnes,
   salario: _renderInlineHardSalario,
+  banda: _renderInlineHardBanda,
+  escala: _renderInlineHardEscala,
 };
 
 function _renderPendenciasEssenciaisLock() {
@@ -11840,9 +11887,38 @@ function _renderPendenciasEssenciaisLock() {
 // o Guia — ver guard em switchTab()): só dá pra interagir com o formulário embutido aqui
 // mesmo, um por pendência hard. Pendências que ainda são só soft continuam listadas
 // embaixo, com o botão "Resolver" de sempre (que navega — não travam mais forte ainda).
-function _renderPendenciasEssenciaisLockEscalado(pendHard) {
+let _pendEscaladoRenderizando = false;
+async function _renderPendenciasEssenciaisLockEscalado(pendHard) {
+  // Reentrância: cada tentativa de troca de aba bloqueada chama isso de novo (ver guard em
+  // switchTab()), e os resolvedores de Banda/Escala levam vários segundos (onDataChange()
+  // completo). Sem essa trava, uma segunda chamada no meio do caminho reconstruía
+  // el.innerHTML por cima da primeira ainda em andamento — destruía o #banda-hoje-card
+  // reparentado (innerHTML= apaga o node, não move) e disparava dois onDataChange()
+  // concorrentes brigando pelo mesmo `state`. A renderização em andamento já reflete o
+  // estado atual quando terminar; simplesmente ignora a chamada nova.
+  if (_pendEscaladoRenderizando) return;
+  _pendEscaladoRenderizando = true;
+  try {
+    await _renderPendenciasEssenciaisLockEscaladoImpl(pendHard);
+  } finally {
+    _pendEscaladoRenderizando = false;
+  }
+}
+async function _renderPendenciasEssenciaisLockEscaladoImpl(pendHard) {
   const idEl = 'pendencias-essenciais-lock';
   let el = document.getElementById(idEl);
+  // #banda-hoje-card pode estar reparentado aqui dentro, vindo de uma renderização
+  // anterior (ver _renderInlineHardBanda/_reparentBandaHojeCard) — qualquer troca de aba
+  // bloqueada (switchTab) chama este render de novo, e sem tirar o card de dentro ANTES
+  // do `el.innerHTML=` abaixo, isso DESTRÓI o node de vez (innerHTML= não move nós pra
+  // lugar nenhum, apaga) — quebrava a Banda de Hoje pro resto da sessão, não só durante o
+  // bloqueio. Estaciona escondido no body até _reparentBandaHojeCard() achar um lugar de
+  // verdade de novo.
+  const _bandaCardOrfao = document.getElementById('banda-hoje-card');
+  if (_bandaCardOrfao && el && el.contains(_bandaCardOrfao)) {
+    _bandaCardOrfao.style.display = 'none';
+    document.body.appendChild(_bandaCardOrfao);
+  }
   if (!el) {
     el = document.createElement('div');
     el.id = idEl;
@@ -11876,8 +11952,14 @@ function _renderPendenciasEssenciaisLockEscalado(pendHard) {
       <div style="font-size:11px;color:#64748b;margin-bottom:10px">${p.mensagem}</div>
       <div id="pend-hard-${p.chave}"></div>`;
     holder.appendChild(box);
-    INLINE_HARD_RESOLVERS[p.chave]('pend-hard-' + p.chave, p);
   });
+  // Um resolvedor de cada vez, nunca em paralelo — Banda e Escala chamam onDataChange()
+  // internamente (que zera e recarrega `state` do dia inteiro), e dois onDataChange()
+  // simultâneos corrompiam um ao outro (o card de Banda ficava sem reparentar direito).
+  for (const p of pendHard) {
+    if (document.getElementById(idEl) !== el) return; // overlay foi re-renderizado no meio do caminho
+    await INLINE_HARD_RESOLVERS[p.chave]('pend-hard-' + p.chave, p);
+  }
 }
 
 // ── Formulários inline do bloqueio ESCALADO ────────────────────────────────
@@ -11965,6 +12047,70 @@ async function _salvarInlineHardSalario(containerId) {
   } catch (e) {
     showToast('⚠️ Erro ao salvar salários', 'error');
   }
+}
+
+// Banda: reaproveita o card compacto "Banda de Hoje" (#banda-hoje-card) já usado nas
+// abas Dados/Banda — mesmo fragmento interativo (confirmar presença/não veio/couvert),
+// só que reparentado pro overlay em vez de ficar atrás dele (ver ajuste em
+// _reparentBandaHojeCard). Salvar continua sendo feito pelos handlers de sempre
+// (_confirmarPresencaBandaCard etc.), que já disparam o recheck da pendência.
+async function _renderInlineHardBanda(containerId, p) {
+  const elLoading = document.getElementById(containerId);
+  if (!elLoading) return;
+  elLoading.innerHTML = '<div style="font-size:11px;color:#94a3b8">Carregando…</div>';
+  const inp = document.getElementById('data-dia-atual');
+  if (inp) inp.value = p.ontem;
+  await onDataChange(p.ontem);
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  el.innerHTML = ''; // limpa "Carregando…" — _carregarBandaHoje() reparenta o card real aqui dentro
+  await _carregarBandaHoje();
+}
+
+// Escala: lista só dos funcionários que estão faltando horário no dia já resolvido por
+// _checarEscalaPendenteOntem — reaproveita updComissoesHorarioDia (mesmo caminho de
+// salvamento da aba Escala real) depois de garantir que a semana certa (a de "ontem")
+// está carregada em comissoesWD via onDataChange.
+async function _renderInlineHardEscala(containerId, p) {
+  const elLoading = document.getElementById(containerId);
+  if (!elLoading) return;
+  elLoading.innerHTML = '<div style="font-size:11px;color:#94a3b8">Carregando…</div>';
+  const inp = document.getElementById('data-dia-atual');
+  if (inp) inp.value = p.ontem;
+  await onDataChange(p.ontem);
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  const funcs = (comissoesWD && comissoesWD.funcs) || [];
+  const linhas = p.faltandoNomes.map(nome => {
+    const i = funcs.findIndex(f => f.nome === nome);
+    if (i < 0) return '';
+    return `<div style="margin-bottom:8px">
+      <div style="font-size:11px;font-weight:700;color:#1A1D23;margin-bottom:4px">${_esc(nome)}</div>
+      <div style="display:flex;gap:8px">
+        <input type="time" data-escala-hard-entrada="${i}" style="flex:1;padding:6px 8px;border-radius:8px;border:1px solid rgba(0,0,0,.15);font-size:12px;font-family:inherit;box-sizing:border-box">
+        <input type="time" data-escala-hard-saida="${i}" style="flex:1;padding:6px 8px;border-radius:8px;border:1px solid rgba(0,0,0,.15);font-size:12px;font-family:inherit;box-sizing:border-box">
+      </div>
+    </div>`;
+  }).join('');
+  el.innerHTML = linhas + `<button onclick="_salvarInlineHardEscala(${p.diaIdx})" style="width:100%;margin-top:4px;background:#E8580A;border:none;border-radius:8px;color:#fff;padding:9px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">💾 Salvar horários</button>`;
+}
+async function _salvarInlineHardEscala(diaIdx) {
+  const entradas = document.querySelectorAll('[data-escala-hard-entrada]');
+  let algumVazio = false;
+  const pares = [];
+  entradas.forEach(inpEnt => {
+    const i = inpEnt.dataset.escalaHardEntrada;
+    const inpSai = document.querySelector('[data-escala-hard-saida="' + i + '"]');
+    if (!inpEnt.value || !inpSai.value) { algumVazio = true; return; }
+    pares.push({ i: parseInt(i, 10), entrada: inpEnt.value, saida: inpSai.value });
+  });
+  if (algumVazio) { showToast('Preencha todos os horários.', 'error'); return; }
+  pares.forEach(({ i, entrada, saida }) => {
+    updComissoesHorarioDia(i, diaIdx, 'entrada', entrada);
+    updComissoesHorarioDia(i, diaIdx, 'saida', saida);
+  });
+  await flushComissoesOps();
+  _atualizarPendenciasEssenciais();
 }
 
 async function _irResolverPendenciaEssencial(chave) {
@@ -12721,9 +12867,14 @@ function _preencherBandaDiaFromAgenda(){
 function _reparentBandaHojeCard(){
   const el = document.getElementById('banda-hoje-card');
   if(!el) return;
-  const targetId = _activeTab === 'dados' ? 'banda-hoje-card-dados-slot' : 'banda-hoje-card-banda-slot';
+  // Bloqueio ESCALADO ativo (ver _renderInlineHardBanda) — o card fica preso ali até a
+  // pendência resolver, mesmo que _activeTab continue apontando pra Dados/Banda por
+  // baixo do overlay (que está por cima, sem exceção nenhuma nesse modo).
+  const hardSlot = document.getElementById('pend-hard-banda');
+  const targetId = hardSlot ? 'pend-hard-banda' : (_activeTab === 'dados' ? 'banda-hoje-card-dados-slot' : 'banda-hoje-card-banda-slot');
   const target = document.getElementById(targetId);
   if(target && el.parentElement !== target) target.appendChild(el);
+  el.style.display = ''; // desfaz o "escondido" de _renderPendenciasEssenciaisLockEscalado, se tiver
 }
 
 function _renderBandaHoje(){
