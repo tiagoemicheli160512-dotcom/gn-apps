@@ -1777,13 +1777,24 @@ async function _calcularNotasFiscaisPendentes() {
   const confirmadasAntesDeHoje = (rows || []).filter(p => p.atualizado_em && p.atualizado_em < inicioHojeISO);
   if (!confirmadasAntesDeHoje.length) return [];
 
+  // "hard": a confirmação já estava sem nota desde ANTES de ontem — ficou 1 dia inteiro
+  // sem resolver (mesmo critério das outras pendências essenciais). Não precisa de um
+  // corte de retroatividade próprio como Carnes/Banda/Escala: NOTA_TRAVA_DESDE (dia do
+  // deploy do bloqueio soft original) já garante que nenhuma linha buscada é anterior a
+  // ele, então no 1º dia depois do deploy desse hard é matematicamente impossível achar
+  // uma linha "antes de ontem" — o corte já dá a folga de 1 dia sozinho, sem query extra
+  // (confirmado no banco: nenhuma loja tem confirmação pendente desde o deploy do soft).
+  const _inicioOntem = new Date(); _inicioOntem.setDate(_inicioOntem.getDate() - 1); _inicioOntem.setHours(0,0,0,0);
+  const inicioOntemISO = _inicioOntem.toISOString();
+
   const grupos = {};
   confirmadasAntesDeHoje.forEach(p => {
     const fornDisp = (p.fornecedor || 'Sem fornecedor').trim();
     const key = fornDisp.toUpperCase();
-    if (!grupos[key]) grupos[key] = { fornecedor: fornDisp, valorPrevisto: 0, semanas: new Set() };
+    if (!grupos[key]) grupos[key] = { fornecedor: fornDisp, valorPrevisto: 0, semanas: new Set(), hard: false };
     grupos[key].valorPrevisto += parseFloat(p.valor_previsto) || 0;
     grupos[key].semanas.add(wkKey(getMonday(new Date(p.atualizado_em))));
+    if (p.atualizado_em < inicioOntemISO) grupos[key].hard = true;
   });
 
   const pendencias = [];
@@ -1795,7 +1806,7 @@ async function _calcularNotasFiscaisPendentes() {
         .filter(e => (e.fornecedor || '').trim().toUpperCase() === g.fornecedor.toUpperCase())
         .reduce((s, e) => s + (parseFloat(e.qtd) || 0) * (parseFloat(e.custoUnit) || 0), 0);
     });
-    if (lancado === 0) pendencias.push({ fornecedor: g.fornecedor, valorPrevisto: g.valorPrevisto });
+    if (lancado === 0) pendencias.push({ fornecedor: g.fornecedor, valorPrevisto: g.valorPrevisto, hard: g.hard });
   });
   return pendencias;
 }
@@ -1806,9 +1817,53 @@ async function _atualizarTravaNotaFiscal() {
   _renderTravaNotaFiscal();
 }
 
+// Bloqueio ESCALADO — pelo menos uma confirmação ficou 1 dia inteiro sem nota lançada
+// (ver `hard` em _calcularNotasFiscaisPendentes). Diferente das travas do Check-list
+// (que embutem um formulário mínimo dentro de um modal), aqui a pendência é lançar nota
+// de verdade — multi-item, com autocomplete de insumo, vencimento de boleto, validação de
+// preço — complexo demais pra recriar num form separado. Em vez disso, reaproveita a
+// PRÓPRIA aba Entradas já existente em modo "tela cheia": esconde o header/nav (não tem
+// pra onde navegar) e força tab='entradas', sem overlay nenhum por cima.
+function _aplicarModoTelaCheiaNotaFiscal(ativo) {
+  const header = document.getElementById('header');
+  const nav = document.getElementById('nav');
+  if (header) header.style.display = ativo ? 'none' : '';
+  if (nav) nav.style.display = ativo ? 'none' : '';
+  if (ativo) {
+    const avisoBarris = document.getElementById('aviso-barris-bar');
+    if (avisoBarris) avisoBarris.style.display = 'none';
+  }
+}
+function _renderBannerHardNotaFiscal(pendHard) {
+  const idBanner = 'nota-fiscal-hard-banner';
+  let b = document.getElementById(idBanner);
+  if (!b) {
+    b = document.createElement('div');
+    b.id = idBanner;
+    b.style.cssText = 'background:#DC2626;color:#fff;padding:10px 14px;font-size:12px;font-weight:700;text-align:center;line-height:1.4';
+    document.body.prepend(b);
+  }
+  const nomes = pendHard.map(p => p.fornecedor).join(', ');
+  b.textContent = '🧾 App bloqueado — nota fiscal de ' + nomes + ' pendente desde ontem. Lance a nota abaixo pra liberar o app.';
+}
+function _removerBannerHardNotaFiscal() {
+  const b = document.getElementById('nota-fiscal-hard-banner');
+  if (b) b.remove();
+}
+
 function _renderTravaNotaFiscal() {
   const idEl = 'nota-fiscal-trava-overlay';
   let el = document.getElementById(idEl);
+  const pendHard = _notaFiscalPendenciasAtivas.filter(p => p.hard);
+  if (pendHard.length) {
+    if (el) el.remove(); // sem overlay-modal no modo hard — a própria tela vira Entradas
+    _aplicarModoTelaCheiaNotaFiscal(true);
+    if (tab !== 'entradas') { tab = 'entradas'; render(); }
+    _renderBannerHardNotaFiscal(pendHard);
+    return;
+  }
+  _aplicarModoTelaCheiaNotaFiscal(false);
+  _removerBannerHardNotaFiscal();
   // Libera visualmente a tela enquanto o usuário está na própria aba de lançamento —
   // continua "travado" de verdade porque goTab() barra sair pra qualquer outra aba
   // enquanto _notaFiscalPendenciasAtivas não esvaziar.
@@ -2838,6 +2893,11 @@ async function carregarDivergencias() {
 
 function goTab(t) {
   if (t !== 'guia' && abasPermitidas && !abasPermitidas.includes(t)) return;
+  // Bloqueio ESCALADO — pelo menos 1 nota fiscal ficou 1 dia inteiro sem lançar (ver
+  // `hard`). Diferente do bloqueio soft, aqui NENHUMA troca de aba é permitida — nem pra
+  // Entradas explicitamente (já é pra lá que _renderTravaNotaFiscal() força sozinho) nem
+  // pro Guia — só dá pra usar a própria tela de Entradas em modo tela cheia.
+  if (_notaFiscalPendenciasAtivas.some(p => p.hard)) { _renderTravaNotaFiscal(); return; }
   // Nota fiscal pendente trava qualquer troca de aba que não seja pra Entradas (onde a
   // pendência se resolve) ou Guia — mesmo princípio do bloqueio de Caixa, mas sem tela de
   // boot própria: o overlay reaparece por cima da aba atual em vez de deixar sair dela.
