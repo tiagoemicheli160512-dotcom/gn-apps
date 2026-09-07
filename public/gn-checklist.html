@@ -3967,6 +3967,26 @@ function fecharModalBancoHoras(){
   _bhModalFunc='';
 }
 
+// Grava um lançamento de banco de horas — usada tanto pelo modal (salvarRegistroBancoHoras)
+// quanto pelo formulário inline do bloqueio ESCALADO (_salvarInlineHardBanco), pra não
+// duplicar a lógica de upsert em _bhRegistros/Supabase.
+async function _salvarBancoHorasFunc(nome, mes, horas, obs){
+  if(!_bhRegistros[mes]) _bhRegistros[mes] = [];
+  const idx = _bhRegistros[mes].findIndex(x=>_bhNormNome(x.nome)===_bhNormNome(nome));
+  if(idx>=0) _bhRegistros[mes][idx] = {nome, horas, obs};
+  else _bhRegistros[mes].push({nome, horas, obs});
+  try{
+    const {error} = await sb.from('gn_banco_horas').upsert(
+      {loja:LOJA, mes, registros:_bhRegistros[mes], updated_at:new Date().toISOString()},
+      {onConflict:'loja,mes'}
+    );
+    if(error) throw error;
+    return true;
+  }catch(e){
+    return false;
+  }
+}
+
 async function salvarRegistroBancoHoras(){
   if(!_bhModalFunc){ showToast('Nenhum funcionário selecionado','error'); return; }
   const mes   = document.getElementById('bh-modal-mes').value;
@@ -3976,23 +3996,8 @@ async function salvarRegistroBancoHoras(){
   if(!mes){ showToast('Selecione o mês','error'); return; }
   if(isNaN(horas)){ showToast('Informe as horas','error'); return; }
 
-  // Atualizar _bhRegistros em memória
-  if(!_bhRegistros[mes]) _bhRegistros[mes] = [];
-  const idx = _bhRegistros[mes].findIndex(x=>_bhNormNome(x.nome)===_bhNormNome(_bhModalFunc));
-  if(idx>=0) _bhRegistros[mes][idx] = {nome:_bhModalFunc, horas, obs};
-  else _bhRegistros[mes].push({nome:_bhModalFunc, horas, obs});
-
-  // Salvar no Supabase
-  try{
-    const {error} = await sb.from('gn_banco_horas').upsert(
-      {loja:LOJA, mes, registros:_bhRegistros[mes], updated_at:new Date().toISOString()},
-      {onConflict:'loja,mes'}
-    );
-    if(error) throw error;
-    showToast('✓ Banco de horas salvo','success');
-  }catch(e){
-    showToast('⚠️ Salvo localmente — erro no servidor','error');
-  }
+  const ok = await _salvarBancoHorasFunc(_bhModalFunc, mes, horas, obs);
+  showToast(ok ? '✓ Banco de horas salvo' : '⚠️ Salvo localmente — erro no servidor', ok ? 'success' : 'error');
 
   fecharModalBancoHoras();
   // Atualizar tab se estiver aberta
@@ -11737,7 +11742,11 @@ async function _checarBancoHorasPendente() {
   if (LOJA === 'Maglia') return null;
   if (!_temAcessoAbaChecklist('banco')) return null;
   const hoje = new Date();
-  if (hoje.getDate() !== 1) return null; // só liga no dia 1 do mês, cobrando o mês anterior
+  // Liga a partir do dia 1 do mês (cobrando o mês anterior) e continua aparecendo em
+  // qualquer dia até alguém completar — antes só checava no dia 1 (não escalava). O corte
+  // BANCO_HORAS_TRAVA_DESDE_MES já dá mais de um mês de folga antes desse check começar a
+  // valer de verdade (confirmado no banco: nenhuma loja tem gap pendente pro mês de corte
+  // hoje), então "hard" não precisa de um corte próprio como Carnes/Banda/Escala.
   const mesAnteriorDate = new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1);
   const mesAnterior = mesAnteriorDate.getFullYear() + '-' + String(mesAnteriorDate.getMonth() + 1).padStart(2, '0');
   if (BANCO_HORAS_TRAVA_DESDE_MES > mesAnterior) return null; // sem retroatividade
@@ -11756,11 +11765,18 @@ async function _checarBancoHorasPendente() {
   if (!nomes.size) return null;
   const faltando = [...nomes.values()].filter(nome => !_bhFindReg(registros, nome));
   if (!faltando.length) return null;
+  // "hard": o dia 1 é quando a pendência aparece pela 1ª vez (soft); a partir do dia 2 sem
+  // ninguém completar já ficou aberta desde ontem — mesmo critério "1 dia sem resolver"
+  // das outras pendências.
+  const hard = hoje.getDate() >= 2;
   return {
     chave: 'banco',
     titulo: '⏱ Banco de Horas do mês anterior pendente',
     mensagem: 'Falta lançar o banco de horas de ' + _bhMesLabel(mesAnterior) + ' pra: ' + faltando.join(', ') + '.',
     tabAlvo: 'banco',
+    hard,
+    mesAnterior,
+    faltandoNomes: faltando,
   };
 }
 
@@ -11864,6 +11880,7 @@ const INLINE_HARD_RESOLVERS = {
   salario: _renderInlineHardSalario,
   banda: _renderInlineHardBanda,
   escala: _renderInlineHardEscala,
+  banco: _renderInlineHardBanco,
 };
 
 function _renderPendenciasEssenciaisLock() {
@@ -12127,6 +12144,57 @@ async function _salvarInlineHardEscala(diaIdx) {
     updComissoesHorarioDia(i, diaIdx, 'saida', saida);
   });
   await flushComissoesOps();
+  _atualizarPendenciasEssenciais();
+}
+
+// Banco de Horas: um input de horas (+/-) e obs opcional por funcionário faltando o
+// lançamento do mês anterior — reaproveita _salvarBancoHorasFunc (mesma gravação do
+// modal). Usa índice (não o nome) nos data-attributes pra não precisar escapar nome em
+// seletor CSS — a lista de nomes fica guardada em _bancoHardFaltandoNomes/_bancoHardMes
+// (escopo de módulo) entre o render e o salvar, igual ao padrão já usado pela Escala.
+let _bancoHardFaltandoNomes = [];
+let _bancoHardMesAnterior = null;
+async function _renderInlineHardBanco(containerId, p) {
+  const elLoading = document.getElementById(containerId);
+  if (!elLoading) return;
+  elLoading.innerHTML = '<div style="font-size:11px;color:#94a3b8">Carregando…</div>';
+  await carregarBancoHoras(); // garante _bhRegistros carregado antes de gravar em cima
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  _bancoHardFaltandoNomes = p.faltandoNomes;
+  _bancoHardMesAnterior = p.mesAnterior;
+  const linhas = p.faltandoNomes.map((nome, i) => `
+    <div style="margin-bottom:8px">
+      <div style="font-size:11px;font-weight:700;color:#1A1D23;margin-bottom:4px">${_esc(nome)}</div>
+      <div style="display:flex;gap:8px">
+        <input type="number" step="0.5" placeholder="Horas (+/-)" data-banco-hard-horas="${i}"
+          style="flex:1;padding:6px 8px;border-radius:8px;border:1px solid rgba(0,0,0,.15);font-size:12px;font-family:inherit;box-sizing:border-box">
+        <input type="text" placeholder="Obs (opcional)" data-banco-hard-obs="${i}"
+          style="flex:1;padding:6px 8px;border-radius:8px;border:1px solid rgba(0,0,0,.15);font-size:12px;font-family:inherit;box-sizing:border-box">
+      </div>
+    </div>`).join('');
+  el.innerHTML = linhas + `<button onclick="_salvarInlineHardBanco()" style="width:100%;margin-top:4px;background:#E8580A;border:none;border-radius:8px;color:#fff;padding:9px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">💾 Salvar banco de horas</button>`;
+}
+async function _salvarInlineHardBanco() {
+  const inputsH = document.querySelectorAll('[data-banco-hard-horas]');
+  let algumVazio = false;
+  const pares = [];
+  inputsH.forEach(inpH => {
+    const i = inpH.dataset.bancoHardHoras;
+    const inpO = document.querySelector('[data-banco-hard-obs="' + i + '"]');
+    const rawH = parseFloat(inpH.value);
+    if (inpH.value === '' || isNaN(rawH)) { algumVazio = true; return; }
+    pares.push({ nome: _bancoHardFaltandoNomes[parseInt(i, 10)], horas: rawH, obs: (inpO.value || '').trim() });
+  });
+  if (algumVazio || !pares.length) { showToast('Preencha as horas de todos os funcionários.', 'error'); return; }
+  // Sequencial (não Promise.all) — cada _salvarBancoHorasFunc lê e regrava
+  // _bhRegistros[mes] inteiro; em paralelo, uma gravação sobrescreveria a outra.
+  for (const { nome, horas, obs } of pares) {
+    await _salvarBancoHorasFunc(nome, _bancoHardMesAnterior, horas, obs);
+  }
+  _bhAtualizarBadge();
+  const tabEl = document.getElementById('tab-banco');
+  if (tabEl && tabEl.classList.contains('active')) renderBancoHoras();
   _atualizarPendenciasEssenciais();
 }
 
