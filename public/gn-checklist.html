@@ -7955,6 +7955,14 @@ function expandTabsBar(){
 }
 
 function switchTab(tab,btn){
+  // Bloqueio ESCALADO — pelo menos 1 pendência ficou aberta um dia inteiro sem resolver
+  // (ver `hard` nos _checarXPendenteOntem + INLINE_HARD_RESOLVERS). Diferente do bloqueio
+  // soft normal, aqui NENHUMA troca de aba é permitida — nem pra Guia, nem pra aba que
+  // resolveria a pendência — só dá pra usar o formulário embutido no próprio overlay.
+  if (_pendenciasEssenciaisAtivas.some(p => p.hard && INLINE_HARD_RESOLVERS[p.chave])) {
+    _renderPendenciasEssenciaisLock();
+    return;
+  }
   // Pendências essenciais (Carnes/Banda de ontem) travam qualquer troca de aba que não
   // seja pra uma das abas que resolvem alguma pendência ativa, ou Guia.
   if (tab !== 'guia' && _pendenciasEssenciaisAtivas.length && !_pendenciasEssenciaisAtivas.some(p => p.tabAlvo === tab)) {
@@ -11488,6 +11496,14 @@ function aplicarRestricaoAbasMaglia() {
 const CARNE_TRAVA_DESDE = '2026-09-06';
 const BANDA_TRAVA_DESDE = '2026-09-06';
 const ESCALA_TRAVA_DESDE = '2026-09-06';
+// Corte SEPARADO pro bloqueio ESCALADO (hard) do Carnes — dia do deploy dessa trava mais
+// forte, não o do lock original. Sem isso, lojas com um gap crônico de "sábado"/"domingo"
+// que já vem de muito antes (ex.: Boulevard/Rancho, confirmado direto no banco antes deste
+// deploy) virariam "hard" JÁ no primeiro dia, sem nenhuma chance de reagir — exatamente o
+// tipo de retroatividade que o resto da feature sempre evitou. Exige que o dia de
+// ANTEONTEM (o que prova que o gap já durava 2 dias) seja depois desse corte, o que só
+// passa a ser matematicamente possível 2 dias depois do deploy.
+const CARNE_HARD_TRAVA_DESDE = '2026-09-07';
 // Formato YYYY-MM — primeiro mês cujo lançamento passa a ser obrigatório (o mês do deploy
 // em si fica de fora, já que só começou a valer no meio dele). Ex.: deploy em 06/09/2026 →
 // setembro fica de fora, outubro é o primeiro mês cobrado — só checado a partir de 1º de
@@ -11515,15 +11531,18 @@ function _ontemISOChecklist() {
   return toISO(d);
 }
 
-async function _checarCarnePendenteOntem() {
-  if (LOJA === 'Maglia') return null;
-  if (!_temAcessoAbaChecklist('carnes')) return null;
-  const ontem = _ontemISOChecklist();
-  if (CARNE_TRAVA_DESDE > ontem) return null;
-  const diaIdx = (new Date(ontem + 'T12:00:00').getDay() + 6) % 7; // 0=seg..6=dom
+// Resolve o gap de carnes pro dia "diasAtras" dias antes de hoje (1=ontem, 2=anteontem) —
+// mesma lógica de resolução de semana/dia (+ pulo de segunda) parametrizada, reaproveitada
+// por _checarCarnePendenteOntem tanto pro gap real (1) quanto pro sinal de escalonamento
+// (2): se o MESMO gap já estava faltando há 2 dias, ficou um dia inteiro sem resolver.
+async function _carneGapNoDia(diasAtras) {
+  const d = new Date(); d.setDate(d.getDate() - diasAtras);
+  const dataAlvo = toISO(d);
+  if (CARNE_TRAVA_DESDE > dataAlvo) return null;
+  const diaIdx = (new Date(dataAlvo + 'T12:00:00').getDay() + 6) % 7; // 0=seg..6=dom
   if (diaIdx === 0) return null; // segunda usa "inicial" (auto-preenchido de outro app) — evita falso positivo
   const diaKey = DIAS_SEMANA[diaIdx];
-  const semanaIni = toISO(getSegundaFeira(new Date(ontem + 'T12:00:00')));
+  const semanaIni = toISO(getSegundaFeira(new Date(dataAlvo + 'T12:00:00')));
   let carnes;
   try {
     const { data } = await sb.from('checklist_carnes').select('carnes').eq('semana_inicio', semanaIni).eq('loja', LOJA).single();
@@ -11533,12 +11552,29 @@ async function _checarCarnePendenteOntem() {
     const v = carnes[c.key] && carnes[c.key][diaKey];
     return v === '' || v === undefined || v === null;
   });
-  if (!faltando.length) return null;
+  return { dataAlvo, diaIdx, diaKey, semanaIni, faltando };
+}
+
+async function _checarCarnePendenteOntem() {
+  if (LOJA === 'Maglia') return null;
+  if (!_temAcessoAbaChecklist('carnes')) return null;
+  const gap = await _carneGapNoDia(1);
+  if (!gap || !gap.faltando.length) return null;
+  const { diaIdx, diaKey, semanaIni, faltando } = gap;
+  // "hard": o mesmo gap (mesma semana/dia) já estava faltando há 2 dias — ficou um dia
+  // inteiro sem ninguém resolver, escalona pro bloqueio total (ver INLINE_HARD_RESOLVERS).
+  // O formulário de resolução continua cobrando só o gap de ontem — anteontem nunca
+  // precisa ser preenchido retroativamente (mesmo espírito "sem retroatividade" de sempre).
+  const gapAnteontem = await _carneGapNoDia(2);
+  const hard = !!(gapAnteontem && gapAnteontem.faltando.length && gapAnteontem.dataAlvo >= CARNE_HARD_TRAVA_DESDE);
   return {
     chave: 'carnes',
     titulo: '🥩 Contagem de carne pendente',
     mensagem: 'A contagem de ontem (' + DIAS_LABEL[diaIdx] + ') não foi preenchida pra: ' + faltando.map(c => c.label).join(', ') + '.',
     tabAlvo: 'carnes',
+    hard,
+    semanaIni, diaKey, diaIdx,
+    faltandoKeys: faltando.map(c => c.key),
     // "Ontem" pode cair numa semana diferente da que está carregada em stateWeem — só
     // acontece quando hoje é 2ª e ontem (domingo) pertence à semana que acabou de fechar.
     // Sem trocar stateWeek pra essa semana antes de abrir a aba Diário, o "Resolver"
@@ -11672,18 +11708,50 @@ async function _checarBancoHorasPendente() {
 async function _checarSalarioIncompleto() {
   if (LOJA === 'Maglia') return null;
   if (!_temAcessoAbaChecklist('escala')) return null;
-  let salariosSetor;
+  let registros;
   try {
     const { data } = await sb.from('gn_banco_horas').select('registros').eq('loja', LOJA).eq('mes', 'CONFIG').maybeSingle();
-    salariosSetor = (data && data.registros && data.registros.salariosSetor) || {};
+    registros = (data && data.registros) || {};
   } catch (e) { return null; }
+  const salariosSetor = registros.salariosSetor || {};
   const qtd = Object.keys(salariosSetor).length;
-  if (qtd >= SALARIO_MIN_SETORES) return null;
+  if (qtd >= SALARIO_MIN_SETORES) {
+    // Limpa o rastro de "desde quando" de uma pendência já resolvida — evita escalar
+    // direto pro bloqueio total se cair abaixo de 5 setores de novo no futuro.
+    if (registros.salarioIncompletoDesde) {
+      const { salarioIncompletoDesde, ...resto } = registros;
+      try {
+        await sb.from('gn_banco_horas').upsert(
+          { loja: LOJA, mes: 'CONFIG', registros: resto, updated_at: new Date().toISOString() },
+          { onConflict: 'loja,mes' }
+        );
+      } catch (e) {}
+    }
+    return null;
+  }
+  // "hard": diferente das outras, é uma exigência estrutural sem "ontem" pra comparar —
+  // precisa de 1 campo de estado próprio (guardado na MESMA linha CONFIG que Salário já
+  // lê/escreve, sem tabela nova) marcando a primeira vez que essa pendência foi vista. Se
+  // já é de um dia anterior a hoje, ficou aberta um dia inteiro sem resolver → escalona
+  // pro bloqueio total (ver INLINE_HARD_RESOLVERS).
+  const hoje = hojeLocal();
+  let desde = registros.salarioIncompletoDesde;
+  if (!desde) {
+    desde = hoje;
+    try {
+      await sb.from('gn_banco_horas').upsert(
+        { loja: LOJA, mes: 'CONFIG', registros: { ...registros, salarioIncompletoDesde: desde }, updated_at: new Date().toISOString() },
+        { onConflict: 'loja,mes' }
+      );
+    } catch (e) {}
+  }
+  const hard = desde < hoje;
   return {
     chave: 'salario',
     titulo: '💰 Salários por Setor incompletos',
     mensagem: 'Só ' + qtd + ' de pelo menos ' + SALARIO_MIN_SETORES + ' funções têm salário cadastrado.',
     tabAlvo: 'escala',
+    hard,
     acaoExtra: () => {
       switchTab('escala', document.querySelector('.tab-btn'));
       setTimeout(() => {
@@ -11725,9 +11793,20 @@ async function _recheckCarnesPendenciaEVoltarSemana() {
   }
 }
 
+// Pendências com formulário inline pronto pro bloqueio ESCALADO (ver mais abaixo) — só
+// quem está aqui chega a escalar de verdade pro modo sem-exceção-nenhuma. As demais
+// (mesmo com `hard:true`) continuam no bloqueio soft de sempre até ganharem o formulário
+// inline delas também (entrega incremental, PR a PR — ver plano da feature).
+const INLINE_HARD_RESOLVERS = {
+  carnes: _renderInlineHardCarnes,
+  salario: _renderInlineHardSalario,
+};
+
 function _renderPendenciasEssenciaisLock() {
   const idEl = 'pendencias-essenciais-lock';
   let el = document.getElementById(idEl);
+  const pendHard = _pendenciasEssenciaisAtivas.filter(p => p.hard && INLINE_HARD_RESOLVERS[p.chave]);
+  if (pendHard.length) { _renderPendenciasEssenciaisLockEscalado(pendHard); return; }
   const tabsAlvo = new Set(_pendenciasEssenciaisAtivas.map(p => p.tabAlvo));
   // Libera visualmente a tela enquanto o usuário está numa aba que resolve alguma
   // pendência ativa — continua "travado" de verdade porque switchTab() barra ir pra
@@ -11736,9 +11815,9 @@ function _renderPendenciasEssenciaisLock() {
   if (!el) {
     el = document.createElement('div');
     el.id = idEl;
-    el.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9000;display:flex;align-items:center;justify-content:center;padding:20px;box-sizing:border-box';
     document.body.appendChild(el);
   }
+  el.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9000;display:flex;align-items:center;justify-content:center;padding:20px;box-sizing:border-box';
   const itensHtml = _pendenciasEssenciaisAtivas.map(p => `
     <div style="background:rgba(0,0,0,.04);border-radius:10px;padding:12px;margin-bottom:8px;text-align:left">
       <div style="font-weight:800;font-size:13px;color:#1A1D23;margin-bottom:4px">${p.titulo}</div>
@@ -11754,6 +11833,138 @@ function _renderPendenciasEssenciaisLock() {
       </div>
       ${itensHtml}
     </div>`;
+}
+
+// Bloqueio ESCALADO — pelo menos 1 pendência ficou aberta um dia inteiro sem resolver
+// (ver `hard` nos _checarXPendenteOntem). Sem exceção nenhuma (nem a aba que resolve, nem
+// o Guia — ver guard em switchTab()): só dá pra interagir com o formulário embutido aqui
+// mesmo, um por pendência hard. Pendências que ainda são só soft continuam listadas
+// embaixo, com o botão "Resolver" de sempre (que navega — não travam mais forte ainda).
+function _renderPendenciasEssenciaisLockEscalado(pendHard) {
+  const idEl = 'pendencias-essenciais-lock';
+  let el = document.getElementById(idEl);
+  if (!el) {
+    el = document.createElement('div');
+    el.id = idEl;
+    document.body.appendChild(el);
+  }
+  el.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:9500;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;overflow-y:auto';
+  const pendSoft = _pendenciasEssenciaisAtivas.filter(p => !pendHard.includes(p));
+  const softHtml = pendSoft.map(p => `
+    <div style="background:rgba(0,0,0,.04);border-radius:10px;padding:12px;margin-bottom:8px;text-align:left">
+      <div style="font-weight:800;font-size:13px;color:#1A1D23;margin-bottom:4px">${p.titulo}</div>
+      <div style="font-size:11px;color:#64748b;margin-bottom:8px">${p.mensagem}</div>
+      <button onclick="_irResolverPendenciaEssencial('${p.chave}')" style="width:100%;background:#E8580A;border:none;border-radius:8px;color:#fff;padding:9px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">Resolver</button>
+    </div>`).join('');
+  el.innerHTML = `
+    <div style="background:#FFFFFF;border-radius:18px;padding:24px 20px;width:100%;max-width:420px;max-height:92vh;overflow-y:auto">
+      <div style="text-align:center">
+        <div style="font-size:36px;margin-bottom:8px">⛔</div>
+        <div style="font-size:16px;font-weight:800;color:#1A1D23;margin-bottom:6px">App bloqueado — passou 1 dia sem resolver</div>
+        <div style="font-size:12px;color:#475569;line-height:1.5;margin-bottom:16px">
+          Essas pendências continuam sem resposta desde ontem. Preencha aqui embaixo pra liberar o app de novo.
+        </div>
+      </div>
+      <div id="pend-hard-forms"></div>
+      ${softHtml}
+    </div>`;
+  const holder = document.getElementById('pend-hard-forms');
+  pendHard.forEach(p => {
+    const box = document.createElement('div');
+    box.style.cssText = 'background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.25);border-radius:10px;padding:12px;margin-bottom:10px;text-align:left';
+    box.innerHTML = `<div style="font-weight:800;font-size:13px;color:#1A1D23;margin-bottom:2px">${p.titulo}</div>
+      <div style="font-size:11px;color:#64748b;margin-bottom:10px">${p.mensagem}</div>
+      <div id="pend-hard-${p.chave}"></div>`;
+    holder.appendChild(box);
+    INLINE_HARD_RESOLVERS[p.chave]('pend-hard-' + p.chave, p);
+  });
+}
+
+// ── Formulários inline do bloqueio ESCALADO ────────────────────────────────
+// Cada um só precisa resolver exatamente o mesmo gap que o botão "Resolver" normal já
+// aponta (mesma semana/dia) — ver comentário em _checarCarnePendenteOntem sobre por que
+// nunca é preciso preencher retroativamente o dia anterior a esse.
+
+// Carnes: só os campos que estão faltando no dia já resolvido por _checarCarnePendenteOntem.
+async function _renderInlineHardCarnes(containerId, p) {
+  const elLoading = document.getElementById(containerId);
+  if (!elLoading) return;
+  elLoading.innerHTML = '<div style="font-size:11px;color:#94a3b8">Carregando…</div>';
+  if (p.semanaIni !== stateWeek.semanaInicio) await loadSupabaseWeek(p.semanaIni);
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  const linhas = p.faltandoKeys.map(key => {
+    const def = CARNES_DEF.find(c => c.key === key);
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+      <label style="font-size:11px;color:#1A1D23;width:90px;flex-shrink:0">${def.icon} ${def.label}</label>
+      <input type="number" min="0" step="0.001" data-carne-hard="${key}" placeholder="${def.unit}"
+        style="flex:1;padding:6px 8px;border-radius:8px;border:1px solid rgba(0,0,0,.15);font-size:12px;font-family:inherit;box-sizing:border-box">
+    </div>`;
+  }).join('');
+  el.innerHTML = linhas + `<button onclick="_salvarInlineHardCarnes('${p.diaKey}')" style="width:100%;margin-top:4px;background:#E8580A;border:none;border-radius:8px;color:#fff;padding:9px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">💾 Salvar contagem</button>`;
+}
+async function _salvarInlineHardCarnes(diaKey) {
+  const inputs = document.querySelectorAll('[data-carne-hard]');
+  let algumVazio = false;
+  inputs.forEach(inp => {
+    const key = inp.dataset.carneHard;
+    if (inp.value === '') { algumVazio = true; return; }
+    if (!stateWeek.carnes[key]) stateWeek.carnes[key] = {};
+    stateWeek.carnes[key][diaKey] = inp.value;
+  });
+  if (algumVazio) { showToast('Preencha todos os campos.', 'error'); return; }
+  await saveAll();
+}
+
+// Salário: mesmo grid de setores do card "💰 Salários por Setor" da aba Escala
+// (renderSalariosSetorCard), só que renderizado dentro do overlay em vez da aba — usa
+// atributos/seletor próprios (data-setor-hard) pra não colidir com os inputs da aba real.
+async function _renderInlineHardSalario(containerId) {
+  const elLoading = document.getElementById(containerId);
+  if (!elLoading) return;
+  elLoading.innerHTML = '<div style="font-size:11px;color:#94a3b8">Carregando…</div>';
+  await carregarBancoHoras();
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  const setores = COMISSOES_SETORES.filter(s => s);
+  const salariosSetor = _bhConfig?.salariosSetor || {};
+  const rows = setores.map(s => {
+    const sal = salariosSetor[s] != null ? salariosSetor[s] : '';
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+      <label style="font-size:11px;color:#1A1D23;width:110px;flex-shrink:0">${_esc(s)}</label>
+      <input type="number" min="0" step="0.01" data-setor-hard="${_esc(s)}" value="${sal}"
+        style="flex:1;padding:6px 8px;border-radius:8px;border:1px solid rgba(0,0,0,.15);font-size:12px;font-family:inherit;box-sizing:border-box">
+    </div>`;
+  }).join('');
+  el.innerHTML = rows + `<div style="font-size:10px;color:#94a3b8;margin-bottom:6px">Preencha pelo menos ${SALARIO_MIN_SETORES} funções pra liberar.</div>`
+    + `<button onclick="_salvarInlineHardSalario('${containerId}')" style="width:100%;background:#E8580A;border:none;border-radius:8px;color:#fff;padding:9px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">💾 Salvar salários</button>`;
+}
+async function _salvarInlineHardSalario(containerId) {
+  const inputs = document.querySelectorAll('#' + containerId + ' input[data-setor-hard]');
+  const salariosSetor = {};
+  inputs.forEach(inp => {
+    const s = inp.dataset.setorHard;
+    const v = parseFloat(inp.value);
+    if (s && !isNaN(v) && v > 0) salariosSetor[s] = v;
+  });
+  if (Object.keys(salariosSetor).length < SALARIO_MIN_SETORES) {
+    showToast('Preencha pelo menos ' + SALARIO_MIN_SETORES + ' funções.', 'error');
+    return;
+  }
+  if (!_bhConfig) _bhConfig = {};
+  _bhConfig.salariosSetor = salariosSetor;
+  try {
+    const { error } = await sb.from('gn_banco_horas').upsert(
+      { loja: LOJA, mes: 'CONFIG', registros: _bhConfig, updated_at: new Date().toISOString() },
+      { onConflict: 'loja,mes' }
+    );
+    if (error) throw error;
+    showToast('✓ Salários salvos', 'success');
+    _logAuditoriaChk('SALVAR_SALARIOS_SETOR', { setores: Object.keys(salariosSetor) });
+    _atualizarPendenciasEssenciais();
+  } catch (e) {
+    showToast('⚠️ Erro ao salvar salários', 'error');
+  }
 }
 
 async function _irResolverPendenciaEssencial(chave) {
