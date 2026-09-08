@@ -550,6 +550,9 @@ const fetchAvaliacoesCloud = async (loja) => {
 // (edição seguinte ou o próprio retry) sempre cancela o retry anterior daquela loja antes
 // de tentar, então nunca reenviamos uma versão mais velha por cima de uma mais nova.
 let _avalPushRetry = {};
+// loja -> true enquanto a leitura da nuvem pra essa loja ainda está em voo — ver os dois
+// useEffect de troca de loja/push abaixo.
+let _avalHidratando = {};
 const pushAvaliacoesCloud = async (loja, arr, autor) => {
   if (_avalPushRetry[loja]) { clearTimeout(_avalPushRetry[loja].timer); delete _avalPushRetry[loja]; }
   try {
@@ -750,10 +753,19 @@ function App() {
   }, [lojaAtiva, isMaster, usuarioNome]);
   useEffect(() => {
     if (!lojaAtiva || lojaAtiva === 'master') return;
+    // Enquanto a nuvem ainda não respondeu pra essa loja, a 1ª pintura (cache local) não
+    // pode disparar o push debounced do efeito abaixo — num aparelho/sessão sem cache
+    // local (troca de aparelho, cache limpo, 1ª vez vendo essa loja), isso ficava
+    // empurrando um array VAZIO pra nuvem por cima de avaliações reais já salvas de outro
+    // aparelho, se a resposta da nuvem demorasse mais que os 1200ms do debounce — a loja
+    // aparecia como "ainda não começou" mesmo já tendo avaliação salva.
+    _avalHidratando[lojaAtiva] = true;
     setAvaliacoes(loadLS(lojaAtiva)); // cache local — pinta na hora enquanto a nuvem carrega
     let cancelado = false;
     fetchAvaliacoesCloud(CHK_TO_USER_KEY[lojaAtiva] || lojaAtiva).then(cloud => {
-      if (cancelado || cloud === null) return;
+      if (cancelado) return;
+      _avalHidratando[lojaAtiva] = false;
+      if (cloud === null) return; // falha de rede — mantém o cache local como está
       setAvaliacoes(cloud);
       saveLS(lojaAtiva, cloud);
     });
@@ -762,6 +774,7 @@ function App() {
   useEffect(() => {
     if (!lojaAtiva || lojaAtiva === 'master') return;
     saveLS(lojaAtiva, avaliacoes);
+    if (_avalHidratando[lojaAtiva]) return; // ainda esperando a nuvem — ver efeito acima
     // Debounce do envio pra nuvem — evita uma requisição a cada tecla digitada no
     // formulário (o estado avaliacoes muda a cada campo preenchido antes de finalizar).
     const t = setTimeout(() => pushAvaliacoesCloud(CHK_TO_USER_KEY[lojaAtiva] || lojaAtiva, avaliacoes, usuarioNome), 1200);
