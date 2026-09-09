@@ -1271,8 +1271,17 @@ function renderPatrimonio(c){
   c.innerHTML=`<div class="chips-wrap">${chips}</div>${pendHtml}${manutPendHtml}<div class="content">${list}</div>`;
 }
 
+// Opção "➕ Novo item" sempre fixada primeiro (criar item novo é o caminho mais comum,
+// não precisa procurar na lista) — o filtro (fp-catalogo-busca) só estreita os itens do
+// catálogo abaixo dela, nunca a esconde.
+function _fpCatalogoOptionsHtml(filtro){
+  const q=(filtro||'').trim().toLowerCase();
+  const itens=q?_patCatalogo.filter(it=>it.nome.toLowerCase().includes(q)):_patCatalogo;
+  const itensHtml=itens.map(it=>`<option value="${esc(it.id)}">${esc(it.nome)}</option>`).join('');
+  return `<option value="__novo__">➕ Novo item (não está na lista)</option>${itensHtml}`;
+}
+
 function renderAddPatrimonioItem(c){
-  const options=_patCatalogo.map(it=>`<option value="${esc(it.id)}">${esc(it.nome)}</option>`).join('');
   c.innerHTML=`
     <div class="back-hdr">
       <button class="back-btn" onclick="cancelView()">← Voltar</button>
@@ -1283,9 +1292,10 @@ function renderAddPatrimonioItem(c){
         <div class="form-title">Adicionar item de patrimônio</div>
         <div class="form-field">
           <label class="form-label">Item do catálogo</label>
-          <select class="form-input" id="fp-catalogo" onchange="_toggleFpNomeNovo()">
-            ${options}
-            <option value="__novo__">➕ Novo item (não está na lista)</option>
+          <input class="inv-busca" id="fp-catalogo-busca" type="search" placeholder="🔍 Filtrar item do catálogo..."
+            oninput="_filtrarFpCatalogo(this.value)">
+          <select class="form-input" id="fp-catalogo" onchange="_toggleFpNomeNovo();_atualizarFpJaExiste()">
+            ${_fpCatalogoOptionsHtml('')}
           </select>
         </div>
         <div class="form-field hidden" id="fp-nome-novo-wrap">
@@ -1295,7 +1305,7 @@ function renderAddPatrimonioItem(c){
         <div class="form-row">
           <div class="form-field">
             <label class="form-label">Setor</label>
-            <select class="form-input" id="fp-setor">
+            <select class="form-input" id="fp-setor" onchange="_atualizarFpJaExiste()">
               ${SETORES.map(s=>`<option value="${esc(s.key)}"${s.key===S.setor?' selected':''}>${s.icon} ${esc(s.key)}</option>`).join('')}
             </select>
           </div>
@@ -1304,6 +1314,7 @@ function renderAddPatrimonioItem(c){
             <input class="form-input" id="fp-qty" type="number" min="0" value="1">
           </div>
         </div>
+        <div id="fp-ja-existe-wrap"></div>
         <div class="form-btns">
           <button class="form-btn sec" onclick="cancelView()">Cancelar</button>
           <button class="form-btn pri" onclick="addPatrimonioItem()">✅ Salvar</button>
@@ -1311,12 +1322,38 @@ function renderAddPatrimonioItem(c){
       </div>
     </div>`;
   _toggleFpNomeNovo();
+  _atualizarFpJaExiste();
 }
 
 function _toggleFpNomeNovo(){
   const sel=$('fp-catalogo'), wrap=$('fp-nome-novo-wrap');
   if(!sel||!wrap) return;
   wrap.classList.toggle('hidden',sel.value!=='__novo__');
+}
+
+// Filtra as opções do <select> pelo texto digitado, sem tocar no input de busca (evita
+// perder foco/cursor a cada tecla) — a opção "➕ Novo item" continua sempre disponível.
+function _filtrarFpCatalogo(v){
+  const sel=$('fp-catalogo');
+  if(!sel) return;
+  sel.innerHTML=_fpCatalogoOptionsHtml(v);
+  _toggleFpNomeNovo();
+  _atualizarFpJaExiste();
+}
+
+// Indica quando o item escolhido já existe no mesmo setor dessa loja — nesse caso salvar
+// só SOMA à quantidade já cadastrada em vez de criar uma linha duplicada (ver addPatrimonioItem).
+function _atualizarFpJaExiste(){
+  const wrap=$('fp-ja-existe-wrap');
+  if(!wrap) return;
+  const catId=$('fp-catalogo')?.value||'';
+  const setor=$('fp-setor')?.value||S.setor;
+  const existente=(catId&&catId!=='__novo__')
+    ?(S.data.patrimonio||[]).find(i=>i.catalogo_id===catId&&i.setor===setor)
+    :null;
+  wrap.innerHTML=existente
+    ?`<div style="background:rgba(22,163,74,.12);color:var(--ok);border:1px solid rgba(22,163,74,.25);border-radius:8px;padding:8px 10px;font-size:12px;font-weight:700;margin-bottom:10px">✅ Já tem ${existente.quantidade} desse item em ${esc(setor)} — a quantidade aqui vai SOMAR ao total existente.</div>`
+    :'';
 }
 
 async function addPatrimonioItem(){
@@ -1339,6 +1376,17 @@ async function addPatrimonioItem(){
     nome=cat.nome; catalogoId=cat.id;
   }
   if(!S.data.patrimonio) S.data.patrimonio=[];
+  // Já existe esse item de catálogo nesse setor dessa loja? Some na quantidade em vez de
+  // criar uma 2ª linha pro mesmo item (o aviso na tela já avisou isso antes de salvar).
+  const existente=S.data.patrimonio.find(i=>i.catalogo_id===catalogoId&&i.setor===setor);
+  if(existente){
+    existente.quantidade=(existente.quantidade||0)+qty;
+    saveData(); S.setor=setor; S.view='list';
+    toast('✅ Quantidade somada ao item existente!');
+    _logAuditoriaInv('ADICIONAR_PATRIMONIO',{item:nome,quantidade:qty,setor,acumulado:true});
+    render();
+    return;
+  }
   S.data.patrimonio.push({id:uid(),catalogo_id:catalogoId,nome,setor,quantidade:qty,criado_em:nowISO(),criado_por:S.usuario.nome});
   saveData(); S.setor=setor; S.view='list';
   toast('✅ Item adicionado!');
