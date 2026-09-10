@@ -10165,6 +10165,11 @@ async function _confirmarFinalizarBarril(id) {
       method: 'PATCH', headers: { 'Prefer': 'return=minimal' },
       body: JSON.stringify({ status: 'FINALIZADO', finalizado_por: (usuarioAtual && usuarioAtual.nome) || loja, finalizado_em: new Date().toISOString() }),
     });
+    // O barril que acabou vira um casco vazio na hora — soma automático no contador de
+    // vazios (ver _ajustarBarrisVaziosAuto), sem depender da loja recontar na mão. É
+    // esse acerto automático (junto do de receber entrega, abaixo) que mantém
+    // vazios+cheios sempre batendo com a base, sem gerar divergência falsa.
+    await _ajustarBarrisVaziosAuto(b.catalogo_id, 1, 'sistema (barril finalizado)');
     showToast('✅ Barril finalizado.');
     carregarBarris();
   } catch (e) {
@@ -10172,11 +10177,39 @@ async function _confirmarFinalizarBarril(id) {
   }
 }
 
+// Ajusta automaticamente a quantidade de cascos vazios de uma loja/tipo (delta positivo
+// ou negativo) sem mexer na base já estabelecida — usado nos dois eventos que movem
+// barril entre "cheio" e "vazio" sozinhos: finalizar (+1 vazio) e receber uma entrega
+// nova (-N vazios, o casco vazio sai da loja na troca com o motorista). Nunca deixa
+// ficar negativo. Falha aqui é best-effort (não bloqueia finalizar/receber, que já
+// aconteceram de verdade) — só não atualiza o contador dessa vez.
+async function _ajustarBarrisVaziosAuto(catalogoId, delta, motivo) {
+  try {
+    const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+    const rows = await sbRequest('gn_barris_vazios?loja_slug=eq.' + slug + '&catalogo_id=eq.' + catalogoId + '&select=*', { method: 'GET' });
+    const atual = rows && rows[0];
+    const vaziosAtual = atual ? (parseFloat(atual.qtd_vazios) || 0) : 0;
+    const novoVazios = Math.max(0, vaziosAtual + delta);
+    const body = {
+      loja: loja, loja_slug: slug, catalogo_id: catalogoId, qtd_vazios: novoVazios,
+      atualizado_em: new Date().toISOString(), atualizado_por: motivo,
+    };
+    await sbRequest('gn_barris_vazios?on_conflict=loja_slug,catalogo_id', {
+      method: 'POST', headers: { 'Prefer': 'return=minimal,resolution=merge-duplicates' },
+      body: JSON.stringify(body),
+    });
+    barrisVaziosState[catalogoId] = Object.assign({}, atual, body);
+  } catch (e) { /* best-effort — não bloqueia o fluxo principal */ }
+}
+
 // Salva a contagem de barris VAZIOS (cascos) por tipo — a primeira vez que a loja salva
 // pra um catalogo_id estabelece a "base" (vazios + cheios naquele momento, guardada em
 // baseline_total); salvamentos seguintes só atualizam qtd_vazios, sem tocar na base — é
 // ela que serve de referência pro setor de Pedidos apontar divergência (ver
-// gn-pedidos.html) se o total (vazios+cheios) mudar sem explicação. Só o setor de
+// gn-pedidos.html) se o total (vazios+cheios) mudar sem explicação. Depois da base
+// definida, o contador segue os eventos automáticos de finalizar/receber (ver
+// _ajustarBarrisVaziosAuto) — esse "Salvar" manual serve pra estabelecer a base e pra
+// recontagens físicas ocasionais (auditoria), não precisa ser refeito a cada barril. Só
 // Pedidos pode corrigir a base depois de checar com a loja.
 async function salvarBarrisVazios(catalogoId) {
   const inputEl = document.getElementById('bv_vazios_' + catalogoId);
@@ -10365,6 +10398,11 @@ async function _confirmarValidadeBarrisEProsseguir(id) {
       };
     });
     await sbRequest('gn_barris_validade', { method: 'POST', headers: { 'Prefer': 'return=minimal' }, body: JSON.stringify(body) });
+    // Barril novo chegando puxa casco vazio pra fora da loja (troca com o motorista) —
+    // desconta da mesma forma automática que o finalizar soma (ver
+    // _ajustarBarrisVaziosAuto). É esse acerto nos dois sentidos que mantém
+    // vazios+cheios sempre batendo com a base sem a loja precisar recontar toda vez.
+    await _ajustarBarrisVaziosAuto(prov.catalogo_id, -qtd, 'sistema (entrega confirmada)');
     if (typeof carregarBarris === 'function') carregarBarris(true);
   } catch (e) {
     // A validade é OBRIGATÓRIA antes de liberar o recebimento — se não deu pra salvar
