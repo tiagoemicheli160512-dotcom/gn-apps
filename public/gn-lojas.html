@@ -743,6 +743,7 @@ let pedidoAll    = {};  // lojaKey -> {item_id: {atual, pedido, obs}}
 let provisoesEntrega = []; // entregas pendentes (AGUARDANDO) desta loja
 let provisoesHistorico = []; // entregas já confirmadas desta loja (últimos 30 dias)
 let barrisAtivos = []; // barris de chopp (AMBEV claro / DuGomes vinho) em acompanhamento de validade
+let barrisVaziosState = {}; // catalogo_id -> linha de gn_barris_vazios (contagem de vazios + base) dessa loja
 // Os dois únicos catalogo_id de barril de chopp hoje (grupo BEBIDAS/subgrupo CHOPP no
 // catálogo) — cada um com seu próprio limiar de "crítico" combinado com o usuário.
 const BARRIS_VALIDADE_CONFIG = {
@@ -9168,6 +9169,36 @@ function render() {
 
   } else if (tab === "barris") {
     const _barrisOrdenados = [...barrisAtivos].sort((a, b) => a.validade.localeCompare(b.validade));
+    // Contagem de barris vazios (Claro/Vinho) — a 1ª vez que a loja salva pra um tipo
+    // estabelece a "base" (vazios + cheios naquele momento); salvamentos seguintes só
+    // atualizam a quantidade vazia, sem mexer na base — se o total (vazios+cheios atuais)
+    // ficar diferente da base, avisa aqui e sinaliza divergência pro setor de Pedidos
+    // resolver (só ele pode corrigir a base, depois de checar com a loja).
+    const _barrisVaziosHtml = (() => {
+      const linhas = Object.keys(BARRIS_VALIDADE_CONFIG).map(cid => {
+        const cfg = BARRIS_VALIDADE_CONFIG[cid];
+        const cheios = barrisAtivos.filter(b => b.catalogo_id === cid).length;
+        const st = barrisVaziosState[cid];
+        const vaziosSalvos = st ? st.qtd_vazios : '';
+        const total = (parseFloat(vaziosSalvos) || 0) + cheios;
+        const temBase = st && st.baseline_total != null;
+        const divergente = temBase && Number(st.baseline_total) !== total;
+        return `<div style="padding:10px 12px;border-bottom:1px solid rgba(0,0,0,.05)">
+          <div style="font-size:12px;font-weight:700;color:#1A1D23;margin-bottom:6px">${cfg.label}</div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <input id="bv_vazios_${cid}" type="number" min="0" step="1" value="${vaziosSalvos}" placeholder="Qtd. vazios"
+              style="flex:1;background:#FFFFFF;border:1px solid #E1E4E9;border-radius:8px;color:#475569;padding:7px 8px;font-size:13px;box-sizing:border-box"/>
+            <button onclick="salvarBarrisVazios('${cid}')" style="background:#059669;border:none;border-radius:8px;padding:8px 12px;color:#fff;font-weight:700;font-size:11px;white-space:nowrap">Salvar</button>
+          </div>
+          <div style="font-size:10px;color:#64748b;margin-top:5px">🍺 ${cheios} cheio${cheios===1?'':'s'} + ${vaziosSalvos||0} vazio${(vaziosSalvos||0)===1?'':'s'} = <b>${total}</b> total${temBase?` (base: ${st.baseline_total})`:''}</div>
+          ${divergente ? `<div style="font-size:10px;color:#DC2626;font-weight:700;margin-top:3px">⚠️ Contagem diferente da base — setor de Pedidos foi avisado</div>` : ''}
+        </div>`;
+      }).join('');
+      return `<div class="card" style="margin-top:10px;padding:0">
+        <div style="padding:10px 12px;border-bottom:1px solid rgba(0,0,0,.08);font-size:11px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:.04em">📦 Barris vazios em loja</div>
+        ${linhas}
+      </div>`;
+    })();
     c.innerHTML = `
     <div class="section">
       <div style="display:flex;align-items:center;justify-content:space-between">
@@ -9175,6 +9206,7 @@ function render() {
         <button onclick="carregarBarris(false)" style="background:rgba(0,0,0,.07);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:5px 10px;color:#475569;font-size:11px">↻ Atualizar</button>
       </div>
       <div style="font-size:11px;color:#64748b;margin-top:6px;line-height:1.4">Validade lançada ao confirmar a entrega na aba Entrega. Toque em "Finalizar" quando o barril acabar no tirador.</div>
+      ${_barrisVaziosHtml}
       ${_barrisOrdenados.length === 0
         ? `<div class="card" style="padding:16px;text-align:center;color:#475569;font-size:12px;margin-top:10px">Nenhum barril em acompanhamento no momento.</div>`
         : `<div class="card" style="margin-top:10px;padding:0">
@@ -9184,14 +9216,25 @@ function render() {
               const bg = crit.nivel === 'vencido' ? 'rgba(220,38,38,.06)' : (crit.nivel === 'critico' ? 'rgba(217,119,6,.06)' : 'transparent');
               const diasTxt = crit.nivel === 'vencido' ? `VENCIDO há ${Math.abs(crit.dias)} dia${Math.abs(crit.dias) === 1 ? '' : 's'}` : `Faltam ${crit.dias} dia${crit.dias === 1 ? '' : 's'}`;
               const validadeFmt = new Date(b.validade + 'T12:00:00').toLocaleDateString('pt-BR');
+              const pendenteHtml = b.validade_nova_solicitada
+                ? `<div style="font-size:10px;color:#7C3AED;font-weight:700;margin-top:4px">🗓️ Nova validade solicitada: ${new Date(b.validade_nova_solicitada+'T12:00:00').toLocaleDateString('pt-BR')} — aguardando confirmação do setor de Pedidos</div>
+                   <button onclick="cancelarSolicitacaoValidadeBarril('${b.id}')" style="margin-top:6px;background:rgba(0,0,0,.06);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:5px 10px;color:#475569;font-size:10px;font-weight:700">↩️ Cancelar solicitação</button>`
+                : '';
+              const editarBtnHtml = !b.validade_nova_solicitada
+                ? `<button onclick="abrirModalEditarValidadeBarril('${b.id}')" style="background:rgba(124,58,237,.08);border:1px solid rgba(124,58,237,.3);border-radius:8px;padding:6px 10px;color:#7C3AED;font-size:11px;font-weight:700;white-space:nowrap">✏️ Validade</button>`
+                : '';
               return `<div style="padding:12px 14px;border-bottom:1px solid rgba(0,0,0,.05);background:${bg}">
                 <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
                   <div style="flex:1;min-width:0">
                     <div style="font-size:13px;font-weight:700;color:#1A1D23">${escapeHtml(b.produto)}</div>
                     <div style="font-size:10px;color:#64748b;margin-top:2px">📅 Validade: ${validadeFmt} · ${escapeHtml(b.fornecedor || '')}</div>
                     <div style="font-size:12px;font-weight:800;color:${cor};margin-top:4px">${crit.nivel !== 'ok' ? '⚠️ ' : ''}${diasTxt}</div>
+                    ${pendenteHtml}
                   </div>
-                  <button onclick="abrirModalFinalizarBarril('${b.id}')" style="flex-shrink:0;background:rgba(0,0,0,.07);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 10px;color:#475569;font-size:11px;font-weight:700">✓ Finalizar</button>
+                  <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0;align-items:flex-end">
+                    <button onclick="abrirModalFinalizarBarril('${b.id}')" style="background:rgba(0,0,0,.07);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 10px;color:#475569;font-size:11px;font-weight:700;white-space:nowrap">✓ Finalizar</button>
+                    ${editarBtnHtml}
+                  </div>
                 </div>
               </div>`;
             }).join('')}
@@ -10042,8 +10085,13 @@ async function carregarCorrecoesSetor(silent) {
 async function carregarBarris(silent) {
   try {
     const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
-    const rows = await sbRequest('gn_barris_validade?loja_slug=eq.' + slug + '&status=eq.ATIVO&select=*&order=validade', { method: 'GET' });
+    const [rows, vaziosRows] = await Promise.all([
+      sbRequest('gn_barris_validade?loja_slug=eq.' + slug + '&status=eq.ATIVO&select=*&order=validade', { method: 'GET' }),
+      sbRequest('gn_barris_vazios?loja_slug=eq.' + slug + '&select=*', { method: 'GET' }),
+    ]);
     barrisAtivos = rows || [];
+    barrisVaziosState = {};
+    (vaziosRows || []).forEach(function(r) { barrisVaziosState[r.catalogo_id] = r; });
     const dot = document.getElementById('dot-barris');
     if (dot) dot.classList.toggle('hidden', !_temBarrilCritico());
     mostrarAvisoBarrisSeNecessario();
@@ -10121,6 +10169,111 @@ async function _confirmarFinalizarBarril(id) {
     carregarBarris();
   } catch (e) {
     showToast('⚠️ Erro ao finalizar — tente de novo. ' + (e.message || ''));
+  }
+}
+
+// Salva a contagem de barris VAZIOS (cascos) por tipo — a primeira vez que a loja salva
+// pra um catalogo_id estabelece a "base" (vazios + cheios naquele momento, guardada em
+// baseline_total); salvamentos seguintes só atualizam qtd_vazios, sem tocar na base — é
+// ela que serve de referência pro setor de Pedidos apontar divergência (ver
+// gn-pedidos.html) se o total (vazios+cheios) mudar sem explicação. Só o setor de
+// Pedidos pode corrigir a base depois de checar com a loja.
+async function salvarBarrisVazios(catalogoId) {
+  const inputEl = document.getElementById('bv_vazios_' + catalogoId);
+  const vazios = Math.max(0, Math.round(parseFloat(inputEl ? inputEl.value : '') || 0));
+  const cheios = barrisAtivos.filter(function(b) { return b.catalogo_id === catalogoId; }).length;
+  const total = vazios + cheios;
+  const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+  const usuario = (usuarioAtual && usuarioAtual.nome) || loja;
+  const atual = barrisVaziosState[catalogoId];
+  const agora = new Date().toISOString();
+  const body = {
+    loja: loja, loja_slug: slug, catalogo_id: catalogoId, qtd_vazios: vazios,
+    atualizado_em: agora, atualizado_por: usuario,
+  };
+  if (!atual || atual.baseline_total == null) {
+    body.baseline_total = total;
+    body.baseline_definida_em = agora;
+    body.baseline_definida_por = usuario;
+  }
+  try {
+    await sbRequest('gn_barris_vazios?on_conflict=loja_slug,catalogo_id', {
+      method: 'POST', headers: { 'Prefer': 'return=minimal,resolution=merge-duplicates' },
+      body: JSON.stringify(body),
+    });
+    showToast('✅ Contagem de barris vazios salva.');
+    carregarBarris();
+  } catch (e) {
+    showToast('⚠️ Erro ao salvar — tente de novo. ' + (e.message || ''));
+  }
+}
+
+// Editar validade de um barril já cadastrado não é imediato — a loja só REGISTRA a
+// solicitação (não altera o valor direto); quem efetiva é o setor de Pedidos
+// (gn-pedidos.html), depois de confirmar. Mesmo padrão de "solicita, Pedidos confirma"
+// já usado pra exclusão de entrega atrasada (ver solicitarExclusaoEntrega em gn-lojas.html).
+function abrirModalEditarValidadeBarril(id) {
+  const b = barrisAtivos.find(function(x) { return x.id === id; });
+  if (!b) return;
+  const existing = document.getElementById('modalEditarValidadeBarril');
+  if (existing) existing.remove();
+  const modal = document.createElement('div');
+  modal.id = 'modalEditarValidadeBarril';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:9999;display:flex;align-items:flex-end;justify-content:center';
+  modal.innerHTML =
+    '<div style="background:#FFFFFF;border-radius:20px 20px 0 0;width:100%;max-width:480px;display:flex;flex-direction:column;padding-bottom:env(safe-area-inset-bottom,0px)">'
+    + '<div style="padding:16px 16px 12px;border-bottom:1px solid rgba(0,0,0,.08)">'
+    + '<div style="width:36px;height:4px;background:rgba(0,0,0,.2);border-radius:2px;margin:0 auto 14px"></div>'
+    + '<div style="font-size:14px;font-weight:800;color:#1A1D23;text-align:center">🗓️ Solicitar nova validade</div>'
+    + '<div style="font-size:11px;color:#64748b;text-align:center;margin-top:3px">' + b.produto + '</div>'
+    + '</div>'
+    + '<div style="padding:14px 16px">'
+    + '<label style="font-size:9px;color:#64748b;font-weight:700;text-transform:uppercase;display:block;margin-bottom:3px">Nova validade</label>'
+    + '<input id="barrilNovaValidade" type="date" value="' + b.validade + '"'
+    + ' style="width:100%;background:#FFFFFF;border:1px solid #E1E4E9;border-radius:8px;color:#475569;padding:8px;font-size:14px;box-sizing:border-box;margin-bottom:8px"/>'
+    + '<div style="font-size:10px;color:#64748b;line-height:1.4">A mudança só vale depois que o setor de Pedidos confirmar.</div>'
+    + '</div>'
+    + '<div style="padding:14px 16px;display:grid;grid-template-columns:1fr 1fr;gap:10px;border-top:1px solid rgba(0,0,0,.08)">'
+    + '<button onclick="document.getElementById(\'modalEditarValidadeBarril\').remove()" style="background:rgba(0,0,0,.08);border:none;border-radius:13px;padding:13px;color:#475569;font-weight:700;font-size:13px">Cancelar</button>'
+    + '<button onclick="_confirmarSolicitarValidadeBarril(\'' + id + '\')" style="background:linear-gradient(135deg,#7C3AED,#5B21B6);border:none;border-radius:13px;padding:13px;color:#fff;font-weight:900;font-size:13px">Solicitar</button>'
+    + '</div></div>';
+  modal.addEventListener('click', function(e) { if (e.target === modal) modal.remove(); });
+  document.body.appendChild(modal);
+}
+
+async function _confirmarSolicitarValidadeBarril(id) {
+  const b = barrisAtivos.find(function(x) { return x.id === id; });
+  if (!b) return;
+  const novaValidade = (document.getElementById('barrilNovaValidade') || {}).value;
+  if (!novaValidade) { showToast('⚠️ Informe a nova validade.'); return; }
+  document.getElementById('modalEditarValidadeBarril')?.remove();
+  try {
+    await sbRequest('gn_barris_validade?id=eq.' + id, {
+      method: 'PATCH', headers: { 'Prefer': 'return=minimal' },
+      body: JSON.stringify({
+        validade_nova_solicitada: novaValidade,
+        validade_solicitada_por: (usuarioAtual && usuarioAtual.nome) || loja,
+        validade_solicitada_em: new Date().toISOString(),
+      }),
+    });
+    showToast('🗓️ Nova validade solicitada — aguardando confirmação do setor de Pedidos.');
+    carregarBarris();
+  } catch (e) {
+    showToast('⚠️ Erro ao solicitar — tente de novo. ' + (e.message || ''));
+  }
+}
+
+async function cancelarSolicitacaoValidadeBarril(id) {
+  if (!confirm('Cancelar a solicitação de nova validade desse barril?')) return;
+  try {
+    await sbRequest('gn_barris_validade?id=eq.' + id, {
+      method: 'PATCH', headers: { 'Prefer': 'return=minimal' },
+      body: JSON.stringify({ validade_nova_solicitada: null, validade_solicitada_por: null, validade_solicitada_em: null }),
+    });
+    showToast('↩️ Solicitação cancelada.');
+    carregarBarris();
+  } catch (e) {
+    showToast('⚠️ Erro ao cancelar — tente de novo. ' + (e.message || ''));
   }
 }
 
