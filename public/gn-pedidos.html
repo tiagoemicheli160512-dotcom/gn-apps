@@ -769,6 +769,7 @@ let S = {
   entregasPendentes: [],
   entregasConfirmadas: [],
   provisoesAtrasadas: [],
+  provisoesExclusao: [], // provisões AGUARDANDO com exclusão solicitada pela loja (ver carregarProvisoesExclusaoPendente)
   devolucoesLojas: [], // [{lojaKey, lojaDisplay, ...dev}]
   barris: [], // espelho de gn_barris_validade (status ATIVO) de todas as lojas — ver renderBarris()
   barrisGruposAbertos: new Set(),
@@ -4595,7 +4596,7 @@ function _provLojaGrupoHtml(lojaSlug, itens) {
 
 async function renderProvisoes() {
   $('content').innerHTML = '<div class="empty"><div class="spin"></div></div>';
-  await Promise.all([carregarProvisoes(), carregarProvisoesPendentes()]);
+  await Promise.all([carregarProvisoes(), carregarProvisoesPendentes(), carregarProvisoesExclusaoPendente()]);
 
   const lojas = [{ slug_pedido:'', nome_display:'Todas as lojas' }, ...S.lojas];
   const lojaTabs = lojas.map(l =>
@@ -4714,6 +4715,31 @@ async function renderProvisoes() {
       </div>
     </div>` : '';
 
+  const bannerExclusao = S.provisoesExclusao.length ? `
+    <div style="background:rgba(124,58,237,.06);border:1px solid rgba(124,58,237,.3);border-radius:var(--r);padding:12px 14px;margin-bottom:12px">
+      <div>
+        <div style="font-size:13px;font-weight:800;color:#1A1D23">🗑️ ${S.provisoesExclusao.length} solicitaç${S.provisoesExclusao.length>1?'ões':'ão'} de exclusão de entrega</div>
+        <div style="font-size:10px;color:var(--muted)">Loja pediu pra excluir — não vale até confirmar aqui</div>
+      </div>
+      <div style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
+        ${S.provisoesExclusao.map(p => {
+          const lojaNome = S.lojas.find(l=>l.slug_pedido===p.loja_slug)?.nome_display || p.loja_slug;
+          const fmtDT = ts => ts ? new Date(ts).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
+          return `<div style="display:flex;align-items:center;gap:8px;padding:8px 8px;background:rgba(124,58,237,.04);border-radius:8px;flex-wrap:wrap">
+            <div style="flex:1;min-width:0">
+              <div style="font-size:11px;color:#1A1D23;font-weight:700">🏪 ${lojaNome}</div>
+              <div style="font-size:12px;font-weight:800;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.fornecedor||'—'} — ${p.gn_catalogo?.produto||'—'}</div>
+              <div style="font-size:10px;color:var(--muted)">Pedido por ${p.exclusao_solicitada_por||'—'} em ${fmtDT(p.exclusao_solicitada_em)}</div>
+            </div>
+            <div style="display:flex;gap:6px;flex-shrink:0">
+              <button onclick="recusarExclusaoProvisao('${p.id}')" style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:5px 10px;color:var(--muted);font-size:11px;cursor:pointer;white-space:nowrap">↩️ Recusar</button>
+              <button onclick="confirmarExclusaoProvisao('${p.id}')" style="background:rgba(220,38,38,.12);border:1px solid rgba(220,38,38,.35);border-radius:8px;padding:5px 10px;color:#DC2626;font-size:11px;font-weight:800;cursor:pointer;white-space:nowrap">✅ Confirmar</button>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>` : '';
+
   // Build devoluções banner (loja_confirmou = awaiting pedidos confirmation)
   const devsPend = (S.devolucoesLojas || []).filter(d => d.status === 'loja_confirmou');
   const devsAll  = (S.devolucoesLojas || []).filter(d => d.status !== 'cancelado').slice().reverse();
@@ -4759,7 +4785,7 @@ async function renderProvisoes() {
       <button onclick="_navegarSemanaProvisao(1)" style="background:rgba(0,0,0,.07);border:1px solid var(--border);border-radius:8px;padding:5px 12px;color:${_semFmt.ehAtual?'var(--muted)':'var(--text)'};font-size:16px;cursor:pointer;opacity:${_semFmt.ehAtual?'.35':'1'}" ${_semFmt.ehAtual?'disabled':''}>→</button>
     </div>`;
 
-  $('content').innerHTML = bannerAtrasadas + bannerDevolucoesHtml + `
+  $('content').innerHTML = bannerAtrasadas + bannerExclusao + bannerDevolucoesHtml + `
     ${_semNavHtml}
     <div class="sec-header">
       <div class="sec-titulo">Provisões <span class="badge badge-r">${provisoesFilt.length}</span></div>
@@ -5564,6 +5590,45 @@ async function carregarProvisoesPendentes() {
   const h = hoje();
   S.provisoesAtrasadas = (data || []).filter(p => (p.data_entrega_fim || p.data_entrega) < h);
   _atualizarBadgeAtrasadas();
+}
+
+// Provisões cuja loja já pediu exclusão (ver solicitarExclusaoEntrega() em gn-lojas.html,
+// aba Entrega) — continuam AGUARDANDO até o setor de Pedidos confirmar ou recusar aqui.
+// Independente de semana/loja selecionada na aba Provisões, pra não depender de navegar
+// até a semana certa pra ver que tem solicitação parada.
+async function carregarProvisoesExclusaoPendente() {
+  const data = await _fetchTodasPaginas(() => db.from('gn_provisoes')
+    .select('*, gn_catalogo(produto,und)')
+    .eq('status', 'AGUARDANDO')
+    .not('exclusao_solicitada_em', 'is', null)
+    .order('exclusao_solicitada_em'));
+  S.provisoesExclusao = data || [];
+}
+
+async function confirmarExclusaoProvisao(id) {
+  const prov = S.provisoesExclusao.find(p => p.id === id);
+  if (!prov) return;
+  if (!confirm(`Confirmar exclusão de "${prov.gn_catalogo?.produto||'este item'}" (${prov.fornecedor||'—'})?\n\nA entrega sai da lista de pendentes da loja.`)) return;
+  const { error } = await db.from('gn_provisoes')
+    .update({ status: 'CANCELADO', atualizado_em: new Date().toISOString() })
+    .eq('id', id).eq('status', 'AGUARDANDO');
+  if (error) { toast('Erro: '+error.message, 'err'); return; }
+  toast('🗑️ Entrega excluída.', 'ok');
+  await carregarProvisoesExclusaoPendente();
+  renderProvisoes();
+}
+
+async function recusarExclusaoProvisao(id) {
+  const prov = S.provisoesExclusao.find(p => p.id === id);
+  if (!prov) return;
+  if (!confirm('Recusar a exclusão? A entrega volta a aparecer como pendente normal pra loja.')) return;
+  const { error } = await db.from('gn_provisoes')
+    .update({ exclusao_solicitada_em: null, exclusao_solicitada_por: null })
+    .eq('id', id);
+  if (error) { toast('Erro: '+error.message, 'err'); return; }
+  toast('↩️ Solicitação recusada.', 'ok');
+  await carregarProvisoesExclusaoPendente();
+  renderProvisoes();
 }
 
 function _atualizarBadgeAtrasadas() {
