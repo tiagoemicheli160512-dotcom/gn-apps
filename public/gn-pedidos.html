@@ -772,6 +772,7 @@ let S = {
   provisoesExclusao: [], // provisões AGUARDANDO com exclusão solicitada pela loja (ver carregarProvisoesExclusaoPendente)
   devolucoesLojas: [], // [{lojaKey, lojaDisplay, ...dev}]
   barris: [], // espelho de gn_barris_validade (status ATIVO) de todas as lojas — ver renderBarris()
+  barrisVazios: [], // linhas de gn_barris_vazios (contagem de cascos vazios + base) de todas as lojas
   barrisGruposAbertos: new Set(),
 
   // Faltas do dia
@@ -1702,14 +1703,150 @@ async function carregarEntregasConfirmadas() {
 
 // Espelho de leitura de gn_barris_validade (AMBEV chopp claro / DuGomes chopp de vinho) —
 // alimentado pelo app Lojas ao confirmar a entrega desses itens (ver abrirModalValidadeBarris
-// em gn-lojas.html). Aqui é só visualização pro setor de Compras, sem ação de finalizar —
-// isso continua sendo feito pela loja, que é quem sabe quando o barril esvazia no tirador.
+// em gn-lojas.html). Finalizar (barril acabou) continua sendo feito pela loja, que é quem
+// sabe quando esvazia no tirador — aqui o setor de Pedidos só confirma/recusa pedidos de
+// troca de validade (validade_nova_solicitada) e acompanha/corrige a contagem de cascos
+// vazios (gn_barris_vazios).
 async function carregarBarris() {
-  const { data } = await db.from('gn_barris_validade')
-    .select('*')
-    .eq('status', 'ATIVO')
-    .order('validade');
+  const [{ data }, { data: vaziosData }] = await Promise.all([
+    db.from('gn_barris_validade').select('*').eq('status', 'ATIVO').order('validade'),
+    db.from('gn_barris_vazios').select('*'),
+  ]);
   S.barris = data || [];
+  S.barrisVazios = vaziosData || [];
+}
+
+// Solicitação de nova validade (ver abrirModalEditarValidadeBarril em gn-lojas.html) — a
+// loja só registra o pedido, quem efetiva é o setor de Pedidos aqui.
+async function confirmarNovaValidadeBarril(id) {
+  const b = S.barris.find(x => x.id === id);
+  if (!b || !b.validade_nova_solicitada) return;
+  const novaFmt = new Date(b.validade_nova_solicitada + 'T12:00:00').toLocaleDateString('pt-BR');
+  if (!confirm(`Confirmar nova validade (${novaFmt}) pra "${b.produto}" (${S.lojas.find(l=>l.slug_pedido===b.loja_slug)?.nome_display || b.loja_slug})?`)) return;
+  const { error } = await db.from('gn_barris_validade')
+    .update({ validade: b.validade_nova_solicitada, validade_nova_solicitada: null, validade_solicitada_por: null, validade_solicitada_em: null })
+    .eq('id', id);
+  if (error) { toast('Erro: ' + error.message, 'err'); return; }
+  toast('✅ Validade atualizada.', 'ok');
+  renderBarris();
+}
+
+async function recusarNovaValidadeBarril(id) {
+  if (!confirm('Recusar a solicitação de nova validade? O barril continua com a validade atual.')) return;
+  const { error } = await db.from('gn_barris_validade')
+    .update({ validade_nova_solicitada: null, validade_solicitada_por: null, validade_solicitada_em: null })
+    .eq('id', id);
+  if (error) { toast('Erro: ' + error.message, 'err'); return; }
+  toast('↩️ Solicitação recusada.', 'ok');
+  renderBarris();
+}
+
+// Corrige a contagem de cascos vazios de uma loja/tipo depois de checar com ela —
+// permissão exclusiva do setor de Pedidos (ver CLAUDE.md/pedido do usuário: "a permissão
+// de alterar só pelo app estoque e pedido"). Reseta a base de comparação (baseline_total)
+// pro valor informado, o que também limpa qualquer divergência já sinalizada.
+function abrirModalCorrigirBarrisVazios(lojaSlug, catalogoId) {
+  const cfg = BARRIS_VALIDADE_CONFIG[catalogoId];
+  const lojaDisplay = S.lojas.find(l => l.slug_pedido === lojaSlug)?.nome_display || lojaSlug;
+  const row = (S.barrisVazios || []).find(r => r.loja_slug === lojaSlug && r.catalogo_id === catalogoId);
+  const cheios = S.barris.filter(b => b.loja_slug === lojaSlug && b.catalogo_id === catalogoId).length;
+  abrirModal(`
+    <div class="modal-titulo">Corrigir contagem — ${lojaDisplay}
+      <button class="modal-close" onclick="$('modal-bg').classList.remove('ativo')">×</button>
+    </div>
+    <div style="background:var(--card2);border-radius:var(--rs);padding:12px;margin-bottom:14px;font-size:12px">
+      <div style="font-weight:600;margin-bottom:4px">${cfg ? cfg.label : catalogoId}</div>
+      <div style="color:var(--muted)">Cheios agora (barris ativos): <span class="num">${cheios}</span></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">QTD VAZIOS (confirmada)</label>
+        <input class="form-input" id="m-bv-vazios" type="number" min="0" step="1" value="${row ? row.qtd_vazios : 0}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">NOVA BASE (TOTAL)</label>
+        <input class="form-input" id="m-bv-base" type="number" min="0" step="1" value="${row && row.baseline_total != null ? row.baseline_total : (cheios + (row ? (parseFloat(row.qtd_vazios)||0) : 0))}">
+      </div>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Ajuste só depois de checar com a loja — isso reseta a base de comparação (a divergência some).</div>
+    <div class="modal-acoes">
+      <button class="btn-sm btn-outline" onclick="$('modal-bg').classList.remove('ativo')">Cancelar</button>
+      <button class="btn-sm btn-success" onclick="_confirmarCorrigirBarrisVazios('${lojaSlug}','${catalogoId}')">💾 Salvar</button>
+    </div>
+  `);
+}
+
+async function _confirmarCorrigirBarrisVazios(lojaSlug, catalogoId) {
+  const vazios = Math.max(0, Math.round(parseFloat($('m-bv-vazios')?.value) || 0));
+  const base = Math.max(0, Math.round(parseFloat($('m-bv-base')?.value) || 0));
+  const lojaDisplay = S.lojas.find(l => l.slug_pedido === lojaSlug)?.nome_display || lojaSlug;
+  let sessNome = '';
+  try { sessNome = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null')?.nome || ''; } catch (e) {}
+  const agora = new Date().toISOString();
+  const { error } = await db.from('gn_barris_vazios').upsert({
+    loja: lojaDisplay, loja_slug: lojaSlug, catalogo_id: catalogoId,
+    qtd_vazios: vazios, baseline_total: base,
+    baseline_definida_em: agora, baseline_definida_por: sessNome || 'Compras',
+    atualizado_em: agora, atualizado_por: sessNome || 'Compras',
+  }, { onConflict: 'loja_slug,catalogo_id' });
+  if (error) { toast('Erro: ' + error.message, 'err'); return; }
+  toast('✅ Contagem corrigida.', 'ok');
+  $('modal-bg').classList.remove('ativo');
+  renderBarris();
+}
+
+// Resumo de cascos vazios/total por loja+tipo, pra todas as lojas com barris ativos OU
+// com alguma contagem de vazios já registrada — divergência (total atual != base) some
+// só quando o setor de Pedidos corrigir via abrirModalCorrigirBarrisVazios().
+function _barrisVaziosResumoHtml() {
+  const porLojaTipo = {};
+  Object.keys(BARRIS_VALIDADE_CONFIG).forEach(cid => {
+    S.barris.filter(b => b.catalogo_id === cid).forEach(b => {
+      const k = (b.loja_slug || '') + '|' + cid;
+      if (!porLojaTipo[k]) porLojaTipo[k] = { lojaSlug: b.loja_slug, catalogoId: cid, cheios: 0, vazios: null, baseline: null };
+      porLojaTipo[k].cheios++;
+    });
+  });
+  (S.barrisVazios || []).forEach(r => {
+    const k = (r.loja_slug || '') + '|' + r.catalogo_id;
+    if (!porLojaTipo[k]) porLojaTipo[k] = { lojaSlug: r.loja_slug, catalogoId: r.catalogo_id, cheios: 0, vazios: null, baseline: null };
+    porLojaTipo[k].vazios = r.qtd_vazios;
+    porLojaTipo[k].baseline = r.baseline_total;
+  });
+  const linhas = Object.values(porLojaTipo).filter(x => x.baseline != null || x.vazios != null || x.cheios > 0);
+  if (!linhas.length) return '';
+
+  const comDivergencia = x => x.baseline != null && Number(x.baseline) !== ((parseFloat(x.vazios) || 0) + x.cheios);
+  const nDivergentes = linhas.filter(comDivergencia).length;
+
+  const linhasHtml = linhas
+    .slice()
+    .sort((a, b) => {
+      const da = comDivergencia(a), db_ = comDivergencia(b);
+      if (da !== db_) return da ? -1 : 1;
+      const lojaA = S.lojas.find(l => l.slug_pedido === a.lojaSlug)?.nome_display || a.lojaSlug || '';
+      const lojaB = S.lojas.find(l => l.slug_pedido === b.lojaSlug)?.nome_display || b.lojaSlug || '';
+      return lojaA.localeCompare(lojaB);
+    })
+    .map(x => {
+      const lojaDisplay = S.lojas.find(l => l.slug_pedido === x.lojaSlug)?.nome_display || x.lojaSlug || 'SEM LOJA';
+      const cfg = BARRIS_VALIDADE_CONFIG[x.catalogoId];
+      const vazios = parseFloat(x.vazios) || 0;
+      const total = vazios + x.cheios;
+      const divergente = comDivergencia(x);
+      return `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;background:${divergente ? 'rgba(220,38,38,.06)' : 'var(--card2)'};border-radius:8px;margin-bottom:6px">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;font-weight:700;color:var(--text)">${divergente ? '⚠️ ' : ''}${lojaDisplay} — ${cfg ? cfg.label : x.catalogoId}</div>
+          <div style="font-size:10px;color:var(--muted)">${x.cheios} cheio${x.cheios===1?'':'s'} + ${vazios} vazio${vazios===1?'':'s'} = <span class="num">${total}</span>${x.baseline != null ? ` (base: ${x.baseline})` : ' (sem base ainda)'}</div>
+        </div>
+        <button onclick="abrirModalCorrigirBarrisVazios('${x.lojaSlug}','${x.catalogoId}')" style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:5px 10px;color:var(--muted);font-size:10px;font-weight:700;white-space:nowrap;cursor:pointer">✏️ Corrigir</button>
+      </div>`;
+    }).join('');
+
+  return `<div style="margin-bottom:14px">
+    <div class="sec-titulo" style="font-size:13px;margin-bottom:8px">📦 Barris vazios em loja ${nDivergentes > 0 ? `<span class="badge badge-r">${nDivergentes} divergência${nDivergentes>1?'s':''}</span>` : ''}</div>
+    ${linhasHtml}
+  </div>`;
 }
 
 // ═══════════════════════════════════════════════
@@ -6097,10 +6234,12 @@ function toggleBarrisGrupo(id) {
 async function renderBarris() {
   $('content').innerHTML = '<div class="empty"><div class="spin"></div></div>';
   await carregarBarris();
+  const vaziosResumoHtml = _barrisVaziosResumoHtml();
 
   if (S.barris.length === 0) {
     $('content').innerHTML = `
     <div class="sec-header"><div class="sec-titulo">🍺 Barris de Chopp</div></div>
+    ${vaziosResumoHtml}
     <div class="empty" style="padding:20px 0">
       <div class="empty-icon">🍺</div>
       <div class="empty-texto">Nenhum barril em acompanhamento no momento.</div>
@@ -6135,6 +6274,15 @@ async function renderBarris() {
         ? `VENCIDO há ${Math.abs(crit.dias)} dia${Math.abs(crit.dias) === 1 ? '' : 's'}`
         : `Faltam ${crit.dias} dia${crit.dias === 1 ? '' : 's'}`;
       const validadeFmt = new Date(b.validade + 'T12:00:00').toLocaleDateString('pt-BR');
+      const pendenteValidadeHtml = b.validade_nova_solicitada ? `
+        <div style="margin-top:8px;padding:8px 10px;background:rgba(124,58,237,.06);border:1px solid rgba(124,58,237,.2);border-radius:8px">
+          <div style="font-size:11px;color:#7C3AED;font-weight:700">🗓️ Nova validade solicitada: ${new Date(b.validade_nova_solicitada+'T12:00:00').toLocaleDateString('pt-BR')}</div>
+          <div style="font-size:10px;color:var(--muted)">Por ${b.validade_solicitada_por||'—'}${b.validade_solicitada_em?' em '+new Date(b.validade_solicitada_em).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):''}</div>
+          <div style="display:flex;gap:6px;margin-top:6px">
+            <button onclick="recusarNovaValidadeBarril('${b.id}')" style="flex:1;background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:5px 8px;color:var(--muted);font-size:10px;font-weight:700;cursor:pointer">↩️ Recusar</button>
+            <button onclick="confirmarNovaValidadeBarril('${b.id}')" style="flex:1;background:rgba(124,58,237,.15);border:1px solid rgba(124,58,237,.4);border-radius:8px;padding:5px 8px;color:#7C3AED;font-size:10px;font-weight:800;cursor:pointer">✅ Confirmar</button>
+          </div>
+        </div>` : '';
       return `<div class="prov-item">
         <div class="prov-item-header">
           <div>
@@ -6146,6 +6294,7 @@ async function renderBarris() {
             <div style="font-size:12px;font-weight:800;color:${cor}">${crit.nivel !== 'ok' ? '⚠️ ' : ''}${diasTxt}</div>
           </div>
         </div>
+        ${pendenteValidadeHtml}
       </div>`;
     }).join('');
     return `<div class="grupo-bloco${porLoja.size===1||S.barrisGruposAbertos.has(gid)?' aberto':''}" id="${gid}" style="margin-bottom:8px">
@@ -6164,7 +6313,8 @@ async function renderBarris() {
     <div class="sec-header">
       <div class="sec-titulo">🍺 Barris de Chopp ${nCriticos > 0 ? `<span class="badge badge-r">${nCriticos} crítico${nCriticos>1?'s':''}</span>` : ''}</div>
     </div>
-    <div style="font-size:11px;color:var(--muted);margin-bottom:12px">Espelho de leitura — validade lançada pela loja ao confirmar a entrega. Finalizar (barril acabou) é feito pelo app Lojas.</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:12px">Validade lançada pela loja ao confirmar a entrega. Finalizar (barril acabou) é feito pelo app Lojas — aqui dá pra confirmar/recusar pedidos de nova validade e corrigir a contagem de cascos vazios.</div>
+    ${vaziosResumoHtml}
     ${htmlGrupos}
   `;
 }
