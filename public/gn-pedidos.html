@@ -744,6 +744,8 @@ let S = {
   // carregarPedidoHortifruti() e o guard em setTab().
   hortifrutiAtivo: false,
   hortifrutiCarregando: false,
+  hortifrutiData: null, // dia sendo visto na aba Hortifruti (YYYY-MM-DD) — null = ainda não escolhido, carregarPedidoHortifruti() usa hoje
+  hortifrutiDiasPendentes: [], // dias com pedido RASCUNHO (+ hoje sempre) — pro navegador de dias
   _pedidoAtualSemanal: null, // guarda S.pedidoAtual enquanto a aba Hortifruti está ativa
   pedFiltro: '',    // '' | 'urgencia' | 'vazios' | 'preenchidos'
   relLojasFiltro: null,   // null = todas as lojas | [slug_pedido,...] — filtro dos relatórios pra fornecedor (todas as lojas)
@@ -1174,26 +1176,34 @@ async function carregarPedidoAtual() {
 // reaproveitado sem mudança nenhuma — já opera em cima de S.pedidoAtual genericamente.
 // Não chama carregarUltimoPedido()/carregarConfirmadosSemana() (comparação com a semana
 // anterior não faz sentido pra um pedido ad-hoc).
+//
+// Mostra sempre o pedido de HOJE por padrão (S.hortifrutiData) — priorizar o mais antigo
+// pendente (versão anterior) escondia o pedido do dia atrás de um backlog de dias
+// parados (05/06/07 nunca confirmados), e o Matheus não enxergava o pedido de hoje. O
+// navegador de dias (_hortifrutiDiaNavHtml) deixa ele voltar e resolver os antigos
+// quando quiser, sem que fiquem bloqueando a visão do dia.
 async function carregarPedidoHortifruti() {
   try {
-    let { data } = await db.from('gn_pedidos')
-      .select('*')
+    const { data: pendentes } = await db.from('gn_pedidos')
+      .select('data_pedido')
       .eq('regiao', 'HORTIFRUTI')
       .eq('status', 'RASCUNHO')
-      .order('data_pedido', { ascending: true })
+      .order('data_pedido', { ascending: true });
+    const hojeStr = hoje();
+    const diasSet = new Set((pendentes || []).map(p => p.data_pedido));
+    diasSet.add(hojeStr); // hoje sempre navegável, mesmo sem pedido nenhum ainda
+    S.hortifrutiDiasPendentes = [...diasSet].sort();
+
+    const dataAlvo = S.hortifrutiData || hojeStr;
+    S.hortifrutiData = dataAlvo;
+
+    const { data } = await db.from('gn_pedidos')
+      .select('*')
+      .eq('regiao', 'HORTIFRUTI')
+      .eq('data_pedido', dataAlvo)
       .order('criado_em', { ascending: true })
       .limit(1);
-    let pedido = data && data[0];
-    if (!pedido) {
-      const res = await db.from('gn_pedidos')
-        .select('*')
-        .eq('regiao', 'HORTIFRUTI')
-        .eq('status', 'CONFIRMADO')
-        .order('data_pedido', { ascending: false })
-        .limit(1);
-      pedido = res.data && res.data[0];
-    }
-    S.pedidoAtual = pedido || null;
+    S.pedidoAtual = (data && data[0]) || null;
     if (S.pedidoAtual) {
       await carregarItensPedido();
       await carregarFornecedoresConfirmados();
@@ -1210,6 +1220,33 @@ async function carregarPedidoHortifruti() {
     console.error('carregarPedidoHortifruti:', e.message);
     S.pedidoAtual = null;
   }
+}
+
+async function selecionarDataHortifruti(data) {
+  S.hortifrutiData = data;
+  S.hortifrutiCarregando = true;
+  renderContent();
+  await carregarPedidoHortifruti();
+  S.hortifrutiCarregando = false;
+  renderContent();
+}
+
+// Navegador de dias da aba Hortifruti — chips clicáveis com hoje + qualquer dia que
+// ainda tenha pedido RASCUNHO parado (mesmo padrão visual do store-tabs já usado nos
+// filtros de loja/status). Deixa o Matheus ver o pedido de hoje por padrão e ainda
+// voltar pra resolver dias antigos sem precisar decorar datas.
+function _hortifrutiDiaNavHtml() {
+  if (!S.hortifrutiAtivo) return '';
+  const hojeStr = hoje();
+  const dias = S.hortifrutiDiasPendentes && S.hortifrutiDiasPendentes.length ? S.hortifrutiDiasPendentes : [hojeStr];
+  const chips = dias.map(d => {
+    const dt = new Date(d + 'T12:00:00');
+    const ddmm = String(dt.getDate()).padStart(2, '0') + '/' + String(dt.getMonth() + 1).padStart(2, '0');
+    const label = d === hojeStr ? `Hoje (${ddmm})` : ddmm;
+    const ativo = (S.hortifrutiData || hojeStr) === d;
+    return `<button class="store-tab${ativo ? ' ativo' : ''}" onclick="selecionarDataHortifruti('${d}')">${label}</button>`;
+  }).join('');
+  return `<div class="store-tabs" style="margin-bottom:10px">${chips}</div>`;
 }
 
 // Reconstrói, a partir do log de auditoria, dois estados que hoje só existiam em memória
@@ -2621,6 +2658,7 @@ async function setTab(tab) {
     await carregarFornecedoresConfirmados();
     await carregarEstadoAuditoriaFornecedores();
   }
+  if (saindoHortifruti) S.hortifrutiData = null; // volta a mostrar hoje por padrão na próxima entrada
   renderContent();
 }
 
@@ -3131,11 +3169,17 @@ function renderPedido() {
     </div>
     ${!sem.ehAtual?`<div style="text-align:center;margin-bottom:6px"><button onclick="irParaSemanaAtual()" style="padding:5px 16px;border-radius:20px;border:1px solid var(--primary);background:rgba(232,88,10,.1);color:var(--text);font-size:11px;font-weight:700;cursor:pointer">▶ Ir para semana atual</button></div>`:''}`;
 
+  // Hortifruti é pedido por dia (não por semana RJ) — a barra de semana não faz sentido
+  // aqui e ainda confundia (mostrava "Semana X" enquanto o pedido era de outro dia). Troca
+  // pelo navegador de dias (_hortifrutiDiaNavHtml), que também resolve o pedido ficar
+  // "preso" num dia antigo: mostra hoje por padrão, com chips pra voltar nos pendentes.
+  const semNavHtmlAtivo = S.hortifrutiAtivo ? _hortifrutiDiaNavHtml() : semNavHtml;
+
   if (!S.pedidoAtual) {
-    $('content').innerHTML = semNavHtml + _datasEspeciaisCardHtml() + _hortifrutiLiberacaoCardHtml() + _vendaSemanaAntCardHtml() + `
+    $('content').innerHTML = semNavHtmlAtivo + _datasEspeciaisCardHtml() + _hortifrutiLiberacaoCardHtml() + _vendaSemanaAntCardHtml() + `
       <div class="empty" style="margin-top:20px">
         <div class="empty-icon">📋</div>
-        <div class="empty-texto">Nenhum pedido nesta semana</div>
+        <div class="empty-texto">${S.hortifrutiAtivo ? 'Nenhum pedido de Hortifruti nesse dia' : 'Nenhum pedido nesta semana'}</div>
       </div>`;
     return;
   }
@@ -3483,11 +3527,11 @@ function renderPedido() {
     }
   }
 
-  $('content').innerHTML = semNavHtml + _datasEspeciaisCardHtml() + _hortifrutiLiberacaoCardHtml() + _vendaSemanaAntCardHtml() + `
+  $('content').innerHTML = semNavHtmlAtivo + _datasEspeciaisCardHtml() + _hortifrutiLiberacaoCardHtml() + _vendaSemanaAntCardHtml() + `
     <div class="pedido-bar">
       <div class="pedido-info">
         <div class="pedido-label">PEDIDO${labelAba}</div>
-        <div class="pedido-valor">${statusChip} &nbsp;<span style="font-size:11px;color:var(--muted)">Semana ${_fmtDDMM(_semAtivaMonISO)} – ${_fmtDDMM(_semAtivaSunISO)}</span></div>
+        <div class="pedido-valor">${statusChip} &nbsp;<span style="font-size:11px;color:var(--muted)">${S.hortifrutiAtivo ? _fmtDDMM(S.hortifrutiData || hoje()) : `Semana ${_fmtDDMM(_semAtivaMonISO)} – ${_fmtDDMM(_semAtivaSunISO)}`}</span></div>
         <div style="font-size:11px;color:var(--muted);margin-top:2px">${S.todosModo ? 'Total geral' : lojaDisplay} : <span class="num" id="hdr-total">${S.todosModo ? `R$ ${fmt(totalGeral)}` : `R$ ${fmt(totalLoja)}`}</span> · <span style="color:var(--text)">${totalItensGeral} item${totalItensGeral!==1?'s':''}</span></div>
       </div>
       <div class="pedido-acoes">
