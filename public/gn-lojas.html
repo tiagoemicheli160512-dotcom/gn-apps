@@ -1635,6 +1635,25 @@ function getEntregasAtrasadas() {
   // a entrega pode chegar validamente em qualquer dia até lá.
   return provisoesEntrega.filter(p => p.data_entrega && (p.data_entrega_fim || p.data_entrega) < hoje);
 }
+// Escopo combinado com o usuário: essa trava só vale pra provisões com semana de
+// provisão A PARTIR do dia em que a feature foi ao ar — o levantamento no Supabase
+// achou 223 itens AGUARDANDO de antes disso, espalhados por 9 lojas (alguns desde
+// 12/08), que não fazem parte desse fluxo (backlog antigo, tratado à parte, não vira
+// vermelho nem ganha botão de excluir por essa mudança).
+const ENTREGA_EXCLUSAO_CUTOFF = '2026-09-10';
+// Uma entrega cuja semana de provisão já passou (estamos numa semana POSTERIOR à da
+// data prevista/fim do período) sem confirmação nenhuma — gatilho pro pedido de
+// exclusão (aparece em vermelho na aba Entrega). Só sinaliza; excluir de fato depende
+// da confirmação do setor de Pedidos (ver solicitarExclusaoEntrega()). Pedido não citou
+// Maglia — regra vale só pras 11 lojas originais.
+function _entregaSemanaProvisaoPassada(p) {
+  if (loja === 'MAGLIA') return false;
+  const dtRef = p.data_entrega_fim || p.data_entrega;
+  if (!dtRef || dtRef < ENTREGA_EXCLUSAO_CUTOFF) return false;
+  const semProvisao = getMonday(new Date(dtRef+'T12:00:00'));
+  const semAtual = getMonday(new Date());
+  return semAtual > semProvisao;
+}
 function gerarMsgAlertaEntregasAtrasadas() {
   const at = getEntregasAtrasadas();
   if (!at.length) return '';
@@ -8672,15 +8691,34 @@ function render() {
                 </div>
               </div>`;
             }
-            return `<div style="padding:12px 14px;border-bottom:1px solid rgba(0,0,0,.05)">
+            if(prov.exclusao_solicitada_em){
+              const fmtDT=ts=>ts?new Date(ts).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'';
+              return `<div style="padding:12px 14px;border-bottom:1px solid rgba(0,0,0,.05);background:rgba(124,58,237,.05)">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+                  <div style="flex:1;min-width:0">
+                    <div style="font-size:12px;font-weight:600;color:#475569;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${produto}</div>
+                    ${dtDisplay?`<div style="font-size:10px;color:#64748b;margin-top:1px">📅 Previsão: ${dtDisplay}</div>`:''}
+                    <div style="font-size:10px;color:#7C3AED;margin-top:3px;font-weight:700">🗑️ Exclusão solicitada em ${fmtDT(prov.exclusao_solicitada_em)} por ${prov.exclusao_solicitada_por||'—'} — aguardando confirmação do setor de Pedidos</div>
+                  </div>
+                  <div style="text-align:right;flex-shrink:0;margin-left:8px">
+                    <div style="font-size:13px;font-weight:800;color:#7C3AED">R$ ${valPrev.toFixed(2).replace('.',',')}</div>
+                    <div style="font-size:11px;color:#64748b">${qtdPrev} ${und}</div>
+                  </div>
+                </div>
+                <button onclick="cancelarSolicitacaoExclusaoEntrega('${prov.id}')" style="width:100%;background:rgba(0,0,0,.06);border:1px solid rgba(0,0,0,.12);border-radius:11px;padding:9px;color:#475569;font-weight:700;font-size:12px">↩️ Cancelar solicitação</button>
+              </div>`;
+            }
+            const atrasadaParaExclusao=_entregaSemanaProvisaoPassada(prov);
+            return `<div style="padding:12px 14px;border-bottom:1px solid rgba(0,0,0,.05);${atrasadaParaExclusao?'background:rgba(220,38,38,.05)':''}">
               <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
                 <div style="flex:1;min-width:0">
                   <div style="font-size:12px;font-weight:600;color:#475569;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${produto}</div>
                   ${pedidoDisplay?`<div style="font-size:10px;color:#64748b;margin-top:1px">🛒 Pedido em ${pedidoDisplay}</div>`:''}
                   ${dtDisplay?`<div style="font-size:10px;color:#64748b;margin-top:1px">📅 Previsão: ${dtDisplay}</div>`:''}
+                  ${atrasadaParaExclusao?`<div style="font-size:10px;color:#DC2626;margin-top:3px;font-weight:800">🔴 Semana de provisão encerrada sem confirmação</div>`:''}
                 </div>
                 <div style="text-align:right;flex-shrink:0;margin-left:8px">
-                  <div style="font-size:13px;font-weight:800;color:#B45309">R$ ${valPrev.toFixed(2).replace('.',',')}</div>
+                  <div style="font-size:13px;font-weight:800;color:${atrasadaParaExclusao?'#DC2626':'#B45309'}">R$ ${valPrev.toFixed(2).replace('.',',')}</div>
                   <div style="font-size:11px;color:#64748b">${qtdPrev} ${und}</div>
                   ${unitPrev>0?`<div style="font-size:10px;color:#7C3AED">R$ ${unitPrev.toFixed(2).replace('.',',')}/${und}</div>`:''}
                 </div>
@@ -8700,6 +8738,7 @@ function render() {
               <button onclick="${BARRIS_VALIDADE_CONFIG[prov.catalogo_id] ? "abrirModalValidadeBarris('"+prov.id+"')" : "confirmarEntrega('"+prov.id+"')"}" style="width:100%;background:linear-gradient(135deg,#059669,#047857);border:none;border-radius:13px;padding:11px;color:#fff;font-weight:800;font-size:13px">
                 ✅ Confirmar Recebimento
               </button>
+              ${atrasadaParaExclusao?`<button onclick="solicitarExclusaoEntrega('${prov.id}')" style="width:100%;background:rgba(220,38,38,.08);border:1px solid rgba(220,38,38,.35);border-radius:13px;padding:9px;color:#DC2626;font-weight:800;font-size:12px;margin-top:8px">🗑️ Solicitar exclusão</button>`:''}
             </div>`;
           }).join('');
           const finalizado=pendentesNoGrupo===0;
@@ -10272,6 +10311,45 @@ async function _epProcessarFila(){
     carregarEntregas(true).then(()=>render());
   }
 }
+// "Excluir" uma entrega não é imediato — a loja só REGISTRA o pedido de exclusão (a
+// provisão continua AGUARDANDO igual antes); quem efetiva de fato é o setor de Pedidos
+// (gn-pedidos.html), que vê essas solicitações na aba Provisões e confirma ou recusa.
+// Evita que a loja apague sozinha um pedido que o fornecedor ainda pode entregar atrasado.
+async function solicitarExclusaoEntrega(id){
+  const prov=provisoesEntrega.find(p=>p.id===id);
+  if(!prov) return;
+  const produtoNome=prov.gn_catalogo?.produto||'este item';
+  if(!confirm(`Solicitar exclusão de "${produtoNome}" (${prov.fornecedor||'—'})?\n\nA entrega já passou da semana de provisão sem confirmação. O setor de Pedidos vai receber a solicitação — a exclusão só vale depois que eles confirmarem.`)) return;
+  const agora=new Date().toISOString();
+  const solicitante=(usuarioAtual&&usuarioAtual.nome)||loja;
+  try{
+    await sbRequest('gn_provisoes?id=eq.'+id,{method:'PATCH',headers:{'Prefer':'return=minimal'},
+      body:JSON.stringify({exclusao_solicitada_em:agora,exclusao_solicitada_por:solicitante})});
+    prov.exclusao_solicitada_em=agora;
+    prov.exclusao_solicitada_por=solicitante;
+    showToast('🗑️ Exclusão solicitada — aguardando confirmação do setor de Pedidos.');
+    render();
+  }catch(e){
+    showToast('⚠️ Não deu pra enviar a solicitação, tenta de novo. '+(e.message||''));
+  }
+}
+
+async function cancelarSolicitacaoExclusaoEntrega(id){
+  const prov=provisoesEntrega.find(p=>p.id===id);
+  if(!prov) return;
+  if(!confirm('Cancelar a solicitação de exclusão desse item? Ele volta a aparecer como uma entrega pendente normal.')) return;
+  try{
+    await sbRequest('gn_provisoes?id=eq.'+id,{method:'PATCH',headers:{'Prefer':'return=minimal'},
+      body:JSON.stringify({exclusao_solicitada_em:null,exclusao_solicitada_por:null})});
+    prov.exclusao_solicitada_em=null;
+    prov.exclusao_solicitada_por=null;
+    showToast('↩️ Solicitação de exclusão cancelada.');
+    render();
+  }catch(e){
+    showToast('⚠️ Não deu pra cancelar, tenta de novo. '+(e.message||''));
+  }
+}
+
 function gerarWppEntregas(){
   if(!provisoesEntrega.length){showToast('Nenhuma entrega pendente.');return;}
   const fmtR=v=>Number(v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
