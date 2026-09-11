@@ -1725,6 +1725,35 @@ function _escalaHomeDiaIdx(dataISO) {
 // Escala e salva de novo (troca de horário, etc). Sem essa herança, os cards do Home
 // ficavam em branco pra qualquer loja que não tivesse resalvado a semana, mesmo com
 // escala real vigente (ex.: Boulevard, Campo Grande, Caxias, Norte Shopping).
+function _escalaHomeNormNome(s) {
+  return (s||'').trim().toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
+}
+// Transforma um funcionário de uma semana anterior na versão "herdada" pra semana alvo —
+// mesma regra de FOLGA/NT/AFASTAMENTO persistentes e FÉRIAS condicionada à data real usada
+// em getComissoesFuncsHerdados do Check-list. Retorna null se não deve ser herdado.
+function _escalaHomeHerdarFunc(f, semAlvo) {
+  if (!f.nome || !f.nome.trim() || f.arquivado) return null;
+  const MANTER_SEM = new Set(['FOLGA','NÃO TRABALHADO','AFASTAMENTO']);
+  let feriasIni=null, feriasFim=null;
+  if (f.ferias_ini && f.ferias_fim) {
+    feriasIni = new Date(f.ferias_ini+'T12:00:00');
+    feriasFim = new Date(f.ferias_fim+'T12:00:00');
+  }
+  const diasHerd = Array(7).fill(null).map((_,di) => {
+    const s = (f.dias||[])[di];
+    if (!s) return 'PRESENTE';
+    if (MANTER_SEM.has(s)) return s;
+    if (s==='FÉRIAS' && feriasIni && feriasFim && semAlvo) {
+      const day = semAlvo.days[di];
+      const iniY = feriasIni.getFullYear();
+      let dt = new Date(`${iniY}-${String(day.m).padStart(2,'0')}-${String(day.d).padStart(2,'0')}T12:00:00`);
+      if (dt<feriasIni) dt = new Date(`${iniY+1}-${String(day.m).padStart(2,'0')}-${String(day.d).padStart(2,'0')}T12:00:00`);
+      if (dt>=feriasIni && dt<=feriasFim) return 'FÉRIAS';
+    }
+    return 'PRESENTE';
+  });
+  return {...f, dias: diasHerd};
+}
 function _escalaHomeFuncsHerdados(allData, idx) {
   for (let i = idx - 1; i >= 0; i--) {
     const wd = allData[String(i)];
@@ -1732,37 +1761,37 @@ function _escalaHomeFuncsHerdados(allData, idx) {
     const comNome = wd.funcs.filter(f => f.nome && f.nome.trim());
     if (!comNome.length) continue;
     const semAlvo = (typeof COMISSOES_CAL !== 'undefined' ? COMISSOES_CAL : [])[idx];
-    const MANTER_SEM = new Set(['FOLGA','NÃO TRABALHADO','AFASTAMENTO']);
-    return comNome.filter(f => !f.arquivado).map(f => {
-      let feriasIni=null, feriasFim=null;
-      if (f.ferias_ini && f.ferias_fim) {
-        feriasIni = new Date(f.ferias_ini+'T12:00:00');
-        feriasFim = new Date(f.ferias_fim+'T12:00:00');
-      }
-      const diasHerd = Array(7).fill(null).map((_,di) => {
-        const s = (f.dias||[])[di];
-        if (!s) return 'PRESENTE';
-        if (MANTER_SEM.has(s)) return s;
-        if (s==='FÉRIAS' && feriasIni && feriasFim && semAlvo) {
-          const day = semAlvo.days[di];
-          const iniY = feriasIni.getFullYear();
-          let dt = new Date(`${iniY}-${String(day.m).padStart(2,'0')}-${String(day.d).padStart(2,'0')}T12:00:00`);
-          if (dt<feriasIni) dt = new Date(`${iniY+1}-${String(day.m).padStart(2,'0')}-${String(day.d).padStart(2,'0')}T12:00:00`);
-          if (dt>=feriasIni && dt<=feriasFim) return 'FÉRIAS';
-        }
-        return 'PRESENTE';
-      });
-      return {...f, dias: diasHerd};
-    });
+    return comNome.map(f => _escalaHomeHerdarFunc(f, semAlvo)).filter(Boolean);
   }
   return [];
 }
+// Autocorreção (mesma lógica de _comissoesMesclarFuncsFaltantes no Check-list): uma semana
+// já salva não é recriada do zero, então funcionário cadastrado depois que essa semana já
+// existia nunca aparecia aqui. Busca a semana anterior mais próxima com gente cadastrada e
+// acrescenta (por nome normalizado, sem fuzzy) quem estiver faltando na semana atual.
+function _escalaHomeMesclarFuncsFaltantes(funcsAtuais, allData, idx) {
+  for (let i = idx - 1; i >= 0; i--) {
+    const wdAnt = allData[String(i)];
+    if (!wdAnt || !wdAnt.funcs) continue;
+    const comNome = wdAnt.funcs.filter(f => f.nome && f.nome.trim());
+    if (!comNome.length) continue;
+    const nomesAtuais = new Set(funcsAtuais.filter(f => f.nome && f.nome.trim() && !f.arquivado).map(f => _escalaHomeNormNome(f.nome)));
+    const faltantes = comNome.filter(f => !f.arquivado && !nomesAtuais.has(_escalaHomeNormNome(f.nome)));
+    if (!faltantes.length) return funcsAtuais;
+    const semAlvo = (typeof COMISSOES_CAL !== 'undefined' ? COMISSOES_CAL : [])[idx];
+    const herdados = faltantes.map(f => _escalaHomeHerdarFunc(f, semAlvo)).filter(Boolean);
+    return [...funcsAtuais, ...herdados];
+  }
+  return funcsAtuais;
+}
 // Funcionários nomeados válidos pra semana `idx`: usa o registro salvo se existir,
-// senão cai pra herança da semana anterior mais recente (ver acima).
+// senão cai pra herança da semana anterior mais recente (ver acima). Quando o registro já
+// existe, ainda mescla quem estiver faltando em relação à semana anterior mais próxima.
 function _escalaHomeFuncsAtual(allData, idx) {
   const wd = allData[String(idx)];
   if (!wd) return _escalaHomeFuncsHerdados(allData, idx);
-  return (wd.funcs || []).filter(f => f.nome && f.nome.trim());
+  const atuais = (wd.funcs || []).filter(f => f.nome && f.nome.trim());
+  return _escalaHomeMesclarFuncsFaltantes(atuais, allData, idx);
 }
 
 async function _renderEscalaDiaHome(mostrar, sess, isMasterAtivo) {
