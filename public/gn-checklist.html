@@ -2323,6 +2323,50 @@ const COMISSOES_SETORES = ['','Salão','Cozinha','Chefe de Cozinha','Ajudante de
 function mkComissoesFuncs(){
   return Array.from({length:COMISSOES_MAX_FUNC},(_,i)=>({id:i,nome:'',tipo:'CLT / MENSALISTA',setor:'',turno:'',horario:'',ferias_ini:'',ferias_fim:'',afastamento_just:'',dias:Array(7).fill('PRESENTE')}));
 }
+function _comissoesBlankFunc(id){
+  return {id, nome:'', tipo:'CLT / MENSALISTA', setor:'', dias:Array(7).fill('PRESENTE')};
+}
+// Normaliza nome pra comparação exata (trim + maiúsculas + remove acento) — usado só pra
+// detectar se um funcionário já está presente na semana, nunca pra fusão aproximada/fuzzy
+// (variações de grafia entre semanas não são casadas automaticamente, de propósito, pra
+// não arriscar mesclar duas pessoas diferentes por engano).
+function _comissoesNormNome(s){
+  return (s||'').trim().toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
+}
+// Transforma um funcionário de uma semana anterior na versão "herdada" pra semana alvo
+// (semAlvo). Retorna null se não deve ser herdado (sem nome ou arquivado) — quem chama
+// decide o que fazer nesse caso (slot em branco, ou simplesmente pular).
+function _comissoesHerdarFunc(f, semAlvo){
+  if(!f.nome || !f.nome.trim()) return null;
+  // Funcionário arquivado (fim de contrato) não é herdado pra semana seguinte —
+  // libera o slot pra um novo funcionário sem mexer nos dados da semana em que
+  // foi arquivado (aquela semana mantém dias trabalhados/gorjetas intactos).
+  if(f.arquivado) return null;
+  // FOLGA, NT e AFASTAMENTO persistem indefinidamente pra semana seguinte (não têm data de
+  // fim conhecida); FALTA/SUSPENSÃO/BANCO voltam para PRESENTE. FÉRIAS só persiste se a data
+  // real do dia na semana nova ainda estiver dentro de ferias_ini/ferias_fim — sem essa
+  // checagem, uma folga de férias acabava sendo arrastada pra sempre pelas semanas seguintes.
+  const MANTER_SEM = new Set(['FOLGA','NÃO TRABALHADO','AFASTAMENTO']);
+  let feriasIni=null, feriasFim=null;
+  if(f.ferias_ini && f.ferias_fim){
+    feriasIni=new Date(f.ferias_ini+'T12:00:00');
+    feriasFim=new Date(f.ferias_fim+'T12:00:00');
+  }
+  const diasHerd = Array(7).fill(null).map((_,di)=>{
+    const s=(f.dias||[])[di];
+    if(!s) return 'PRESENTE';
+    if(MANTER_SEM.has(s)) return s;
+    if(s==='FÉRIAS' && feriasIni && feriasFim && semAlvo){
+      const day=semAlvo.days[di];
+      const iniY=feriasIni.getFullYear();
+      let dt=new Date(`${iniY}-${String(day.m).padStart(2,'0')}-${String(day.d).padStart(2,'0')}T12:00:00`);
+      if(dt<feriasIni) dt=new Date(`${iniY+1}-${String(day.m).padStart(2,'0')}-${String(day.d).padStart(2,'0')}T12:00:00`);
+      if(dt>=feriasIni && dt<=feriasFim) return 'FÉRIAS';
+    }
+    return 'PRESENTE';
+  });
+  return {id:f.id, nome:f.nome, tipo:f.tipo, setor:f.setor||'', turno:f.turno||'', horario:f.horario||'', ferias_ini:f.ferias_ini||'', ferias_fim:f.ferias_fim||'', afastamento_just:f.afastamento_just||'', inicio_contrato:f.inicio_contrato||'', fim_contrato:f.fim_contrato||'', horario_dias:f.horario_dias||null, aval_exp_45:f.aval_exp_45||null, aval_exp_90:f.aval_exp_90||null, encerramento_solicitado:f.encerramento_solicitado||false, encerramento_data:f.encerramento_data||'', dias:diasHerd};
+}
 function getComissoesFuncsHerdados(allData, idx){
   for(let i=idx-1;i>=0;i--){
     const wd = allData[String(i)];
@@ -2331,42 +2375,46 @@ function getComissoesFuncsHerdados(allData, idx){
       if(comNome.length>0){
         const semAlvo = COMISSOES_CAL[idx];
         const herdados = wd.funcs.map(f=>{
-          if(!f.nome || !f.nome.trim()) return {id:f.id,nome:'',tipo:'CLT / MENSALISTA',setor:'',dias:Array(7).fill('PRESENTE')};
-          // Funcionário arquivado (fim de contrato) não é herdado pra semana seguinte —
-          // libera o slot pra um novo funcionário sem mexer nos dados da semana em que
-          // foi arquivado (aquela semana mantém dias trabalhados/gorjetas intactos).
-          if(f.arquivado) return {id:f.id,nome:'',tipo:'CLT / MENSALISTA',setor:'',dias:Array(7).fill('PRESENTE')};
-          // FOLGA, NT e AFASTAMENTO persistem indefinidamente pra semana seguinte (não têm data de
-          // fim conhecida); FALTA/SUSPENSÃO/BANCO voltam para PRESENTE. FÉRIAS só persiste se a data
-          // real do dia na semana nova ainda estiver dentro de ferias_ini/ferias_fim — sem essa
-          // checagem, uma folga de férias acabava sendo arrastada pra sempre pelas semanas seguintes.
-          const MANTER_SEM = new Set(['FOLGA','NÃO TRABALHADO','AFASTAMENTO']);
-          let feriasIni=null, feriasFim=null;
-          if(f.ferias_ini && f.ferias_fim){
-            feriasIni=new Date(f.ferias_ini+'T12:00:00');
-            feriasFim=new Date(f.ferias_fim+'T12:00:00');
-          }
-          const diasHerd = Array(7).fill(null).map((_,di)=>{
-            const s=(f.dias||[])[di];
-            if(!s) return 'PRESENTE';
-            if(MANTER_SEM.has(s)) return s;
-            if(s==='FÉRIAS' && feriasIni && feriasFim && semAlvo){
-              const day=semAlvo.days[di];
-              const iniY=feriasIni.getFullYear();
-              let dt=new Date(`${iniY}-${String(day.m).padStart(2,'0')}-${String(day.d).padStart(2,'0')}T12:00:00`);
-              if(dt<feriasIni) dt=new Date(`${iniY+1}-${String(day.m).padStart(2,'0')}-${String(day.d).padStart(2,'0')}T12:00:00`);
-              if(dt>=feriasIni && dt<=feriasFim) return 'FÉRIAS';
-            }
-            return 'PRESENTE';
-          });
-          return {id:f.id, nome:f.nome, tipo:f.tipo, setor:f.setor||'', turno:f.turno||'', horario:f.horario||'', ferias_ini:f.ferias_ini||'', ferias_fim:f.ferias_fim||'', afastamento_just:f.afastamento_just||'', inicio_contrato:f.inicio_contrato||'', fim_contrato:f.fim_contrato||'', horario_dias:f.horario_dias||null, aval_exp_45:f.aval_exp_45||null, aval_exp_90:f.aval_exp_90||null, encerramento_solicitado:f.encerramento_solicitado||false, encerramento_data:f.encerramento_data||'', dias:diasHerd};
+          const h = _comissoesHerdarFunc(f, semAlvo);
+          return h || _comissoesBlankFunc(f.id);
         });
-        while(herdados.length<COMISSOES_MAX_FUNC) herdados.push({id:herdados.length,nome:'',tipo:'CLT / MENSALISTA',setor:'',dias:Array(7).fill('PRESENTE')});
+        while(herdados.length<COMISSOES_MAX_FUNC) herdados.push(_comissoesBlankFunc(herdados.length));
         return herdados;
       }
     }
   }
   return mkComissoesFuncs();
+}
+// Autocorreção: uma semana já salva não é recriada a partir do zero, então se um
+// funcionário foi cadastrado depois que essa semana já tinha sido aberta (ou editado só na
+// semana anterior), ele nunca aparecia aqui — a semana ficava "congelada" na versão de quando
+// foi criada. Aqui a gente busca a semana anterior mais próxima com gente cadastrada e, pra
+// quem estiver faltando na semana atual (comparação exata por nome normalizado, sem fuzzy —
+// ver _comissoesNormNome), insere numa vaga vazia. Nunca mexe em quem já está presente.
+function _comissoesMesclarFuncsFaltantes(funcs, allData, idx){
+  for(let i=idx-1;i>=0;i--){
+    const wdAnt = allData[String(i)];
+    if(!wdAnt || !wdAnt.funcs) continue;
+    const comNome = wdAnt.funcs.filter(f=>f.nome && f.nome.trim());
+    if(comNome.length===0) continue;
+    const nomesAtuais = new Set(funcs.filter(f=>f.nome && f.nome.trim() && !f.arquivado).map(f=>_comissoesNormNome(f.nome)));
+    const faltantes = comNome.filter(f=>!f.arquivado && !nomesAtuais.has(_comissoesNormNome(f.nome)));
+    if(faltantes.length===0) return funcs;
+    const semAlvo = COMISSOES_CAL[idx];
+    const resultado = [...funcs];
+    const vazios = resultado.map((f,i2)=>i2).filter(i2=>!resultado[i2].nome || !resultado[i2].nome.trim());
+    let vi = 0;
+    for(const f of faltantes){
+      if(vi>=vazios.length) break;
+      const h = _comissoesHerdarFunc(f, semAlvo);
+      if(!h) continue;
+      const slot = vazios[vi];
+      resultado[slot] = {...h, id: resultado[slot].id};
+      vi++;
+    }
+    return resultado;
+  }
+  return funcs;
 }
 function getComissoesWD(allData, idx){
   const k = String(idx);
@@ -2376,9 +2424,10 @@ function getComissoesWD(allData, idx){
   const wd = {...allData[k]};
   if(!wd.funcs || wd.funcs.length<COMISSOES_MAX_FUNC){
     const cur=[...(wd.funcs||[])];
-    while(cur.length<COMISSOES_MAX_FUNC) cur.push({id:cur.length,nome:'',tipo:'CLT / MENSALISTA',setor:'',dias:Array(7).fill('PRESENTE')});
+    while(cur.length<COMISSOES_MAX_FUNC) cur.push(_comissoesBlankFunc(cur.length));
     wd.funcs=cur;
   }
+  wd.funcs = _comissoesMesclarFuncsFaltantes(wd.funcs, allData, idx);
   if(!wd.brutos) wd.brutos=Array(7).fill(0);
   return wd;
 }
