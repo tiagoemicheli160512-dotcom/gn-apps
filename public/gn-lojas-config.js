@@ -55,9 +55,9 @@ window.CARGOS_ALTERNAR_LOJA    = ['compras','supervisor','administrador']; // po
 window.gnLogError = function(context, err) {
   console.error('[GN:' + context + ']', (err && err.message) ? err.message : err);
 };
-window.gnFetchJson = async function(url, headers, context, fallback) {
+window.gnFetchJson = async function(url, headers, context, fallback, fetchOpts) {
   try {
-    const r = await fetch(url, { headers });
+    const r = await fetch(url, Object.assign({ headers }, fetchOpts));
     if (!r.ok) { window.gnLogError(context, 'HTTP ' + r.status + ' — ' + url); return fallback; }
     return await r.json();
   } catch (e) {
