@@ -4792,12 +4792,13 @@ async function _sincronizarProdutosPedidoComCatalogo() {
    segunda e quinta viram lotes separados automaticamente, sem esbarrar no pedido semanal
    nem na lógica de dedupe que já existe pra ele (ver _buscarOuCriarPedidoAtivo). */
 let hortifrutiCatalogo = [];  // [{id (catalogo uuid), fornecedor, subgrupo, produto, und, custo}]
-let hortifrutiQtd = {};       // catalogo_id -> quantidade digitada (ainda não enviada)
-let hortifrutiUnidade = {};   // catalogo_id -> unidade escolhida (CX/SC/UND/KG) pra esse envio — começa na unidade padrão do catálogo
+let hortifrutiQtd = {};       // catalogo_id -> {kg, und} quantidade digitada (ainda não enviada) — dois campos
+                               // fixos por item (igual Cx/Und da aba Pedido), não unidade escolhível: kg e und não
+                               // convertem entre si, então só um dos dois é enviado por item (kg tem prioridade se
+                               // os dois vierem preenchidos por engano).
 let hortifrutiEnviado = null; // { pedidoId, itens:[{catalogo_id,produto,und,qtd_pedida}] } quando já mandou hoje
 let hortifrutiCarregando = false;
 let hortifrutiLiberadoHoje = false; // liberação especial pra hoje (fora de segunda/quinta), feita pelo Compras
-const HORTIFRUTI_UNIDADES = ['CX', 'SC', 'UND', 'KG'];
 
 function _hortifrutiPodeEnviarHoje() {
   return [1, 4].includes(new Date().getDay()) || hortifrutiLiberadoHoje; // 1=segunda, 4=quinta
@@ -4813,11 +4814,6 @@ async function carregarHortifruti() {
     ]);
     hortifrutiCatalogo = catalogo || [];
     hortifrutiLiberadoHoje = !!(liberacoes && liberacoes.length);
-    // Unidade padrão = a do catálogo — só inicializa quem ainda não tem escolha feita
-    // nessa sessão (não sobrescreve o que a loja já trocou na tela).
-    hortifrutiCatalogo.forEach(function(p) {
-      if (!hortifrutiUnidade[p.id]) hortifrutiUnidade[p.id] = p.und || 'UND';
-    });
 
     const slug = LOJA_SLUG[loja];
     hortifrutiEnviado = null;
@@ -4849,29 +4845,21 @@ async function carregarHortifruti() {
   }
 }
 
-function setHortifrutiQtd(catalogoId, val) {
-  hortifrutiQtd[catalogoId] = Math.max(0, parseFloat(val) || 0);
+function setHortifrutiQtd(catalogoId, campo, val) {
+  if (!hortifrutiQtd[catalogoId]) hortifrutiQtd[catalogoId] = {};
+  hortifrutiQtd[catalogoId][campo] = Math.max(0, parseFloat(val) || 0);
 }
 
-function setHortifrutiUnidade(catalogoId, val) {
-  hortifrutiUnidade[catalogoId] = val;
-}
-
-// Igual campoComBadgeSemAutoSave, mas o "badge" vira um <select> pra escolher a unidade
-// (CX/SC/UND/KG) — o fornecedor de Hortifruti nem sempre entrega no mesmo formato do
-// catálogo (varia por semana/oferta), então travar numa unidade só atrapalhava mais do
-// que ajudava.
-function campoComBadgeUnidadeEscolhivel(valor, catalogoId, unidadeAtual, badgeCor, oninputAttr) {
-  const opcoes = HORTIFRUTI_UNIDADES.map(function(u) {
-    return '<option value="' + u + '"' + (u === unidadeAtual ? ' selected' : '') + '>' + u + '</option>';
-  }).join('');
-  return '<div style="position:relative">' +
-    '<select onchange="setHortifrutiUnidade(\'' + catalogoId + '\',this.value)" onclick="event.stopPropagation()" ' +
-      'style="position:absolute;left:4px;top:50%;transform:translateY(-50%);background:' + badgeCor + ';color:#fff;font-size:9px;font-weight:800;padding:2px 3px;border-radius:5px;border:none;z-index:1;letter-spacing:.3px;appearance:none;-webkit-appearance:none;text-align:center;text-align-last:center">' +
-      opcoes +
-    '</select>' +
-    '<input class="inp-full" type="number" step="0.001" min="0" value="' + valor + '" placeholder="0" ' + oninputAttr + ' style="font-size:12px;padding:5px 8px 5px 42px"/>' +
-  '</div>';
+// Monta a lista de itens a enviar a partir de hortifrutiQtd — um item só entra com UM dos
+// dois campos (kg tem prioridade se os dois vierem preenchidos, já que gn_pedido_itens só
+// aceita uma linha por catálogo+loja+pedido, então não dá pra mandar os dois juntos).
+function _hortifrutiItensParaEnviar() {
+  return hortifrutiCatalogo.reduce(function(itens, p) {
+    const q = hortifrutiQtd[p.id] || {};
+    if ((q.kg || 0) > 0) itens.push({ catalogo_id: p.id, qtd_pedida: q.kg, unidade: 'KG' });
+    else if ((q.und || 0) > 0) itens.push({ catalogo_id: p.id, qtd_pedida: q.und, unidade: 'UND' });
+    return itens;
+  }, []);
 }
 
 // Busca a quantidade pedida da última vez que essa loja mandou Hortifruti (não
@@ -4905,14 +4893,12 @@ async function enviarPedidoHortifruti() {
   if (!_hortifrutiPodeEnviarHoje()) { showToast('⚠️ Pedido de Hortifruti só pode ser enviado segunda ou quinta.'); return; }
   const slug = LOJA_SLUG[loja];
   if (!slug) { showToast('⚠️ Loja sem slug de pedido configurado.'); return; }
-  const itensParaEnviar = hortifrutiCatalogo
-    .filter(function(p) { return (hortifrutiQtd[p.id] || 0) > 0; })
-    .map(function(p) { return { catalogo_id: p.id, qtd_pedida: hortifrutiQtd[p.id], unidade: hortifrutiUnidade[p.id] || p.und || 'UND' }; });
+  const itensParaEnviar = _hortifrutiItensParaEnviar();
   if (itensParaEnviar.length === 0) { showToast('⚠️ Digite a quantidade de pelo menos um item.'); return; }
 
   const provAntMap = await _buscarProvAntHortifruti(slug);
   const zerados = hortifrutiCatalogo
-    .filter(function(p) { return (hortifrutiQtd[p.id] || 0) === 0 && (provAntMap[p.id] || 0) > 0; })
+    .filter(function(p) { const q = hortifrutiQtd[p.id] || {}; return !((q.kg||0) > 0) && !((q.und||0) > 0) && (provAntMap[p.id] || 0) > 0; })
     .map(function(p) { return { id: p.id, produto: p.produto, und: p.und || 'UN', provAnt: provAntMap[p.id] }; });
   if (zerados.length > 0) { _abrirAvisoZeradosHortifruti(zerados); return; }
 
@@ -4941,7 +4927,7 @@ function _abrirAvisoZeradosHortifruti(zerados) {
         + '<div style="font-size:12px;font-weight:700;color:#1A1D23;margin-bottom:4px">' + it.produto + '</div>'
         + '<div style="font-size:10px;color:#78350F;margin-bottom:6px">Prov.ant: <b>' + it.provAnt + ' ' + it.und + '</b></div>'
         + '<input type="number" step="0.001" min="0" placeholder="0" class="inp-full" style="width:110px;padding:5px 8px;font-size:12px"'
-        + ' oninput="_qtdZeradoHortiChanged(this,\'' + it.id + '\',' + i + ')">'
+        + ' oninput="_qtdZeradoHortiChanged(this,\'' + it.id + '\',' + i + ',\'' + (it.und === 'KG' ? 'kg' : 'und') + '\')">'
         + '</div>';
     }).join('')
     + '</div>'
@@ -4954,19 +4940,18 @@ function _abrirAvisoZeradosHortifruti(zerados) {
 }
 
 // oninput do campo dentro do aviso de zerados do Hortifruti — reaproveita setHortifrutiQtd
-// (mesmo estado usado pelo grid normal da aba), só marca a linha como resolvida
+// (mesmo estado usado pelo grid normal da aba), escrevendo no campo (kg/und) que
+// corresponde à unidade que o item usava da última vez. Só marca a linha como resolvida
 // visualmente assim que o valor deixa de ser zero.
-function _qtdZeradoHortiChanged(el, catalogoId, idx) {
-  setHortifrutiQtd(catalogoId, el.value);
+function _qtdZeradoHortiChanged(el, catalogoId, idx, campo) {
+  setHortifrutiQtd(catalogoId, campo, el.value);
   const row = document.getElementById('zerado-horti-row-' + idx);
   if (row) row.style.opacity = (parseFloat(el.value) || 0) > 0 ? '0.5' : '1';
 }
 
 async function _confirmarEnviarHortifruti() {
   const slug = LOJA_SLUG[loja];
-  const itensParaEnviar = hortifrutiCatalogo
-    .filter(function(p) { return (hortifrutiQtd[p.id] || 0) > 0; })
-    .map(function(p) { return { catalogo_id: p.id, qtd_pedida: hortifrutiQtd[p.id], unidade: hortifrutiUnidade[p.id] || p.und || 'UND' }; });
+  const itensParaEnviar = _hortifrutiItensParaEnviar();
   if (itensParaEnviar.length === 0) { showToast('⚠️ Digite a quantidade de pelo menos um item.'); return; }
   if (!confirm('Enviar pedido de Hortifruti com ' + itensParaEnviar.length + ' item' + (itensParaEnviar.length > 1 ? 's' : '') + '? Depois de enviado, só o Estoque e Pedido pode ajustar.')) return;
 
@@ -8627,13 +8612,21 @@ function render() {
         ${podeEnviar && hortifrutiLiberadoHoje ? `<div style="background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.25);border-radius:13px;padding:10px 12px;font-size:11px;color:#065F46;margin-bottom:10px">🔓 Envio liberado hoje pelo Estoque e Pedido (dia especial).</div>` : ''}
         <div class="card">
           ${hortifrutiCatalogo.map(function(p) {
+            const _hq = hortifrutiQtd[p.id] || {};
             return `<div class="row-item" style="flex-direction:column;align-items:flex-start;gap:6px">
               <div style="display:flex;width:100%;align-items:center;gap:6px">
                 <span class="item-name" style="font-weight:700;font-size:12px;flex:1;min-width:0">${p.produto}</span>
                 <span style="font-size:9px;color:#64748b;flex-shrink:0">${p.subgrupo||''}</span>
               </div>
-              <div style="width:100%">
-                ${campoComBadgeUnidadeEscolhivel(hortifrutiQtd[p.id]||'', p.id, hortifrutiUnidade[p.id]||p.und||'UND', '#059669', "oninput=\"setHortifrutiQtd('"+p.id+"',this.value)\"")}
+              <div style="display:flex;gap:6px;width:100%">
+                <div style="flex:1">
+                  <label style="font-size:9px;color:#64748b;font-weight:700;text-transform:uppercase">Kg</label>
+                  ${campoComBadgeSemAutoSave(_hq.kg||'', 'KG', '#059669', "oninput=\"setHortifrutiQtd('"+p.id+"','kg',this.value)\"")}
+                </div>
+                <div style="flex:1">
+                  <label style="font-size:9px;color:#475569;font-weight:700;text-transform:uppercase">Und</label>
+                  ${campoComBadgeSemAutoSave(_hq.und||'', 'UND', '#7c3aed', "oninput=\"setHortifrutiQtd('"+p.id+"','und',this.value)\"")}
+                </div>
               </div>
             </div>`;
           }).join('')}
