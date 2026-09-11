@@ -2316,7 +2316,7 @@ if (session) {
 // Silently refresh permissions from DB on every load so permission
 // changes by the admin take effect without requiring a manual logout.
 if (session) {
-  fetch(`${SB_URL}/rest/v1/gn_usuarios?id=eq.${session.id}&ativo=eq.true&select=id,nome,loja,cargo,permissoes`,
+  fetch(`${SB_URL}/rest/v1/gn_usuarios_publico?id=eq.${session.id}&ativo=eq.true&select=id,nome,loja,cargo,permissoes`,
     { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } })
   .then(r => r.json()).then(data => {
     if (!data || !data.length) return;
@@ -2413,7 +2413,7 @@ async function forcarAtualizacao() {
   btns.forEach(b => { if (b) { b.textContent = b.id === 'sbn-btn-atualizar' ? '↻ Atualizar app' : '↻ Atualizar'; b.disabled = false; } });
 
   // Atualiza permissões em background (usa _refreshPermUI, nunca showHome)
-  fetch(`${SB_URL}/rest/v1/gn_usuarios?id=eq.${session.id}&ativo=eq.true&select=id,nome,loja,cargo,permissoes`,
+  fetch(`${SB_URL}/rest/v1/gn_usuarios_publico?id=eq.${session.id}&ativo=eq.true&select=id,nome,loja,cargo,permissoes`,
     { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } })
   .then(r => r.json()).then(data => {
     if (!data || !data.length) return;
@@ -2459,14 +2459,14 @@ async function doLogin() {
   btn.textContent = 'Verificando...'; btn.disabled = true;
   try {
     const res = await fetch(
-      `${SB_URL}/rest/v1/gn_usuarios?nome=eq.${encodeURIComponent(nome)}&senha=eq.${encodeURIComponent(senha)}&ativo=eq.true`,
-      { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } }
+      `${SB_URL}/rest/v1/rpc/verificar_login`,
+      { method: 'POST', headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ p_nome: nome, p_senha: senha, p_app: 'gn-home' }) }
     );
     const data = await res.json();
     if (!data || !data.length) {
       errEl.textContent = '❌ Nome ou senha incorretos.';
       btn.textContent = 'Entrar →'; btn.disabled = false;
-      _registrarTentativaFalha(nome);
       return;
     }
     const u = data[0];
@@ -3065,25 +3065,6 @@ function _senhaExpirada(dataStr) {
   return dias >= 90;
 }
 
-// Registra em gn_login_tentativas, só pra controle — não interfere na resposta
-// já mostrada ao usuário (nome ou senha incorretos). Faz uma segunda consulta,
-// só por nome, pra classificar o motivo sem expor no login se o problema foi
-// usuário inexistente/inativo ou senha errada.
-function _registrarTentativaFalha(nome) {
-  fetch(`${SB_URL}/rest/v1/gn_usuarios?nome=eq.${encodeURIComponent(nome)}&select=id,ativo`,
-    { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } })
-    .then(r => r.ok ? r.json() : [])
-    .then(rows => {
-      const motivo = !rows.length ? 'usuario_nao_encontrado' : (rows[0].ativo === false ? 'usuario_inativo' : 'senha_incorreta');
-      return fetch(`${SB_URL}/rest/v1/gn_login_tentativas`, {
-        method: 'POST',
-        headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-        body: JSON.stringify({ nome, motivo, app: 'gn-home' })
-      });
-    })
-    .catch(() => {});
-}
-
 // Registra em gn_acessos, só pra controle — permite ao mestre ver na tela da loja
 // quem entrou no app naquele dia (gerente, sub etc.), sem interferir no login em si.
 function _registrarAcesso(u) {
@@ -3334,7 +3315,7 @@ async function _carregarSupervisoresList() {
     // Inclui mestre além de supervisor — quem tem cargo mestre também faz visitas às
     // lojas (já libera entrada/saída na aba Visitas do Check-list, ver CARGOS_VISITAS
     // em gn-checklist.html) e precisa aparecer aqui pros próprios relatórios/calendário.
-    const res = await fetch(`${SB_URL}/rest/v1/gn_usuarios?cargo=in.(supervisor,mestre)&ativo=eq.true&select=id,nome,cargo&order=nome.asc`,
+    const res = await fetch(`${SB_URL}/rest/v1/gn_usuarios_publico?cargo=in.(supervisor,mestre)&ativo=eq.true&select=id,nome,cargo&order=nome.asc`,
       { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } });
     _visSupList = res.ok ? await res.json() : [];
   } catch(e) { _visSupList = []; }
@@ -4095,9 +4076,12 @@ async function _visExcluirRealConfirmar(id) {
   if (!user || !pass) { if (errEl) errEl.textContent = 'Preencha usuário e senha.'; return; }
   if (btnEl) btnEl.disabled = true;
   try {
-    const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
-    const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_usuarios?nome=ilike.${encodeURIComponent(user)}&senha=eq.${encodeURIComponent(pass)}&ativo=eq.true&cargo=ilike.mestre&select=id`, H, 'visExclReal:auth', []);
-    if (!rows.length) { if (errEl) errEl.textContent = 'Usuário/senha inválidos ou não é cargo mestre.'; if (btnEl) btnEl.disabled = false; return; }
+    const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+    const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/rpc/verificar_login`, H, 'visExclReal:auth', [],
+      { method: 'POST', body: JSON.stringify({ p_nome: user, p_senha: pass, p_app: 'gn-home:visExclReal' }) });
+    // verificar_login não filtra por cargo (é genérico pra todo login) — o requisito
+    // "só mestre" continua sendo aplicado aqui, igual antes.
+    if (!rows.length || (rows[0].cargo || '').toLowerCase() !== 'mestre') { if (errEl) errEl.textContent = 'Usuário/senha inválidos ou não é cargo mestre.'; if (btnEl) btnEl.disabled = false; return; }
     const res = await fetch(`${SB_URL}/rest/v1/gn_chk_visitas?id=eq.${id}`, {
       method: 'DELETE',
       headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY }
@@ -5342,7 +5326,7 @@ async function _loadFeriasGerencia(){
     // virava "nenhuma loja tem gerente/sub", disparando um alerta falso no Xadrez
     // pra todas as lojas de uma vez.
     const [gerRows, lojaRows, avalColabRows] = await Promise.all([
-      window.gnFetchJson(`${SB_URL}/rest/v1/gn_usuarios?or=(cargo.ilike.gerente,cargo.ilike.sub_gerente)&ativo=eq.true&select=id,nome,cargo,loja&order=nome.asc`, H, 'ferias:gerentes', null),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_usuarios_publico?or=(cargo.ilike.gerente,cargo.ilike.sub_gerente)&ativo=eq.true&select=id,nome,cargo,loja&order=nome.asc`, H, 'ferias:gerentes', null),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?select=loja,all_data`, H, 'ferias:lojas', null),
       // Avaliações de desempenho do app Avaliações (gn-avaliacoes.html) — mesma chave
       // de loja (userKey) usada em gn_usuarios/gn_lojas, ver CHK_TO_USER_KEY lá.
@@ -5702,7 +5686,7 @@ async function _loadFeriasEquipe(){
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
   try{
     const [userRows, cfgRows] = await Promise.all([
-      window.gnFetchJson(`${SB_URL}/rest/v1/gn_usuarios?cargo=in.(${CARGOS_EQUIPE_FERIAS.join(',')})&ativo=eq.true&select=id,nome,cargo&order=nome.asc`, H, 'ferias:equipe:usuarios', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_usuarios_publico?cargo=in.(${CARGOS_EQUIPE_FERIAS.join(',')})&ativo=eq.true&select=id,nome,cargo&order=nome.asc`, H, 'ferias:equipe:usuarios', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.EQUIPE_CONFIG&select=all_data`, H, 'ferias:equipe:cfg', []),
     ]);
     _dashEquipeUsuarios = (userRows||[]).map(u=>({ id:u.id, nome:u.nome, cargo:(u.cargo||'').toLowerCase() }));
