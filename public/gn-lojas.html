@@ -750,6 +750,30 @@ const BARRIS_VALIDADE_CONFIG = {
   'd8d457b1-0fb9-4c58-952b-27c175700f1f': { label: 'Chopp Claro (AMBEV)', diasCritico: 4 },
   '60bbc4c5-a781-485b-9454-091d376d124a': { label: 'Chopp de Vinho (DuGomes)', diasCritico: 12 },
 };
+
+// ═══════════ CONTAGEM SEMANAL DE BARRIS (aba Pedido) ═══════════
+// Independente da aba 🍺 Barris (que acompanha validade por entrega recebida em
+// gn_barris_validade/gn_barris_vazios) — isso aqui é uma contagem manual do estoquista,
+// toda semana, do estado FÍSICO de cada barril de chopp que a loja tem no momento (cheio
+// guardado, na linha em uso, ou vazio), pra dar visão de quadro/consumo pra gerência, sem
+// depender de entrega/pedido pra existir um registro.
+const BARRIS_SEMANAL_TIPOS = [
+  { val: 'CLARO', label: 'Chopp Claro', emoji: '🍺' },
+  { val: 'VINHO', label: 'Chopp de Vinho', emoji: '🍷' },
+];
+const BARRIS_SEMANAL_STATUS = [
+  { val: 'CHEIO', label: 'Cheio (guardado)' },
+  { val: 'NA_LINHA_CHEIO', label: 'Na linha — Cheio' },
+  { val: 'NA_LINHA_METADE', label: 'Na linha — Pela metade' },
+  { val: 'NA_LINHA_ABAIXO_METADE', label: 'Na linha — Abaixo da metade' },
+  { val: 'VAZIO', label: 'Vazio' },
+];
+const BARRIS_SEMANAL_STATUS_LABEL = Object.fromEntries(BARRIS_SEMANAL_STATUS.map(s => [s.val, s.label]));
+let _barrisSemPendente = false;
+let _barrisSemSemanaIni = null; // wkKey (YYYY-MM-DD) da segunda-feira da semana atual
+let _barrisSemItens = { CLARO: [], VINHO: [] }; // {status, validade} adicionados nesta sessão, ainda não confirmados
+let _barrisSemComparativo = null; // {CLARO:n, VINHO:n} da semana passada, ou null se ainda não carregou
+let _barrisSemSalvando = false;
 // Janela do Histórico de Recebimentos (aba Entrega), em dias — 14 é o padrão de sempre pra
 // qualquer usuário; o filtro Semana/Mês/Trimestre (só cargo mestre/compras, ver
 // _epHistFiltroVisivel) troca esse valor e reconsulta o banco com carregarEntregas().
@@ -1933,6 +1957,160 @@ function _renderTravaNotaFiscal(forcarExibicao) {
     </div>`;
 }
 
+// Só o cargo Estoquista faz essa contagem — mestre/gerente/supervisor/compras nunca
+// travam por isso (o card nem aparece pra eles).
+function _cargoEstoquista() { return !!(usuarioAtual && usuarioAtual.cargo === 'estoquista'); }
+
+// Confere se a loja já confirmou a contagem de barris desta semana. Maglia fica de fora
+// por padrão (CLAUDE.md — só entra se o pedido citar "Maglia" explicitamente, o que não
+// foi o caso aqui). Falha de rede não trava (mesmo princípio das outras pendências).
+async function _checarBarrisSemanalPendencia() {
+  _barrisSemSemanaIni = wkKey(getMonday(new Date()));
+  if (!_cargoEstoquista() || loja === 'Maglia') { _barrisSemPendente = false; _renderTravaBarrisSemanal(); return; }
+  try {
+    const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+    const rows = await sbRequest(
+      'gn_barris_semanal_confirmacao?loja_slug=eq.' + slug + '&semana_inicio=eq.' + _barrisSemSemanaIni + '&select=loja_slug',
+      { method: 'GET' }
+    );
+    _barrisSemPendente = !(rows && rows.length);
+  } catch (e) { _barrisSemPendente = false; }
+  if (_barrisSemPendente && !_barrisSemComparativo) _carregarComparativoBarrisSemanal();
+  _renderTravaBarrisSemanal();
+}
+
+async function _carregarComparativoBarrisSemanal() {
+  try {
+    const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+    const semanaAnteriorISO = wkKey(addDays(new Date(_barrisSemSemanaIni + 'T12:00:00'), -7));
+    const rows = await sbRequest(
+      'gn_barris_semanal_contagem?loja_slug=eq.' + slug + '&semana_inicio=eq.' + semanaAnteriorISO + '&select=tipo',
+      { method: 'GET' }
+    );
+    const cont = { CLARO: 0, VINHO: 0 };
+    (rows || []).forEach(function(r) { if (cont[r.tipo] != null) cont[r.tipo]++; });
+    _barrisSemComparativo = cont;
+  } catch (e) { _barrisSemComparativo = null; }
+  _renderTravaBarrisSemanal();
+}
+
+function _addItemBarrisSemanal(tipo) {
+  const statusEl = document.getElementById('bsem-status-' + tipo);
+  const validadeEl = document.getElementById('bsem-validade-' + tipo);
+  const status = statusEl ? statusEl.value : '';
+  const validade = validadeEl ? validadeEl.value : '';
+  if (!status) { showToast('Selecione o status do barril.'); return; }
+  if (!validade) { showToast('Informe a validade do barril.'); return; }
+  _barrisSemItens[tipo].push({ status: status, validade: validade });
+  if (validadeEl) validadeEl.value = '';
+  _renderTravaBarrisSemanal();
+}
+function _removerItemBarrisSemanal(tipo, idx) {
+  _barrisSemItens[tipo].splice(idx, 1);
+  _renderTravaBarrisSemanal();
+}
+
+async function _confirmarContagemBarrisSemanal() {
+  if (_barrisSemSalvando) return;
+  const total = _barrisSemItens.CLARO.length + _barrisSemItens.VINHO.length;
+  const msg = total === 0
+    ? 'Confirmar a contagem desta semana SEM nenhum barril cadastrado?'
+    : 'Confirmar a contagem desta semana com ' + total + ' barril' + (total === 1 ? '' : 'is') + '?';
+  if (!confirm(msg)) return;
+  _barrisSemSalvando = true;
+  _renderTravaBarrisSemanal();
+  try {
+    const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+    const monday = _barrisSemSemanaIni;
+    const criadoPor = usuarioAtual ? usuarioAtual.nome : null;
+    const linhas = [];
+    BARRIS_SEMANAL_TIPOS.forEach(function(t) {
+      _barrisSemItens[t.val].forEach(function(item) {
+        linhas.push({ loja: loja, loja_slug: slug, semana_inicio: monday, tipo: t.val, status: item.status, validade: item.validade, criado_por: criadoPor });
+      });
+    });
+    if (linhas.length) {
+      await sbRequest('gn_barris_semanal_contagem', { method: 'POST', headers: { 'Prefer': 'return=minimal' }, body: JSON.stringify(linhas) });
+    }
+    await sbRequest('gn_barris_semanal_confirmacao?on_conflict=loja_slug,semana_inicio', {
+      method: 'POST',
+      headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify({ loja_slug: slug, semana_inicio: monday, loja: loja, confirmado_por: criadoPor })
+    });
+    _barrisSemPendente = false;
+    _barrisSemItens = { CLARO: [], VINHO: [] };
+    _barrisSemComparativo = null;
+    showToast('✅ Contagem de barris confirmada!');
+  } catch (e) {
+    showToast('⚠️ Erro ao salvar: ' + (e.message || e));
+  } finally {
+    _barrisSemSalvando = false;
+    _renderTravaBarrisSemanal();
+  }
+}
+
+// Overlay bloqueante — igual em espírito ao bloqueio "hard" da Nota Fiscal, mas aqui o
+// próprio overlay JÁ É o formulário de resolução (não precisa reaproveitar nenhuma aba de
+// verdade por baixo), então fica sempre visível enquanto pendente, sem alternar com o
+// conteúdo da aba Pedido por trás.
+function _renderTravaBarrisSemanal() {
+  const idEl = 'barris-semanal-trava-overlay';
+  let el = document.getElementById(idEl);
+  if (!_barrisSemPendente) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = idEl;
+    el.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:9999;display:flex;align-items:flex-start;justify-content:center;padding:16px;box-sizing:border-box;overflow-y:auto';
+    document.body.appendChild(el);
+  }
+  const semanaLbl = _barrisSemSemanaIni ? fmt(_barrisSemSemanaIni) : '';
+  const comp = _barrisSemComparativo;
+  const compHtml = comp
+    ? '<div style="background:rgba(0,0,0,.04);border-radius:10px;padding:8px 10px;margin-bottom:12px;font-size:11px;color:#475569"><b>Semana passada:</b> 🍺 Claro: ' + comp.CLARO + ' · 🍷 Vinho: ' + comp.VINHO + '</div>'
+    : '';
+  const secaoTipo = function(t) {
+    const itens = _barrisSemItens[t.val];
+    const total = itens.length;
+    let deltaHtml = '';
+    if (comp) {
+      const d = total - comp[t.val];
+      const cor = d > 0 ? '#16a34a' : d < 0 ? '#dc2626' : '#64748b';
+      const sinal = d > 0 ? '+' : '';
+      deltaHtml = '<span style="color:' + cor + ';font-weight:800">(' + sinal + d + ' vs sem. passada)</span>';
+    }
+    const listaHtml = itens.length ? itens.map(function(item, idx) {
+      return '<div style="display:flex;align-items:center;gap:8px;background:#F5F6F8;border-radius:8px;padding:6px 10px;margin-bottom:5px;font-size:11px">' +
+        '<span style="flex:1;color:#1A1D23;font-weight:700">' + (BARRIS_SEMANAL_STATUS_LABEL[item.status] || item.status) + '</span>' +
+        '<span style="color:#64748b">venc. ' + fmt(item.validade) + '</span>' +
+        '<button onclick="_removerItemBarrisSemanal(\'' + t.val + '\',' + idx + ')" style="background:none;border:none;color:#dc2626;font-size:15px;cursor:pointer;line-height:1;padding:0 2px">×</button>' +
+        '</div>';
+    }).join('') : '<div style="font-size:11px;color:rgba(0,0,0,.3);padding:6px 0">Nenhum barril de ' + t.label + ' adicionado ainda.</div>';
+    return '<div style="border:1px solid rgba(0,0,0,.08);border-radius:12px;padding:12px;margin-bottom:12px">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
+      '<div style="font-weight:800;font-size:13px;color:#1A1D23">' + t.emoji + ' ' + t.label + '</div>' +
+      '<div style="font-size:11px;color:#64748b">' + total + ' nesta semana ' + deltaHtml + '</div>' +
+      '</div>' +
+      '<div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">' +
+      '<select id="bsem-status-' + t.val + '" style="flex:1;min-width:150px;background:#F5F6F8;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:7px 8px;font-size:12px;font-family:inherit">' +
+      BARRIS_SEMANAL_STATUS.map(function(s) { return '<option value="' + s.val + '">' + s.label + '</option>'; }).join('') +
+      '</select>' +
+      '<input type="date" id="bsem-validade-' + t.val + '" style="background:#F5F6F8;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:7px 8px;font-size:12px;font-family:inherit"/>' +
+      '<button onclick="_addItemBarrisSemanal(\'' + t.val + '\')" style="background:#059669;border:none;border-radius:8px;color:#fff;padding:7px 12px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">+ Adicionar</button>' +
+      '</div>' + listaHtml + '</div>';
+  };
+  const totalGeral = _barrisSemItens.CLARO.length + _barrisSemItens.VINHO.length;
+  el.innerHTML =
+    '<div style="background:#FFFFFF;border-radius:18px;padding:22px 20px;width:100%;max-width:440px;margin:auto">' +
+    '<div style="text-align:center;margin-bottom:6px;font-size:34px">🍺</div>' +
+    '<div style="text-align:center;font-size:16px;font-weight:800;color:#1A1D23;margin-bottom:4px">Contagem semanal de barris</div>' +
+    '<div style="text-align:center;font-size:11px;color:#64748b;margin-bottom:14px">Semana de ' + semanaLbl + ' · registre a situação de cada barril de chopp pra liberar o app</div>' +
+    compHtml +
+    BARRIS_SEMANAL_TIPOS.map(secaoTipo).join('') +
+    '<button ' + (_barrisSemSalvando ? 'disabled' : '') + ' onclick="_confirmarContagemBarrisSemanal()" style="display:block;width:100%;background:' + (_barrisSemSalvando ? 'rgba(5,150,105,.5)' : '#059669') + ';border:none;border-radius:10px;color:#fff;padding:13px;font-size:14px;font-weight:800;cursor:' + (_barrisSemSalvando ? 'default' : 'pointer') + ';font-family:inherit">' +
+    (_barrisSemSalvando ? 'Salvando…' : '✅ Confirmar contagem' + (totalGeral ? ' (' + totalGeral + ')' : ' (sem barris)')) +
+    '</button></div>';
+}
+
 function _podeCfgMinimos() {
   try {
     const cargo = usuarioAtual ? usuarioAtual.cargo : null;
@@ -2944,6 +3122,10 @@ function goTab(t) {
   // boot própria: o overlay reaparece por cima da aba atual em vez de deixar sair dela.
   // forcarExibicao=true porque essa troca está sendo BARRADA aqui mesmo (`tab` não muda).
   if (_notaFiscalPendenciasAtivas.length && t !== 'entradas' && t !== 'guia') { _renderTravaNotaFiscal(true); return; }
+  // Contagem semanal de barris pendente (só cargo Estoquista) — trava qualquer troca de
+  // aba que não seja pro próprio Pedido (onde o overlay de contagem já aparece por cima)
+  // ou pro Guia, mesmo princípio das outras pendências essenciais.
+  if (_barrisSemPendente && t !== 'pedido' && t !== 'guia') { _renderTravaBarrisSemanal(); return; }
   tab = t;
   document.querySelectorAll('.sidebar-link').forEach(l => l.classList.remove('active'));
   const sl = document.querySelector(`.sidebar-link[data-sidebar-tab="${t}"]`);
@@ -10640,6 +10822,7 @@ sbPull(false).then(() => {
   // Carrega dados do check-list (faturamento + vendas por produto) em background para home já mostrar correto
   loadChecklistFat();
   _atualizarTravaNotaFiscal();
+  _checarBarrisSemanalPendencia();
 });
 // Atualiza a lista de itens/preços do Pedido a partir do Catálogo (gn_catalogo) assim que abrir,
 // e reexibe a tela se o Pedido já estiver na tela pra refletir os dados atualizados.

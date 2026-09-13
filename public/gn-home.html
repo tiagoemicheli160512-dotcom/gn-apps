@@ -6203,6 +6203,70 @@ function _buildXadrezPanel(){
   return reportBtns+formHtml+movsHtml+issuesHtml+boardHtml;
 }
 
+// ── Contagem semanal de barris (espelho da trava de aba Pedido do app Lojas) ─────────
+// Só leitura aqui — quem preenche é o estoquista, na aba Pedido do gn-lojas.html. Maglia
+// fica de fora por padrão (CLAUDE.md — não foi citada no pedido desta feature).
+let _barrisSemGerenciaData = null;
+let _barrisSemGerenciaLoaded = false;
+async function _loadBarrisSemanalGerencia(){
+  _barrisSemGerenciaLoaded = false;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const lojas = _lojasFatConsolidado(LOJAS_LISTA);
+  const slugs = lojas.map(k => LOJA_SLUG_HOME[k]).filter(Boolean);
+  const semanaAtualIni = _weekRange(0).dates[0];
+  const semanaAnteriorIni = _weekRange(-1).dates[0];
+  const [contagens, confirmacoes] = await Promise.all([
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_barris_semanal_contagem?loja_slug=in.(${slugs.join(',')})&semana_inicio=in.(${semanaAtualIni},${semanaAnteriorIni})&select=loja_slug,semana_inicio,tipo`, H, 'barrisSem:contagens', []),
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_barris_semanal_confirmacao?loja_slug=in.(${slugs.join(',')})&semana_inicio=eq.${semanaAtualIni}&select=loja_slug,confirmado_por,confirmado_em`, H, 'barrisSem:confirmacoes', []),
+  ]);
+  const slugToLoja = Object.fromEntries(lojas.map(k => [LOJA_SLUG_HOME[k], k]));
+  const porLoja = {};
+  lojas.forEach(k => { porLoja[k] = { atual: {CLARO:0, VINHO:0}, anterior: {CLARO:0, VINHO:0}, confirmado: null }; });
+  (contagens || []).forEach(r => {
+    const k = slugToLoja[r.loja_slug];
+    if (!k || !porLoja[k]) return;
+    const alvo = r.semana_inicio === semanaAtualIni ? porLoja[k].atual : r.semana_inicio === semanaAnteriorIni ? porLoja[k].anterior : null;
+    if (alvo && alvo[r.tipo] != null) alvo[r.tipo]++;
+  });
+  (confirmacoes || []).forEach(r => {
+    const k = slugToLoja[r.loja_slug];
+    if (k && porLoja[k]) porLoja[k].confirmado = { por: r.confirmado_por, em: r.confirmado_em };
+  });
+  _barrisSemGerenciaData = { porLoja, semanaAtualIni, semanaAnteriorIni };
+  _barrisSemGerenciaLoaded = true;
+  renderDashboard();
+}
+function _buildBarrisSemanalPanel(){
+  if (!_barrisSemGerenciaLoaded || !_barrisSemGerenciaData) return _skelPanel(4);
+  const { porLoja, semanaAtualIni, semanaAnteriorIni } = _barrisSemGerenciaData;
+  const fmtSemana = iso => { const [y,m,d]=iso.split('-'); return d+'/'+m; };
+  const linhas = Object.keys(porLoja).sort((a,b)=>(LOJA_DISPLAY[a]||a).localeCompare(LOJA_DISPLAY[b]||b)).map(k => {
+    const d = porLoja[k];
+    const deltaHtml = (tipo) => {
+      const delta = d.atual[tipo] - d.anterior[tipo];
+      if (delta === 0) return '<span style="color:rgba(0,0,0,.3)">=</span>';
+      const cor = delta > 0 ? '#16a34a' : '#dc2626';
+      return `<span style="color:${cor};font-weight:800">${delta > 0 ? '+' : ''}${delta}</span>`;
+    };
+    const confHtml = d.confirmado
+      ? `<span style="color:#16a34a;font-weight:700">✅ ${d.confirmado.por || 'confirmado'}</span>`
+      : `<span style="color:#dc2626;font-weight:700">⚠ pendente</span>`;
+    return `<div style="background:#FFFFFF;border:1px solid rgba(0,0,0,.08);border-left:3px solid ${COR_LOJA[k]||'#F97316'};border-radius:12px;padding:11px 14px;margin-bottom:8px;box-shadow:0 1px 3px rgba(0,0,0,.06)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div style="font-size:12px;font-weight:800;color:#1A1D23">${LOJA_DISPLAY[k]||k}</div>
+        <div style="font-size:10px">${confHtml}</div>
+      </div>
+      <div style="display:flex;gap:16px">
+        <div style="font-size:11px;color:rgba(0,0,0,.6)">🍺 Claro: <b>${d.atual.CLARO}</b> ${deltaHtml('CLARO')}</div>
+        <div style="font-size:11px;color:rgba(0,0,0,.6)">🍷 Vinho: <b>${d.atual.VINHO}</b> ${deltaHtml('VINHO')}</div>
+      </div>
+    </div>`;
+  }).join('');
+  return `<div style="font-size:11px;color:rgba(0,0,0,.35);margin-bottom:12px">
+      Contagem semanal de barris (${fmtSemana(semanaAtualIni)}) vs semana passada (${fmtSemana(semanaAnteriorIni)}) — preenchida pelo estoquista na aba Pedido do app Lojas.</div>
+    ${linhas}`;
+}
+
 // ── Relatórios da aba Xadrez ──────────────────────────────────────────────────
 function _xadrezDados(){
   if(!_dashGerentes || !_xadrezMovsLoaded) return null;
@@ -6671,6 +6735,9 @@ function renderDashboard() {
   } else if (_dashTab==='bi') {
     content = _buildBiTab(fat, maxVal, loading);
 
+  } else if (_dashTab==='barris') {
+    content = _buildBarrisSemanalPanel();
+
   } else { // ⚙ Metas
     const perLabel=_dashPer==='sem'?'semana':'mês';
     content=`
@@ -6708,9 +6775,10 @@ function renderDashboard() {
         <button class="dash-tab${_dashTab==='ferias'?' on':''}" onclick="_setDashTab('ferias')">🏖 Férias</button>
         <button class="dash-tab${_dashTab==='xadrez'?' on':''}" onclick="_setDashTab('xadrez')">🔀 Xadrez</button>
         <button class="dash-tab${_dashTab==='bi'?' on':''}" onclick="_setDashTab('bi')">📊 BI</button>
+        <button class="dash-tab${_dashTab==='barris'?' on':''}" onclick="_setDashTab('barris')">🍺 Barris</button>
         <button class="dash-tab${_dashTab==='metas'?' on':''}" onclick="_setDashTab('metas')">⚙ Metas</button>
       </div>
-      ${(_dashTab!=='metas'&&_dashTab!=='ferias'&&_dashTab!=='xadrez')?periodRow:''}
+      ${(_dashTab!=='metas'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris')?periodRow:''}
       ${content}
     </div>`;
   _updateHdrBell();
@@ -6721,6 +6789,7 @@ function _setDashTab(t){
   if((t==='ferias'||t==='xadrez')&&!_dashGerentes) _loadFeriasGerencia();
   if(t==='ferias'&&!_dashEquipeUsuarios) _loadFeriasEquipe();
   if(t==='xadrez'&&!_xadrezMovsLoaded) _loadXadrezPendente();
+  if(t==='barris'&&!_barrisSemGerenciaLoaded) _loadBarrisSemanalGerencia();
   renderDashboard();
 }
 function _navToAtt(){ const el=document.getElementById('dash-section'); if(el)el.scrollIntoView({behavior:'smooth'}); _setDashTab('att'); }
