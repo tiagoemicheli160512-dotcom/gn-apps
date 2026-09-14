@@ -6245,6 +6245,103 @@ function _agruparItensBarrisHome(itens) {
   });
   return grupos;
 }
+// Edição pela supervisão (só disponível aqui, no Painel de Gestão — quem preenche no dia
+// a dia continua sendo o estoquista na aba Pedido do app Lojas). Guardado por chave de
+// loja; cada item guarda o `id` original (null = item novo, ainda não existe no banco) pra
+// _salvarEdicaoBarrisLoja saber o que fazer: PATCH (mudou), POST (novo) ou DELETE (sumiu).
+let _barrisSemEditLoja = null;
+let _barrisSemEditItens = null;
+let _barrisSemEditSalvando = false;
+function _abrirEditarBarrisLoja(lojaKey){
+  const d = _barrisSemGerenciaData && _barrisSemGerenciaData.porLoja[lojaKey];
+  if (!d) return;
+  _barrisSemEditLoja = lojaKey;
+  _barrisSemEditItens = {
+    CLARO: (d.itensAtual.CLARO || []).map(i => ({ id: i.id, status: i.status, validade: i.validade || '' })),
+    VINHO: (d.itensAtual.VINHO || []).map(i => ({ id: i.id, status: i.status, validade: i.validade || '' })),
+  };
+  renderDashboard();
+}
+function _fecharEditarBarrisLoja(){
+  _barrisSemEditLoja = null;
+  _barrisSemEditItens = null;
+  renderDashboard();
+}
+function _editAdicionarItemBarris(tipo){
+  if (!_barrisSemEditItens) return;
+  _barrisSemEditItens[tipo].push({ id: null, status: 'CHEIO', validade: '' });
+  renderDashboard();
+}
+function _editRemoverItemBarris(tipo, idx){
+  if (!_barrisSemEditItens) return;
+  _barrisSemEditItens[tipo].splice(idx, 1);
+  renderDashboard();
+}
+function _editStatusBarrisChange(tipo, idx, val){
+  if (!_barrisSemEditItens || !_barrisSemEditItens[tipo][idx]) return;
+  _barrisSemEditItens[tipo][idx].status = val;
+  if (val === 'VAZIO') _barrisSemEditItens[tipo][idx].validade = '';
+  renderDashboard();
+}
+function _editValidadeBarrisChange(tipo, idx, val){
+  if (!_barrisSemEditItens || !_barrisSemEditItens[tipo][idx]) return;
+  _barrisSemEditItens[tipo][idx].validade = val;
+}
+async function _salvarEdicaoBarrisLoja(){
+  if (_barrisSemEditSalvando || !_barrisSemEditLoja || !_barrisSemEditItens) return;
+  const lojaKey = _barrisSemEditLoja;
+  const d = _barrisSemGerenciaData.porLoja[lojaKey];
+  for (const tipo of ['CLARO', 'VINHO']) {
+    for (const item of _barrisSemEditItens[tipo]) {
+      if (!item.status) { alert('Selecione o status de todos os barris antes de salvar.'); return; }
+      if (item.status !== 'VAZIO' && !item.validade) { alert('Informe a validade de todos os barris (exceto Vazio).'); return; }
+    }
+  }
+  _barrisSemEditSalvando = true;
+  renderDashboard();
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+  const slug = LOJA_SLUG_HOME[lojaKey];
+  const monday = _barrisSemGerenciaData.semanaAtualIni;
+  const criadoPor = (session && session.nome) ? session.nome + ' (edição supervisão)' : 'Supervisão';
+  try {
+    const idsFinais = new Set();
+    const proms = [];
+    ['CLARO', 'VINHO'].forEach(tipo => {
+      _barrisSemEditItens[tipo].forEach(item => {
+        const validadeFinal = item.status === 'VAZIO' ? null : item.validade;
+        if (item.id) {
+          idsFinais.add(item.id);
+          const original = (d.itensAtual[tipo] || []).find(i => i.id === item.id);
+          if (original && (original.status !== item.status || (original.validade || null) !== validadeFinal)) {
+            proms.push(fetch(`${SB_URL}/rest/v1/gn_barris_semanal_contagem?id=eq.${item.id}`, {
+              method: 'PATCH', headers: { ...H, Prefer: 'return=minimal' },
+              body: JSON.stringify({ status: item.status, validade: validadeFinal }),
+            }));
+          }
+        } else {
+          proms.push(fetch(`${SB_URL}/rest/v1/gn_barris_semanal_contagem`, {
+            method: 'POST', headers: { ...H, Prefer: 'return=minimal' },
+            body: JSON.stringify({ loja: LOJA_DISPLAY[lojaKey] || lojaKey, loja_slug: slug, semana_inicio: monday, tipo, status: item.status, validade: validadeFinal, criado_por: criadoPor }),
+          }));
+        }
+      });
+    });
+    (d.itensAtual.CLARO || []).concat(d.itensAtual.VINHO || []).forEach(i => {
+      if (i.id && !idsFinais.has(i.id)) {
+        proms.push(fetch(`${SB_URL}/rest/v1/gn_barris_semanal_contagem?id=eq.${i.id}`, { method: 'DELETE', headers: H }));
+      }
+    });
+    await Promise.all(proms);
+    _barrisSemEditLoja = null;
+    _barrisSemEditItens = null;
+    await _loadBarrisSemanalGerencia();
+  } catch (e) {
+    alert('Erro ao salvar a edição. Tente novamente.');
+  } finally {
+    _barrisSemEditSalvando = false;
+    renderDashboard();
+  }
+}
 async function _loadBarrisSemanalGerencia(){
   _barrisSemGerenciaLoaded = false;
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
@@ -6253,7 +6350,7 @@ async function _loadBarrisSemanalGerencia(){
   const semanaAtualIni = _weekRange(0).dates[0];
   const semanaAnteriorIni = _weekRange(-1).dates[0];
   const [contagens, confirmacoes] = await Promise.all([
-    window.gnFetchJson(`${SB_URL}/rest/v1/gn_barris_semanal_contagem?loja_slug=in.(${slugs.join(',')})&semana_inicio=in.(${semanaAtualIni},${semanaAnteriorIni})&select=loja_slug,semana_inicio,tipo,status,validade`, H, 'barrisSem:contagens', []),
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_barris_semanal_contagem?loja_slug=in.(${slugs.join(',')})&semana_inicio=in.(${semanaAtualIni},${semanaAnteriorIni})&select=id,loja_slug,semana_inicio,tipo,status,validade`, H, 'barrisSem:contagens', []),
     window.gnFetchJson(`${SB_URL}/rest/v1/gn_barris_semanal_confirmacao?loja_slug=in.(${slugs.join(',')})&semana_inicio=eq.${semanaAtualIni}&select=loja_slug,confirmado_por,confirmado_em`, H, 'barrisSem:confirmacoes', []),
   ]);
   const slugToLoja = Object.fromEntries(lojas.map(k => [LOJA_SLUG_HOME[k], k]));
@@ -6265,7 +6362,7 @@ async function _loadBarrisSemanalGerencia(){
     const alvo = r.semana_inicio === semanaAtualIni ? porLoja[k].atual : r.semana_inicio === semanaAnteriorIni ? porLoja[k].anterior : null;
     if (alvo && alvo[r.tipo] != null) alvo[r.tipo]++;
     if (r.semana_inicio === semanaAtualIni && porLoja[k].itensAtual[r.tipo]) {
-      porLoja[k].itensAtual[r.tipo].push({ status: r.status, validade: r.validade });
+      porLoja[k].itensAtual[r.tipo].push({ id: r.id, status: r.status, validade: r.validade });
     }
   });
   (confirmacoes || []).forEach(r => {
@@ -6275,6 +6372,45 @@ async function _loadBarrisSemanalGerencia(){
   _barrisSemGerenciaData = { porLoja, semanaAtualIni, semanaAnteriorIni };
   _barrisSemGerenciaLoaded = true;
   renderDashboard();
+}
+// Painel de edição inline (supervisão) — mesma ideia do formulário de contagem em
+// gn-lojas.html (status + validade por item), só que editando itens que já existem
+// (com id) em vez de só adicionar. Sempre re-renderiza tudo a cada mudança (mesmo padrão
+// já usado no resto do dashboard), então não precisa de toggle de campo — o campo de
+// validade some/aparece de novo sozinho conforme o status atual de cada linha.
+function _buildEditPanelBarris(lojaKey){
+  if (!_barrisSemEditItens) return '';
+  const statusOpts = Object.entries(BARRIS_SEMANAL_STATUS_LABEL);
+  const secaoTipo = (tipo, emoji, label) => {
+    const itens = _barrisSemEditItens[tipo];
+    const linhas = itens.map((item, idx) => {
+      const vazio = item.status === 'VAZIO';
+      const dateField = vazio
+        ? '<span style="flex:1;font-size:11px;color:rgba(0,0,0,.35);text-align:center">sem validade</span>'
+        : `<input type="date" value="${item.validade || ''}" onchange="_editValidadeBarrisChange('${tipo}',${idx},this.value)" style="flex:1;font-size:11px;padding:5px 6px;border-radius:6px;border:1px solid rgba(0,0,0,.15);font-family:inherit"/>`;
+      return `<div style="display:flex;gap:6px;align-items:center;margin-bottom:5px">
+        <select onchange="_editStatusBarrisChange('${tipo}',${idx},this.value)" style="flex:1.4;min-width:110px;font-size:11px;padding:5px 6px;border-radius:6px;border:1px solid rgba(0,0,0,.15);font-family:inherit">
+          ${statusOpts.map(([val, lbl]) => `<option value="${val}" ${val === item.status ? 'selected' : ''}>${lbl}</option>`).join('')}
+        </select>
+        ${dateField}
+        <button onclick="_editRemoverItemBarris('${tipo}',${idx})" style="background:none;border:none;color:#dc2626;font-size:14px;cursor:pointer;padding:0 2px">×</button>
+      </div>`;
+    }).join('');
+    return `<div style="margin-bottom:8px">
+      <div style="font-size:10px;font-weight:800;color:rgba(0,0,0,.5);margin-bottom:4px">${emoji} ${label}</div>
+      ${linhas || '<div style="font-size:10px;color:rgba(0,0,0,.3);margin-bottom:4px">Nenhum barril.</div>'}
+      <button onclick="_editAdicionarItemBarris('${tipo}')" style="background:#F5F6F8;border:1px solid rgba(0,0,0,.12);border-radius:6px;font-size:10px;padding:4px 8px;cursor:pointer;font-family:inherit">+ Adicionar</button>
+    </div>`;
+  };
+  return `<div style="margin-top:8px;padding:10px;background:rgba(217,119,6,.05);border:1px dashed rgba(217,119,6,.3);border-radius:8px">
+    <div style="font-size:10px;font-weight:800;color:#D97706;margin-bottom:8px">✏️ Editando (supervisão)</div>
+    ${secaoTipo('CLARO', '🍺', 'Chopp Claro')}
+    ${secaoTipo('VINHO', '🍷', 'Chopp de Vinho')}
+    <div style="display:flex;gap:8px;margin-top:2px">
+      <button ${_barrisSemEditSalvando ? 'disabled' : ''} onclick="_salvarEdicaoBarrisLoja()" style="flex:1;background:${_barrisSemEditSalvando ? 'rgba(5,150,105,.5)' : '#059669'};border:none;border-radius:8px;color:#fff;padding:9px;font-size:12px;font-weight:800;cursor:${_barrisSemEditSalvando ? 'default' : 'pointer'};font-family:inherit">${_barrisSemEditSalvando ? 'Salvando…' : '💾 Salvar'}</button>
+      <button ${_barrisSemEditSalvando ? 'disabled' : ''} onclick="_fecharEditarBarrisLoja()" style="background:none;border:1px solid rgba(0,0,0,.15);border-radius:8px;color:rgba(0,0,0,.6);padding:9px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit">Cancelar</button>
+    </div>
+  </div>`;
 }
 function _buildBarrisSemanalPanel(){
   const reportBtns = _reportBtnsRowHtml('Barris');
@@ -6313,16 +6449,20 @@ function _buildBarrisSemanalPanel(){
       </div>`;
     }).join('');
     const todosItens = itensDoTipo('CLARO','🍺') + itensDoTipo('VINHO','🍷');
+    const editando = _barrisSemEditLoja === k;
+    const editBtn = `<button onclick="_abrirEditarBarrisLoja('${k}')" title="Editar (supervisão)" style="background:none;border:1px solid rgba(0,0,0,.15);border-radius:6px;color:rgba(0,0,0,.55);font-size:10px;padding:2px 7px;cursor:pointer;font-family:inherit">✏️ Editar</button>`;
+    const painelEdicao = editando ? _buildEditPanelBarris(k) : '';
     return `<div style="background:#FFFFFF;border:1px solid rgba(0,0,0,.08);border-left:3px solid ${COR_LOJA[k]||'#F97316'};border-radius:12px;padding:11px 14px;margin-bottom:8px;box-shadow:0 1px 3px rgba(0,0,0,.06)">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
         <div style="font-size:12px;font-weight:800;color:#1A1D23">${LOJA_DISPLAY[k]||k}</div>
-        <div style="font-size:10px">${confHtml}</div>
+        <div style="display:flex;align-items:center;gap:8px;font-size:10px">${confHtml}${editando ? '' : editBtn}</div>
       </div>
       <div style="display:flex;gap:16px">
         <div style="flex:1;font-size:11px;color:rgba(0,0,0,.6)">🍺 Claro: <b>${d.atual.CLARO}</b> ${deltaHtml('CLARO')}</div>
         <div style="flex:1;font-size:11px;color:rgba(0,0,0,.6)">🍷 Vinho: <b>${d.atual.VINHO}</b> ${deltaHtml('VINHO')}</div>
       </div>
-      ${todosItens ? `<div style="margin-top:6px;padding-top:6px;border-top:1px dashed rgba(0,0,0,.1)">${todosItens}</div>` : ''}
+      ${todosItens && !editando ? `<div style="margin-top:6px;padding-top:6px;border-top:1px dashed rgba(0,0,0,.1)">${todosItens}</div>` : ''}
+      ${painelEdicao}
     </div>`;
   }).join('');
   return reportBtns + `<div style="font-size:11px;color:rgba(0,0,0,.35);margin-bottom:12px">
