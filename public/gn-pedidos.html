@@ -1692,21 +1692,33 @@ async function carregarProvisoes() {
     return q;
   });
 
-  // Itens confirmados: via pedido_id da semana (mesma lógica de carregarEntregasConfirmadas)
+  // Itens confirmados: a semana de uma provisão confirmada é a da PRÓPRIA entrega
+  // (data_entrega), não a do pedido que a originou — um fornecedor com janela de dias
+  // (ex: SAUDALI/CIACARNE, entrega SEG-QUI) pode gerar provisão pra semana seguinte mesmo
+  // com o pedido confirmado ainda nesta semana (e o oposto também acontece: pedido de
+  // semana passada com entrega caindo nesta semana). Filtrar só por pedido_id da semana
+  // do pedido fazia a entrega sumir da visão semanal de Provisões assim que era recebida,
+  // mesmo caindo certinho na semana olhada — foi o caso do pedido do Matheus pra
+  // SAUDALI/CIACARNE, confirmado 5ª-feira (semana passada) com entrega calculada pra
+  // 2ª-feira seguinte (esta semana): a parte ainda AGUARDANDO aparecia (filtro por
+  // data_entrega), mas a parte já RECEBIDO_OK sumia (filtro por pedido_id da semana
+  // errada). Só cai pro fallback por pedido_id quando data_entrega vier nulo (não dá pra
+  // saber a semana da entrega só pelo dado da provisão nesse caso).
   const { data: pedidos } = await db.from('gn_pedidos').select('id')
     .or(`semana_inicio.eq.${monday},and(data_pedido.gte.${monday},data_pedido.lte.${sunday})`);
   const pedidoIds = (pedidos || []).map(p => p.id);
+  const filtroConf = pedidoIds.length
+    ? `and(data_entrega.gte.${monday},data_entrega.lte.${sunday}),and(data_entrega.is.null,pedido_id.in.(${pedidoIds.join(',')}))`
+    : `and(data_entrega.gte.${monday},data_entrega.lte.${sunday})`;
 
-  const qConf = pedidoIds.length
-    ? _fetchTodasPaginas(() => {
-        let q = db.from('gn_provisoes').select(SEL)
-          .in('status', ['RECEBIDO_OK', 'DIVERGENCIA', 'DEVOLVIDO'])
-          .in('pedido_id', pedidoIds)
-          .order('data_entrega', {ascending:true}).order('fornecedor').order('id');
-        if (S.provLoja) q = q.eq('loja_slug', S.provLoja);
-        return q;
-      })
-    : Promise.resolve([]);
+  const qConf = _fetchTodasPaginas(() => {
+    let q = db.from('gn_provisoes').select(SEL)
+      .in('status', ['RECEBIDO_OK', 'DIVERGENCIA', 'DEVOLVIDO'])
+      .or(filtroConf)
+      .order('data_entrega', {ascending:true}).order('fornecedor').order('id');
+    if (S.provLoja) q = q.eq('loja_slug', S.provLoja);
+    return q;
+  });
 
   const [pending, confirmed] = await Promise.all([qPend, qConf]);
   const seen = new Set();
@@ -1726,15 +1738,21 @@ async function carregarEntregasConfirmadas() {
   const semAtiva = S.provSemana || getMondayOfWeek();
   const monday = semAtiva.toISOString().split('T')[0];
   const sunday = getSundayOfWeek(semAtiva).toISOString().split('T')[0];
+  // Mesma correção de carregarProvisoes(): a semana de uma entrega confirmada é a da
+  // própria data_entrega, não a do pedido que a originou (ver comentário lá — pedido
+  // confirmado numa semana pode gerar entrega calculada pra semana seguinte, ou o
+  // oposto). Só cai pro fallback por pedido_id quando data_entrega vier nulo.
   const { data: pedidos } = await db.from('gn_pedidos')
     .select('id')
     .or(`semana_inicio.eq.${monday},and(data_pedido.gte.${monday},data_pedido.lte.${sunday})`);
   const pedidoIds = (pedidos || []).map(p => p.id);
-  if (!pedidoIds.length) { S.entregasConfirmadas = []; return; }
+  const filtro = pedidoIds.length
+    ? `and(data_entrega.gte.${monday},data_entrega.lte.${sunday}),and(data_entrega.is.null,pedido_id.in.(${pedidoIds.join(',')}))`
+    : `and(data_entrega.gte.${monday},data_entrega.lte.${sunday})`;
   const data = await _fetchTodasPaginas(() => db.from('gn_provisoes')
     .select('*, gn_catalogo(produto,und), gn_pedidos(data_pedido), gn_recebimentos(qtd_recebida,valor_recebido,validado_por,diferenca_qtd,observacao)')
     .in('status', ['RECEBIDO_OK','DIVERGENCIA'])
-    .in('pedido_id', pedidoIds)
+    .or(filtro)
     .order('data_entrega').order('id'));
   S.entregasConfirmadas = data || [];
 }
