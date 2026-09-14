@@ -757,9 +757,12 @@ const BARRIS_VALIDADE_CONFIG = {
 // toda semana, do estado FÍSICO de cada barril de chopp que a loja tem no momento (cheio
 // guardado, na linha em uso, ou vazio), pra dar visão de quadro/consumo pra gerência, sem
 // depender de entrega/pedido pra existir um registro.
+// diasCritico espelha o mesmo limiar já usado em BARRIS_VALIDADE_CONFIG (4 dias pro
+// Chopp Claro AMBEV, 12 pro Chopp de Vinho DuGomes) — aqui não dá pra referenciar direto
+// por catalogo_id porque a contagem semanal não tem vínculo com entrega/catálogo.
 const BARRIS_SEMANAL_TIPOS = [
-  { val: 'CLARO', label: 'Chopp Claro', emoji: '🍺' },
-  { val: 'VINHO', label: 'Chopp de Vinho', emoji: '🍷' },
+  { val: 'CLARO', label: 'Chopp Claro', emoji: '🍺', diasCritico: 4 },
+  { val: 'VINHO', label: 'Chopp de Vinho', emoji: '🍷', diasCritico: 12 },
 ];
 const BARRIS_SEMANAL_STATUS = [
   { val: 'CHEIO', label: 'Cheio (guardado)' },
@@ -1994,6 +1997,29 @@ async function _carregarComparativoBarrisSemanal() {
   _renderTravaBarrisSemanal();
 }
 
+// Agrupa itens iguais (mesmo status + mesma validade) numa linha só com quantidade —
+// evita mostrar "Vazio" 5 vezes ou "Cheio" repetido quando são do mesmo vencimento.
+// Guarda os índices originais em cada grupo pra remover 1 unidade por vez com o botão ×.
+function _agruparItensBarris(itens) {
+  const porChave = {};
+  const grupos = [];
+  itens.forEach(function(item, idx) {
+    const chave = item.status + '|' + (item.validade || '');
+    if (!porChave[chave]) {
+      porChave[chave] = { status: item.status, validade: item.validade, idxs: [] };
+      grupos.push(porChave[chave]);
+    }
+    porChave[chave].idxs.push(idx);
+  });
+  // Mais urgente (validade mais próxima) primeiro; sem validade (Vazio) por último.
+  grupos.sort(function(a, b) {
+    if (!a.validade && !b.validade) return 0;
+    if (!a.validade) return 1;
+    if (!b.validade) return -1;
+    return a.validade < b.validade ? -1 : a.validade > b.validade ? 1 : 0;
+  });
+  return grupos;
+}
 function _toggleBsemValidade(tipo) {
   const statusEl = document.getElementById('bsem-status-' + tipo);
   const validadeEl = document.getElementById('bsem-validade-' + tipo);
@@ -2088,11 +2114,21 @@ function _renderTravaBarrisSemanal() {
       const sinal = d > 0 ? '+' : '';
       deltaHtml = '<span style="color:' + cor + ';font-weight:800">(' + sinal + d + ' vs sem. passada)</span>';
     }
-    const listaHtml = itens.length ? itens.map(function(item, idx) {
-      return '<div style="display:flex;align-items:center;gap:8px;background:#F5F6F8;border-radius:8px;padding:6px 10px;margin-bottom:5px;font-size:11px">' +
-        '<span style="flex:1;color:#1A1D23;font-weight:700">' + (BARRIS_SEMANAL_STATUS_LABEL[item.status] || item.status) + '</span>' +
-        '<span style="color:#64748b">' + (item.validade ? 'venc. ' + fmt(item.validade) : '—') + '</span>' +
-        '<button onclick="_removerItemBarrisSemanal(\'' + t.val + '\',' + idx + ')" style="background:none;border:none;color:#dc2626;font-size:15px;cursor:pointer;line-height:1;padding:0 2px">×</button>' +
+    const listaHtml = itens.length ? _agruparItensBarris(itens).map(function(g) {
+      const dias = g.validade ? _diasParaVencerBarril(g.validade) : null;
+      const nivel = dias === null ? 'ok' : (dias < 0 ? 'vencido' : (dias <= t.diasCritico ? 'critico' : 'ok'));
+      const cor = nivel === 'vencido' ? '#DC2626' : (nivel === 'critico' ? '#D97706' : null);
+      const bg = nivel === 'vencido' ? 'rgba(220,38,38,.08)' : (nivel === 'critico' ? 'rgba(217,119,6,.08)' : '#F5F6F8');
+      const aviso = nivel === 'vencido' ? ' ⚠️ vencido há ' + Math.abs(dias) + 'd'
+                  : nivel === 'critico' ? ' ⚠️ vence em ' + dias + 'd'
+                  : '';
+      const qtdTxt = g.idxs.length > 1 ? g.idxs.length + '× ' : '';
+      const vencTxt = g.validade ? 'venc. ' + fmt(g.validade) : '—';
+      const idxRemover = g.idxs[g.idxs.length - 1];
+      return '<div style="display:flex;align-items:center;gap:8px;background:' + bg + ';border-radius:8px;padding:6px 10px;margin-bottom:5px;font-size:11px">' +
+        '<span style="flex:1;color:' + (cor || '#1A1D23') + ';font-weight:700">' + qtdTxt + (BARRIS_SEMANAL_STATUS_LABEL[g.status] || g.status) + '</span>' +
+        '<span style="color:' + (cor || '#64748b') + ';font-weight:' + (cor ? '800' : '400') + '">' + vencTxt + aviso + '</span>' +
+        '<button onclick="_removerItemBarrisSemanal(\'' + t.val + '\',' + idxRemover + ')" style="background:none;border:none;color:#dc2626;font-size:15px;cursor:pointer;line-height:1;padding:0 2px">×</button>' +
         '</div>';
     }).join('') : '<div style="font-size:11px;color:rgba(0,0,0,.3);padding:6px 0">Nenhum barril de ' + t.label + ' adicionado ainda.</div>';
     return '<div style="border:1px solid rgba(0,0,0,.08);border-radius:12px;padding:12px;margin-bottom:12px">' +
