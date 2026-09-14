@@ -6208,6 +6208,14 @@ function _buildXadrezPanel(){
 // fica de fora por padrão (CLAUDE.md — não foi citada no pedido desta feature).
 let _barrisSemGerenciaData = null;
 let _barrisSemGerenciaLoaded = false;
+// Mesmos status/labels de BARRIS_SEMANAL_STATUS em gn-lojas.html (quem preenche).
+const BARRIS_SEMANAL_STATUS_LABEL = {
+  CHEIO: 'Cheio',
+  NA_LINHA_CHEIO: 'Na linha — Cheio',
+  NA_LINHA_METADE: 'Na linha — Pela metade',
+  NA_LINHA_ABAIXO_METADE: 'Na linha — Abaixo da metade',
+  VAZIO: 'Vazio',
+};
 async function _loadBarrisSemanalGerencia(){
   _barrisSemGerenciaLoaded = false;
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
@@ -6216,17 +6224,20 @@ async function _loadBarrisSemanalGerencia(){
   const semanaAtualIni = _weekRange(0).dates[0];
   const semanaAnteriorIni = _weekRange(-1).dates[0];
   const [contagens, confirmacoes] = await Promise.all([
-    window.gnFetchJson(`${SB_URL}/rest/v1/gn_barris_semanal_contagem?loja_slug=in.(${slugs.join(',')})&semana_inicio=in.(${semanaAtualIni},${semanaAnteriorIni})&select=loja_slug,semana_inicio,tipo`, H, 'barrisSem:contagens', []),
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_barris_semanal_contagem?loja_slug=in.(${slugs.join(',')})&semana_inicio=in.(${semanaAtualIni},${semanaAnteriorIni})&select=loja_slug,semana_inicio,tipo,status,validade`, H, 'barrisSem:contagens', []),
     window.gnFetchJson(`${SB_URL}/rest/v1/gn_barris_semanal_confirmacao?loja_slug=in.(${slugs.join(',')})&semana_inicio=eq.${semanaAtualIni}&select=loja_slug,confirmado_por,confirmado_em`, H, 'barrisSem:confirmacoes', []),
   ]);
   const slugToLoja = Object.fromEntries(lojas.map(k => [LOJA_SLUG_HOME[k], k]));
   const porLoja = {};
-  lojas.forEach(k => { porLoja[k] = { atual: {CLARO:0, VINHO:0}, anterior: {CLARO:0, VINHO:0}, confirmado: null }; });
+  lojas.forEach(k => { porLoja[k] = { atual: {CLARO:0, VINHO:0}, anterior: {CLARO:0, VINHO:0}, itensAtual: {CLARO:[], VINHO:[]}, confirmado: null }; });
   (contagens || []).forEach(r => {
     const k = slugToLoja[r.loja_slug];
     if (!k || !porLoja[k]) return;
     const alvo = r.semana_inicio === semanaAtualIni ? porLoja[k].atual : r.semana_inicio === semanaAnteriorIni ? porLoja[k].anterior : null;
     if (alvo && alvo[r.tipo] != null) alvo[r.tipo]++;
+    if (r.semana_inicio === semanaAtualIni && porLoja[k].itensAtual[r.tipo]) {
+      porLoja[k].itensAtual[r.tipo].push({ status: r.status, validade: r.validade });
+    }
   });
   (confirmacoes || []).forEach(r => {
     const k = slugToLoja[r.loja_slug];
@@ -6252,14 +6263,25 @@ function _buildBarrisSemanalPanel(){
     const confHtml = d.confirmado
       ? `<span style="color:#16a34a;font-weight:700">✅ ${d.confirmado.por || 'confirmado'}</span>`
       : `<span style="color:#dc2626;font-weight:700">⚠ pendente</span>`;
+    const itensHtml = (tipo) => {
+      const itens = d.itensAtual[tipo];
+      if (!itens || !itens.length) return '';
+      return '<div style="margin-top:4px;margin-left:2px">' + itens.map(item => {
+        const venc = item.validade ? 'venc. ' + fmtSemana(item.validade) : '—';
+        return `<div style="font-size:10px;color:rgba(0,0,0,.5);display:flex;justify-content:space-between;gap:8px;padding:2px 0">
+          <span>${BARRIS_SEMANAL_STATUS_LABEL[item.status] || item.status}</span>
+          <span>${venc}</span>
+        </div>`;
+      }).join('') + '</div>';
+    };
     return `<div style="background:#FFFFFF;border:1px solid rgba(0,0,0,.08);border-left:3px solid ${COR_LOJA[k]||'#F97316'};border-radius:12px;padding:11px 14px;margin-bottom:8px;box-shadow:0 1px 3px rgba(0,0,0,.06)">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
         <div style="font-size:12px;font-weight:800;color:#1A1D23">${LOJA_DISPLAY[k]||k}</div>
         <div style="font-size:10px">${confHtml}</div>
       </div>
       <div style="display:flex;gap:16px">
-        <div style="font-size:11px;color:rgba(0,0,0,.6)">🍺 Claro: <b>${d.atual.CLARO}</b> ${deltaHtml('CLARO')}</div>
-        <div style="font-size:11px;color:rgba(0,0,0,.6)">🍷 Vinho: <b>${d.atual.VINHO}</b> ${deltaHtml('VINHO')}</div>
+        <div style="flex:1;font-size:11px;color:rgba(0,0,0,.6)">🍺 Claro: <b>${d.atual.CLARO}</b> ${deltaHtml('CLARO')}${itensHtml('CLARO')}</div>
+        <div style="flex:1;font-size:11px;color:rgba(0,0,0,.6)">🍷 Vinho: <b>${d.atual.VINHO}</b> ${deltaHtml('VINHO')}${itensHtml('VINHO')}</div>
       </div>
     </div>`;
   }).join('');
@@ -6274,13 +6296,20 @@ function _barrisSemRelatorioTexto(){
   if (!_barrisSemGerenciaLoaded || !_barrisSemGerenciaData) return null;
   const { porLoja, semanaAtualIni, semanaAnteriorIni } = _barrisSemGerenciaData;
   const fmtSemana = iso => { const [y,m,d]=iso.split('-'); return d+'/'+m; };
+  const itensTxt = (itens) => itens.map(item => {
+    const label = BARRIS_SEMANAL_STATUS_LABEL[item.status] || item.status;
+    const venc = item.validade ? 'venc. ' + fmtSemana(item.validade) : 'sem validade';
+    return `    - ${label} (${venc})`;
+  }).join('\n');
   let msg = `CONTAGEM SEMANAL DE BARRIS\nSemana de ${fmtSemana(semanaAtualIni)} (vs semana passada ${fmtSemana(semanaAnteriorIni)})\n`;
   Object.keys(porLoja).sort((a,b)=>(LOJA_DISPLAY[a]||a).localeCompare(LOJA_DISPLAY[b]||b)).forEach(k => {
     const d = porLoja[k];
     const delta = (tipo) => { const dif = d.atual[tipo]-d.anterior[tipo]; return dif===0?'=':(dif>0?'+':'')+dif; };
     msg += `\n${LOJA_DISPLAY[k]||k}\n`;
     msg += `  Claro: ${d.atual.CLARO} (semana passada: ${d.anterior.CLARO}) [${delta('CLARO')}]\n`;
+    if (d.itensAtual.CLARO.length) msg += itensTxt(d.itensAtual.CLARO) + '\n';
     msg += `  Vinho: ${d.atual.VINHO} (semana passada: ${d.anterior.VINHO}) [${delta('VINHO')}]\n`;
+    if (d.itensAtual.VINHO.length) msg += itensTxt(d.itensAtual.VINHO) + '\n';
     msg += d.confirmado ? `  Confirmado por ${d.confirmado.por || '—'}\n` : `  Pendente — ainda não contou essa semana\n`;
   });
   return { msg, titulo: 'Contagem Semanal de Barris' };
@@ -6289,13 +6318,20 @@ function gerarWppBarris(){
   if (!_barrisSemGerenciaLoaded || !_barrisSemGerenciaData) { alert('Aguarde os dados carregarem.'); return; }
   const { porLoja, semanaAtualIni, semanaAnteriorIni } = _barrisSemGerenciaData;
   const fmtSemana = iso => { const [y,m,d]=iso.split('-'); return d+'/'+m; };
+  const itensTxt = (itens) => itens.map(item => {
+    const label = BARRIS_SEMANAL_STATUS_LABEL[item.status] || item.status;
+    const venc = item.validade ? 'venc. ' + fmtSemana(item.validade) : 'sem validade';
+    return `    _${label} (${venc})_`;
+  }).join('\n');
   let msg = `🍺 *CONTAGEM SEMANAL DE BARRIS*\nSemana de ${fmtSemana(semanaAtualIni)} (vs semana passada ${fmtSemana(semanaAnteriorIni)})\n`;
   Object.keys(porLoja).sort((a,b)=>(LOJA_DISPLAY[a]||a).localeCompare(LOJA_DISPLAY[b]||b)).forEach(k => {
     const d = porLoja[k];
     const delta = (tipo) => { const dif = d.atual[tipo]-d.anterior[tipo]; return dif===0?'=':(dif>0?'+':'')+dif; };
     msg += `\n🏪 *${LOJA_DISPLAY[k]||k}*\n`;
     msg += `  🍺 Claro: ${d.atual.CLARO} (sem. passada: ${d.anterior.CLARO}) [${delta('CLARO')}]\n`;
+    if (d.itensAtual.CLARO.length) msg += itensTxt(d.itensAtual.CLARO) + '\n';
     msg += `  🍷 Vinho: ${d.atual.VINHO} (sem. passada: ${d.anterior.VINHO}) [${delta('VINHO')}]\n`;
+    if (d.itensAtual.VINHO.length) msg += itensTxt(d.itensAtual.VINHO) + '\n';
     msg += d.confirmado ? `  ✅ Confirmado por ${d.confirmado.por || '—'}\n` : `  ⚠ Pendente — ainda não contou essa semana\n`;
   });
   window.open('https://wa.me/?text='+encodeURIComponent(msg),'_blank');
