@@ -5270,7 +5270,7 @@ function _lojasFiltroLabel() {
 
 // ── Relatório para fornecedor — todas as lojas, ou só as selecionadas em
 // S.relLojasFiltro (ver abrirModalLojasRelatorioPedido) ─────────────────
-function _buildRelatorioFornAllLojas(fornecedor) {
+async function _buildRelatorioFornAllLojas(fornecedor) {
   // Retorna { porForn, totalGeral } com dados das lojas ativas no filtro
   const porForn = {};
   // Sem fornecedor específico ("Pedido Completo"), respeita o escopo da aba
@@ -5288,13 +5288,15 @@ function _buildRelatorioFornAllLojas(fornecedor) {
       });
     });
   });
+  const fornsEscopo = fornecedor ? [fornecedor] : [...new Set(prods.map(p => p.fornecedor))];
+  await _perguntarEJuntarRodadaAnterior(fornsEscopo, porForn);
   return porForn;
 }
 
-function gerarWppFornAllLojas(fornecedor) {
+async function gerarWppFornAllLojas(fornecedor) {
   if (!S.pedidoAtual) { toast('Nenhum pedido ativo.', 'err'); return; }
   const sem = formatarSemana(S.semanaAtiva);
-  const porForn = _buildRelatorioFornAllLojas(fornecedor);
+  const porForn = await _buildRelatorioFornAllLojas(fornecedor);
   const fns = Object.keys(porForn).sort();
   if (!fns.length) { toast('Nenhum item no pedido.', 'err'); return; }
 
@@ -5328,10 +5330,10 @@ function gerarWppFornAllLojas(fornecedor) {
 
 // Monta o texto do relatório por fornecedor (todas as lojas) — reaproveitado pelo PDF
 // impresso e pelo PDF anexado no WhatsApp.
-function _relatorioFornAllLojasMsgETitulo(fornecedor) {
+async function _relatorioFornAllLojasMsgETitulo(fornecedor) {
   if (!S.pedidoAtual) return null;
   const sem = formatarSemana(S.semanaAtiva);
-  const porForn = _buildRelatorioFornAllLojas(fornecedor);
+  const porForn = await _buildRelatorioFornAllLojas(fornecedor);
   const fns = Object.keys(porForn).sort();
   if (!fns.length) return null;
 
@@ -5360,9 +5362,9 @@ function _relatorioFornAllLojasMsgETitulo(fornecedor) {
   return { msg, titulo: `${tituloLabel} — Semana ${sem.num}/${sem.ano}` };
 }
 
-function gerarPDFFornAllLojas(fornecedor) {
+async function gerarPDFFornAllLojas(fornecedor) {
   if (!S.pedidoAtual) { toast('Nenhum pedido ativo.', 'err'); return; }
-  const r = _relatorioFornAllLojasMsgETitulo(fornecedor);
+  const r = await _relatorioFornAllLojasMsgETitulo(fornecedor);
   if (!r) { toast('Nenhum item no pedido.', 'err'); return; }
   gerarPDF(r.msg, r.titulo);
 }
@@ -5370,7 +5372,7 @@ function gerarPDFFornAllLojas(fornecedor) {
 // Mesmo conteúdo do PDF acima, mas anexado direto no compartilhamento nativo (WhatsApp).
 async function enviarPDFFornAllLojasWpp(fornecedor) {
   if (!S.pedidoAtual) { toast('Nenhum pedido ativo.', 'err'); return; }
-  const r = _relatorioFornAllLojasMsgETitulo(fornecedor);
+  const r = await _relatorioFornAllLojasMsgETitulo(fornecedor);
   if (!r) { toast('Nenhum item no pedido.', 'err'); return; }
   await _compartilharPdfWpp(r.msg, r.titulo);
 }
@@ -5499,7 +5501,7 @@ function gerarWppEntregas() {
   window.open('https://wa.me/?text='+encodeURIComponent(msg));
 }
 
-function gerarWppPedido() {
+async function gerarWppPedido() {
   if (!S.pedidoAtual) { toast('Nenhum pedido ativo.', 'err'); return; }
   const sem = formatarSemana(S.semanaAtiva);
   const porForn = {};
@@ -5521,6 +5523,8 @@ function gerarWppPedido() {
         .push({ produto: prod.produto, und: prod.und, custo: prod.custo || 0, loja: lojaNome, qtd });
     }
   });
+  const fornsEscopo = [...new Set(S.catalogo.filter(p => p.ativo && _fornecedorNoEscopoAtivo(p.fornecedor, p.grupo)).map(p => p.fornecedor))];
+  await _perguntarEJuntarRodadaAnterior(fornsEscopo, porForn);
   const fns = Object.keys(porForn).sort();
   if (!fns.length) { toast('Nenhum item com pedido para enviar.', 'err'); return; }
   const titulo = S.todosModo ? 'TODAS AS LOJAS' : (S.lojas.find(l => l.slug_pedido === S.lojaAtiva)?.nome_display || S.lojaAtiva);
@@ -5559,9 +5563,49 @@ function gerarPDF(texto,titulo){
   const w=window.open('','_blank');
   if(w){w.document.write(html);w.document.close();}
 }
+// Fornecedor com "2ª rodada" aberta (ver _limparFornecedoresAba) tem uma rodada anterior
+// desta mesma semana já confirmada (provisão gerada) mas ainda AGUARDANDO entrega — ela
+// não aparece mais em S.pedidoItens (foi zerada ao abrir a rodada nova), então o relatório
+// (PDF/WhatsApp) gerado mostrava só a rodada nova, ou só a antiga se gerado antes de
+// lançar algo na rodada nova. Pergunta se quer juntar as duas no relatório (soma por
+// produto+loja) ou manter só a rodada atual — pedido do usuário, caso real do Oseas com
+// PETISCOS (reabriu a rodada várias vezes no mesmo dia).
+async function _fetchProvisoesAguardandoDoPedido(fornecedores) {
+  if (!S.pedidoAtual?.id || !fornecedores.length) return [];
+  try {
+    const rows = await _fetchTodasPaginas(() => db.from('gn_provisoes')
+      .select('fornecedor,loja_slug,catalogo_id,qtd_prevista')
+      .eq('pedido_id', S.pedidoAtual.id)
+      .eq('status', 'AGUARDANDO')
+      .in('fornecedor', fornecedores));
+    return rows || [];
+  } catch (e) { return []; }
+}
+function _mesclarProvisoesNoPorForn(porForn, provisoes) {
+  provisoes.forEach(p => {
+    const prod = S.catalogo.find(c => c.id === p.catalogo_id);
+    if (!prod) return;
+    const qtd = parseFloat(p.qtd_prevista) || 0;
+    if (qtd <= 0) return;
+    const lojaNome = S.lojas.find(l => l.slug_pedido === p.loja_slug)?.nome_display || p.loja_slug;
+    const arr = (porForn[p.fornecedor] = porForn[p.fornecedor] || []);
+    const existente = arr.find(i => i.produto === prod.produto && i.loja === lojaNome);
+    if (existente) existente.qtd += qtd;
+    else arr.push({ produto: prod.produto, und: prod.und, custo: prod.custo || 0, loja: lojaNome, qtd });
+  });
+}
+async function _perguntarEJuntarRodadaAnterior(fornecedores, porForn) {
+  const comRodadaAnterior = fornecedores.filter(f => S.fornecedoresReabertos.has(f));
+  if (!comRodadaAnterior.length) return;
+  const provisoes = await _fetchProvisoesAguardandoDoPedido(comRodadaAnterior);
+  if (!provisoes.length) return;
+  const juntar = confirm(`${comRodadaAnterior.join('/')} ${comRodadaAnterior.length>1?'têm':'tem'} uma rodada anterior desta semana ainda aguardando entrega.\n\nJuntar essa rodada com a nova neste relatório?\n\nOK = junta as duas · Cancelar = só a rodada atual`);
+  if (juntar) _mesclarProvisoesNoPorForn(porForn, provisoes);
+}
+
 // Monta o texto do pedido (mesmo conteúdo usado tanto pro PDF impresso quanto pro PDF
 // anexado no WhatsApp) — extraído de gerarPDFPedido() pra não duplicar essa lógica.
-function _pedidoMsgETitulo(){
+async function _pedidoMsgETitulo(){
   if(!S.pedidoAtual) return null;
   const sem=formatarSemana(S.semanaAtiva);
   const porForn={};
@@ -5581,6 +5625,8 @@ function _pedidoMsgETitulo(){
       (porForn[prod.fornecedor]=porForn[prod.fornecedor]||[]).push({produto:prod.produto,und:prod.und,custo:prod.custo||0,loja:lojaNome,qtd});
     }
   });
+  const fornsEscopo=[...new Set(S.catalogo.filter(p=>p.ativo && _fornecedorNoEscopoAtivo(p.fornecedor, p.grupo)).map(p=>p.fornecedor))];
+  await _perguntarEJuntarRodadaAnterior(fornsEscopo, porForn);
   const fns=Object.keys(porForn).sort();
   if(!fns.length) return null;
   const titulo=S.todosModo?'TODAS AS LOJAS':(S.lojas.find(l=>l.slug_pedido===S.lojaAtiva)?.nome_display||S.lojaAtiva);
@@ -5604,9 +5650,9 @@ function _pedidoMsgETitulo(){
   return { msg, titulo: `Pedido${_labelCompradorAtivo()} Semana ${sem.num}/${sem.ano}` };
 }
 
-function gerarPDFPedido(){
+async function gerarPDFPedido(){
   if(!S.pedidoAtual){toast('Nenhum pedido ativo.','err');return;}
-  const r=_pedidoMsgETitulo();
+  const r=await _pedidoMsgETitulo();
   if(!r){toast('Nenhum item com pedido.','err');return;}
   gerarPDF(r.msg, r.titulo);
 }
@@ -5661,7 +5707,7 @@ async function _compartilharPdfWpp(msg, titulo){
 
 async function enviarPDFPedidoWpp(){
   if(!S.pedidoAtual){toast('Nenhum pedido ativo.','err');return;}
-  const r=_pedidoMsgETitulo();
+  const r=await _pedidoMsgETitulo();
   if(!r){toast('Nenhum item com pedido.','err');return;}
   await _compartilharPdfWpp(r.msg, r.titulo);
 }
