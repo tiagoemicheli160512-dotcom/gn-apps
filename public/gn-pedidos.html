@@ -590,6 +590,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 <script src="gn-lojas-config.js"></script>
+<script src="gn-deploy-update.js"></script>
 <script>
 // ═══════════════════════════════════════════════
 // CONFIG
@@ -7608,55 +7609,13 @@ function fecharAvisoGuia() {
 }
 
 // ── DEPLOY NOVO (service worker trocou) ──────────────────────────────────
-// Recarregar a página na hora que o deploy chega apagava o que estivesse sendo feito —
-// caso relatado na aba Catálogo: modal de "+ Novo"/editar produto aberto (ou edição em
-// lote de custo/Und por Cx em andamento) e a tela recarregava sozinha no meio, perdendo
-// tudo que já tinha sido digitado. Pior aqui do que nos outros apps porque havia DOIS
-// gatilhos de reload (controllerchange + mensagem GN_SW_UPDATED), disparando juntos.
-// Agora: se a tela está ociosa, recarrega na hora como antes; se tem trabalho em
-// andamento, mostra um aviso discreto com "Atualizar agora" e aplica sozinho assim que
-// ficar ocioso.
-let _deployPendente = false;
-let _deployTimer = null;
-
-function _appOcupadoParaReload() {
-  if ($('modal-bg')?.classList.contains('ativo')) return true;  // modal aberto (novo produto/editar/etc.)
-  if (S.catEditLote || S.catEditLoteCusto) return true;         // edição em lote no Catálogo
-  const el = document.activeElement;                            // digitando em algum campo
-  if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return true;
-  return false;
-}
-
-function _mostrarBannerDeploy() {
-  if ($('deploy-update-banner')) return;
-  const div = document.createElement('div');
-  div.id = 'deploy-update-banner';
-  div.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:14px;z-index:300;background:#1A1D23;color:#fff;border-radius:12px;padding:10px 14px;font-size:12px;font-weight:700;display:flex;align-items:center;gap:10px;box-shadow:0 6px 20px rgba(0,0,0,.3);font-family:inherit;max-width:92vw';
-  div.innerHTML = '<span>🔄 Nova versão disponível — atualiza sozinho quando você terminar.</span>'
-    + '<button onclick="_aplicarDeployAgora()" style="background:#E8580A;border:none;border-radius:8px;color:#fff;padding:6px 10px;font-size:11px;font-weight:800;cursor:pointer;font-family:inherit;white-space:nowrap">Atualizar agora</button>';
-  document.body.appendChild(div);
-}
-
-async function _aplicarDeployAgora() {
-  // Mesma proteção já usada no app Lojas: garante que o último salvamento pendente chegou
-  // na nuvem antes do reload (que é navegação de verdade e aborta request em voo), com
-  // teto de 6s pra não travar se a rede estiver ruim.
-  try { await Promise.race([flushPendingItems(false), new Promise(r => setTimeout(r, 6000))]); } catch(_) {}
-  window.location.reload();
-}
-
-function _deployNovoDetectado() {
-  if (_deployPendente) return; // os dois gatilhos disparam juntos — trata uma vez só
-  _deployPendente = true;
-  if (!_appOcupadoParaReload()) { _aplicarDeployAgora(); return; }
-  _mostrarBannerDeploy();
-  if (_deployTimer) clearInterval(_deployTimer);
-  _deployTimer = setInterval(() => {
-    if (_appOcupadoParaReload()) return;
-    clearInterval(_deployTimer);
-    _aplicarDeployAgora();
-  }, 5000);
-}
+// Quem decide a hora de recarregar é o gn-deploy-update (compartilhado por todos os apps):
+// tela ociosa recarrega na hora, com trabalho em andamento espera terminar. Aqui só
+// declaramos o que é específico deste app: o flush das quantidades pendentes antes do
+// reload, e o modo de edição em lote do Catálogo — que é "editando" sem modal aberto nem
+// campo em foco, então o módulo não teria como adivinhar sozinho.
+window.gnDeployFlush = () => flushPendingItems(false);
+window.gnDeployOcupadoExtra = () => !!(S.catEditLote || S.catEditLoteCusto);
 
 async function iniciarApp() {
   $('login').classList.remove('ativo');
@@ -7722,9 +7681,9 @@ async function iniciarApp() {
         setTimeout(registrarPushSubscription, 3000);
       }
     }).catch(() => {});
-    navigator.serviceWorker.addEventListener('controllerchange', _deployNovoDetectado);
+    navigator.serviceWorker.addEventListener('controllerchange', gnDeployAtualizar);
     navigator.serviceWorker.addEventListener('message', e => {
-      if (e.data && e.data.type === 'GN_SW_UPDATED') _deployNovoDetectado();
+      if (e.data && e.data.type === 'GN_SW_UPDATED') gnDeployAtualizar();
     });
   }
 
