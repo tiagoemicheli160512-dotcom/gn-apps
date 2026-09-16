@@ -325,6 +325,10 @@ input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-
     <span class="nav-label">Entrega</span>
     <span class="nav-dot hidden" id="dot-entrega" style="background:#D97706"></span>
   </button>
+  <button class="nav-btn" id="nav-notas" onclick="goTab('notas')">
+    <span class="nav-icon">&#129534;</span>
+    <span class="nav-label">Notas</span>
+  </button>
   <button class="nav-btn" id="nav-barris" onclick="goTab('barris')">
     <span class="nav-icon">&#127866;</span>
     <span class="nav-label">Barris</span>
@@ -828,6 +832,40 @@ function _epFilaCarregar() {
 }
 function _epFilaSalvar() {
   try { localStorage.setItem(EP_FILA_KEY, JSON.stringify(_epFilaPendente)); } catch(e) {}
+}
+// ── NOTA FISCAL DA ENTREGA (aba Entrega) ──────────────────────────────────────────────
+// Número e valor da nota são OBRIGATÓRIOS pra confirmar qualquer recebimento — mesmo
+// espírito da validade dos barris de chopp: sem o dado, nada é confirmado.
+// Uma entrega de fornecedor vem numa nota só (um pedido de 12 itens = 1 nota), então a
+// nota é pedida no PRIMEIRO item daquele fornecedor e herdada pelos demais — sem obrigar
+// a loja a redigitar o mesmo número 12 vezes. O valor guardado é o da NOTA INTEIRA, e
+// por isso se repete em cada item dela (ver comentário da coluna em gn_recebimentos).
+const EP_NOTA_KEY = 'gn_entrega_nota_por_fornecedor';
+let _epNotaPorForn = {}; // { [loja]: { [fornecedor]: {numero, valor, dia} } }
+function _epNotaHoje() {
+  const d = new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function _epNotaCarregar() {
+  try { _epNotaPorForn = JSON.parse(localStorage.getItem(EP_NOTA_KEY) || '{}'); }
+  catch(e) { _epNotaPorForn = {}; }
+}
+function _epNotaSalvar() {
+  try { localStorage.setItem(EP_NOTA_KEY, JSON.stringify(_epNotaPorForn)); } catch(e) {}
+}
+function _epNotaGet(fornecedor) {
+  const n = ((_epNotaPorForn[loja] || {})[fornecedor || 'SEM FORNECEDOR']) || null;
+  // A nota herdada vale só pelo dia em que foi informada — a entrega de amanhã do mesmo
+  // fornecedor vem com outra nota, e herdar a de ontem em silêncio seria pior do que
+  // pedir de novo (gravaria número errado sem ninguém perceber).
+  if (!n || n.dia !== _epNotaHoje()) return null;
+  return n;
+}
+function _epNotaSet(fornecedor, numero, valor) {
+  const f = fornecedor || 'SEM FORNECEDOR';
+  if (!_epNotaPorForn[loja]) _epNotaPorForn[loja] = {};
+  _epNotaPorForn[loja][f] = { numero: numero, valor: valor, dia: _epNotaHoje() };
+  _epNotaSalvar();
 }
 let _entregaItensMap = {}; // id -> itens (para recalc sem JSON no onclick)
 let pedidoCustom = [];  // itens novos criados no app [{item, fornecedor, grupo, subgrupo, produto, und, custo, posIndex}]
@@ -3104,7 +3142,7 @@ function _iniciarVigiaHorario() {
 function prevWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana, -7); checklistFat = null; checklistVendasItens = null; if(tab==="vendas") loadChecklistFat(); if(tab==="pedido") _carregarEstAntHistorico(); render(); }
 function nextWeek()  { if (!_podeNavSemana()) return; semana = addDays(semana,  7); checklistFat = null; checklistVendasItens = null; if(tab==="vendas") loadChecklistFat(); if(tab==="pedido") _carregarEstAntHistorico(); render(); }
 function irParaSemana(isoStr) { semana = new Date(isoStr); tab = "relatorio"; render(); }
-function changeLoja(v) { if (lojaForcada) return; loja = v; tab = "home"; checklistFat = null; checklistVendasItens = null; _epGruposAbertos.clear(); render(); _epProcessarFila(); _pedSyncFilaProcessar(); }
+function changeLoja(v) { if (lojaForcada) return; loja = v; tab = "home"; checklistFat = null; checklistVendasItens = null; _epGruposAbertos.clear(); notasEntrega = []; _epNotasAbertas.clear(); render(); _epProcessarFila(); _pedSyncFilaProcessar(); }
 function carregarPermissaoLoja() {
   try {
     var s = JSON.parse(localStorage.getItem('gn_session_v1') || 'null');
@@ -3120,7 +3158,10 @@ function carregarPermissaoAbas() {
     if (!s || Date.now() - s.ts > 43200000) { abasPermitidas = null; return; }
     var abas = s.permissoes && s.permissoes.lojas_abas;
     if (!Array.isArray(abas)) { abasPermitidas = null; return; }
-    abasPermitidas = abas;
+    // A aba 🧾 Notas é o espelho somente-leitura da Entrega e nasceu depois das permissões
+    // já salvas em cada usuário — sem isso, quem confirma entrega ficaria sem acesso ao
+    // espelho do próprio trabalho até alguém reeditar o cadastro dele um por um.
+    abasPermitidas = abas.includes('entrega') && !abas.includes('notas') ? abas.concat(['notas']) : abas;
     if (!abasPermitidas.includes(tab)) tab = abasPermitidas[0] || 'home';
   } catch(e) { abasPermitidas = null; }
 }
@@ -3186,6 +3227,7 @@ function goTab(t) {
   if (t === "hortifruti") { carregarHortifruti(); }
   render();
   if (t === 'entrega') carregarEntregas(true);
+  if (t === 'notas') carregarNotasEntrega(true);
   if (t === 'barris') carregarBarris(true);
   _renderTravaNotaFiscal();
   // foco automático na busca se a aba tem campo de busca
@@ -7518,7 +7560,7 @@ function render() {
   if (navGestao) navGestao.style.display = _fichasOk ? "" : "none";
   // Tab permissions
   if (abasPermitidas) {
-    ['home','pedido','hortifruti','fichas','gestao','estoque','vendas','contagem','entradas','vinculos','transf','entrega','barris','avarias','relatorio'].forEach(function(tid) {
+    ['home','pedido','hortifruti','fichas','gestao','estoque','vendas','contagem','entradas','vinculos','transf','entrega','notas','barris','avarias','relatorio'].forEach(function(tid) {
       const nb = document.getElementById('nav-' + tid);
       if (nb) nb.style.display = abasPermitidas.includes(tid) ? '' : 'none';
       const sb = document.getElementById('sidebar-' + tid);
@@ -8982,7 +9024,7 @@ function render() {
                     style="width:100%;background:#FFFFFF;border:1px solid #E1E4E9;border-radius:8px;color:#475569;padding:7px 8px;font-size:13px;box-sizing:border-box"/>
                 </div>
               </div>
-              <button onclick="${BARRIS_VALIDADE_CONFIG[prov.catalogo_id] ? "abrirModalValidadeBarris('"+prov.id+"')" : "confirmarEntrega('"+prov.id+"')"}" style="width:100%;background:linear-gradient(135deg,#059669,#047857);border:none;border-radius:13px;padding:11px;color:#fff;font-weight:800;font-size:13px">
+              <button onclick="iniciarConfirmacaoEntrega('${prov.id}')" style="width:100%;background:linear-gradient(135deg,#059669,#047857);border:none;border-radius:13px;padding:11px;color:#fff;font-weight:800;font-size:13px">
                 ✅ Confirmar Recebimento
               </button>
               ${atrasadaParaExclusao?`<button onclick="solicitarExclusaoEntrega('${prov.id}')" style="width:100%;background:rgba(220,38,38,.08);border:1px solid rgba(220,38,38,.35);border-radius:13px;padding:9px;color:#DC2626;font-weight:800;font-size:12px;margin-top:8px">🗑️ Solicitar exclusão</button>`:''}
@@ -8994,6 +9036,16 @@ function render() {
             recebido: itens.filter(p=>p._statusFinal==='RECEBIDO_OK').length,
             divergencia: itens.filter(p=>p._statusFinal==='DIVERGENCIA').length,
           });
+          // Nota fiscal já informada pra este fornecedor hoje — mostrada no cabeçalho pra
+          // a loja conferir o número que está sendo gravado nos itens seguintes, com
+          // saída pra corrigir se digitou errado (ou se chegou uma segunda nota no dia).
+          const notaForn=_epNotaGet(forn);
+          const notaHtml=notaForn
+            ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;background:rgba(5,150,105,.08);border-radius:8px;padding:4px 8px">
+                <span style="font-size:10px;font-weight:700;color:#047857;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">🧾 Nota ${escapeHtml(notaForn.numero)} · R$ ${(parseFloat(notaForn.valor)||0).toFixed(2).replace('.',',')}</span>
+                <button onclick="trocarNotaEntrega('${forn.replace(/'/g,"\\'")}', event)" style="flex-shrink:0;background:none;border:none;color:#047857;font-size:10px;font-weight:800;text-decoration:underline;padding:0">trocar</button>
+              </div>`
+            : '';
           return `<div class="ep-grupo${_epGruposAbertos.has(gid)?' aberto':''}" id="${gid}">
             <div class="ep-grupo-header" onclick="toggleEpGrupo('${gid}')" style="border-left:3px solid ${finalizado?'#16A34A':'#D97706'};flex-direction:column;align-items:stretch;gap:5px">
               <div style="display:flex;align-items:center;justify-content:space-between">
@@ -9004,6 +9056,7 @@ function render() {
                 </div>
               </div>
               ${badgesHtml?`<div style="display:flex;gap:5px;flex-wrap:wrap">${badgesHtml}</div>`:''}
+              ${notaHtml}
             </div>
             <div class="ep-grupo-body">${itensHtml}</div>
           </div>`;
@@ -9223,6 +9276,93 @@ function render() {
             </div>`}
         </div>`;
       })()}
+    </div>`;
+
+  } else if (tab === "notas") {
+    const grupos = _epAgruparNotas(notasEntrega);
+    const totalNotas = grupos.reduce((s,g) => s + (g.notaValor != null ? g.notaValor : g.totalItens), 0);
+    const semNota = grupos.filter(g => !g.numero).length;
+    const pills = _EP_NOTAS_OPCOES.map(o => {
+      const on = _epNotasJanelaDias === o.dias;
+      return `<button onclick="_epSetNotasJanela(${o.dias})" style="flex:1;padding:7px 4px;border-radius:9px;font-size:11px;font-weight:700;border:1px solid ${on?'#B45309':'rgba(0,0,0,.12)'};background:${on?'rgba(217,119,6,.14)':'#FFFFFF'};color:${on?'#B45309':'#475569'};cursor:pointer">${o.lbl}</button>`;
+    }).join('');
+    const fmtDT = ts => ts ? new Date(ts).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—';
+
+    c.innerHTML = `
+    <div class="section">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div class="sec-label" style="margin-bottom:0">🧾 Notas de Entrega — ${lojaDisp(loja)}</div>
+        <button onclick="carregarNotasEntrega(false)" style="background:rgba(0,0,0,.07);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:5px 10px;color:#475569;font-size:11px">↻ Atualizar</button>
+      </div>
+      <div style="font-size:11px;color:#64748b;margin-top:4px">Espelho somente-leitura do que foi confirmado na aba Entrega — número da nota, valor, data e quem confirmou.</div>
+
+      <div style="display:flex;gap:6px;margin-top:12px">${pills}</div>
+
+      <div class="card" style="padding:12px 14px;margin-top:10px;display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <div style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase">Notas no período</div>
+          <div style="font-size:19px;font-weight:900;color:#B45309">${grupos.length}</div>
+          ${semNota ? `<div style="font-size:10px;color:#64748b;margin-top:2px">${semNota} sem nota registrada</div>` : ''}
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase">Valor total</div>
+          <div style="font-size:19px;font-weight:900;color:#047857">R$ ${totalNotas.toFixed(2).replace('.',',')}</div>
+        </div>
+      </div>
+
+      ${_epNotasCarregando && !grupos.length
+        ? `<div class="card" style="padding:16px;text-align:center;color:#64748b;font-size:12px;margin-top:10px">Carregando notas…</div>`
+        : (!grupos.length
+          ? `<div class="card" style="padding:16px;text-align:center;color:#475569;font-size:12px;margin-top:10px">Nenhum recebimento confirmado nesse período.</div>`
+          : grupos.map(g => {
+            const gid = 'ep_nota_' + g.chave.replace(/[^a-z0-9]/gi,'_');
+            const aberto = _epNotasAbertas.has(gid);
+            const valor = g.notaValor != null ? g.notaValor : g.totalItens;
+            // Nota e soma dos itens podem legitimamente divergir (item devolvido, ou a
+            // nota trazendo algo que não estava provisionado) — o espelho aponta a
+            // diferença em vez de escolher um dos dois números por conta própria.
+            const divergeValor = g.notaValor != null && Math.abs(g.notaValor - g.totalItens) >= 0.01;
+            const cor = g.numero ? '#047857' : '#B45309';
+            return `<div class="card" style="margin-top:10px;overflow:hidden;border-left:3px solid ${cor}">
+              <div onclick="toggleNotaEntrega('${gid}')" style="padding:12px 14px;cursor:pointer">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+                  <div style="flex:1;min-width:0">
+                    <div style="font-size:13px;font-weight:900;color:${cor}">${g.numero ? '🧾 Nota ' + escapeHtml(g.numero) : '⚠️ Sem nota registrada'}</div>
+                    <div style="font-size:11px;color:#475569;font-weight:700;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(g.fornecedor)}</div>
+                    <div style="font-size:10px;color:#64748b;margin-top:3px">📅 ${fmtDT(g.quando)}</div>
+                    <div style="font-size:10px;color:#64748b;margin-top:1px">👤 Confirmado por ${escapeHtml(g.validadoPor || '—')}</div>
+                  </div>
+                  <div style="text-align:right;flex-shrink:0">
+                    <div style="font-size:14px;font-weight:900;color:${cor}">R$ ${valor.toFixed(2).replace('.',',')}</div>
+                    <div style="font-size:10px;color:#64748b">${g.itens.length} ${g.itens.length===1?'item':'itens'}</div>
+                    <div style="font-size:10px;color:#94a3b8;margin-top:2px">${aberto?'▲':'▼'}</div>
+                  </div>
+                </div>
+                ${divergeValor ? `<div style="font-size:10px;color:#B45309;font-weight:700;margin-top:6px">⚠️ Itens confirmados somam R$ ${g.totalItens.toFixed(2).replace('.',',')} — diferença de R$ ${Math.abs(g.notaValor-g.totalItens).toFixed(2).replace('.',',')} pro valor da nota</div>` : ''}
+              </div>
+              ${aberto ? `<div style="border-top:1px solid rgba(0,0,0,.06)">${g.itens.map(prov => {
+                const rec = _epRec(prov);
+                const produto = prov.gn_catalogo?.produto || '—';
+                const und = prov.gn_catalogo?.und || '';
+                const qtdRec = parseFloat(rec?.qtd_recebida ?? prov.qtd_prevista) || 0;
+                const valRec = parseFloat(rec?.valor_recebido ?? prov.valor_previsto) || 0;
+                const isDev = prov.status === 'DEVOLVIDO';
+                const isDiv = prov.status === 'DIVERGENCIA';
+                const corItem = isDev ? '#7C3AED' : (isDiv ? '#B45309' : '#059669');
+                const rotulo = isDev ? '↩️ Devolvido' : (isDiv ? '⚠️ Divergência' : '✅ Recebido');
+                return `<div style="padding:9px 14px;border-bottom:1px solid rgba(0,0,0,.04);display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+                  <div style="flex:1;min-width:0">
+                    <div style="font-size:10px;color:${corItem};font-weight:700">${rotulo}</div>
+                    <div style="font-size:12px;color:#475569;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${produto}</div>
+                  </div>
+                  <div style="text-align:right;flex-shrink:0">
+                    <div style="font-size:12px;font-weight:800;color:${corItem}">R$ ${valRec.toFixed(2).replace('.',',')}</div>
+                    <div style="font-size:10px;color:#64748b">${qtdRec} ${und}</div>
+                  </div>
+                </div>`;
+              }).join('')}</div>` : ''}
+            </div>`;
+          }).join(''))}
     </div>`;
 
   } else if (tab === "fichas") {
@@ -9713,7 +9853,7 @@ const LOJAS_TABS_CONFIG = [
   {id:"home",lb:"Home"},{id:"pedido",lb:"Pedido"},{id:"hortifruti",lb:"Hortifruti"},{id:"fichas",lb:"Fichas"},
   {id:"estoque",lb:"Estoque"},{id:"vendas",lb:"Vendas"},{id:"contagem",lb:"Contagem"},
   {id:"entradas",lb:"Entradas"},{id:"transf",lb:"Transfer."},
-  {id:"entrega",lb:"Entrega"},{id:"barris",lb:"Barris"},{id:"relatorio",lb:"Relatório"}
+  {id:"entrega",lb:"Entrega"},{id:"notas",lb:"Notas"},{id:"barris",lb:"Barris"},{id:"relatorio",lb:"Relatório"}
 ];
 let _usuariosCache = [];
 
@@ -10241,7 +10381,7 @@ async function _epFetchHistorico(slug, desde) {
   let offset=0;
   const all=[];
   while(true){
-    const page=await sbRequest('gn_provisoes?loja_slug=eq.'+slug+'&status=in.(RECEBIDO_OK,DIVERGENCIA,DEVOLVIDO)&atualizado_em=gte.'+desde+'&select=*,gn_catalogo(produto,und),gn_pedidos(data_pedido,semana_inicio),gn_recebimentos(qtd_recebida,valor_recebido,validado_por,diferenca_qtd)&order=atualizado_em.desc&limit='+pageSize+'&offset='+offset,{method:'GET'});
+    const page=await sbRequest('gn_provisoes?loja_slug=eq.'+slug+'&status=in.(RECEBIDO_OK,DIVERGENCIA,DEVOLVIDO)&atualizado_em=gte.'+desde+'&select=*,gn_catalogo(produto,und),gn_pedidos(data_pedido,semana_inicio),gn_recebimentos(qtd_recebida,valor_recebido,validado_por,validado_em,diferenca_qtd,nota_numero,nota_valor)&order=atualizado_em.desc&limit='+pageSize+'&offset='+offset,{method:'GET'});
     all.push(...(page||[]));
     if(!page||page.length<pageSize) break;
     offset+=pageSize;
@@ -10277,6 +10417,72 @@ async function carregarEntregas(silent) {
     // sessão já pode ter processado nesse meio tempo.
     if (typeof window.gnLogError === 'function') window.gnLogError('lojas:carregarEntregas', e);
   }
+}
+
+/* ── ESPELHO DAS NOTAS FISCAIS DE ENTREGA (aba 🧾 Notas) ──────────────────────────────
+   Só leitura: o que a loja confirmou na aba Entrega, agrupado por nota fiscal, com data e
+   quem confirmou. Consulta sempre pelo loja_slug da loja aberta — cada loja vê só as
+   próprias notas (mesmo recorte que o histórico da aba Entrega já usa). */
+let notasEntrega = [];            // provisões já confirmadas, na janela escolhida
+let _epNotasJanelaDias = 30;
+let _epNotasCarregando = false;
+const _EP_NOTAS_OPCOES = [ {dias:7,lbl:'7 dias'}, {dias:30,lbl:'30 dias'}, {dias:90,lbl:'90 dias'} ];
+let _epNotasAbertas = new Set();  // notas expandidas (mesma ideia de _epGruposAbertos)
+
+async function carregarNotasEntrega(silent) {
+  _epNotasCarregando = true;
+  if (!silent && tab === 'notas') render();
+  try {
+    const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+    const desde = new Date(Date.now() - _epNotasJanelaDias*86400000).toISOString();
+    notasEntrega = await _epFetchHistorico(slug, desde);
+  } catch(e) {
+    if (typeof window.gnLogError === 'function') window.gnLogError('lojas:carregarNotasEntrega', e);
+  } finally {
+    _epNotasCarregando = false;
+    if (tab === 'notas') render();
+  }
+}
+function _epSetNotasJanela(dias) {
+  if (_epNotasJanelaDias === dias) return;
+  _epNotasJanelaDias = dias;
+  carregarNotasEntrega(false);
+}
+function toggleNotaEntrega(gid) {
+  if (_epNotasAbertas.has(gid)) _epNotasAbertas.delete(gid); else _epNotasAbertas.add(gid);
+  render();
+}
+function _epRec(prov) {
+  return Array.isArray(prov.gn_recebimentos) ? prov.gn_recebimentos[0] : prov.gn_recebimentos;
+}
+// Agrupa as provisões confirmadas por (nota, fornecedor). Confirmações anteriores a esta
+// versão não têm nota gravada — em vez de sumirem do espelho, caem num grupo próprio por
+// fornecedor/dia marcado como "sem nota registrada", que é a informação honesta.
+function _epAgruparNotas(rows) {
+  const grupos = {};
+  rows.forEach(prov => {
+    const rec = _epRec(prov);
+    const numero = (rec && rec.nota_numero) || '';
+    const forn = prov.fornecedor || 'SEM FORNECEDOR';
+    const quando = (rec && rec.validado_em) || prov.atualizado_em || '';
+    const dia = quando ? quando.slice(0,10) : '—';
+    const chave = numero ? ('N|'+numero+'|'+forn) : ('S|'+forn+'|'+dia);
+    if (!grupos[chave]) {
+      grupos[chave] = {
+        chave, numero, fornecedor: forn, dia,
+        notaValor: rec && rec.nota_valor != null ? parseFloat(rec.nota_valor) : null,
+        quando, validadoPor: (rec && rec.validado_por) || '', itens: [], totalItens: 0,
+      };
+    }
+    const g = grupos[chave];
+    g.itens.push(prov);
+    g.totalItens += parseFloat(rec && rec.valor_recebido != null ? rec.valor_recebido : prov.valor_previsto) || 0;
+    // A nota é a mesma pro grupo inteiro, mas guarda o registro mais ANTIGO como
+    // "quando/quem confirmou" — é o momento em que a entrega começou a ser conferida.
+    if (quando && (!g.quando || quando < g.quando)) { g.quando = quando; g.validadoPor = (rec && rec.validado_por) || g.validadoPor; }
+    if (g.notaValor == null && rec && rec.nota_valor != null) g.notaValor = parseFloat(rec.nota_valor);
+  });
+  return Object.values(grupos).sort((a,b) => String(b.quando).localeCompare(String(a.quando)));
 }
 
 /* ── CORREÇÕES DE ESTOQUE FEITAS PELO SETOR DE COMPRAS (app Estoque e Pedido) ──
@@ -10519,6 +10725,100 @@ function _atualizarCamposValidadeBarris() {
 // Confirmação de recebimento pra barril de chopp (AMBEV claro / DuGomes vinho): antes do
 // fluxo normal de confirmarEntrega(), pede a quantidade de barris e a validade de CADA um
 // (barril físico tem validade impressa própria — podem vir diferentes numa mesma entrega).
+// Porta de entrada ÚNICA do botão "Confirmar Recebimento". A nota fiscal é checada aqui,
+// ANTES de qualquer outra etapa: se o item for barril de chopp, a validade dos barris já
+// é gravada no banco dentro do modal dela, então pedir a nota depois criaria um ponto de
+// desistência com dado já persistido. Nota primeiro → depois barril → depois confirmação.
+function iniciarConfirmacaoEntrega(id) {
+  const prov = provisoesEntrega.find(function(p){ return p.id === id; });
+  if (!prov) return;
+  if (!_epNotaGet(prov.fornecedor)) { abrirModalNotaEntrega(id); return; }
+  _epSeguirAposNota(id);
+}
+
+function _epSeguirAposNota(id) {
+  const prov = provisoesEntrega.find(function(p){ return p.id === id; });
+  if (!prov) return;
+  if (BARRIS_VALIDADE_CONFIG[prov.catalogo_id]) abrirModalValidadeBarris(id);
+  else confirmarEntrega(id);
+}
+
+// Trocar a nota de um fornecedor no meio da conferência (erro de digitação, ou uma
+// segunda entrega do mesmo fornecedor no mesmo dia com outra nota). Sem isso, um número
+// digitado errado no primeiro item ficaria valendo pro pedido inteiro sem saída.
+function trocarNotaEntrega(fornecedor, ev) {
+  if (ev && ev.stopPropagation) ev.stopPropagation();
+  abrirModalNotaEntrega(null, fornecedor);
+}
+
+// Modal da nota. Dois modos: (a) com `id`, é o primeiro item daquele fornecedor sendo
+// confirmado — ao salvar, segue direto pra confirmação; (b) sem `id` e com `fornecedor`,
+// é só a troca da nota já informada, e ao salvar não confirma nada.
+function abrirModalNotaEntrega(id, fornecedor) {
+  const prov = id ? provisoesEntrega.find(function(p){ return p.id === id; }) : null;
+  if (id && !prov) return;
+  const forn = (prov ? prov.fornecedor : fornecedor) || 'SEM FORNECEDOR';
+  const atual = _epNotaGet(forn);
+  const itensDoForn = provisoesEntrega.filter(function(p){ return (p.fornecedor || 'SEM FORNECEDOR') === forn && !_epConfirmadosSessao[p.id]; });
+  const totalPrev = itensDoForn.reduce(function(s, p){ return s + (parseFloat(p.valor_previsto) || 0); }, 0);
+
+  const existing = document.getElementById('modalNotaEntrega');
+  if (existing) existing.remove();
+  const modal = document.createElement('div');
+  modal.id = 'modalNotaEntrega';
+  modal.dataset.provId = id || '';
+  modal.dataset.fornecedor = forn;
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:9999;display:flex;align-items:flex-end;justify-content:center';
+  modal.innerHTML =
+    '<div style="background:#FFFFFF;border-radius:20px 20px 0 0;width:100%;max-width:480px;display:flex;flex-direction:column;max-height:90vh;padding-bottom:env(safe-area-inset-bottom,0px)">'
+    + '<div style="padding:16px 16px 12px;border-bottom:1px solid rgba(0,0,0,.08)">'
+    + '<div style="width:36px;height:4px;background:rgba(0,0,0,.2);border-radius:2px;margin:0 auto 14px"></div>'
+    + '<div style="font-size:14px;font-weight:800;color:#1A1D23;text-align:center">🧾 Nota fiscal da entrega</div>'
+    + '<div style="font-size:12px;color:#B45309;font-weight:700;text-align:center;margin-top:3px">' + escapeHtml(forn) + '</div>'
+    + '</div>'
+    + '<div style="overflow-y:auto;padding:14px 16px">'
+    + '<div style="background:rgba(217,119,6,.08);border:1px solid rgba(217,119,6,.25);border-radius:10px;padding:9px 11px;font-size:11px;color:#B45309;font-weight:600;margin-bottom:14px">'
+    + 'Obrigatório pra confirmar o recebimento. A nota vale pra <b>todos os itens deste fornecedor</b> nesta entrega — só precisa digitar uma vez.'
+    + '</div>'
+    + '<label style="font-size:9px;color:#64748b;font-weight:700;text-transform:uppercase;display:block;margin-bottom:3px">Número da nota</label>'
+    + '<input id="notaEntregaNumero" type="text" inputmode="numeric" autocomplete="off" placeholder="Ex.: 123456"'
+    + ' value="' + escapeHtml(atual ? atual.numero : '') + '"'
+    + ' style="width:100%;background:#FFFFFF;border:1px solid #E1E4E9;border-radius:8px;color:#475569;padding:9px;font-size:14px;box-sizing:border-box;margin-bottom:12px"/>'
+    + '<label style="font-size:9px;color:#64748b;font-weight:700;text-transform:uppercase;display:block;margin-bottom:3px">Valor total da nota (R$)</label>'
+    + '<input id="notaEntregaValor" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0,00"'
+    + ' value="' + (atual && atual.valor != null ? atual.valor : '') + '"'
+    + ' style="width:100%;background:#FFFFFF;border:1px solid #E1E4E9;border-radius:8px;color:#475569;padding:9px;font-size:14px;box-sizing:border-box"/>'
+    + (totalPrev > 0 ? '<div style="font-size:10px;color:#64748b;margin-top:5px">Previsto pra este fornecedor: R$ ' + totalPrev.toFixed(2).replace('.', ',') + '</div>' : '')
+    + '<div id="notaEntregaErro" style="font-size:11px;color:#DC2626;font-weight:700;min-height:15px;margin-top:8px"></div>'
+    + '</div>'
+    + '<div style="padding:14px 16px;display:grid;grid-template-columns:1fr 1fr;gap:10px;border-top:1px solid rgba(0,0,0,.08)">'
+    + '<button onclick="document.getElementById(\'modalNotaEntrega\').remove()" style="background:rgba(0,0,0,.08);border:none;border-radius:13px;padding:13px;color:#475569;font-weight:700;font-size:13px">Cancelar</button>'
+    + '<button onclick="_salvarNotaEntrega()" style="background:linear-gradient(135deg,#059669,#047857);border:none;border-radius:13px;padding:13px;color:#fff;font-weight:900;font-size:13px">' + (id ? 'Salvar e confirmar' : 'Salvar nota') + '</button>'
+    + '</div></div>';
+  modal.addEventListener('click', function(e) { if (e.target === modal) modal.remove(); });
+  document.body.appendChild(modal);
+  setTimeout(function(){ const i = document.getElementById('notaEntregaNumero'); if (i) i.focus(); }, 80);
+}
+
+function _salvarNotaEntrega() {
+  const modal = document.getElementById('modalNotaEntrega');
+  if (!modal) return;
+  const err = document.getElementById('notaEntregaErro');
+  const numero = (document.getElementById('notaEntregaNumero').value || '').trim();
+  const valorTxt = (document.getElementById('notaEntregaValor').value || '').replace(',', '.').trim();
+  const valor = parseFloat(valorTxt);
+  if (!numero) { if (err) err.textContent = '⚠️ Informe o número da nota.'; return; }
+  if (!valorTxt || !isFinite(valor) || valor <= 0) { if (err) err.textContent = '⚠️ Informe o valor total da nota (maior que zero).'; return; }
+
+  const id = modal.dataset.provId;
+  const forn = modal.dataset.fornecedor;
+  _epNotaSet(forn, numero, valor);
+  modal.remove();
+  if (id) { _epSeguirAposNota(id); return; }
+  showToast('🧾 Nota ' + numero + ' salva para ' + forn + '.');
+  render();
+}
+
 function abrirModalValidadeBarris(id) {
   const prov = provisoesEntrega.find(function(p){ return p.id === id; });
   if (!prov) return;
@@ -10603,6 +10903,13 @@ async function _confirmarValidadeBarrisEProsseguir(id) {
 function confirmarEntrega(id){
   const prov=provisoesEntrega.find(p=>p.id===id);
   if(!prov) return;
+  // Trava final da nota fiscal. iniciarConfirmacaoEntrega() já pede a nota antes de
+  // chegar aqui, mas confirmarEntrega() também é chamada por dentro (fluxo dos barris) —
+  // então a exigência é reafirmada no último ponto antes de gravar, pra nenhum caminho
+  // novo conseguir confirmar um recebimento sem nota. Mesmo princípio da validade dos
+  // barris, que também é checada onde o dado é efetivamente usado.
+  const nota=_epNotaGet(prov.fornecedor);
+  if(!nota){ showToast('⚠️ Informe o número e o valor da nota fiscal antes de confirmar.'); abrirModalNotaEntrega(id); return; }
   const qtdEl=document.getElementById('ep_qtd_'+id);
   const valEl=document.getElementById('ep_val_'+id);
   const qtdRec=parseFloat((qtdEl?qtdEl.value:'0').replace(',','.'))||0;
@@ -10618,13 +10925,13 @@ function confirmarEntrega(id){
   // toa). Mesmo padrão de "tem certeza" já usado ao confirmar fornecedores no app Pedidos.
   const produtoNome=prov.gn_catalogo?.produto||'este item';
   const und=prov.gn_catalogo?.und||'';
-  if (!confirm(`Confirmar recebimento de "${produtoNome}"?\n\nQtd recebida: ${qtdRec} ${und}\nValor: R$ ${valRec.toFixed(2).replace('.',',')}` + (status==='DIVERGENCIA' ? `\n\n⚠️ Diferente do previsto (${qtdPrev} ${und}) — vai registrar como divergência.` : ''))) return;
+  if (!confirm(`Confirmar recebimento de "${produtoNome}"?\n\nQtd recebida: ${qtdRec} ${und}\nValor: R$ ${valRec.toFixed(2).replace('.',',')}\nNota: ${nota.numero} (R$ ${(parseFloat(nota.valor)||0).toFixed(2).replace('.',',')})` + (status==='DIVERGENCIA' ? `\n\n⚠️ Diferente do previsto (${qtdPrev} ${und}) — vai registrar como divergência.` : ''))) return;
 
   // 1) Grava na hora no aparelho, sem depender da rede — mesmo padrão de resiliência
   // já usado na Contagem (autoSave local + retry em segundo plano).
   if(!_epFilaPendente[loja]) _epFilaPendente[loja]=[];
   _epFilaPendente[loja]=_epFilaPendente[loja].filter(x=>x.id!==id); // evita duplicar se reconfirmar
-  _epFilaPendente[loja].push({id,qtdRec,valRec,diff,status,validado_por,ts:Date.now(),prov});
+  _epFilaPendente[loja].push({id,qtdRec,valRec,diff,status,validado_por,notaNumero:nota.numero,notaValor:nota.valor,ts:Date.now(),prov});
   _epFilaSalvar();
 
   // 2) Trava o item na tela como confirmado (mas sinalizando "sincronizando") — usuário
@@ -10665,7 +10972,10 @@ async function _epProcessarFila(){
       }
       try{
         await sbRequest('gn_recebimentos',{method:'POST',headers:{'Prefer':'return=minimal'},
-          body:JSON.stringify({provisao_id:item.id,qtd_recebida:item.qtdRec,valor_recebido:item.valRec,diferenca_qtd:item.diff,validado_por:item.validado_por})});
+          body:JSON.stringify({provisao_id:item.id,qtd_recebida:item.qtdRec,valor_recebido:item.valRec,diferenca_qtd:item.diff,validado_por:item.validado_por,
+            // Confirmações que já estavam na fila do aparelho antes desta versão não têm
+            // nota — vão como null em vez de quebrar o insert, e o espelho mostra "—".
+            nota_numero:item.notaNumero||null,nota_valor:item.notaValor!=null?item.notaValor:null})});
       }catch(eRec){
         // reverte a provisão pra não ficar marcada como recebida sem nenhum registro
         await sbRequest('gn_provisoes?id=eq.'+item.id,{method:'PATCH',headers:{'Prefer':'return=minimal'},body:JSON.stringify({status:'AGUARDANDO'})}).catch(()=>{});
@@ -10832,6 +11142,7 @@ carregarBarris(true);
 // Recupera confirmações de entrega que ficaram pendentes de sincronizar (ex.: app fechado
 // com internet ruim antes do retry terminar) e já tenta reenviar assim que a sessão carrega.
 _epFilaCarregar();
+_epNotaCarregar();
 (_epFilaPendente[loja]||[]).forEach(item => {
   _epConfirmadosSessao[item.id] = { ...item.prov, _statusFinal: item.status, _qtdRec: item.qtdRec, _valRec: item.valRec, _syncPendente: true };
 });
