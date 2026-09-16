@@ -1936,6 +1936,16 @@ function _ppDel(catalogoId, lojaSlug){
   _ppSave(q); _ppBadge();
 }
 function _ppCount(){ const q=_ppLoad(); return Object.values(q).reduce((n,ls)=>n+Object.keys(ls).length,0); }
+// Quantos itens da fila offline pertencem a estes fornecedores. Usado pra barrar a
+// confirmação do pedido só quando o que falta sincronizar é justamente dos fornecedores
+// sendo confirmados — pendência de outro comprador (outra aba) não tem nada a ver com
+// essas provisões e não pode travar a confirmação de quem está pronto.
+function _pendentesDosFornecedores(forns){
+  const fornsSet = new Set(forns);
+  const catalogoIds = new Set(S.catalogo.filter(p => fornsSet.has(p.fornecedor)).map(p => p.id));
+  const q = _ppLoad();
+  return Object.keys(q).reduce((n, cid) => n + (catalogoIds.has(cid) ? Object.keys(q[cid]).length : 0), 0);
+}
 function _ppBadge(){
   const n=_ppCount();
   const b=$('offline-banner'), t=$('offline-banner-txt'), btn=$('btn-salvar-pedidos');
@@ -2210,6 +2220,22 @@ async function _confirmarFornecedoresSelecionados() {
   let selecionados = [...document.querySelectorAll('.confirmForn-chk:checked')].map(chk => chk.value);
   if (selecionados.length === 0) {
     toast('Selecione ao menos um fornecedor.', 'err'); return;
+  }
+
+  // Tudo que foi digitado precisa estar GRAVADO no banco antes de gerar as provisões: o
+  // passo 1 aqui embaixo recarrega os itens (carregarItensPedido) e sobrescreve o estado
+  // local com o que está gravado. Quantidade ainda presa no debounce de 500ms, ou parada
+  // na fila offline depois de uma falha de rede, sumia da tela E não virava provisão — o
+  // pedido saía com uma loja só, sem aviso nenhum (relato do Oseas: lançou pras lojas,
+  // clicou em confirmar e foi só uma). Então força a gravação e, se ainda sobrar item sem
+  // sincronizar, para aqui em vez de mandar um pedido pela metade pro fornecedor.
+  await _flushQtdTimersPendentes();
+  const naoSincronizados = _pendentesDosFornecedores(selecionados);
+  if (naoSincronizados > 0) {
+    alert('⚠️ ' + naoSincronizados + ' quantidade(s) ainda não chegaram no servidor (parece falta de conexão).\n\n'
+      + 'O pedido NÃO foi confirmado — se confirmasse agora, essas lojas ficariam de fora e o fornecedor receberia um pedido incompleto.\n\n'
+      + 'Assim que a internet voltar, toque em "💾 Salvar" (no aviso laranja do topo) e confirme de novo.');
+    return;
   }
 
   // Confirmação em duas etapas antes de gerar as provisões — confirmar gera pedido de
@@ -3791,17 +3817,22 @@ function qtdChanged(catalogoId, lojaSlug, custo, valor, imediato, cxUnd) {
   }
 }
 
+// Devolve uma promise (allSettled, nunca rejeita) pra quem PRECISA esperar a gravação
+// terminar antes de seguir — é o caso da confirmação do pedido, que recarrega os itens do
+// banco logo depois. Os listeners de visibilitychange/pagehide/blur continuam chamando
+// sem esperar, como antes.
 function _flushQtdTimersPendentes() {
-  Object.keys(_qtdSaveTimers).forEach(key => {
+  const gravacoes = Object.keys(_qtdSaveTimers).map(key => {
     const pend = _qtdSaveTimers[key];
     clearTimeout(pend.timer);
     delete _qtdSaveTimers[key];
-    _executarSalvarQtd(pend.catalogoId, pend.lojaSlug, pend.custo, pend.valor, pend.cxUnd);
+    return _executarSalvarQtd(pend.catalogoId, pend.lojaSlug, pend.custo, pend.valor, pend.cxUnd);
   });
   // Também tenta reenviar quem já falhou antes (fila offline) — sem isso, um item que
   // caiu na fila só era reenviado no próximo tick de 25s, então minimizar/fechar logo
   // depois de ficar sem internet podia atrasar a sincronização até a próxima abertura.
-  if (_ppCount() > 0) flushPendingItems(false);
+  if (_ppCount() > 0) gravacoes.push(flushPendingItems(false));
+  return Promise.allSettled(gravacoes);
 }
 document.addEventListener('visibilitychange', () => { if (document.hidden) _flushQtdTimersPendentes(); });
 window.addEventListener('pagehide', _flushQtdTimersPendentes);
