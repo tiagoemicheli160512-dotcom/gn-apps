@@ -2406,7 +2406,14 @@ function _comissoesMesclarFuncsFaltantes(funcs, allData, idx){
     const comNome = wdAnt.funcs.filter(f=>f.nome && f.nome.trim());
     if(comNome.length===0) continue;
     const nomesAtuais = new Set(funcs.filter(f=>f.nome && f.nome.trim() && !f.arquivado).map(f=>_comissoesNormNome(f.nome)));
-    const faltantes = comNome.filter(f=>!f.arquivado && !nomesAtuais.has(_comissoesNormNome(f.nome)));
+    // Quem foi excluído À MÃO nesta semana não pode ser ressuscitado pela fusão: como ele
+    // continua existindo na semana anterior, a autocorreção o trazia de volta no próximo
+    // render e a exclusão parecia não funcionar (caso real: Bangu, Cristiane e Dayna).
+    // removeComissoesFunc grava _removidoNome na vaga que esvaziou justamente pra isso.
+    const removidos = new Set(funcs.filter(f=>f._removidoNome).map(f=>_comissoesNormNome(f._removidoNome)));
+    const faltantes = comNome.filter(f=>!f.arquivado
+      && !nomesAtuais.has(_comissoesNormNome(f.nome))
+      && !removidos.has(_comissoesNormNome(f.nome)));
     if(faltantes.length===0) return funcs;
     const semAlvo = COMISSOES_CAL[idx];
     const resultado = [...funcs];
@@ -2424,6 +2431,54 @@ function _comissoesMesclarFuncsFaltantes(funcs, allData, idx){
   }
   return funcs;
 }
+// Autocorreção das férias vencidas. A checagem de data que existe em _comissoesHerdarFunc
+// só roda quando a semana é CRIADA — uma semana já salva com FÉRIAS nunca era revisitada,
+// então quando as férias acabavam o funcionário continuava marcado como "em férias" pra
+// sempre (caso real: Bangu, férias de 13/07 a 12/08 ainda marcadas em setembro, e o mesmo
+// arrastado pras semanas seguintes). Aqui, todo dia marcado FÉRIAS cuja data real está
+// fora do período cadastrado do funcionário volta pra PRESENTE.
+// Só mexe em quem TEM ferias_ini e ferias_fim preenchidos: sem as datas não dá pra saber
+// se a marcação está certa, e aí o que está na tela é preservado.
+// Só vale da semana atual pra frente: semana passada é registro fechado (dias trabalhados
+// já contados em gorjetas e no RH), não se reescreve histórico automaticamente.
+function _comissoesCorrigirFeriasVencidas(funcs, idx){
+  const sem = COMISSOES_CAL[idx];
+  if(!sem) return { funcs, corrigidos: [] };
+  // Data LOCAL, não toISOString() (que é UTC e, depois das 21h no Brasil, já aponta pro
+  // dia seguinte — perto da virada de semana isso mudaria qual semana conta como "atual").
+  const h = new Date();
+  const hojeISO = h.getFullYear()+'-'+String(h.getMonth()+1).padStart(2,'0')+'-'+String(h.getDate()).padStart(2,'0');
+  const hojeIdx = comissoesSemIdx(hojeISO);
+  if(hojeIdx == null || idx < hojeIdx) return { funcs, corrigidos: [] };
+  const corrigidos = [];
+  const novos = funcs.map(f => {
+    if(!f || !f.nome || !f.nome.trim() || !f.ferias_ini || !f.ferias_fim) return f;
+    if(!(f.dias||[]).some(s => s === 'FÉRIAS')) return f;
+    const ini = new Date(f.ferias_ini+'T12:00:00');
+    const fim = new Date(f.ferias_fim+'T12:00:00');
+    if(isNaN(ini) || isNaN(fim)) return f;
+    const iniY = ini.getFullYear();
+    let mudou = false;
+    const dias = (f.dias||[]).map((s, di) => {
+      if(s !== 'FÉRIAS') return s;
+      const day = sem.days[di];
+      if(!day) return s;
+      const mm = String(day.m).padStart(2,'0'), dd = String(day.d).padStart(2,'0');
+      // O calendário guarda só dia/mês; o ano sai do período de férias (mesma conta de
+      // _comissoesHerdarFunc), com o +1 pra virada de ano.
+      let dt = new Date(`${iniY}-${mm}-${dd}T12:00:00`);
+      if(dt < ini) dt = new Date(`${iniY+1}-${mm}-${dd}T12:00:00`);
+      if(dt >= ini && dt <= fim) return s;
+      mudou = true;
+      return 'PRESENTE';
+    });
+    if(!mudou) return f;
+    corrigidos.push(f.nome.trim());
+    return {...f, dias};
+  });
+  return { funcs: novos, corrigidos };
+}
+
 function getComissoesWD(allData, idx){
   const k = String(idx);
   if(!allData[k]){
@@ -2436,6 +2491,9 @@ function getComissoesWD(allData, idx){
     wd.funcs=cur;
   }
   wd.funcs = _comissoesMesclarFuncsFaltantes(wd.funcs, allData, idx);
+  const fer = _comissoesCorrigirFeriasVencidas(wd.funcs, idx);
+  wd.funcs = fer.funcs;
+  if(fer.corrigidos.length) window._comissoesFeriasCorrigidas = fer.corrigidos;
   if(!wd.brutos) wd.brutos=Array(7).fill(0);
   return wd;
 }
@@ -5301,6 +5359,13 @@ function renderComissoesFuncs(){
     countEl.textContent='—';
     return;
   }
+  // A autocorreção de férias vencidas muda a marcação da tela sozinha — sem avisar,
+  // pareceria que o app "desfez" o que a loja lançou. Mostra uma vez por correção.
+  if(window._comissoesFeriasCorrigidas && window._comissoesFeriasCorrigidas.length){
+    const nomes=window._comissoesFeriasCorrigidas;
+    window._comissoesFeriasCorrigidas=null;
+    showToast(`🏖️ Férias encerradas: ${nomes.join(', ')} ${nomes.length>1?'voltaram':'voltou'} para PRESENTE (o período cadastrado já terminou).`);
+  }
   if(!comissoesWD || comissoesWeekIdx==null){
     lista.innerHTML='';
     empty.style.display='block';
@@ -6268,14 +6333,26 @@ function updComissoesDia(i,d,sel){
       const fim=new Date(f.ferias_fim+'T12:00:00');
       const iniY=ini.getFullYear();
       const novos=[...f.dias];
+      let diaEscolhidoDentro=false;
       sem.days.forEach((day,di)=>{
         const mm=String(day.m).padStart(2,'0'),dd2=String(day.d).padStart(2,'0');
         let dt=new Date(`${iniY}-${mm}-${dd2}T12:00:00`);
         if(dt<ini) dt=new Date(`${iniY+1}-${mm}-${dd2}T12:00:00`);
-        if(dt>=ini&&dt<=fim) novos[di]=v;
+        const dentro = dt>=ini&&dt<=fim;
+        if(di===d) diaEscolhidoDentro=dentro;
+        if(dentro) novos[di]=v;
         else if(novos[di]===v) novos[di]='PRESENTE';
       });
-      novos[d]=v;
+      // Antes o dia clicado era forçado (`novos[d]=v`) mesmo estando FORA do período
+      // cadastrado — era assim que sobrava FÉRIAS depois do fim das férias, e a
+      // autocorreção em _comissoesCorrigirFeriasVencidas ia desfazer logo em seguida,
+      // parecendo que a tela "não obedece". Agora avisa em vez de gravar contradição.
+      if(!diaEscolhidoDentro){
+        const lbl=v==='FÉRIAS'?'as férias':'o afastamento';
+        showToast(`${v} não marcado: esse dia está fora do período cadastrado (${_fmtDataBRChk(f.ferias_ini)} a ${_fmtDataBRChk(f.ferias_fim)}). Ajuste as datas de ${lbl} primeiro.`,'error');
+        sel.value=novos[d];
+        sel.setAttribute('data-s',novos[d]);
+      }
       diasFinal=novos;
     }
   }
@@ -6311,7 +6388,10 @@ function removeComissoesFunc(i,btnEl){
     return;
   }
 
-  const mutator=wd=>{ wd={...wd}; wd.funcs=[...wd.funcs]; wd.funcs[i]={id:i,nome:'',tipo:'CLT / MENSALISTA',setor:'',dias:Array(7).fill('PRESENTE'),_removidoEm:Date.now()}; return wd; };
+  // _removidoNome guarda quem saiu da vaga: sem isso, a vaga fica anônima e a fusão
+  // automática (_comissoesMesclarFuncsFaltantes) reinsere a pessoa a partir da semana
+  // anterior no render seguinte, desfazendo a exclusão.
+  const mutator=wd=>{ wd={...wd}; wd.funcs=[...wd.funcs]; wd.funcs[i]={id:i,nome:'',tipo:'CLT / MENSALISTA',setor:'',dias:Array(7).fill('PRESENTE'),_removidoEm:Date.now(),_removidoNome:nomeAtual}; return wd; };
   comissoesWD=mutator(comissoesWD);
   delete comissoesVisibleSlots[i];
   delete comissoesExpanded[i];
@@ -6319,7 +6399,45 @@ function removeComissoesFunc(i,btnEl){
   showToast('Removendo...');
   comissoesOpsQueue.push(mutator);
   clearTimeout(comissoesSyncTimer);
-  flushComissoesOps().then(()=>showToast(comissoesLoadErr?'⚠️ Removido, mas falhou ao salvar':'✓ Removido e salvo'));
+  flushComissoesOps().then(async ()=>{
+    if(comissoesLoadErr){ showToast('⚠️ Removido, mas falhou ao salvar','error'); return; }
+    const n = await _comissoesRemoverDeSemanasFuturas(nomeAtual);
+    showToast(n>0
+      ? `✓ Removido e salvo (e de ${n} semana${n>1?'s':''} futura${n>1?'s':''})`
+      : '✓ Removido e salvo');
+  });
+}
+
+// Semana futura é projeção (foi criada por herança da semana anterior), não registro do
+// que aconteceu — então excluir alguém tem que valer pra frente também. Sem isso a pessoa
+// continuava lá nas semanas já criadas adiante e reaparecia assim que alguém navegasse,
+// dando a impressão de que a exclusão não pegou. Semanas passadas nunca são tocadas.
+async function _comissoesRemoverDeSemanasFuturas(nome){
+  const alvo = _comissoesNormNome(nome);
+  if(!alvo || comissoesWeekIdx==null) return 0;
+  try{
+    const lojaKey = comissoesLojaKey();
+    const allData = await fetchComissoesAllData(lojaKey);
+    let mexeu = 0;
+    Object.keys(allData).forEach(k=>{
+      if(!/^\d+$/.test(k) || Number(k) <= comissoesWeekIdx) return;
+      const wd = allData[k];
+      if(!wd || !Array.isArray(wd.funcs)) return;
+      let achou = false;
+      wd.funcs = wd.funcs.map((f,i)=>{
+        if(!f || !f.nome || _comissoesNormNome(f.nome) !== alvo) return f;
+        achou = true;
+        return {id: f.id != null ? f.id : i, nome:'', tipo:'CLT / MENSALISTA', setor:'',
+                dias:Array(7).fill('PRESENTE'), _removidoEm:Date.now(), _removidoNome:nome};
+      });
+      if(achou) mexeu++;
+    });
+    if(mexeu) await patchComissoesAllData(lojaKey, allData);
+    return mexeu;
+  }catch(e){
+    window.gnLogError && window.gnLogError('chk:removerSemanasFuturas', e);
+    return 0;
+  }
 }
 
 // =============================================
