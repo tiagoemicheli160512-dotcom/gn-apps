@@ -6219,6 +6219,17 @@ const BARRIS_SEMANAL_STATUS_LABEL = {
 // Mesmo limiar de BARRIS_VALIDADE_CONFIG/BARRIS_SEMANAL_TIPOS em gn-lojas.html (4 dias
 // pro Chopp Claro AMBEV, 12 pro Chopp de Vinho DuGomes).
 const BARRIS_SEMANAL_DIAS_CRITICO = { CLARO: 4, VINHO: 12 };
+// Mesmos catalogo_id de BARRIS_VALIDADE_CONFIG em gn-lojas.html — é de lá (aba 🍺 Barris
+// do app Lojas) que vêm as entradas de chopp com validade que são somadas aqui. O fallback
+// pelo nome do produto existe só pra não sumir com uma entrada se um dia cadastrarem um
+// terceiro barril no catálogo com outro id.
+const BARRIS_VALIDADE_TIPO = {
+  'd8d457b1-0fb9-4c58-952b-27c175700f1f': 'CLARO', // Barril Chopp claro 50 litros (AMBEV)
+  '60bbc4c5-a781-485b-9454-091d376d124a': 'VINHO', // Chopp Vinho Barril c/ 50 litros (DuGomes)
+};
+function _tipoBarrilEntrega(row) {
+  return BARRIS_VALIDADE_TIPO[row.catalogo_id] || (/vinho/i.test(row.produto || '') ? 'VINHO' : 'CLARO');
+}
 function _diasParaVencerBarrilSemanal(validadeISO) {
   const hoje = new Date(); hoje.setHours(0, 0, 0, 0);
   const v = new Date(validadeISO + 'T00:00:00');
@@ -6230,9 +6241,12 @@ function _agruparItensBarrisHome(itens) {
   const porChave = {};
   const grupos = [];
   (itens || []).forEach(item => {
-    const chave = item.status + '|' + (item.validade || '');
+    // `entregue` entra na chave de propósito: barril que acabou de chegar não se mistura
+    // com o que já estava contado, mesmo com o mesmo status/validade — é justamente o que
+    // a supervisão quer enxergar separado ("esses aqui foram entregues").
+    const chave = item.status + '|' + (item.validade || '') + '|' + (item.entregue ? 'E' : '');
     if (!porChave[chave]) {
-      porChave[chave] = { status: item.status, validade: item.validade, qtd: 0 };
+      porChave[chave] = { status: item.status, validade: item.validade, qtd: 0, entregue: !!item.entregue };
       grupos.push(porChave[chave]);
     }
     porChave[chave].qtd++;
@@ -6245,6 +6259,22 @@ function _agruparItensBarrisHome(itens) {
   });
   return grupos;
 }
+// Resumo da entrada de chopp que chegou depois da contagem da semana (o que a supervisão
+// pediu pra ver somado e marcado como entregue). Devolve [] quando não teve entrada nova —
+// aí quem chama simplesmente não mostra linha nenhuma.
+function _barrisEntregasResumo(d){
+  return ['CLARO', 'VINHO'].filter(t => (d.entregas && d.entregas[t] || []).length).map(t => ({
+    tipo: t,
+    emoji: t === 'CLARO' ? '🍺' : '🍷',
+    label: t === 'CLARO' ? 'Claro' : 'Vinho',
+    qtd: d.entregas[t].length,
+    trocados: (d.vaziosTrocados && d.vaziosTrocados[t]) || 0,
+  }));
+}
+function _barrisEntregaTxt(e){
+  const troca = e.trocados ? ` (${e.trocados} vazio${e.trocados > 1 ? 's' : ''} trocado${e.trocados > 1 ? 's' : ''})` : '';
+  return `${e.qtd} ${e.qtd > 1 ? 'barris' : 'barril'}${troca}`;
+}
 // Edição pela supervisão (só disponível aqui, no Painel de Gestão — quem preenche no dia
 // a dia continua sendo o estoquista na aba Pedido do app Lojas). Guardado por chave de
 // loja; cada item guarda o `id` original (null = item novo, ainda não existe no banco) pra
@@ -6256,9 +6286,16 @@ function _abrirEditarBarrisLoja(lojaKey){
   const d = _barrisSemGerenciaData && _barrisSemGerenciaData.porLoja[lojaKey];
   if (!d) return;
   _barrisSemEditLoja = lojaKey;
+  // Abre já com o estoque EFETIVO (contagem + entradas de chopp da semana, com os vazios
+  // trocados) e não com o que está gravado — é o que a supervisão vê no card, e salvar
+  // grava exatamente isso: os cheios entregues entram sem id (POST) e os vazios trocados
+  // somem da lista (DELETE, pela varredura em cima de itensAtual). Depois disso as linhas
+  // passam a existir de verdade e a entrega deixa de ser recalculada (a contagem fica mais
+  // nova que ela), então não tem risco de somar duas vezes.
+  const doEfetivo = i => ({ id: i.id || null, status: i.status, validade: i.validade || '' });
   _barrisSemEditItens = {
-    CLARO: (d.itensAtual.CLARO || []).map(i => ({ id: i.id, status: i.status, validade: i.validade || '' })),
-    VINHO: (d.itensAtual.VINHO || []).map(i => ({ id: i.id, status: i.status, validade: i.validade || '' })),
+    CLARO: (d.itensEfetivos.CLARO || []).map(doEfetivo),
+    VINHO: (d.itensEfetivos.VINHO || []).map(doEfetivo),
   };
   renderDashboard();
 }
@@ -6367,13 +6404,24 @@ async function _loadBarrisSemanalGerencia(){
   const slugs = lojas.map(k => LOJA_SLUG_HOME[k]).filter(Boolean);
   const semanaAtualIni = _weekRange(0).dates[0];
   const semanaAnteriorIni = _weekRange(-1).dates[0];
-  const [contagens, confirmacoes] = await Promise.all([
-    window.gnFetchJson(`${SB_URL}/rest/v1/gn_barris_semanal_contagem?loja_slug=in.(${slugs.join(',')})&semana_inicio=in.(${semanaAtualIni},${semanaAnteriorIni})&select=id,loja_slug,semana_inicio,tipo,status,validade`, H, 'barrisSem:contagens', []),
+  const [contagens, confirmacoes, entregas] = await Promise.all([
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_barris_semanal_contagem?loja_slug=in.(${slugs.join(',')})&semana_inicio=in.(${semanaAtualIni},${semanaAnteriorIni})&select=id,loja_slug,semana_inicio,tipo,status,validade,criado_em`, H, 'barrisSem:contagens', []),
     window.gnFetchJson(`${SB_URL}/rest/v1/gn_barris_semanal_confirmacao?loja_slug=in.(${slugs.join(',')})&semana_inicio=eq.${semanaAtualIni}&select=loja_slug,confirmado_por,confirmado_em`, H, 'barrisSem:confirmacoes', []),
+    // Entradas de chopp com validade lançadas na aba 🍺 Barris do app Lojas (o estoquista
+    // informa a validade na hora de receber a entrega). Só as ATIVAS: um barril já
+    // finalizado chegou e acabou, e nesse caso a troca se desfaz sozinha (voltou a ser um
+    // casco vazio), então somar seria mentir sobre o estoque de agora.
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_barris_validade?loja_slug=in.(${slugs.join(',')})&status=eq.ATIVO&criado_em=gte.${semanaAtualIni}T00:00:00-03:00&select=id,loja_slug,catalogo_id,produto,validade,criado_em`, H, 'barrisSem:entregas', []),
   ]);
   const slugToLoja = Object.fromEntries(lojas.map(k => [LOJA_SLUG_HOME[k], k]));
   const porLoja = {};
-  lojas.forEach(k => { porLoja[k] = { atual: {CLARO:0, VINHO:0}, anterior: {CLARO:0, VINHO:0}, itensAtual: {CLARO:[], VINHO:[]}, confirmado: null }; });
+  lojas.forEach(k => { porLoja[k] = {
+    atual: {CLARO:0, VINHO:0}, anterior: {CLARO:0, VINHO:0},
+    itensAtual: {CLARO:[], VINHO:[]},      // o que está gravado de fato em gn_barris_semanal_contagem
+    itensEfetivos: {CLARO:[], VINHO:[]},   // itensAtual + entregas novas − vazios trocados (é o que aparece na tela)
+    entregas: {CLARO:[], VINHO:[]}, vaziosTrocados: {CLARO:0, VINHO:0},
+    contagemEm: null, confirmado: null,
+  }; });
   (contagens || []).forEach(r => {
     const k = slugToLoja[r.loja_slug];
     if (!k || !porLoja[k]) return;
@@ -6381,11 +6429,43 @@ async function _loadBarrisSemanalGerencia(){
     if (alvo && alvo[r.tipo] != null) alvo[r.tipo]++;
     if (r.semana_inicio === semanaAtualIni && porLoja[k].itensAtual[r.tipo]) {
       porLoja[k].itensAtual[r.tipo].push({ id: r.id, status: r.status, validade: r.validade });
+      // Momento da contagem = linha mais nova da semana (a contagem é feita de uma vez só;
+      // edição da supervisão que acrescenta barril também empurra essa marca pra frente).
+      if (!porLoja[k].contagemEm || r.criado_em > porLoja[k].contagemEm) porLoja[k].contagemEm = r.criado_em;
     }
   });
   (confirmacoes || []).forEach(r => {
     const k = slugToLoja[r.loja_slug];
     if (k && porLoja[k]) porLoja[k].confirmado = { por: r.confirmado_por, em: r.confirmado_em };
+  });
+  // Entrega só entra aqui se for POSTERIOR à contagem da semana: se o barril chegou antes,
+  // o estoquista já contou ele fisicamente e somar de novo dobraria o estoque. Loja que
+  // ainda não contou nessa semana não tem marca nenhuma — aí toda entrega da semana conta.
+  (entregas || []).forEach(r => {
+    const k = slugToLoja[r.loja_slug];
+    if (!k || !porLoja[k]) return;
+    if (porLoja[k].contagemEm && new Date(r.criado_em) <= new Date(porLoja[k].contagemEm)) return;
+    porLoja[k].entregas[_tipoBarrilEntrega(r)].push({ validade: r.validade || '', criado_em: r.criado_em });
+  });
+  // Substituição automática: cada barril cheio que chega troca com um casco vazio (o
+  // motorista leva o vazio e deixa o cheio) — 13 vazios + entrada de 3 cheios = 10 vazios
+  // e 3 cheios a mais. É o mesmo acerto que _ajustarBarrisVaziosAuto já faz no contador da
+  // aba Barris do app Lojas, só que aqui em cima da contagem semanal. Nunca fica negativo:
+  // se chegou mais barril do que tinha casco, o excedente só soma como cheio.
+  lojas.forEach(k => {
+    const d = porLoja[k];
+    ['CLARO', 'VINHO'].forEach(tipo => {
+      let aTrocar = d.entregas[tipo].length;
+      const efetivos = [];
+      (d.itensAtual[tipo] || []).forEach(i => {
+        if (i.status === 'VAZIO' && aTrocar > 0) { aTrocar--; return; }
+        efetivos.push(i);
+      });
+      d.vaziosTrocados[tipo] = d.entregas[tipo].length - aTrocar;
+      d.entregas[tipo].forEach(e => efetivos.push({ id: null, status: 'CHEIO', validade: e.validade, entregue: true }));
+      d.itensEfetivos[tipo] = efetivos;
+      d.atual[tipo] = efetivos.length;
+    });
   });
   _barrisSemGerenciaData = { porLoja, semanaAtualIni, semanaAnteriorIni };
   _barrisSemGerenciaLoaded = true;
@@ -6488,7 +6568,7 @@ function _buildBarrisSemanalPanel(){
     // (isso ficava ambíguo/confuso quando as linhas quebravam ou os totais eram baixos).
     // Itens iguais (mesmo status + validade) viram uma linha só com quantidade, e
     // validades perto de vencer (mesmo limiar do app Lojas) ficam destacadas.
-    const itensDoTipo = (tipo, emoji) => _agruparItensBarrisHome(d.itensAtual[tipo]).map(g => {
+    const itensDoTipo = (tipo, emoji) => _agruparItensBarrisHome(d.itensEfetivos[tipo]).map(g => {
       const dias = g.validade ? _diasParaVencerBarrilSemanal(g.validade) : null;
       const diasCritico = BARRIS_SEMANAL_DIAS_CRITICO[tipo] || 7;
       const nivel = dias === null ? 'ok' : (dias < 0 ? 'vencido' : (dias <= diasCritico ? 'critico' : 'ok'));
@@ -6499,12 +6579,19 @@ function _buildBarrisSemanalPanel(){
       const qtdTxt = `${g.qtd}× `;
       // Barril Vazio não tem validade — não faz sentido anunciar "sem validade" pra ele.
       const venc = g.validade ? 'venc. ' + fmtSemana(g.validade) : '';
+      const tagEntrega = g.entregue ? ' <span style="color:#16a34a;font-weight:800">📦 entregue</span>' : '';
       return `<div style="font-size:10px;color:${cor};font-weight:${nivel==='ok'?400:700};display:flex;justify-content:space-between;gap:8px;padding:2px 0">
-        <span>${emoji} ${qtdTxt}${BARRIS_SEMANAL_STATUS_LABEL[g.status] || g.status}</span>
+        <span>${emoji} ${qtdTxt}${BARRIS_SEMANAL_STATUS_LABEL[g.status] || g.status}${tagEntrega}</span>
         <span style="white-space:nowrap">${venc}${aviso}</span>
       </div>`;
     }).join('');
     const todosItens = itensDoTipo('CLARO','🍺') + itensDoTipo('VINHO','🍷');
+    const entregasResumo = _barrisEntregasResumo(d);
+    const entregasHtml = entregasResumo.length
+      ? `<div style="margin-top:6px;padding:5px 8px;background:rgba(22,163,74,.07);border-radius:6px;font-size:10px;color:#166534;font-weight:700">
+          📦 Entrada de chopp nesta semana (já somada acima): ${entregasResumo.map(e => `${e.emoji} ${_barrisEntregaTxt(e)}`).join(' · ')}
+        </div>`
+      : '';
     const editando = _barrisSemEditLoja === k;
     const editBtn = `<button onclick="_abrirEditarBarrisLoja('${k}')" title="Editar (supervisão)" style="background:none;border:1px solid rgba(0,0,0,.15);border-radius:6px;color:rgba(0,0,0,.55);font-size:10px;padding:2px 7px;cursor:pointer;font-family:inherit">✏️ Editar</button>`;
     const painelEdicao = editando ? _buildEditPanelBarris(k) : '';
@@ -6518,11 +6605,13 @@ function _buildBarrisSemanalPanel(){
         <div style="flex:1;font-size:11px;color:rgba(0,0,0,.6)">🍷 Vinho: <b>${d.atual.VINHO}</b> ${deltaHtml('VINHO')}</div>
       </div>
       ${todosItens && !editando ? `<div style="margin-top:6px;padding-top:6px;border-top:1px dashed rgba(0,0,0,.1)">${todosItens}</div>` : ''}
+      ${editando ? '' : entregasHtml}
       ${painelEdicao}
     </div>`;
   }).join('');
   return _barrisSemLojaFiltroHtml(porLoja) + reportBtns + `<div style="font-size:11px;color:rgba(0,0,0,.35);margin-bottom:12px">
-      Contagem semanal de barris (${fmtSemana(semanaAtualIni)}) vs semana passada (${fmtSemana(semanaAnteriorIni)}) — preenchida pelo estoquista na aba Pedido do app Lojas.</div>
+      Contagem semanal de barris (${fmtSemana(semanaAtualIni)}) vs semana passada (${fmtSemana(semanaAnteriorIni)}) — preenchida pelo estoquista na aba Pedido do app Lojas.<br>
+      📦 As entradas de chopp com validade lançadas na aba Barris do app Lojas depois da contagem já entram somadas aqui, cada barril cheio trocando um casco vazio.</div>
     ${linhas}`;
 }
 
@@ -6543,7 +6632,8 @@ function _barrisSemRelatorioTexto(){
     const aviso = nivel === 'vencido' ? ` ⚠️ VENCIDO há ${Math.abs(dias)}d` : nivel === 'critico' ? ` ⚠️ vence em ${dias}d` : '';
     const vencTxt = g.validade ? ` (venc. ${fmtSemana(g.validade)})` : '';
     const qtdTxt = `${g.qtd}x `;
-    return `    - ${qtdTxt}${label}${vencTxt}${aviso}`;
+    const tagEntrega = g.entregue ? ' [entregue]' : '';
+    return `    - ${qtdTxt}${label}${tagEntrega}${vencTxt}${aviso}`;
   }).join('\n');
   const lojasFiltro = _barrisSemLojasDoRelatorio(porLoja);
   const tituloFiltro = lojasFiltro.length < Object.keys(porLoja).length
@@ -6554,9 +6644,11 @@ function _barrisSemRelatorioTexto(){
     const d = porLoja[k];
     msg += `\n${LOJA_DISPLAY[k]||k}\n`;
     msg += `  Claro: ${d.atual.CLARO}\n`;
-    if (d.itensAtual.CLARO.length) msg += itensTxt(d.itensAtual.CLARO, 'CLARO') + '\n';
+    if (d.itensEfetivos.CLARO.length) msg += itensTxt(d.itensEfetivos.CLARO, 'CLARO') + '\n';
     msg += `  Vinho: ${d.atual.VINHO}\n`;
-    if (d.itensAtual.VINHO.length) msg += itensTxt(d.itensAtual.VINHO, 'VINHO') + '\n';
+    if (d.itensEfetivos.VINHO.length) msg += itensTxt(d.itensEfetivos.VINHO, 'VINHO') + '\n';
+    const entregas = _barrisEntregasResumo(d);
+    if (entregas.length) msg += `  Entrada de chopp nesta semana: ${entregas.map(e => `${e.label} ${_barrisEntregaTxt(e)}`).join(' | ')}\n`;
     msg += d.confirmado ? `  Confirmado por ${d.confirmado.por || '—'}\n` : `  Pendente — ainda não contou essa semana\n`;
   });
   return { msg, titulo: 'Contagem Semanal de Barris' + tituloFiltro };
@@ -6573,7 +6665,8 @@ function gerarWppBarris(){
     const aviso = nivel === 'vencido' ? ` ⚠️ *VENCIDO há ${Math.abs(dias)}d*` : nivel === 'critico' ? ` ⚠️ *vence em ${dias}d*` : '';
     const vencTxt = g.validade ? ` (venc. ${fmtSemana(g.validade)})` : '';
     const qtdTxt = `${g.qtd}x `;
-    return `    _${qtdTxt}${label}_${vencTxt}${aviso}`;
+    const tagEntrega = g.entregue ? ' 📦' : '';
+    return `    _${qtdTxt}${label}_${tagEntrega}${vencTxt}${aviso}`;
   }).join('\n');
   const lojasFiltro = _barrisSemLojasDoRelatorio(porLoja);
   const tituloFiltro = lojasFiltro.length < Object.keys(porLoja).length
@@ -6584,9 +6677,11 @@ function gerarWppBarris(){
     const d = porLoja[k];
     msg += `\n🏪 *${LOJA_DISPLAY[k]||k}*\n`;
     msg += `  🍺 Claro: ${d.atual.CLARO}\n`;
-    if (d.itensAtual.CLARO.length) msg += itensTxt(d.itensAtual.CLARO, 'CLARO') + '\n';
+    if (d.itensEfetivos.CLARO.length) msg += itensTxt(d.itensEfetivos.CLARO, 'CLARO') + '\n';
     msg += `  🍷 Vinho: ${d.atual.VINHO}\n`;
-    if (d.itensAtual.VINHO.length) msg += itensTxt(d.itensAtual.VINHO, 'VINHO') + '\n';
+    if (d.itensEfetivos.VINHO.length) msg += itensTxt(d.itensEfetivos.VINHO, 'VINHO') + '\n';
+    const entregas = _barrisEntregasResumo(d);
+    if (entregas.length) msg += `  📦 Entrada de chopp nesta semana: ${entregas.map(e => `${e.emoji} ${_barrisEntregaTxt(e)}`).join(' | ')}\n`;
     msg += d.confirmado ? `  ✅ Confirmado por ${d.confirmado.por || '—'}\n` : `  ⚠ Pendente — ainda não contou essa semana\n`;
   });
   window.open('https://wa.me/?text='+encodeURIComponent(msg),'_blank');
