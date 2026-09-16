@@ -6335,6 +6335,7 @@ let feriasGeralData = null;   // [{id, nome, setor, inicio, fim, tipo, aq_ini, a
 let feriasGeralLoading = false;
 let feriasAno = new Date().getFullYear();
 let feriasFormAberto = null;  // nome do funcionário com o form de novo período aberto
+let feriasEditandoId = null;  // id do período sendo EDITADO (null = cadastro novo)
 let feriasFormTipo = {};      // key(nome) -> 'ferias'|'afastamento', tipo selecionado no form aberto
 let _feriasAllDataCache = null; // allData completo (todas as semanas) — reusado pra contar faltas sem refetch
 
@@ -6579,10 +6580,19 @@ async function salvarFeriasGeral(nome, setor){
   }
   const lista=Array.isArray(allData.ferias_geral)?[...allData.ferias_geral]:[];
 
+  // Edição: o período em edição não pode contar contra ele mesmo no limite de dias/
+  // fracionamento, senão corrigir 30 pra 24 dias bateria em "excede o direito" (30+24).
+  const editandoId=feriasEditandoId;
+  const periodoOriginal=editandoId ? lista.find(p=>p.id===editandoId) : null;
+  if(editandoId && !periodoOriginal){
+    showToast('⚠️ Esse período não existe mais (foi excluído em outra tela). Atualize e tente de novo.','error');
+    feriasEditandoId=null; renderFeriasStore(); return;
+  }
+
   let mesmoAquisitivo=[];
   if(tipo==='ferias'){
     const nomeNorm=nome.trim().toLowerCase();
-    mesmoAquisitivo=lista.filter(p=>(p.nome||'').trim().toLowerCase()===nomeNorm && p.aq_ini===aqIni && p.aq_fim===aqFim);
+    mesmoAquisitivo=lista.filter(p=>(p.nome||'').trim().toLowerCase()===nomeNorm && p.aq_ini===aqIni && p.aq_fim===aqFim && p.id!==editandoId);
     if(mesmoAquisitivo.length>=3){
       showToast('⚠️ Máximo de 3 períodos por período aquisitivo (fracionamento).','error');
       return;
@@ -6597,10 +6607,23 @@ async function salvarFeriasGeral(nome, setor){
   }
 
   feriasFormAberto=null;
+  feriasEditandoId=null;
   try{
-    const entry={ id:'fer_'+Date.now()+'_'+Math.random().toString(36).slice(2,6), nome, setor:setor||'', inicio:ini, fim, tipo, criadoEm:new Date().toISOString() };
+    const entry={
+      id: periodoOriginal ? periodoOriginal.id : 'fer_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),
+      nome, setor:setor||'', inicio:ini, fim, tipo,
+      criadoEm: periodoOriginal ? periodoOriginal.criadoEm : new Date().toISOString(),
+    };
     if(tipo==='ferias'){ entry.aq_ini=aqIni; entry.aq_fim=aqFim; }
-    lista.push(entry);
+    if(periodoOriginal){
+      entry.editadoEm=new Date().toISOString();
+      // Tira da Escala as marcas do período ANTIGO antes de aplicar as novas — senão os
+      // dias que saíram do período (o caso de encurtar) ficariam como FÉRIAS pra sempre.
+      _aplicarFeriasNaEscala(allData, periodoOriginal.nome, periodoOriginal.inicio, periodoOriginal.fim, false, periodoOriginal.tipo);
+      lista.splice(lista.findIndex(p=>p.id===periodoOriginal.id), 1, entry);
+    } else {
+      lista.push(entry);
+    }
     allData.ferias_geral=lista;
     _aplicarFeriasNaEscala(allData, nome, ini, fim, true, tipo);
     await patchComissoesAllData(comissoesLojaKey(), allData);
@@ -6608,7 +6631,12 @@ async function salvarFeriasGeral(nome, setor){
     _feriasAllDataCache=allData;
     // A semana aberta agora pode ter mudado — recarrega pra refletir na Escala
     if(comissoesWeekIdx!=null) loadComissoesData();
-    showToast(tipo==='afastamento'?'🩺 Afastamento salvo e marcado na Escala':'🏖 Férias salvas e marcadas na Escala');
+    if(periodoOriginal){
+      _logAuditoriaChk('EDITAR_FERIAS',{nome, de:{inicio:periodoOriginal.inicio, fim:periodoOriginal.fim}, para:{inicio:ini, fim}});
+    }
+    showToast(periodoOriginal
+      ? (tipo==='afastamento'?'🩺 Afastamento atualizado na Escala':'🏖 Férias atualizadas na Escala')
+      : (tipo==='afastamento'?'🩺 Afastamento salvo e marcado na Escala':'🏖 Férias salvas e marcadas na Escala'));
     if(tipo==='ferias'){
       const grupoFinal=[...mesmoAquisitivo, {inicio:ini, fim}];
       if(grupoFinal.length>=2 && !grupoFinal.some(p=>_diasPeriodoFerias(p.inicio,p.fim)>=14)){
@@ -6649,8 +6677,20 @@ async function excluirFeriasGeral(periodoId){
 }
 
 function _feriasFormKey(nome){ return (nome||'').replace(/[^a-zA-Z0-9]/g,'_'); }
-function abrirFormFerias(nome){ feriasFormAberto=nome; feriasFormTipo[_feriasFormKey(nome)]='ferias'; renderFeriasStore(); }
-function fecharFormFerias(){ feriasFormAberto=null; renderFeriasStore(); }
+function abrirFormFerias(nome){ feriasFormAberto=nome; feriasEditandoId=null; feriasFormTipo[_feriasFormKey(nome)]='ferias'; renderFeriasStore(); }
+function fecharFormFerias(){ feriasFormAberto=null; feriasEditandoId=null; renderFeriasStore(); }
+// Editar um período já cadastrado, em vez de só excluir e cadastrar de novo. Sem isso,
+// quem salvava o período errado ficava preso: o cadastro novo SOMA ao que já existe, então
+// tentar corrigir pra menos dias batia em "Total de dias excede o direito" e não salvava
+// nunca (caso real da Nova América — 30 dias salvos, sem conseguir reduzir depois).
+function editarFeriasGeral(periodoId){
+  const p=(feriasGeralData||[]).find(x=>x.id===periodoId);
+  if(!p){ showToast('⚠️ Período não encontrado — atualize a tela.','error'); return; }
+  feriasFormAberto=(p.nome||'').trim();
+  feriasEditandoId=periodoId;
+  feriasFormTipo[_feriasFormKey(feriasFormAberto)]=p.tipo==='afastamento'?'afastamento':'ferias';
+  renderFeriasStore();
+}
 function _setFeriasFormTipo(key,tipo){ feriasFormTipo[key]=tipo; renderFeriasStore(); }
 function feriasAnoNav(dir){ feriasAno+=dir; renderFeriasStore(); }
 
@@ -6768,13 +6808,21 @@ function renderFeriasStore(){
               ${p.tipo==='afastamento'?`<span style="font-size:9px;font-weight:800;color:#0d9488;background:rgba(20,184,166,.15);border-radius:6px;padding:1px 6px;margin-left:6px">AFASTAMENTO</span>`:''}
               ${p.aq_ini&&p.aq_fim?`<div style="font-size:9px;color:#475569;margin-top:1px">Aquisitivo: ${_fmtDataBRChk(p.aq_ini)} – ${_fmtDataBRChk(p.aq_fim)}${prazoInterno?` · prazo interno ${_fmtDataBRChk(prazoInterno)}`:''}</div>`:''}
             </div>
-            <button onclick="excluirFeriasGeral('${p.id}')" style="background:none;border:none;color:rgba(0,0,0,.3);font-size:14px;cursor:pointer;padding:0 4px">✕</button>
+            <div style="display:flex;align-items:center;gap:2px;flex-shrink:0">
+              <button onclick="editarFeriasGeral('${p.id}')" title="Editar este período" style="background:none;border:none;color:rgba(0,0,0,.35);font-size:12px;cursor:pointer;padding:0 4px">✏️</button>
+              <button onclick="excluirFeriasGeral('${p.id}')" title="Excluir este período" style="background:none;border:none;color:rgba(0,0,0,.3);font-size:14px;cursor:pointer;padding:0 4px">✕</button>
+            </div>
           </div>`;
         }).join('')
       : `<div style="font-size:10px;color:#475569;margin-top:4px">Nenhuma férias em ${feriasAno}</div>`;
     const key=_feriasFormKey(nome);
     const tipoAtual=feriasFormTipo[key]==='afastamento'?'afastamento':'ferias';
+    // Em edição o form abre preenchido com o período escolhido e salva por cima dele.
+    const pEdit=feriasEditandoId ? periodosTodos.find(x=>x.id===feriasEditandoId) : null;
+    const vIni=pEdit?escHtml(pEdit.inicio):'', vFim=pEdit?escHtml(pEdit.fim):'';
+    const vAqIni=pEdit&&pEdit.aq_ini?escHtml(pEdit.aq_ini):'', vAqFim=pEdit&&pEdit.aq_fim?escHtml(pEdit.aq_fim):'';
     const formHtml=feriasFormAberto===nome ? `<div style="margin-top:8px;padding:10px;background:rgba(0,0,0,.02);border:1px solid rgba(0,0,0,.08);border-radius:10px">
+        ${pEdit?`<div style="font-size:10px;font-weight:800;color:#b45309;background:rgba(245,158,11,.14);border-radius:7px;padding:5px 8px;margin-bottom:10px">✏️ Editando o período ${_fmtDataBRChk(pEdit.inicio)} – ${_fmtDataBRChk(pEdit.fim)} — salvar substitui esse período (não cria outro).</div>`:''}
         <div style="display:flex;gap:6px;margin-bottom:10px">
           <button type="button" onclick="_setFeriasFormTipo('${key}','ferias')" style="flex:1;background:${tipoAtual==='ferias'?'var(--gn-color,#E8580A)':'rgba(0,0,0,.06)'};color:${tipoAtual==='ferias'?'#fff':'#1A1D23'};border:1px solid ${tipoAtual==='ferias'?'var(--gn-color,#E8580A)':'rgba(0,0,0,.12)'};border-radius:8px;padding:6px;font-size:11px;font-weight:800;cursor:pointer">🏖 Férias</button>
           <button type="button" onclick="_setFeriasFormTipo('${key}','afastamento')" style="flex:1;background:${tipoAtual==='afastamento'?'#0d9488':'rgba(0,0,0,.06)'};color:${tipoAtual==='afastamento'?'#fff':'#1A1D23'};border:1px solid ${tipoAtual==='afastamento'?'#0d9488':'rgba(0,0,0,.12)'};border-radius:8px;padding:6px;font-size:11px;font-weight:800;cursor:pointer">🩺 Afastamento</button>
@@ -6783,11 +6831,11 @@ function renderFeriasStore(){
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px">
           <div>
             <div style="font-size:9px;color:#1A1D23;margin-bottom:2px">Aquisitivo início</div>
-            <input type="date" id="ferias-aq-ini-${key}" onchange="_atualizarInfoAquisitivoFeriasChk('${key}','${nomeEsc}')" style="background:#EEF1F4;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#1A1D23;font-family:inherit">
+            <input type="date" id="ferias-aq-ini-${key}" value="${vAqIni}" onchange="_atualizarInfoAquisitivoFeriasChk('${key}','${nomeEsc}')" style="background:#EEF1F4;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#1A1D23;font-family:inherit">
           </div>
           <div>
             <div style="font-size:9px;color:#1A1D23;margin-bottom:2px">Aquisitivo fim</div>
-            <input type="date" id="ferias-aq-fim-${key}" onchange="_atualizarInfoAquisitivoFeriasChk('${key}','${nomeEsc}')" style="background:#EEF1F4;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#1A1D23;font-family:inherit">
+            <input type="date" id="ferias-aq-fim-${key}" value="${vAqFim}" onchange="_atualizarInfoAquisitivoFeriasChk('${key}','${nomeEsc}')" style="background:#EEF1F4;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#1A1D23;font-family:inherit">
           </div>
         </div>
         <div id="ferias-prazo-${key}" style="font-size:10px;color:#475569;margin-bottom:10px"></div>
@@ -6796,13 +6844,13 @@ function renderFeriasStore(){
         <div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap">
           <div>
             <div style="font-size:9px;color:#1A1D23;margin-bottom:2px">Início</div>
-            <input type="date" id="ferias-ini-${key}" style="background:#EEF1F4;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#1A1D23;font-family:inherit">
+            <input type="date" id="ferias-ini-${key}" value="${vIni}" style="background:#EEF1F4;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#1A1D23;font-family:inherit">
           </div>
           <div>
             <div style="font-size:9px;color:#1A1D23;margin-bottom:2px">Fim</div>
-            <input type="date" id="ferias-fim-${key}" style="background:#EEF1F4;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#1A1D23;font-family:inherit">
+            <input type="date" id="ferias-fim-${key}" value="${vFim}" style="background:#EEF1F4;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:#1A1D23;font-family:inherit">
           </div>
-          <button onclick="salvarFeriasGeral('${nomeEsc}','${(f.setor||'').replace(/'/g,"\\'")}')" style="background:var(--gn-color,#E8580A);color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:11px;font-weight:800;cursor:pointer">Salvar</button>
+          <button onclick="salvarFeriasGeral('${nomeEsc}','${(f.setor||'').replace(/'/g,"\\'")}')" style="background:var(--gn-color,#E8580A);color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:11px;font-weight:800;cursor:pointer">${pEdit?'Salvar alterações':'Salvar'}</button>
           <button onclick="fecharFormFerias()" style="background:rgba(0,0,0,.06);border:1px solid rgba(0,0,0,.1);color:#1A1D23;border-radius:8px;padding:7px 12px;font-size:11px;cursor:pointer">Cancelar</button>
         </div>
       </div>` : '';
