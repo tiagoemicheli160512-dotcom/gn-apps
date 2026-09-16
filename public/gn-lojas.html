@@ -744,7 +744,6 @@ let pedidoAll    = {};  // lojaKey -> {item_id: {atual, pedido, obs}}
 let provisoesEntrega = []; // entregas pendentes (AGUARDANDO) desta loja
 let provisoesHistorico = []; // entregas já confirmadas desta loja (últimos 30 dias)
 let barrisAtivos = []; // barris de chopp (AMBEV claro / DuGomes vinho) em acompanhamento de validade
-let barrisVaziosState = {}; // catalogo_id -> linha de gn_barris_vazios (contagem de vazios + base) dessa loja
 // Os dois únicos catalogo_id de barril de chopp hoje (grupo BEBIDAS/subgrupo CHOPP no
 // catálogo) — cada um com seu próprio limiar de "crítico" combinado com o usuário.
 const BARRIS_VALIDADE_CONFIG = {
@@ -9416,36 +9415,11 @@ function render() {
 
   } else if (tab === "barris") {
     const _barrisOrdenados = [...barrisAtivos].sort((a, b) => a.validade.localeCompare(b.validade));
-    // Contagem de barris vazios (Claro/Vinho) — a 1ª vez que a loja salva pra um tipo
-    // estabelece a "base" (vazios + cheios naquele momento); salvamentos seguintes só
-    // atualizam a quantidade vazia, sem mexer na base — se o total (vazios+cheios atuais)
-    // ficar diferente da base, avisa aqui e sinaliza divergência pro setor de Pedidos
-    // resolver (só ele pode corrigir a base, depois de checar com a loja).
-    const _barrisVaziosHtml = (() => {
-      const linhas = Object.keys(BARRIS_VALIDADE_CONFIG).map(cid => {
-        const cfg = BARRIS_VALIDADE_CONFIG[cid];
-        const cheios = barrisAtivos.filter(b => b.catalogo_id === cid).length;
-        const st = barrisVaziosState[cid];
-        const vaziosSalvos = st ? st.qtd_vazios : '';
-        const total = (parseFloat(vaziosSalvos) || 0) + cheios;
-        const temBase = st && st.baseline_total != null;
-        const divergente = temBase && Number(st.baseline_total) !== total;
-        return `<div style="padding:10px 12px;border-bottom:1px solid rgba(0,0,0,.05)">
-          <div style="font-size:12px;font-weight:700;color:#1A1D23;margin-bottom:6px">${cfg.label}</div>
-          <div style="display:flex;align-items:center;gap:8px">
-            <input id="bv_vazios_${cid}" type="number" min="0" step="1" value="${vaziosSalvos}" placeholder="Qtd. vazios"
-              style="flex:1;background:#FFFFFF;border:1px solid #E1E4E9;border-radius:8px;color:#475569;padding:7px 8px;font-size:13px;box-sizing:border-box"/>
-            <button onclick="salvarBarrisVazios('${cid}')" style="background:#059669;border:none;border-radius:8px;padding:8px 12px;color:#fff;font-weight:700;font-size:11px;white-space:nowrap">Salvar</button>
-          </div>
-          <div style="font-size:10px;color:#64748b;margin-top:5px">🍺 ${cheios} cheio${cheios===1?'':'s'} + ${vaziosSalvos||0} vazio${(vaziosSalvos||0)===1?'':'s'} = <b>${total}</b> total${temBase?` (base: ${st.baseline_total})`:''}</div>
-          ${divergente ? `<div style="font-size:10px;color:#DC2626;font-weight:700;margin-top:3px">⚠️ Contagem diferente da base — setor de Pedidos foi avisado</div>` : ''}
-        </div>`;
-      }).join('');
-      return `<div class="card" style="margin-top:10px;padding:0">
-        <div style="padding:10px 12px;border-bottom:1px solid rgba(0,0,0,.08);font-size:11px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:.04em">📦 Barris vazios em loja</div>
-        ${linhas}
-      </div>`;
-    })();
+    // A loja NÃO conta mais barril vazio aqui. Isso virou responsabilidade da supervisão,
+    // na aba Barris do Painel de Gestão (gn-home.html), onde a quantidade de vazios é
+    // digitada por tipo e as entradas de chopp já trocam vazio por cheio sozinhas. Esta
+    // aba ficou só com a informação dos barris recebidos (validade/finalizar), que é o que
+    // a loja realmente precisa acompanhar no dia a dia.
     c.innerHTML = `
     <div class="section">
       <div style="display:flex;align-items:center;justify-content:space-between">
@@ -9453,7 +9427,6 @@ function render() {
         <button onclick="carregarBarris(false)" style="background:rgba(0,0,0,.07);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:5px 10px;color:#475569;font-size:11px">↻ Atualizar</button>
       </div>
       <div style="font-size:11px;color:#64748b;margin-top:6px;line-height:1.4">Validade lançada ao confirmar a entrega na aba Entrega. Toque em "Finalizar" quando o barril acabar no tirador.</div>
-      ${_barrisVaziosHtml}
       ${_barrisOrdenados.length === 0
         ? `<div class="card" style="padding:16px;text-align:center;color:#475569;font-size:12px;margin-top:10px">Nenhum barril em acompanhamento no momento.</div>`
         : `<div class="card" style="margin-top:10px;padding:0">
@@ -10336,13 +10309,10 @@ async function carregarCorrecoesSetor(silent) {
 async function carregarBarris(silent) {
   try {
     const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
-    const [rows, vaziosRows] = await Promise.all([
-      sbRequest('gn_barris_validade?loja_slug=eq.' + slug + '&status=eq.ATIVO&select=*&order=validade', { method: 'GET' }),
-      sbRequest('gn_barris_vazios?loja_slug=eq.' + slug + '&select=*', { method: 'GET' }),
-    ]);
+    // Só os barris recebidos: a contagem de vazios saiu daqui (é feita na aba Barris do
+    // Painel de Gestão), então não precisa mais buscar gn_barris_vazios nesta tela.
+    const rows = await sbRequest('gn_barris_validade?loja_slug=eq.' + slug + '&status=eq.ATIVO&select=*&order=validade', { method: 'GET' });
     barrisAtivos = rows || [];
-    barrisVaziosState = {};
-    (vaziosRows || []).forEach(function(r) { barrisVaziosState[r.catalogo_id] = r; });
     const dot = document.getElementById('dot-barris');
     if (dot) dot.classList.toggle('hidden', !_temBarrilCritico());
     mostrarAvisoBarrisSeNecessario();
@@ -10434,6 +10404,8 @@ async function _confirmarFinalizarBarril(id) {
 // nova (-N vazios, o casco vazio sai da loja na troca com o motorista). Nunca deixa
 // ficar negativo. Falha aqui é best-effort (não bloqueia finalizar/receber, que já
 // aconteceram de verdade) — só não atualiza o contador dessa vez.
+// Continua valendo mesmo depois que a contagem de vazios saiu desta tela: é o que mantém
+// o resumo de cascos do setor de Pedidos (gn-pedidos.html) em dia sem a loja digitar nada.
 async function _ajustarBarrisVaziosAuto(catalogoId, delta, motivo) {
   try {
     const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
@@ -10449,47 +10421,7 @@ async function _ajustarBarrisVaziosAuto(catalogoId, delta, motivo) {
       method: 'POST', headers: { 'Prefer': 'return=minimal,resolution=merge-duplicates' },
       body: JSON.stringify(body),
     });
-    barrisVaziosState[catalogoId] = Object.assign({}, atual, body);
   } catch (e) { /* best-effort — não bloqueia o fluxo principal */ }
-}
-
-// Salva a contagem de barris VAZIOS (cascos) por tipo — a primeira vez que a loja salva
-// pra um catalogo_id estabelece a "base" (vazios + cheios naquele momento, guardada em
-// baseline_total); salvamentos seguintes só atualizam qtd_vazios, sem tocar na base — é
-// ela que serve de referência pro setor de Pedidos apontar divergência (ver
-// gn-pedidos.html) se o total (vazios+cheios) mudar sem explicação. Depois da base
-// definida, o contador segue os eventos automáticos de finalizar/receber (ver
-// _ajustarBarrisVaziosAuto) — esse "Salvar" manual serve pra estabelecer a base e pra
-// recontagens físicas ocasionais (auditoria), não precisa ser refeito a cada barril. Só
-// Pedidos pode corrigir a base depois de checar com a loja.
-async function salvarBarrisVazios(catalogoId) {
-  const inputEl = document.getElementById('bv_vazios_' + catalogoId);
-  const vazios = Math.max(0, Math.round(parseFloat(inputEl ? inputEl.value : '') || 0));
-  const cheios = barrisAtivos.filter(function(b) { return b.catalogo_id === catalogoId; }).length;
-  const total = vazios + cheios;
-  const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
-  const usuario = (usuarioAtual && usuarioAtual.nome) || loja;
-  const atual = barrisVaziosState[catalogoId];
-  const agora = new Date().toISOString();
-  const body = {
-    loja: loja, loja_slug: slug, catalogo_id: catalogoId, qtd_vazios: vazios,
-    atualizado_em: agora, atualizado_por: usuario,
-  };
-  if (!atual || atual.baseline_total == null) {
-    body.baseline_total = total;
-    body.baseline_definida_em = agora;
-    body.baseline_definida_por = usuario;
-  }
-  try {
-    await sbRequest('gn_barris_vazios?on_conflict=loja_slug,catalogo_id', {
-      method: 'POST', headers: { 'Prefer': 'return=minimal,resolution=merge-duplicates' },
-      body: JSON.stringify(body),
-    });
-    showToast('✅ Contagem de barris vazios salva.');
-    carregarBarris();
-  } catch (e) {
-    showToast('⚠️ Erro ao salvar — tente de novo. ' + (e.message || ''));
-  }
 }
 
 // Editar validade de um barril já cadastrado não é imediato — a loja só REGISTRA a
