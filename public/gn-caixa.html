@@ -1010,6 +1010,12 @@ select option { background: var(--graf2); color: var(--txt); }
           oninput="atualizarRepiqueLocal(this)" onblur="salvarRepique(this)">
       </div>
     </div>
+    <!-- Buffet de feijoada (só sexta e sábado) e rodízio (todo dia) — o conteúdo é
+         montado por renderBuffet(), que monta os campos conforme o dia e a loja. -->
+    <div class="secao" id="secBuffet" style="display:none">
+      <h3 id="buffetTitulo">Buffet &amp; Rodízio</h3>
+      <div id="buffetCampos"></div>
+    </div>
     <div class="secao">
       <h3>Entradas</h3>
       <div id="resEntradas"></div>
@@ -1747,6 +1753,143 @@ function renderTudo() {
   $('dezRep').textContent = money(repique());
 }
 
+// ── BUFFET DE FEIJOADA E RODÍZIO ──────────────────────────────────────────────
+// Quantidade vendida lançada no fechamento do caixa: feijoada só na sexta e no sábado,
+// rodízio todo dia. Preços e regras de dia vêm de gn-lojas-config.js (GN_BUFFET_*), a
+// mesma fonte que o Painel de Gestão usa pra converter em R$ — os números não são
+// repetidos aqui. O valor é sempre calculado a partir da quantidade; nunca é digitado.
+const BUFFET_CAMPOS = ['feijoada_inteira', 'feijoada_meia', 'rodizio_inteira', 'rodizio_meia'];
+let _buffetChaveRender = null; // loja|caixa|data|status do que está montado na tela agora
+
+function buffetLojaUsa()        { return !GN_BUFFET_FORA.includes(S.loja); }
+function buffetObrigatorio()    { return buffetLojaUsa() && GN_BUFFET_OBRIGATORIO.includes(S.loja); }
+function buffetDow()            { return S.fech?.data ? gnBuffetDow(S.fech.data) : new Date().getDay(); }
+function buffetTemFeijoadaHoje(){ return buffetLojaUsa() && gnBuffetTemFeijoada(buffetDow()); }
+
+// Campos que precisam estar preenchidos hoje: rodízio sempre, feijoada só sexta/sábado.
+function buffetCamposDoDia() {
+  if (!buffetLojaUsa()) return [];
+  return buffetTemFeijoadaHoje() ? BUFFET_CAMPOS.slice() : ['rodizio_inteira', 'rodizio_meia'];
+}
+// Lê do input quando ele está na tela (não de S.fech): igual ao repique, o poll de 30s
+// troca S.fech por uma leitura do banco e levaria de volta o valor antigo se alguém
+// estivesse digitando. Sem input na tela (modo consulta), cai no que está gravado.
+function buffetQtdInput(campo) {
+  const el = $('bf_' + campo);
+  if (!el) {
+    const v = S.fech ? S.fech[campo] : null;
+    return v == null ? null : Math.max(0, parseInt(v, 10) || 0);
+  }
+  const t = String(el.value).trim();
+  if (t === '') return null;
+  return Math.max(0, parseInt(t, 10) || 0);
+}
+// Só as quantidades dos campos que valem hoje — o que não vale vai como null, pra não
+// deixar sobra de um dia em que o campo aparecia (ex.: feijoada de sábado num domingo).
+function buffetPayload() {
+  const doDia = buffetCamposDoDia();
+  const body = {};
+  BUFFET_CAMPOS.forEach(c => { body[c] = doDia.includes(c) ? buffetQtdInput(c) : null; });
+  return body;
+}
+function buffetFaltando() {
+  if (!buffetObrigatorio()) return [];
+  const LBL = { feijoada_inteira:'Feijoada inteira', feijoada_meia:'Feijoada meia',
+                rodizio_inteira:'Rodízio inteira',   rodizio_meia:'Rodízio meia' };
+  return buffetCamposDoDia().filter(c => buffetQtdInput(c) === null).map(c => LBL[c]);
+}
+
+function renderBuffet() {
+  const sec = $('secBuffet');
+  if (!sec) return;
+  if (!buffetLojaUsa() || S.modoConsulta) { sec.style.display = 'none'; return; }
+  sec.style.display = '';
+
+  // O poll de 30s chama renderFechar() sozinho; remontar o HTML com alguém digitando
+  // tiraria o foco e devolveria o valor do banco por cima do que está sendo digitado
+  // (mesmo motivo do guard de activeElement no repique). Nesse caso só recalcula os R$.
+  // Mas o guard só vale enquanto a TELA é a mesma: se mudou a loja, o dia (que decide se
+  // tem feijoada e qual preço de rodízio) ou o caixa aberto, os campos precisam ser
+  // remontados de qualquer jeito — senão ficariam os campos do dia anterior na tela.
+  const chave = [S.loja, S.fech?.id, S.fech?.data, S.fech?.status].join('|');
+  if (chave === _buffetChaveRender && BUFFET_CAMPOS.some(c => document.activeElement === $('bf_' + c))) {
+    onBuffetInput(); return;
+  }
+  _buffetChaveRender = chave;
+
+  const dow = buffetDow();
+  const temFeijoada = buffetTemFeijoadaHoje();
+  const F = GN_BUFFET_PRECOS.feijoada, R = gnBuffetPrecoRodizio(dow);
+  const obrig = buffetObrigatorio();
+  const fechado = S.fech?.status === 'FECHADO';
+
+  $('buffetTitulo').innerHTML = `Buffet &amp; Rodízio ${obrig
+    ? '<small style="color:var(--err);font-weight:700">· obrigatório</small>'
+    : '<small style="color:var(--mut)">· opcional</small>'}`;
+
+  // Semeia do que está gravado (S.fech) — sem input na tela ainda, é essa a fonte.
+  const linha = (campo, label, preco) => {
+    const bruto = S.fech ? S.fech[campo] : null;
+    const v = bruto == null ? null : Math.max(0, parseInt(bruto, 10) || 0);
+    return `<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px">${label}</div>
+        <div style="font-size:10px;color:var(--mut)">${money(preco)} cada</div>
+      </div>
+      <input id="bf_${campo}" type="number" inputmode="numeric" min="0" step="1" placeholder="0"
+        ${fechado ? 'disabled' : ''} value="${v === null ? '' : v}" oninput="onBuffetInput()" onblur="salvarBuffet()"
+        style="width:74px;text-align:center">
+      <div id="bfv_${campo}" style="width:84px;text-align:right;font-size:12px;font-weight:700">${money((v||0) * preco)}</div>
+    </div>`;
+  };
+
+  let html = '';
+  if (temFeijoada) {
+    html += `<div style="font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Buffet de feijoada</div>`;
+    html += linha('feijoada_inteira', 'Inteira', F.inteira);
+    html += linha('feijoada_meia', 'Meia', F.meia);
+  }
+  html += `<div style="font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:1px;margin:${temFeijoada?'14px':'0'} 0 6px">Rodízio <span style="text-transform:none;letter-spacing:0">(${(dow===0||dow===6)?'fim de semana':'segunda a sexta'})</span></div>`;
+  html += linha('rodizio_inteira', 'Inteira', R.inteira);
+  html += linha('rodizio_meia', 'Meia', R.meia);
+  html += `<div style="display:flex;justify-content:space-between;border-top:1px solid var(--linha);margin-top:10px;padding-top:8px;font-size:13px;font-weight:700">
+    <span>Total buffet/rodízio</span><span id="bfTotal">—</span></div>`;
+  if (!temFeijoada && buffetLojaUsa())
+    html += `<div style="font-size:10px;color:var(--mut);margin-top:6px">A feijoada só é lançada na sexta e no sábado.</div>`;
+  $('buffetCampos').innerHTML = html;
+  onBuffetInput();
+}
+
+// Recalcula os R$ de cada linha e o total conforme a quantidade é digitada.
+function onBuffetInput() {
+  const dow = buffetDow();
+  const F = GN_BUFFET_PRECOS.feijoada, R = gnBuffetPrecoRodizio(dow);
+  const PRECO = { feijoada_inteira:F.inteira, feijoada_meia:F.meia,
+                  rodizio_inteira:R.inteira,  rodizio_meia:R.meia };
+  let total = 0;
+  buffetCamposDoDia().forEach(c => {
+    const q = buffetQtdInput(c) || 0;
+    total += q * PRECO[c];
+    const el = $('bfv_' + c);
+    if (el) el.textContent = money(q * PRECO[c]);
+  });
+  const t = $('bfTotal');
+  if (t) t.textContent = money(total);
+  renderPreFechamento();
+}
+
+// Grava as quantidades sem fechar o caixa (onblur), igual ao repique — não perde o que
+// foi digitado se o operador sair da aba antes de concluir o fechamento.
+async function salvarBuffet() {
+  if (!S.fech?.id || !buffetLojaUsa() || S.fech.status === 'FECHADO') return;
+  try {
+    const u = await sb(`gn_caixa_fechamento?id=eq.${S.fech.id}`, {
+      method: 'PATCH', prefer: 'return=representation', body: buffetPayload()
+    });
+    if (u && u[0]) S.fech = u[0];
+  } catch (e) { gnLogError('caixa:salvarBuffet', e); }
+}
+
 function renderFechar() {
   const rInp = $('repiqueInput');
   if (rInp && document.activeElement !== rInp) {
@@ -1849,9 +1992,15 @@ function renderFechar() {
   $('fecharErro').textContent = aprov ? `✓ Aprovado por ${aprov}` : '';
   if (aprov) $('fecharErro').style.color = 'var(--ok)';
 
-  // Checklist visual de pré-fechamento
+  renderBuffet();
+  renderPreFechamento();
+}
+
+// Checklist visual de pré-fechamento. Separado de renderFechar() porque o buffet
+// precisa atualizá-lo a cada tecla, sem remontar a tela inteira.
+function renderPreFechamento() {
   const preChk = $('preFecharCheck');
-  if (preChk && !isConsulta) {
+  if (preChk && !S.modoConsulta) {
     const temValor   = $('valorEncontrado').value.trim() !== '';
     const temRepique = $('repiqueInput').value.trim() !== '';
     const temSistema = $('totalSistema') && $('totalSistema').value.trim() !== '';
@@ -1862,7 +2011,11 @@ function renderFechar() {
       `<div style="display:flex;align-items:center;gap:7px;font-size:12px;padding:3px 0;color:${ok?'var(--ok)':'var(--mut)'}">
         <span style="font-size:13px;width:16px;text-align:center">${ok?'✓':'○'}</span><span>${lbl}</span>
        </div>`;
-    const allOk = temValor && temRepique && temSistema && temFotoSistema && temFotos && isFechado;
+    // Só entra no checklist onde é obrigatório — nas demais lojas o campo existe, mas
+    // não é pendência de fechamento.
+    const faltaBuffet = buffetFaltando();
+    const temBuffet   = faltaBuffet.length === 0;
+    const allOk = temValor && temRepique && temSistema && temFotoSistema && temFotos && temBuffet && isFechado;
     const semFotoCount = S.saidas.filter(s => !s.foto || s.foto.trim() === '').length;
     preChk.innerHTML = `<div style="background:var(--graf3);border:1px solid ${allOk?'var(--ok)':'var(--linha)'};border-radius:8px;padding:10px 14px;margin-bottom:12px">
       <div style="font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Pré-fechamento</div>
@@ -1872,6 +2025,7 @@ function renderFechar() {
       ${ck(temSistema, 'Total do sistema conferido')}
       ${ck(temFotoSistema, 'Foto do caixa do sistema')}
       ${ck(temFotos, semFotoCount > 0 ? `Fotos dos comprovantes (${semFotoCount} sem foto)` : 'Fotos dos comprovantes')}
+      ${buffetObrigatorio() ? ck(temBuffet, temBuffet ? 'Buffet e rodízio lançados' : `Buffet e rodízio (${faltaBuffet.length} sem quantidade)`) : ''}
       ${ck(isFechado, 'Caixa fechado')}
     </div>`;
   } else if (preChk) {
@@ -1945,6 +2099,10 @@ async function fecharCaixa() {
     erros.push('• Total Real do Sistema não preenchido');
   if (!S.fech?.foto_sistema)
     erros.push('• Foto do Caixa do Sistema não anexada');
+  // Buffet/rodízio: obrigatório só nas lojas de GN_BUFFET_OBRIGATORIO. Zero é resposta
+  // válida (não vendeu nenhum) — o que trava é o campo em branco, igual ao repique.
+  buffetFaltando().forEach(lbl =>
+    erros.push(`• ${lbl}: quantidade não informada (informe 0 se não vendeu)`));
   const saidasSemFoto = S.saidas.filter(s => !s.foto || s.foto.trim() === '');
   if (saidasSemFoto.length > 0) {
     const SAIDA_MAP = Object.fromEntries(SAIDAS);
@@ -1975,7 +2133,9 @@ async function fecharCaixa() {
   try {
     const u = await sb(`gn_caixa_fechamento?id=eq.${S.fech.id}`, {
       method: 'PATCH', prefer: 'return=representation',
-      body: { total_real: real || null, total_sistema: sistema || null, status: 'FECHADO', repique: rq, venda_ifood: ifoodVal(), venda_online: onlineVal() }
+      body: Object.assign(
+        { total_real: real || null, total_sistema: sistema || null, status: 'FECHADO', repique: rq, venda_ifood: ifoodVal(), venda_online: onlineVal() },
+        buffetLojaUsa() ? buffetPayload() : {})
     });
     S.fech = u[0];
     const syncOk = await sincronizarChecklist(S.fech.data);
@@ -2002,6 +2162,7 @@ async function salvarFechamentoParcial() {
         repique: rq,
         venda_ifood: ifoodVal(),
         venda_online: onlineVal(),
+        ...(buffetLojaUsa() ? buffetPayload() : {}),
       }
     });
     S.fech = u[0];
@@ -2157,7 +2318,8 @@ async function salvarFundo() {
 // Rótulo pros campos fixos, usado só como fallback pra conferências salvas antes
 // desta mudança (que não têm entry.label gravado) — itens variáveis (despesa,
 // suprimento, gorjeta) não têm como ser reconstruídos, mostram a chave crua mesmo.
-const _LABEL_FALLBACK_CAMPO = { total_real:'Total Real (Cofre)', repique:'Repique', venda_ifood:'iFood', venda_online:'Online' };
+const _LABEL_FALLBACK_CAMPO = { total_real:'Total Real (Cofre)', repique:'Repique', venda_ifood:'iFood', venda_online:'Online',
+  feijoada_inteira:'Feijoada inteira', feijoada_meia:'Feijoada meia', rodizio_inteira:'Rodízio inteira', rodizio_meia:'Rodízio meia' };
 function _itensDivergentes(conf) {
   const itens = conf?.itens || {};
   const flat = [];

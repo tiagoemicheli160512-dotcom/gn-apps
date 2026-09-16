@@ -20,6 +20,47 @@ window.GN_LOJAS = [
   { display:'Maglia',         userKey:'MAGLIA',        chkKey:'Maglia',         comKey:'MAGLIA',       lojaSlug:'maglia',         trioSlug:'maglia',       cor:'#059669' },
 ];
 
+// ── Buffet de feijoada e rodízio ───────────────────────────────────────────
+// Fonte única dos preços e das regras de dia, usada pelo app Caixa (lançamento da
+// quantidade vendida no fechamento) e pelo Painel de Gestão do Home (valor no card da
+// loja). Mudar um preço aqui reflete nos dois — nenhum dos apps repete esses números.
+window.GN_BUFFET_PRECOS = {
+  feijoada: { inteira: 69.90, meia: 34.95 },                 // só sexta e sábado
+  rodizio: {
+    semana:      { inteira: 79.90, meia: 39.95 },            // segunda a sexta
+    fimDeSemana: { inteira: 89.90, meia: 44.95 },            // sábado e domingo
+  },
+};
+
+// Lojas onde o lançamento é OBRIGATÓRIO pra fechar o caixa. Nas demais o campo aparece
+// igual, mas não trava o fechamento — até o usuário pedir pra ligar a obrigatoriedade.
+window.GN_BUFFET_OBRIGATORIO = ['BOULEVARD', 'BANGU', 'SÃO GONÇALO']; // userKey
+
+// A Maglia é operação independente e não trabalha com buffet/rodízio: nem vê o campo.
+window.GN_BUFFET_FORA = ['MAGLIA']; // userKey
+
+// dow: 0=Dom .. 6=Sáb (use new Date(iso + 'T12:00').getDay(), nunca o UTC).
+window.gnBuffetTemFeijoada = function(dow) { return dow === 5 || dow === 6; };
+window.gnBuffetPrecoRodizio = function(dow) {
+  return (dow === 0 || dow === 6)
+    ? window.GN_BUFFET_PRECOS.rodizio.fimDeSemana
+    : window.GN_BUFFET_PRECOS.rodizio.semana;
+};
+window.gnBuffetDow = function(dataISO) { return new Date(dataISO + 'T12:00').getDay(); };
+
+// Converte as quantidades de um fechamento no valor em R$, já usando o preço do dia.
+// `qtds` aceita as colunas cruas de gn_caixa_fechamento (feijoada_inteira, feijoada_meia,
+// rodizio_inteira, rodizio_meia); null/undefined contam como 0.
+window.gnBuffetValores = function(qtds, dow) {
+  const n = v => Math.max(0, parseInt(v, 10) || 0);
+  const F = window.GN_BUFFET_PRECOS.feijoada, R = window.gnBuffetPrecoRodizio(dow);
+  const fI = n(qtds && qtds.feijoada_inteira), fM = n(qtds && qtds.feijoada_meia);
+  const rI = n(qtds && qtds.rodizio_inteira),  rM = n(qtds && qtds.rodizio_meia);
+  const feijoada = fI * F.inteira + fM * F.meia;
+  const rodizio  = rI * R.inteira + rM * R.meia;
+  return { feijoadaQtd: fI + fM, rodizioQtd: rI + rM, feijoada, rodizio, total: feijoada + rodizio };
+};
+
 // Slug usado em gn_trios_agenda a partir do comKey — helper compartilhado
 // entre gn-checklist.html, gn-rh.html e demais apps que consultam bandas/trios.
 window.trioLojaSlugByComKey = function(comKey) {
