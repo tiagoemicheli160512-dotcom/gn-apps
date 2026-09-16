@@ -335,6 +335,9 @@
     </div>
   </div>
 
+  <!-- Primeiro card da Home, logo abaixo do nome da loja e da gerência de plantão -->
+  <div id="venda-mes-home-card"></div>
+
   <div id="dash-section" style="display:none"></div>
 
   <div id="data-comemorativa-home-card"></div>
@@ -1041,6 +1044,127 @@ async function _renderVisitaSupervisaoHome(mostrar, sess, isMasterAtivo) {
     <div style="font-size:10.5px;color:rgba(0,0,0,.5);margin-top:4px">${tituloLinha}</div>
     ${itens}
   </div>`;
+}
+
+// ── VENDA DO MÊS vs MÊS ANTERIOR (card fixo, logo abaixo do nome da loja) ────────────
+// Compara o acumulado do mês atual com o MESMO pedaço do mês anterior, sempre até ONTEM
+// — que é o último dia fechado, já que o de hoje ainda está acontecendo. Junto vem o que
+// a loja vendeu HOJE no mês passado, que é a meta a bater no dia.
+// Fonte: checklist_diario (venda_salao + venda_delivery), a mesma do card de fechamento
+// de mês e do faturamento do Painel de Gestão.
+//
+// O cálculo fica separado do DOM de propósito: é a parte que precisa estar certa (recorte
+// de dias, mês anterior mais curto, base incompleta) e assim dá pra testar sozinha.
+function _vendaMesComparativo(porDia, hoje){
+  const iso = (y, m, d) => y + '-' + String(m + 1).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+  const anoAtual = hoje.getFullYear(), mesAtual = hoje.getMonth(), diaHoje = hoje.getDate();
+  const anterior = new Date(anoAtual, mesAtual - 1, 1);
+  const anoAnt = anterior.getFullYear(), mesAnt = anterior.getMonth();
+  const diasNoMesAnt = new Date(anoAnt, mesAnt + 1, 0).getDate();
+  const ultimoDia = diaHoje - 1; // último dia fechado
+  const somar = (ano, mes, ate) => {
+    let total = 0, dias = 0;
+    for (let d = 1; d <= ate; d++) {
+      const v = porDia[iso(ano, mes, d)];
+      if (v != null) { total += v; dias++; }
+    }
+    return { total, dias };
+  };
+  // Mês anterior mais curto (31 de março compara com fevereiro): o recorte para no último
+  // dia que existe lá, senão a conta pediria um dia que nunca houve.
+  const atual = somar(anoAtual, mesAtual, ultimoDia);
+  const ant = somar(anoAnt, mesAnt, Math.min(ultimoDia, diasNoMesAnt));
+  const diff = atual.total - ant.total;
+  return {
+    temAcumulado: ultimoDia >= 1,
+    ultimoDia, anoAtual, mesAtual, anoAnt, mesAnt, diaHoje,
+    atual, anterior: ant, diff,
+    pct: ant.total > 0 ? (diff / ant.total) * 100 : null,
+    // Loja que abriu no meio do mês passado (ou mês sem lançamento) compara contra menos
+    // dias e o crescimento aparece inflado — o card avisa em vez de mentir por omissão.
+    baseIncompleta: ant.dias < atual.dias,
+    ontem: ultimoDia >= 1 ? {
+      dia: ultimoDia,
+      atual: porDia[iso(anoAtual, mesAtual, ultimoDia)] != null ? porDia[iso(anoAtual, mesAtual, ultimoDia)] : null,
+      anterior: ultimoDia <= diasNoMesAnt && porDia[iso(anoAnt, mesAnt, ultimoDia)] != null ? porDia[iso(anoAnt, mesAnt, ultimoDia)] : null,
+    } : null,
+    metaHoje: diaHoje <= diasNoMesAnt && porDia[iso(anoAnt, mesAnt, diaHoje)] != null ? porDia[iso(anoAnt, mesAnt, diaHoje)] : null,
+  };
+}
+
+const VENDA_MES_MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+async function _renderVendaMesHome(mostrar, sess, isMasterAtivo) {
+  const el = document.getElementById('venda-mes-home-card');
+  if (!el) return;
+  if (!mostrar || !sess) { el.innerHTML = ''; return; }
+  const loja = (isMasterAtivo && masterLoja) ? masterLoja : sess.loja;
+  // Maglia fora por padrão (CLAUDE.md — não foi citada no pedido desta feature).
+  if (!LOJAS_LISTA.includes(loja) || loja === 'MAGLIA') { el.innerHTML = ''; return; }
+  const chkKey = LOJA_DB_KEY[loja] || loja;
+  const hoje = new Date();
+  const iso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const iniAnt = new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1);
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  try {
+    // Uma consulta só, do dia 1 do mês passado até hoje — cobre os dois meses.
+    const rows = await window.gnFetchJson(
+      `${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${iso(iniAnt)}&data_operacao=lte.${iso(hoje)}&select=data_operacao,venda_salao,venda_delivery`,
+      H, 'vendaMes:checklist', []);
+    const porDia = {};
+    (rows || []).forEach(r => {
+      const v = (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0);
+      porDia[r.data_operacao] = (porDia[r.data_operacao] || 0) + v;
+    });
+    const c = _vendaMesComparativo(porDia, hoje);
+    const fR = v => 'R$ ' + (v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const dm = (dia, mes) => String(dia).padStart(2, '0') + '/' + String(mes + 1).padStart(2, '0');
+
+    const subiu = c.diff >= 0;
+    const cor = subiu ? '#16a34a' : '#dc2626';
+    const pctTxt = c.pct === null ? '' : ` (${c.pct >= 0 ? '+' : ''}${c.pct.toFixed(1).replace('.', ',')}%)`;
+
+    const blocoAcumulado = !c.temAcumulado
+      ? `<div style="font-size:11px;color:rgba(0,0,0,.5);padding:2px 0">O mês começou hoje — a comparação do acumulado aparece a partir de amanhã.</div>`
+      : `<div style="display:flex;gap:8px">
+          <div style="flex:1;background:#fff;border-radius:10px;padding:9px 11px">
+            <div style="font-size:9px;font-weight:800;color:rgba(0,0,0,.4);text-transform:uppercase;letter-spacing:.04em">${VENDA_MES_MESES[c.mesAtual]} 01–${String(c.ultimoDia).padStart(2,'0')}</div>
+            <div style="font-size:14px;font-weight:900;color:#1A1D23;margin-top:2px">${fR(c.atual.total)}</div>
+          </div>
+          <div style="flex:1;background:#fff;border-radius:10px;padding:9px 11px">
+            <div style="font-size:9px;font-weight:800;color:rgba(0,0,0,.4);text-transform:uppercase;letter-spacing:.04em">${VENDA_MES_MESES[c.mesAnt]} 01–${String(Math.min(c.ultimoDia, new Date(c.anoAnt, c.mesAnt+1, 0).getDate())).padStart(2,'0')}</div>
+            <div style="font-size:14px;font-weight:900;color:rgba(0,0,0,.55);margin-top:2px">${fR(c.anterior.total)}</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;background:${cor}12;border-radius:10px;padding:8px 11px">
+          <span style="font-size:15px">${subiu ? '▲' : '▼'}</span>
+          <span style="font-size:13px;font-weight:900;color:${cor}">${subiu ? '+' : '−'}${fR(Math.abs(c.diff)).replace('R$ ', 'R$ ')}${pctTxt}</span>
+          <span style="font-size:10px;color:rgba(0,0,0,.45);margin-left:auto">${subiu ? 'acima' : 'abaixo'} do mês passado</span>
+        </div>
+        ${c.baseIncompleta ? `<div style="font-size:9.5px;color:#D97706;font-weight:700">⚠️ ${VENDA_MES_MESES[c.mesAnt]} tem só ${c.anterior.dias} dia(s) lançado(s) contra ${c.atual.dias} — a diferença acima fica maior do que é de verdade.</div>` : ''}
+        ${c.ontem && c.ontem.atual !== null ? `<div style="display:flex;justify-content:space-between;align-items:center;font-size:10.5px;color:rgba(0,0,0,.55);padding:0 2px">
+          <span>Ontem ${dm(c.ontem.dia, c.mesAtual)}: <b style="color:#1A1D23">${fR(c.ontem.atual)}</b></span>
+          <span>${c.ontem.anterior !== null ? `${dm(c.ontem.dia, c.mesAnt)}: ${fR(c.ontem.anterior)}` : ''}</span>
+        </div>` : ''}`;
+
+    const blocoMeta = c.metaHoje !== null
+      ? `<div style="display:flex;align-items:center;gap:8px;background:rgba(217,119,6,.10);border:1px solid rgba(217,119,6,.22);border-radius:10px;padding:9px 11px">
+          <span style="font-size:15px;flex-shrink:0">🎯</span>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:10px;color:rgba(0,0,0,.5)">Meta de hoje (${dm(c.diaHoje, c.mesAtual)}) — foi o que a loja vendeu em ${dm(c.diaHoje, c.mesAnt)}</div>
+            <div style="font-size:14px;font-weight:900;color:#B45309;margin-top:1px">${fR(c.metaHoje)}</div>
+          </div>
+        </div>`
+      : `<div style="font-size:10px;color:rgba(0,0,0,.4)">Sem venda lançada em ${dm(c.diaHoje, c.mesAnt)} — hoje fica sem meta de comparação.</div>`;
+
+    el.innerHTML = `<div style="background:rgba(22,163,74,.05);border:1px solid rgba(0,0,0,.08);border-left:3px solid ${cor};border-radius:14px;padding:13px 15px;margin:0 16px 14px;display:flex;flex-direction:column;gap:8px">
+      <div style="font-size:12px;font-weight:800;color:#1A1D23">📈 Venda do mês vs mês anterior</div>
+      ${blocoAcumulado}
+      ${blocoMeta}
+    </div>`;
+  } catch (e) {
+    window.gnLogError && window.gnLogError('vendaMesHome', e);
+    el.innerHTML = '';
+  }
 }
 
 // Card "Desempenho do mês anterior" — aparece só nos 3 primeiros dias de cada mês,
@@ -2398,6 +2522,7 @@ function _refreshPermUI(sess) {
   renderModules(sess, isMaster);
   loadBadges(sess, isMaster);
   const _mostrarCards = (!isMaster || !!masterLoja) && !_ehCargoModuloUnico(sess);
+  _renderVendaMesHome(_mostrarCards, sess, isMaster);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
   _renderVisitaSupervisaoHome(_mostrarCards, sess, isMaster);
   _renderMesAnteriorHome(_mostrarCards, sess, isMaster);
@@ -2632,6 +2757,7 @@ function showHome(sess) {
   renderModules(sess, isMaster);
   loadBadges(sess, isMaster);
   const _mostrarCards = (!isMaster || !!masterLoja) && !_ehCargoModuloUnico(sess);
+  _renderVendaMesHome(_mostrarCards, sess, isMaster);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
   _renderVisitaSupervisaoHome(_mostrarCards, sess, isMaster);
   _renderMesAnteriorHome(_mostrarCards, sess, isMaster);
