@@ -6563,20 +6563,9 @@ async function salvarFeriasGeral(nome, setor){
     aqFim=document.getElementById('ferias-aq-fim-'+key)?.value;
     if(!aqIni || !aqFim){ showToast('Preencha o período aquisitivo (obrigatório).','error'); return; }
     if(aqFim<aqIni){ showToast('Fim do período aquisitivo não pode ser antes do início.','error'); return; }
-    const prazoInterno=_prazoInternoAquisitivoISO(aqFim);
-    if(prazoInterno && ini>prazoInterno){
-      showToast(`⚠️ Início das férias ultrapassa o prazo interno de segurança (${_fmtDataBRChk(prazoInterno)}, 11 meses após o fim do aquisitivo) — evita o risco de estourar o prazo legal.`,'error');
-      return;
-    }
-    const restricao=_inicioProibidoDSRFeriado(ini, nome);
-    if(restricao){
-      showToast(`⚠️ Férias não podem começar em ${_fmtDataBRChk(ini)}: ${restricao} — regra dos 2 dias antes de folga/feriado.`,'error');
-      return;
-    }
   }
 
   const diasNovo=_diasPeriodoFerias(ini,fim);
-  if(tipo==='ferias' && diasNovo<5){ showToast('Cada período de férias precisa ter no mínimo 5 dias corridos.','error'); return; }
 
   let allData;
   try{
@@ -6597,21 +6586,44 @@ async function salvarFeriasGeral(nome, setor){
     feriasEditandoId=null; renderFeriasStore(); return;
   }
 
+  // Regras de CLT / política interna: viram AVISO com confirmação, não bloqueio. Antes
+  // cada uma dava um toast e cancelava o salvamento — o toast some sozinho em segundos e
+  // no celular passava batido, então parecia que o botão simplesmente não funcionava. Pior:
+  // às vezes a regra está certa na lei mas a decisão já foi tomada e notificada ao
+  // funcionário (caso real da Nova América, com a folga fixa na segunda), e não havia
+  // nenhuma saída pela tela. Agora o app explica o motivo, exige um "salvar mesmo assim" e
+  // deixa registrado o que foi assumido. Erro de preenchimento (data faltando, fim antes do
+  // início, aquisitivo vazio) continua barrando de verdade lá em cima — ali não é decisão,
+  // é engano.
+  const avisos=[];
   let mesmoAquisitivo=[];
   if(tipo==='ferias'){
+    const prazoInterno=_prazoInternoAquisitivoISO(aqFim);
+    if(prazoInterno && ini>prazoInterno){
+      avisos.push(`O início (${_fmtDataBRChk(ini)}) passa do prazo interno de segurança, que é ${_fmtDataBRChk(prazoInterno)} — 11 meses após o fim do aquisitivo. Depois do prazo legal (12 meses) a empresa paga as férias em dobro.`);
+    }
+    const restricao=_inicioProibidoDSRFeriado(ini, nome);
+    if(restricao){
+      avisos.push(`As férias começam em ${_fmtDataBRChk(ini)} e ${restricao}. A CLT (art. 134 §3) não permite iniciar férias nos 2 dias que antecedem feriado ou a folga semanal.`);
+    }
+    if(diasNovo<5){
+      avisos.push(`O período tem ${diasNovo} dia(s). No fracionamento, nenhum período pode ter menos de 5 dias corridos.`);
+    }
     const nomeNorm=nome.trim().toLowerCase();
     mesmoAquisitivo=lista.filter(p=>(p.nome||'').trim().toLowerCase()===nomeNorm && p.aq_ini===aqIni && p.aq_fim===aqFim && p.id!==editandoId);
     if(mesmoAquisitivo.length>=3){
-      showToast('⚠️ Máximo de 3 períodos por período aquisitivo (fracionamento).','error');
-      return;
+      avisos.push(`Esse funcionário já tem ${mesmoAquisitivo.length} períodos nesse aquisitivo. A CLT permite fracionar em no máximo 3.`);
     }
     const faltas=_contarFaltasAquisitivoChk(allData, nome, aqIni, aqFim);
     const diasDireito=_diasDireitoFerias(faltas);
     const diasJaUsados=mesmoAquisitivo.reduce((s,p)=>s+_diasPeriodoFerias(p.inicio,p.fim),0);
     if(diasJaUsados+diasNovo>diasDireito){
-      showToast(`⚠️ Total de dias (${diasJaUsados+diasNovo}) excede o direito de ${diasDireito} dias corridos (${faltas} faltas no período aquisitivo).`,'error');
-      return;
+      avisos.push(`Total de ${diasJaUsados+diasNovo} dias (${diasJaUsados} já cadastrados + ${diasNovo} agora) contra um direito de ${diasDireito} dias corridos — a Escala registra ${faltas} falta(s) nesse aquisitivo. Se o número de faltas do RH for outro, o direito também é outro.`);
     }
+  }
+  if(avisos.length){
+    const titulo=avisos.length>1?`⚠️ ${avisos.length} pontos fora da regra:`:'⚠️ Isso está fora da regra:';
+    if(!confirm(`${titulo}\n\n${avisos.map(a=>'• '+a).join('\n\n')}\n\nSalvar mesmo assim? O período fica marcado como lançado fora da regra.`)) return;
   }
 
   feriasFormAberto=null;
@@ -6623,6 +6635,9 @@ async function salvarFeriasGeral(nome, setor){
       criadoEm: periodoOriginal ? periodoOriginal.criadoEm : new Date().toISOString(),
     };
     if(tipo==='ferias'){ entry.aq_ini=aqIni; entry.aq_fim=aqFim; }
+    // Fica gravado NO período o que foi assumido — é o que permite o RH conferir depois
+    // por que aquele lançamento foge da regra, sem depender da memória de quem salvou.
+    if(avisos.length) entry.fora_da_regra=avisos; else delete entry.fora_da_regra;
     if(periodoOriginal){
       entry.editadoEm=new Date().toISOString();
       // Tira da Escala as marcas do período ANTIGO antes de aplicar as novas — senão os
@@ -6640,7 +6655,10 @@ async function salvarFeriasGeral(nome, setor){
     // A semana aberta agora pode ter mudado — recarrega pra refletir na Escala
     if(comissoesWeekIdx!=null) loadComissoesData();
     if(periodoOriginal){
-      _logAuditoriaChk('EDITAR_FERIAS',{nome, de:{inicio:periodoOriginal.inicio, fim:periodoOriginal.fim}, para:{inicio:ini, fim}});
+      _logAuditoriaChk('EDITAR_FERIAS',{nome, de:{inicio:periodoOriginal.inicio, fim:periodoOriginal.fim}, para:{inicio:ini, fim}, fora_da_regra:avisos.length?avisos:undefined});
+    }
+    if(avisos.length){
+      _logAuditoriaChk('FERIAS_FORA_DA_REGRA',{nome, inicio:ini, fim, tipo, motivos:avisos});
     }
     showToast(periodoOriginal
       ? (tipo==='afastamento'?'🩺 Afastamento atualizado na Escala':'🏖 Férias atualizadas na Escala')
@@ -6814,6 +6832,7 @@ function renderFeriasStore(){
             <div>
               <span style="font-size:11px;color:#1A1D23">${_fmtDataBRChk(p.inicio)} – ${_fmtDataBRChk(p.fim)} (${_diasPeriodoFerias(p.inicio,p.fim)}d)</span>
               ${p.tipo==='afastamento'?`<span style="font-size:9px;font-weight:800;color:#0d9488;background:rgba(20,184,166,.15);border-radius:6px;padding:1px 6px;margin-left:6px">AFASTAMENTO</span>`:''}
+              ${Array.isArray(p.fora_da_regra)&&p.fora_da_regra.length?`<span title="${escHtml(p.fora_da_regra.join(' | '))}" style="font-size:9px;font-weight:800;color:#b45309;background:rgba(245,158,11,.18);border-radius:6px;padding:1px 6px;margin-left:6px">⚠️ FORA DA REGRA</span>`:''}
               ${p.aq_ini&&p.aq_fim?`<div style="font-size:9px;color:#475569;margin-top:1px">Aquisitivo: ${_fmtDataBRChk(p.aq_ini)} – ${_fmtDataBRChk(p.aq_fim)}${prazoInterno?` · prazo interno ${_fmtDataBRChk(prazoInterno)}`:''}</div>`:''}
             </div>
             <div style="display:flex;align-items:center;gap:2px;flex-shrink:0">
@@ -8522,6 +8541,8 @@ const HISTORICO_AUDIT_ACOES = {
   CONFIRMAR_MANUTENCAO:     { icon: '✅', label: 'Confirmou resolução de manutenção', cor: '#4ade80' },
   RECEBER_INSUMO:           { icon: '📦', label: 'Confirmou recebimento de insumo',  cor: '#4ade80' },
   EXCLUIR_FERIAS:           { icon: '🗑️', label: 'Excluiu período de férias',        cor: '#f87171' },
+  EDITAR_FERIAS:            { icon: '✏️', label: 'Editou período de férias',         cor: '#fbbf24' },
+  FERIAS_FORA_DA_REGRA:     { icon: '⚠️', label: 'Salvou férias fora da regra',      cor: '#f59e0b' },
   SALVAR_SALARIOS_SETOR:    { icon: '💰', label: 'Alterou salários por setor',       cor: '#fbbf24' },
   EXCLUIR_VISITA:           { icon: '🗑️', label: 'Excluiu visita',                   cor: '#f87171' },
   CONFIRMAR_PRESENCA_BANDA: { icon: '🎸', label: 'Confirmou presença da banda',      cor: '#4ade80' },
@@ -8543,6 +8564,8 @@ function _formatarDetalhesAuditoriaChk(acao, d){
     if(acao==='CONFIRMAR_MANUTENCAO')     return `${d.setor||''} — ${d.descricao||''}`;
     if(acao==='RECEBER_INSUMO')           return `${d.nome||''}${d.quantidade?' ('+d.quantidade+')':''}`;
     if(acao==='EXCLUIR_FERIAS')           return `${d.nome||''} — ${d.inicio||''} a ${d.fim||''}`;
+    if(acao==='EDITAR_FERIAS')            return `${d.nome||''} — ${d.de?.inicio||''} a ${d.de?.fim||''} → ${d.para?.inicio||''} a ${d.para?.fim||''}`;
+    if(acao==='FERIAS_FORA_DA_REGRA')     return `${d.nome||''} — ${d.inicio||''} a ${d.fim||''}: ${(d.motivos||[]).join(' | ')}`;
     if(acao==='SALVAR_SALARIOS_SETOR')    return (d.setores||[]).join(', ');
     if(acao==='EXCLUIR_VISITA')           return `${d.loja||''} — ${d.data||''} ${d.hora_chegada||''}`;
     if(acao==='CONFIRMAR_PRESENCA_BANDA') return d.artista||'';
