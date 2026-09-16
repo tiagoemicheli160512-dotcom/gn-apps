@@ -697,6 +697,7 @@ let _dashComDiaLoja = null;   // {lojaKey: Array(7)} — mesmo valor do repique 
 // gn_comissoes.brutos[dia] É o repique do dia, não precisa de uma segunda linha "Rep"
 // duplicando o mesmo número — ver onRepiqueChange() em gn-checklist.html.
 let _dashXmlPendentes = null; // Set de lojas sem o XML fiscal do mês confirmado (ver _mesRefPendenteXmlHome)
+let _dashBuffet = null;       // {lojaKey: {feijoadaQtd, rodizioQtd, feijoada, rodizio, total}} no período selecionado
 let _dashVisitasAndamento = null; // {lojaKey: [{nome, origem, horaChegada}]} — visitas ainda sem hora_saida hoje
 let _dashEscalaIncompleta = null; // {lojaKey: [{nome, dias:[nomeDia,...]}]} — funcs com horário faltando na escala da semana
 let _dashBancoHorasPendente = null; // {lojaKey: {motivo:'sem_periodo'|'setor_faltando', setores:[...]}}
@@ -4789,7 +4790,7 @@ async function _loadDashAll() {
     const comKeysAll = Object.values(LOJA_COM_KEY).join(',');
     const catorze = new Date(); catorze.setDate(catorze.getDate()-14);
     const from14 = catorze.toISOString().slice(0,10);
-    const [fatCur, fatPrv, fatPrvComp, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows, comissoesAllRows, bhConfigRows, caixaFechadosRows, alertasUrgentesRows, visitasPassadasRows, provisoesRows, carnesRows, trioAgendaOntemRows, bhMesAnteriorRows] = await Promise.all([
+    const [fatCur, fatPrv, fatPrvComp, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows, comissoesAllRows, bhConfigRows, caixaFechadosRows, alertasUrgentesRows, visitasPassadasRows, provisoesRows, carnesRows, trioAgendaOntemRows, bhMesAnteriorRows, buffetRows] = await Promise.all([
       _fetchFat(range.dates).catch(e=>{ _errCb('fatCur')(e); return {}; }),
       _fetchFat(prevRange.dates).catch(e=>{ _errCb('fatPrv')(e); return {}; }),
       precisaCompSeparada ? _fetchFat(prevRangeCompDates).catch(e=>{ _errCb('fatPrvComp')(e); return {}; }) : Promise.resolve(null),
@@ -4819,6 +4820,9 @@ async function _loadDashAll() {
       segueBH
         ? window.gnFetchJson(`${SB_URL}/rest/v1/gn_banco_horas?mes=eq.${mesAnteriorStr}&select=loja,registros`, H, 'dash:bhMesAnteriorRows', [])
         : Promise.resolve([]),
+      // Buffet de feijoada e rodízio lançados no fechamento de caixa, no MESMO período
+      // do faturamento mostrado nos cards (não nos últimos 30 dias como caixaFechadosRows).
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${range.from}&data=lte.${range.to}&select=loja,data,feijoada_inteira,feijoada_meia,rodizio_inteira,rodizio_meia`, H, 'dash:buffetRows', []),
     ]);
     _dashFat = fatCur; _dashFatPrev = precisaCompSeparada ? fatPrvComp : fatPrv;
     _dashFatPrevParcial = precisaCompSeparada;
@@ -4873,6 +4877,22 @@ async function _loadDashAll() {
     manutTodos.forEach(m=>{ if(Object.prototype.hasOwnProperty.call(byManut,m._loja)) byManut[m._loja]++; });
     _dashManut = byManut;
     _dashChk   = new Set((chkRows||[]).map(r=>_normLoja(r.loja)).filter(l=>LOJAS_LISTA.includes(l)));
+
+    // Buffet/rodízio: soma as quantidades de todos os caixas (os dois turnos) do período
+    // e converte em R$ com o preço do DIA de cada lançamento — rodízio de fim de semana
+    // custa mais que o de segunda a sexta, então não dá pra somar tudo e multiplicar no
+    // fim. Preços e regra de dia vêm de gn-lojas-config.js, a mesma fonte do app Caixa.
+    const byBuffet = {};
+    LOJAS_LISTA.forEach(k => { byBuffet[k] = { feijoadaQtd:0, rodizioQtd:0, feijoada:0, rodizio:0, total:0 }; });
+    (buffetRows||[]).forEach(r => {
+      const k = _normLoja(r.loja);
+      const acc = byBuffet[k];
+      if (!acc || GN_BUFFET_FORA.includes(r.loja)) return;
+      const v = gnBuffetValores(r, gnBuffetDow(r.data));
+      acc.feijoadaQtd += v.feijoadaQtd; acc.rodizioQtd += v.rodizioQtd;
+      acc.feijoada    += v.feijoada;    acc.rodizio    += v.rodizio;    acc.total += v.total;
+    });
+    _dashBuffet = byBuffet;
     window._chipDetail = window._chipDetail || {};
     window._chipDetail.dashChk = { title: '📋 Lojas sem checklist hoje',
       lines: LOJAS_LISTA.filter(l=>!_dashChk.has(l)).map(l=>({ nome: LOJA_DISPLAY[l] || l })),
@@ -5039,7 +5059,7 @@ async function _loadDashAll() {
     window.gnLogError('dash:_loadDashAll', e);
     _dashLoadHadError = true;
     _dashFat=_dashFat||{}; _dashFatPrev=_dashFatPrev||{};
-    _dashManut=_dashManut||{}; _dashChk=_dashChk||new Set();
+    _dashManut=_dashManut||{}; _dashChk=_dashChk||new Set(); _dashBuffet=_dashBuffet||{};
     _dashXmlPendentes=_dashXmlPendentes||new Set(); _dashVisitasAndamento=_dashVisitasAndamento||{};
     _dashEscalaIncompleta=_dashEscalaIncompleta||{}; _dashBancoHorasPendente=_dashBancoHorasPendente||{};
     _dashContratosVencendo=_dashContratosVencendo||{}; _dashManutParada=_dashManutParada||{};
@@ -7295,6 +7315,22 @@ function renderDashboard() {
         const funcRow = (funcN!=null) ? `<div title="Funcionários na escala desta semana${vendaPorFunc!==null?` · meta R$ ${(metaFunc/1000).toFixed(1)}k/func no período`:''}" style="display:flex;align-items:center;gap:5px;margin-top:4px;font-size:9px;color:rgba(0,0,0,.4)">
           <span>👥 ${funcN} func${funcN===1?'':'s'}</span>${vendaPorFunc!==null?`<span style="color:${vpfCor};font-weight:700">${_fmtBRLs(vendaPorFunc)}/func</span>`:''}
         </div>` : '';
+        // Buffet de feijoada e rodízio — quantidade vendida lançada no fechamento de
+        // caixa, já convertida em R$ pelo preço do dia (ver gnBuffetValores). Só aparece
+        // quando houve lançamento no período; loja sem venda não ganha uma linha vazia.
+        let buffetRow = '';
+        {
+          const bf = _dashBuffet ? _dashBuffet[k] : null;
+          if (bf && (bf.feijoadaQtd > 0 || bf.rodizioQtd > 0)) {
+            const partes = [];
+            if (bf.feijoadaQtd > 0) partes.push(`🍲 ${bf.feijoadaQtd} feijoada${bf.feijoadaQtd>1?'s':''} · ${_fmtBRLs(bf.feijoada)}`);
+            if (bf.rodizioQtd > 0)  partes.push(`🍖 ${bf.rodizioQtd} rodízio${bf.rodizioQtd>1?'s':''} · ${_fmtBRLs(bf.rodizio)}`);
+            buffetRow = `<div title="Buffet de feijoada e rodízio vendidos no período, lançados no fechamento de caixa — total ${_fmtBRL(bf.total)}" style="display:flex;flex-wrap:wrap;gap:4px 8px;margin-top:4px;font-size:9px;color:rgba(0,0,0,.4)">
+              ${partes.map(p=>`<span>${p}</span>`).join('')}
+              <span style="font-weight:700;color:#1A1D23">${_fmtBRLs(bf.total)}</span>
+            </div>`;
+          }
+        }
         const selMode=_dashRelSel.size>0;
         const isSel=_dashRelSel.has(k);
         const selBorder=selMode?(isSel?'border:2px solid rgba(250,204,21,.75);box-shadow:0 0 0 1px rgba(250,204,21,.25);':'opacity:.38;border:2px solid transparent;'):`border-color:${cor};`;
@@ -7308,8 +7344,8 @@ function renderDashboard() {
             ${selIcon}
             <div class="sc-nome" style="justify-content:space-between;padding-right:22px"><span style="display:flex;align-items:center;gap:5px;min-width:0"><span class="sc-dot" style="background:${cor}"></span><span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${nome}</span></span>${rankBadge}</div>
             ${loading?`<div>${_skelBar('60%','15px')}</div><div style="margin-top:6px">${_skelBar('100%','3px')}</div>`
-              :hasData?`<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:4px"><div class="sc-val">${_fmtBRLs(v)}${diffHtml}</div>${spark?`<div style="margin-top:2px;flex-shrink:0">${spark}</div>`:''}</div>${bar}${diaGrid}${badgeRow}${funcRow}`
-              :`<div class="sc-empty">Sem dados</div>${diaGrid}${badgeRow}${funcRow}`}
+              :hasData?`<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:4px"><div class="sc-val">${_fmtBRLs(v)}${diffHtml}</div>${spark?`<div style="margin-top:2px;flex-shrink:0">${spark}</div>`:''}</div>${bar}${diaGrid}${badgeRow}${funcRow}${buffetRow}`
+              :`<div class="sc-empty">Sem dados</div>${diaGrid}${badgeRow}${funcRow}${buffetRow}`}
           </div>`;
       }).join('');
       mainView=`<div class="cons-card">
