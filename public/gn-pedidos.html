@@ -2694,7 +2694,7 @@ async function setTab(tab) {
     S.todosModo = true;
     S.hortifrutiCarregando = true;
     renderContent();
-    await Promise.all([carregarPedidoHortifruti(), carregarHortifrutiLiberacoes()]);
+    await Promise.all([carregarPedidoHortifruti(), carregarHortifrutiLiberacoes(), carregarHortifrutiBloqueio()]);
     S.hortifrutiCarregando = false;
   } else if (saindoHortifruti && S._pedidoAtualSemanal) {
     S.pedidoAtual = S._pedidoAtualSemanal;
@@ -2848,6 +2848,68 @@ async function carregarHortifrutiLiberacoes() {
     const { data } = await db.from('gn_hortifruti_liberacoes').select('*').gte('data', hojeStr).order('data');
     hortifrutiLiberacoes = data || [];
   } catch (e) { hortifrutiLiberacoes = []; }
+}
+
+// ── HORTIFRUTI — bloqueio geral do pedido ───────────────────────────────────
+// O oposto da liberação acima: um interruptor único que FECHA o envio pra todas
+// as lojas em qualquer dia, inclusive segunda/quinta, até alguém liberar aqui.
+// Fica numa linha só (id='GERAL') em gn_hortifruti_bloqueio.
+let hortifrutiBloqueio = null; // {bloqueado, motivo, alterado_por, alterado_em}
+
+async function carregarHortifrutiBloqueio() {
+  try {
+    const { data } = await db.from('gn_hortifruti_bloqueio').select('*').eq('id', 'GERAL').maybeSingle();
+    hortifrutiBloqueio = data || null;
+  } catch (e) { hortifrutiBloqueio = null; }
+}
+
+function _hortifrutiBloqueioCardHtml() {
+  if (!S.hortifrutiAtivo) return '';
+  const bloqueado = !!(hortifrutiBloqueio && hortifrutiBloqueio.bloqueado);
+  const quem = hortifrutiBloqueio && hortifrutiBloqueio.alterado_por;
+  const quando = hortifrutiBloqueio && hortifrutiBloqueio.alterado_em
+    ? new Date(hortifrutiBloqueio.alterado_em).toLocaleString('pt-BR', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})
+    : '';
+  const cor = bloqueado ? '#ef4444' : '#059669';
+  return `<div style="background:var(--card2);border:1px solid var(--border);border-left:3px solid ${cor};border-radius:var(--r);padding:12px 14px;margin-bottom:10px">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+      <div style="flex:1;min-width:180px">
+        <div style="font-size:12px;font-weight:700;margin-bottom:3px">${bloqueado ? '🔒 Pedido FECHADO para as lojas' : '🔓 Pedido aberto para as lojas'}</div>
+        <div style="font-size:10px;color:var(--muted);line-height:1.4">${bloqueado
+          ? 'Nenhuma loja consegue enviar Hortifruti, nem em segunda/quinta, até você liberar aqui.'
+          : 'As lojas enviam normalmente nos dias de pedido (segunda e quinta) e nos dias liberados abaixo.'}</div>
+        ${quem ? `<div style="font-size:10px;color:var(--muted);margin-top:4px">Última alteração: ${escapeHtml(quem)}${quando ? ' · ' + quando : ''}</div>` : ''}
+        ${bloqueado && hortifrutiBloqueio.motivo ? `<div style="font-size:10px;color:var(--muted);margin-top:2px">Motivo: ${escapeHtml(hortifrutiBloqueio.motivo)}</div>` : ''}
+      </div>
+      <button onclick="alternarBloqueioHortifruti()" style="background:${bloqueado ? '#059669' : '#ef4444'};border:none;border-radius:8px;padding:10px 16px;color:#fff;font-weight:700;font-size:12px;cursor:pointer;white-space:nowrap">${bloqueado ? '🔓 Liberar pedido' : '🔒 Bloquear pedido'}</button>
+    </div>
+  </div>`;
+}
+
+async function alternarBloqueioHortifruti() {
+  const bloqueado = !!(hortifrutiBloqueio && hortifrutiBloqueio.bloqueado);
+  const novo = !bloqueado;
+  let motivo = null;
+  if (novo) {
+    if (!confirm('Bloquear o pedido de Hortifruti?\n\nNenhuma loja vai conseguir enviar — nem na segunda nem na quinta — até você liberar aqui de novo.')) return;
+    // Motivo é opcional: se a loja for cobrar explicação, é ele que aparece na tela dela.
+    motivo = (prompt('Motivo (opcional) — aparece pras lojas:', '') || '').trim() || null;
+  } else {
+    if (!confirm('Liberar o pedido de Hortifruti?\n\nAs lojas voltam a enviar normalmente nos dias de pedido.')) return;
+  }
+  try {
+    const sess = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
+    await db.from('gn_hortifruti_bloqueio').upsert({
+      id: 'GERAL', bloqueado: novo, motivo,
+      alterado_por: (sess && sess.nome) || 'Compras',
+      alterado_em: new Date().toISOString(),
+    }, { onConflict: 'id' });
+    toast(novo ? '🔒 Pedido bloqueado.' : '🔓 Pedido liberado!', 'ok');
+    await carregarHortifrutiBloqueio();
+    renderContent();
+  } catch (e) {
+    toast('Erro ao mudar o bloqueio: ' + (e.message || e), 'err');
+  }
 }
 
 function _hortifrutiLiberacaoCardHtml() {
@@ -3222,7 +3284,7 @@ function renderPedido() {
   const semNavHtmlAtivo = S.hortifrutiAtivo ? _hortifrutiDiaNavHtml() : semNavHtml;
 
   if (!S.pedidoAtual) {
-    $('content').innerHTML = semNavHtmlAtivo + _datasEspeciaisCardHtml() + _hortifrutiLiberacaoCardHtml() + _vendaSemanaAntCardHtml() + `
+    $('content').innerHTML = semNavHtmlAtivo + _datasEspeciaisCardHtml() + _hortifrutiBloqueioCardHtml() + _hortifrutiLiberacaoCardHtml() + _vendaSemanaAntCardHtml() + `
       <div class="empty" style="margin-top:20px">
         <div class="empty-icon">📋</div>
         <div class="empty-texto">${S.hortifrutiAtivo ? 'Nenhum pedido de Hortifruti nesse dia' : 'Nenhum pedido nesta semana'}</div>
@@ -3573,7 +3635,7 @@ function renderPedido() {
     }
   }
 
-  $('content').innerHTML = semNavHtmlAtivo + _datasEspeciaisCardHtml() + _hortifrutiLiberacaoCardHtml() + _vendaSemanaAntCardHtml() + `
+  $('content').innerHTML = semNavHtmlAtivo + _datasEspeciaisCardHtml() + _hortifrutiBloqueioCardHtml() + _hortifrutiLiberacaoCardHtml() + _vendaSemanaAntCardHtml() + `
     <div class="pedido-bar">
       <div class="pedido-info">
         <div class="pedido-label">PEDIDO${labelAba}</div>
