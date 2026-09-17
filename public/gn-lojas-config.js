@@ -34,7 +34,7 @@ window.GN_BUFFET_PRECOS = {
 
 // RODÍZIO: lojas onde a quantidade é OBRIGATÓRIA pra fechar o caixa. Nas demais o campo
 // aparece igual, mas não trava o fechamento.
-window.GN_BUFFET_OBRIGATORIO = ['BOULEVARD', 'BANGU', 'SÃO GONÇALO', 'PEDREIRA']; // userKey
+window.GN_BUFFET_OBRIGATORIO = ['BOULEVARD', 'BANGU', 'SÃO GONÇALO', 'PEDREIRA', 'CAMPO GRANDE']; // userKey
 
 // A Maglia é operação independente e não trabalha com buffet/rodízio: nem vê o campo.
 window.GN_BUFFET_FORA = ['MAGLIA']; // userKey
