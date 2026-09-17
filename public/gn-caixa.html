@@ -1769,7 +1769,13 @@ const BUFFET_CAMPOS = ['feijoada_inteira', 'feijoada_meia', 'rodizio_inteira', '
 let _buffetChaveRender = null; // loja|caixa|data|status do que está montado na tela agora
 
 function buffetLojaUsa()        { return !GN_BUFFET_FORA.includes(S.loja); }
-function buffetObrigatorio()    { return buffetLojaUsa() && GN_BUFFET_OBRIGATORIO.includes(S.loja); }
+// Quais campos travam o fechamento HOJE nesta loja — feijoada vale pra toda loja que usa
+// buffet (nos dias em que é servida), rodízio só nas lojas da lista. Ver
+// gnBuffetCamposObrigatorios em gn-lojas-config.js, a fonte da regra.
+function buffetCamposObrigatoriosDoDia() { return gnBuffetCamposObrigatorios(S.loja, buffetDow()); }
+function buffetObrigatorio()    { return buffetCamposObrigatoriosDoDia().length > 0; }
+function buffetRodizioObrigatorio()  { return buffetCamposObrigatoriosDoDia().includes('rodizio_inteira'); }
+function buffetFeijoadaObrigatoria() { return buffetCamposObrigatoriosDoDia().includes('feijoada_inteira'); }
 function buffetDow()            { return S.fech?.data ? gnBuffetDow(S.fech.data) : new Date().getDay(); }
 function buffetTemFeijoadaHoje(){ return buffetLojaUsa() && gnBuffetTemFeijoada(buffetDow()); }
 
@@ -1800,10 +1806,11 @@ function buffetPayload() {
   return body;
 }
 function buffetFaltando() {
-  if (!buffetObrigatorio()) return [];
   const LBL = { feijoada_inteira:'Feijoada inteira', feijoada_meia:'Feijoada meia',
                 rodizio_inteira:'Rodízio inteira',   rodizio_meia:'Rodízio meia' };
-  return buffetCamposDoDia().filter(c => buffetQtdInput(c) === null).map(c => LBL[c]);
+  // Só os campos obrigatórios do dia: o que é opcional pode ficar em branco sem travar.
+  // buffetQtdInput devolve null só pro campo VAZIO — 0 digitado passa, de propósito.
+  return buffetCamposObrigatoriosDoDia().filter(c => buffetQtdInput(c) === null).map(c => LBL[c]);
 }
 
 function renderBuffet() {
@@ -1830,8 +1837,15 @@ function renderBuffet() {
   const obrig = buffetObrigatorio();
   const fechado = S.fech?.status === 'FECHADO';
 
-  $('buffetTitulo').innerHTML = `Buffet &amp; Rodízio ${obrig
+  // Feijoada e rodízio podem ter obrigatoriedade diferente na mesma loja (a feijoada é
+  // obrigatória em todas, o rodízio só em algumas), então o selo vai por bloco e o título
+  // só avisa que tem campo obrigatório ali.
+  const feijObrig = buffetFeijoadaObrigatoria(), rodObrig = buffetRodizioObrigatorio();
+  const selo = o => o
     ? '<small style="color:var(--err);font-weight:700">· obrigatório</small>'
+    : '<small style="color:var(--mut)">· opcional</small>';
+  $('buffetTitulo').innerHTML = `Buffet &amp; Rodízio ${obrig
+    ? '<small style="color:var(--err);font-weight:700">· tem campo obrigatório</small>'
     : '<small style="color:var(--mut)">· opcional</small>'}`;
 
   // Semeia do que está gravado (S.fech) — sem input na tela ainda, é essa a fonte.
@@ -1850,13 +1864,19 @@ function renderBuffet() {
     </div>`;
   };
 
+  // Lembrete do zero: sem ele, quem não vendeu nada tende a deixar o campo vazio e não
+  // consegue fechar o caixa sem entender por quê.
+  const dicaZero = `<div style="font-size:10px;color:var(--mut);margin:-2px 0 8px">Não vendeu nenhum? Informe <b>0</b>.</div>`;
+
   let html = '';
   if (temFeijoada) {
-    html += `<div style="font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Buffet de feijoada</div>`;
+    html += `<div style="font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Buffet de feijoada ${selo(feijObrig)}</div>`;
+    if (feijObrig) html += dicaZero;
     html += linha('feijoada_inteira', 'Inteira', F.inteira);
     html += linha('feijoada_meia', 'Meia', F.meia);
   }
-  html += `<div style="font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:1px;margin:${temFeijoada?'14px':'0'} 0 6px">Rodízio <span style="text-transform:none;letter-spacing:0">(${(dow===0||dow===6)?'fim de semana':'segunda a sexta'})</span></div>`;
+  html += `<div style="font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:1px;margin:${temFeijoada?'14px':'0'} 0 6px">Rodízio <span style="text-transform:none;letter-spacing:0">(${(dow===0||dow===6)?'fim de semana':'segunda a sexta'})</span> ${selo(rodObrig)}</div>`;
+  if (rodObrig) html += dicaZero;
   html += linha('rodizio_inteira', 'Inteira', R.inteira);
   html += linha('rodizio_meia', 'Meia', R.meia);
   html += `<div style="display:flex;justify-content:space-between;border-top:1px solid var(--linha);margin-top:10px;padding-top:8px;font-size:13px;font-weight:700">
@@ -2032,7 +2052,13 @@ function renderPreFechamento() {
       ${ck(temSistema, 'Total do sistema conferido')}
       ${ck(temFotoSistema, 'Foto do caixa do sistema')}
       ${ck(temFotos, semFotoCount > 0 ? `Fotos dos comprovantes (${semFotoCount} sem foto)` : 'Fotos dos comprovantes')}
-      ${buffetObrigatorio() ? ck(temBuffet, temBuffet ? 'Buffet e rodízio lançados' : `Buffet e rodízio (${faltaBuffet.length} sem quantidade)`) : ''}
+      ${buffetObrigatorio() ? (() => {
+        // O nome da linha segue o que é obrigatório hoje: em loja que só tem a feijoada
+        // obrigatória, falar em "rodízio" mandaria a pessoa procurar pendência que não há.
+        const nome = buffetFeijoadaObrigatoria() && buffetRodizioObrigatorio() ? 'Feijoada e rodízio'
+          : buffetFeijoadaObrigatoria() ? 'Feijoada' : 'Rodízio';
+        return ck(temBuffet, temBuffet ? `${nome} lançados` : `${nome} (${faltaBuffet.length} sem quantidade)`);
+      })() : ''}
       ${ck(isFechado, 'Caixa fechado')}
     </div>`;
   } else if (preChk) {
@@ -2106,8 +2132,9 @@ async function fecharCaixa() {
     erros.push('• Total Real do Sistema não preenchido');
   if (!S.fech?.foto_sistema)
     erros.push('• Foto do Caixa do Sistema não anexada');
-  // Buffet/rodízio: obrigatório só nas lojas de GN_BUFFET_OBRIGATORIO. Zero é resposta
-  // válida (não vendeu nenhum) — o que trava é o campo em branco, igual ao repique.
+  // Buffet/rodízio: feijoada trava em toda loja que usa buffet (nos dias em que é
+  // servida), rodízio só nas lojas de GN_BUFFET_OBRIGATORIO. Zero é resposta válida
+  // (não vendeu nenhum) — o que trava é o campo em branco, igual ao repique.
   buffetFaltando().forEach(lbl =>
     erros.push(`• ${lbl}: quantidade não informada (informe 0 se não vendeu)`));
   const saidasSemFoto = S.saidas.filter(s => !s.foto || s.foto.trim() === '');

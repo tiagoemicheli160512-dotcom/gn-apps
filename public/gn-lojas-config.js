@@ -32,12 +32,25 @@ window.GN_BUFFET_PRECOS = {
   },
 };
 
-// Lojas onde o lançamento é OBRIGATÓRIO pra fechar o caixa. Nas demais o campo aparece
-// igual, mas não trava o fechamento — até o usuário pedir pra ligar a obrigatoriedade.
-window.GN_BUFFET_OBRIGATORIO = ['BOULEVARD', 'BANGU', 'SÃO GONÇALO']; // userKey
+// RODÍZIO: lojas onde a quantidade é OBRIGATÓRIA pra fechar o caixa. Nas demais o campo
+// aparece igual, mas não trava o fechamento.
+window.GN_BUFFET_OBRIGATORIO = ['BOULEVARD', 'BANGU', 'SÃO GONÇALO', 'PEDREIRA']; // userKey
 
 // A Maglia é operação independente e não trabalha com buffet/rodízio: nem vê o campo.
 window.GN_BUFFET_FORA = ['MAGLIA']; // userKey
+
+// Quais quantidades travam o fechamento do caixa naquele dia, por loja.
+// A FEIJOADA é obrigatória em TODA loja que trabalha com buffet (não depende da lista
+// acima), nos dias em que ela é servida; o RODÍZIO só nas lojas de GN_BUFFET_OBRIGATORIO.
+// Em ambos os casos, zero é resposta válida — o que trava é o campo em branco, pra
+// diferenciar "não vendeu nenhum" de "esqueceu de lançar".
+window.gnBuffetCamposObrigatorios = function(userKey, dow) {
+  if (window.GN_BUFFET_FORA.includes(userKey)) return [];
+  const campos = [];
+  if (window.gnBuffetTemFeijoada(dow)) campos.push('feijoada_inteira', 'feijoada_meia');
+  if (window.GN_BUFFET_OBRIGATORIO.includes(userKey)) campos.push('rodizio_inteira', 'rodizio_meia');
+  return campos;
+};
 
 // dow: 0=Dom .. 6=Sáb (use new Date(iso + 'T12:00').getDay(), nunca o UTC).
 window.gnBuffetTemFeijoada = function(dow) { return dow === 5 || dow === 6; };
