@@ -187,6 +187,32 @@ function parseBRL(v) {
   return parseFloat(v) || 0;
 }
 
+// Quanto da cota do dia cada tipo de contrato leva. O Jovem Aprendiz leva METADE do dia
+// trabalhado; a outra metade não some nem fica com ele — cai no pool e vai pra
+// distribuição dos demais (ele nunca entra nesse rateio, ver `elegivel` em calcSemana).
+// Como poolRateio = baseTotal - sumAF, reduzir a cota dele já joga a metade liberada no
+// pool sozinha, sem precisar de nenhuma transferência à parte.
+window.GN_GORJETA_FATOR_DIA = { 'JOVEM APRENDIZ': 0.5 };
+// A regra da meia cota vale da semana 38 (14/09 a 20/09/2026) EM DIANTE. Semanas
+// anteriores continuam calculando como sempre calcularam, senão abrir uma semana já paga
+// mostraria um valor diferente do que a loja efetivamente pagou na época — o app não
+// guarda foto do que foi pago, recalcula tudo na hora a partir dos dados crus.
+// O número aqui é o ÍNDICE interno da semana (a chave usada em all_data), que é o número
+// mostrado na tela menos 2: semana 38 na tela = índice 36.
+window.GN_GORJETA_JA_METADE_DESDE_SEM = 36;
+// `semIdx` ausente = semana não identificada; nesse caso vale a regra NOVA, que é a regra
+// corrente do negócio — o corte acima é uma cortesia com o histórico, não o padrão.
+window.gnGorjetaFatorDia = function(tipo, semIdx) {
+  const f = window.GN_GORJETA_FATOR_DIA[tipo];
+  if (typeof f !== 'number') return 1;
+  // null/undefined/'' são "semana não identificada" — não podem virar Number(null)===0 e
+  // cair no lado ANTIGO do corte, que é o oposto do padrão que queremos.
+  if (semIdx === null || semIdx === undefined || semIdx === '') return f;
+  const idx = Number(semIdx);
+  if (Number.isFinite(idx) && idx < window.GN_GORJETA_JA_METADE_DESDE_SEM) return 1;
+  return f;
+};
+
 function calcSemana(wd, saldoAnt = 0) {
   const ativos = wd.funcs.filter(f => f.nome.trim());
   const nAtivos = ativos.length;
@@ -196,14 +222,20 @@ function calcSemana(wd, saldoAnt = 0) {
     return { e90, cotaUnit: I > 0 ? e90 / I : 0, I };
   });
   const funcCalc = ativos.map(f => {
+    // O Jovem Aprendiz continua contando como uma pessoa inteira no divisor do dia
+    // (`I` acima) — o que muda é só quanto ele leva da própria cota. `wd.semIdx` é gravado
+    // por quem monta a semana (getWD/getWDLoja) e decide se a semana já está sob a regra
+    // nova; as telas leem o `fatorDia` daqui em vez de recalcular, pra tela e conta nunca
+    // divergirem.
+    const fatorDia = gnGorjetaFatorDia(f.tipo, wd.semIdx);
     let bruta = 0;
-    dias.forEach((dia, d) => { if (['PRESENTE', 'HORISTA', 'JOVEM APRENDIZ', 'FOLGA', 'BANCO DE HORAS', 'FÉRIAS'].includes(f.dias[d])) bruta += dia.cotaUnit; });
+    dias.forEach((dia, d) => { if (['PRESENTE', 'HORISTA', 'JOVEM APRENDIZ', 'FOLGA', 'BANCO DE HORAS', 'FÉRIAS'].includes(f.dias[d])) bruta += dia.cotaUnit * fatorDia; });
     const nFS = f.dias.filter(s => ['FALTA', 'SUSPENSÃO'].includes(s)).length;
     const mult = nFS >= 2 ? 0 : nFS === 1 ? 0.5 : 1;
     const AF = bruta * mult;
     const elegivel = f.tipo !== 'JOVEM APRENDIZ' && nFS === 0 && f.dias.filter(s => s === 'ATESTADO' || s === 'JUSTIFICATIVA').length === 0 && f.dias.filter(s => ['PRESENTE', 'HORISTA', 'FOLGA', 'BANCO DE HORAS', 'FÉRIAS'].includes(s)).length > 0;
     const diasEleg = elegivel ? f.dias.filter(s => ['PRESENTE', 'HORISTA', 'FOLGA', 'BANCO DE HORAS', 'FÉRIAS'].includes(s)).length : 0;
-    return { ...f, bruta, mult, AF, elegivel, diasEleg, nFS };
+    return { ...f, bruta, mult, AF, elegivel, diasEleg, nFS, fatorDia };
   });
   const baseTotal = dias.reduce((s, d) => s + d.e90, 0);
   const sumAF = funcCalc.reduce((s, f) => s + f.AF, 0);
