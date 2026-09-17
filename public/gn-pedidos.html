@@ -2994,19 +2994,49 @@ async function _carregarVendaSemanaAnterior(lojaSlug, semanaAtivaDate) {
   if (S.vendaAntCache[cacheKey]) return; // já carregado ou carregando
   S.vendaAntCache[cacheKey] = { loading: true };
   try {
-    const { data, error } = await db.from('checklist_diario')
-      .select('data_operacao,loja,venda_salao,venda_delivery')
-      .gte('data_operacao', isoSeg).lte('data_operacao', isoDom);
-    if (error) throw error;
+    // Venda vem do Check-list; rodízio/feijoada vêm do fechamento de caixa (o Check-list
+    // não tem essas colunas). As duas consultas filtram a loja no cliente com
+    // _normLojaPed porque cada tabela grava a loja num formato diferente — e a de caixa
+    // ainda tem variantes antigas (SAO_GONCALO) que um eq. no servidor deixaria de fora.
+    const [vendaRes, buffetRes] = await Promise.all([
+      db.from('checklist_diario')
+        .select('data_operacao,loja,venda_salao,venda_delivery')
+        .gte('data_operacao', isoSeg).lte('data_operacao', isoDom),
+      db.from('gn_caixa_fechamento')
+        .select('data,loja,feijoada_inteira,feijoada_meia,rodizio_inteira,rodizio_meia')
+        .gte('data', isoSeg).lte('data', isoDom),
+    ]);
+    if (vendaRes.error) throw vendaRes.error;
     const alvo = _normLojaPed(chkKey);
+    const idxDoDia = iso => Math.round((new Date(iso + 'T12:00:00') - new Date(isoSeg + 'T12:00:00')) / 86400000);
     const dias = Array(7).fill(0);
-    (data || []).forEach(r => {
+    (vendaRes.data || []).forEach(r => {
       if (_normLojaPed(r.loja) !== alvo) return;
-      const idx = Math.round((new Date(r.data_operacao + 'T12:00:00') - new Date(isoSeg + 'T12:00:00')) / 86400000);
+      const idx = idxDoDia(r.data_operacao);
       if (idx < 0 || idx > 6) return;
       dias[idx] += (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0);
     });
-    S.vendaAntCache[cacheKey] = { loading: false, dias, total: dias.reduce((a, b) => a + b, 0) };
+    // Os dois turnos do mesmo dia somam na mesma casa. Erro aqui não derruba o card: a
+    // venda continua sendo o principal, o buffet some e pronto.
+    const rodizio = Array(7).fill(0), feijoada = Array(7).fill(0);
+    let temBuffet = false;
+    if (!buffetRes.error) {
+      (buffetRes.data || []).forEach(r => {
+        if (_normLojaPed(r.loja) !== alvo) return;
+        const idx = idxDoDia(r.data);
+        if (idx < 0 || idx > 6) return;
+        const v = gnBuffetValores(r, gnBuffetDow(r.data));
+        rodizio[idx] += v.rodizioQtd;
+        feijoada[idx] += v.feijoadaQtd;
+        if (v.rodizioQtd || v.feijoadaQtd) temBuffet = true;
+      });
+    }
+    S.vendaAntCache[cacheKey] = {
+      loading: false, dias, total: dias.reduce((a, b) => a + b, 0),
+      rodizio, feijoada, temBuffet,
+      rodizioTotal: rodizio.reduce((a, b) => a + b, 0),
+      feijoadaTotal: feijoada.reduce((a, b) => a + b, 0),
+    };
   } catch (e) {
     S.vendaAntCache[cacheKey] = { loading: false, erro: true };
   }
@@ -3030,22 +3060,45 @@ function _vendaSemanaAntCardHtml() {
   const lojaNome = S.lojas.find(l => l.slug_pedido === S.lojaAtiva)?.nome_display || chkKey;
   const fmtD = d => d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
   const DSEM = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
+  // Quem não trabalha com buffet/rodízio não ganha as linhas (a Maglia está em
+  // GN_BUFFET_FORA) — mesma fonte que o app Caixa usa pra esconder o campo lá.
+  const usaBuffet = !(window.GN_BUFFET_FORA || []).includes(LOJA_USERKEY_BY_SLUG[S.lojaAtiva]);
 
   let corpo;
   if (!cache || cache.loading) {
     corpo = `<div style="font-size:11px;color:var(--muted);padding:4px 0">Carregando…</div>`;
   } else if (cache.erro) {
     corpo = `<div style="font-size:11px;color:var(--muted);padding:4px 0">Não foi possível carregar a venda dessa semana.</div>`;
-  } else if (!cache.total) {
+  } else if (!cache.total && !cache.temBuffet) {
     corpo = `<div style="font-size:11px;color:var(--muted);padding:4px 0">Sem venda lançada no Check-list nessa semana.</div>`;
   } else {
-    const fmtV = v => v > 0 ? (v >= 1000 ? 'R$' + (v / 1000).toFixed(1).replace('.', ',') + 'k' : 'R$' + Math.round(v)) : '—';
+    // O "R$" saiu de cada célula e virou o rótulo da linha: com três linhas rotuladas, é
+    // o que deixa as sete colunas do dia caberem lado a lado na tela do celular.
+    const fmtV = v => v > 0 ? (v >= 1000 ? (v / 1000).toFixed(1).replace('.', ',') + 'k' : String(Math.round(v))) : '—';
+    const rot = t => `<td style="font-size:9px;font-weight:700;color:var(--muted);text-align:left;padding:2px 4px 2px 0;white-space:nowrap">${t}</td>`;
+    const cel = (txt, forte) => `<td style="font-size:10px;font-weight:800;color:${forte ? 'var(--text)' : 'var(--muted)'};text-align:center;padding:2px 0">${txt}</td>`;
+    // A feijoada só é servida sexta e sábado (gnBuffetTemFeijoada). Nos outros dias o
+    // vazio não é falta de lançamento, então marca com "·" em vez de "—" pra ninguém
+    // sair atrás de um dado que não existe.
+    const segAntDow = new Date(isoSeg + 'T12:00').getDay();
+    const dowDoIdx = i => (segAntDow + i) % 7;
+    const linhaBuffet = (qtds, label, soDiaDeFeijoada) => `<tr>${rot(label)}${qtds.map((q, i) => {
+      if (soDiaDeFeijoada && !gnBuffetTemFeijoada(dowDoIdx(i))) return cel('·', false);
+      return cel(q > 0 ? String(q) : '—', q > 0);
+    }).join('')}</tr>`;
+
     corpo = `
       <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:6px">
-        <thead><tr>${DSEM.map(d => `<th style="font-size:9px;font-weight:700;color:var(--muted);text-align:center;padding:2px 0">${d}</th>`).join('')}</tr></thead>
-        <tbody><tr>${cache.dias.map(v => `<td style="font-size:10px;font-weight:800;color:${v > 0 ? 'var(--text)' : 'var(--muted)'};text-align:center;padding:2px 0">${fmtV(v)}</td>`).join('')}</tr></tbody>
+        <colgroup><col style="width:52px">${DSEM.map(() => '<col>').join('')}</colgroup>
+        <thead><tr><th></th>${DSEM.map(d => `<th style="font-size:9px;font-weight:700;color:var(--muted);text-align:center;padding:2px 0">${d}</th>`).join('')}</tr></thead>
+        <tbody>
+          <tr>${rot('R$')}${cache.dias.map(v => cel(fmtV(v), v > 0)).join('')}</tr>
+          ${usaBuffet ? linhaBuffet(cache.rodizio || Array(7).fill(0), '🍖 Rodízio', false) : ''}
+          ${usaBuffet ? linhaBuffet(cache.feijoada || Array(7).fill(0), '🍲 Feijoada', true) : ''}
+        </tbody>
       </table>
-      <div style="text-align:right;font-size:11px;font-weight:800;color:#1A1D23;margin-top:6px">Total: R$ ${cache.total.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</div>`;
+      <div style="text-align:right;font-size:11px;font-weight:800;color:#1A1D23;margin-top:6px">Total: R$ ${cache.total.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</div>
+      ${usaBuffet ? `<div style="text-align:right;font-size:10px;color:var(--muted);margin-top:2px">🍖 ${cache.rodizioTotal || 0} rodízio${(cache.rodizioTotal || 0) === 1 ? '' : 's'} · 🍲 ${cache.feijoadaTotal || 0} feijoada${(cache.feijoadaTotal || 0) === 1 ? '' : 's'} na semana${cache.temBuffet ? '' : ' (nada lançado no Caixa)'}</div>` : ''}`;
   }
 
   return `<div style="background:var(--card2);border:1px solid var(--border);border-left:3px solid #22c55e;border-radius:var(--r);padding:12px 14px;margin-bottom:10px">
