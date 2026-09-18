@@ -1389,14 +1389,36 @@ function _addDiasISO(dataISO, n) { const d = new Date(dataISO + 'T00:00:00'); d.
 // que trava mostrarHome() e mostra a tela #telaBloqueioCaixa em vez da Home normal.
 // Maglia fica de fora por padrão (regra combinada: só entra se pedido citar "Maglia").
 const CAIXA_TRAVA_DESDE = '2026-09-01';
+
+// DIAS JUNTOS — exceção pra quando a loja lançou o movimento de dois dias num caixa só
+// (ex.: fecharam 16 e 17/09 juntos no caixa do dia 16). O dia absorvido nunca vai ter
+// caixa próprio, então sem isso a trava exigiria pra sempre um caixa que não existe.
+// Fica em gn_lojas.all_data.caixa_dias_juntos, no mesmo lugar de caixa_conferencias:
+//   { "2026-09-17": { com: "2026-09-16", por: "Tiago", em: "<iso>" } }
+// A exceção só vale se o dia que absorveu tiver mesmo um caixa FECHADO — senão ela
+// esconderia uma falta de verdade em vez de explicar uma.
+async function _caixaDiasJuntos() {
+  try {
+    const comKey = LOJA_COM_MAP[S.loja] || S.loja;
+    const lojaRow = await sb(`gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`);
+    return (lojaRow?.[0]?.all_data?.caixa_dias_juntos) || {};
+  } catch(_) { return {}; }
+}
+
 async function _diaCaixaPendente() {
   if (!S.loja || S.loja === 'MAGLIA') return null;
   const ontem = _addDiasISO(hoje(), -1);
   if (CAIXA_TRAVA_DESDE > ontem) return null;
-  const rows = await sb(`gn_caixa_fechamento?loja=eq.${encodeURIComponent(S.loja)}&data=gte.${CAIXA_TRAVA_DESDE}&data=lte.${ontem}&select=id,data,turno,operador,status`);
+  const [rows, juntos] = await Promise.all([
+    sb(`gn_caixa_fechamento?loja=eq.${encodeURIComponent(S.loja)}&data=gte.${CAIXA_TRAVA_DESDE}&data=lte.${ontem}&select=id,data,turno,operador,status`),
+    _caixaDiasJuntos(),
+  ]);
   const fechados = new Set((rows || []).filter(r => r.status === 'FECHADO').map(r => r.data));
+  S._caixaDiasJuntos = juntos;
   let d = CAIXA_TRAVA_DESDE;
   while (d <= ontem) {
+    const junto = juntos[d];
+    if (junto && fechados.has(junto.com)) { d = _addDiasISO(d, 1); continue; }
     if (!fechados.has(d)) {
       // Reabrir um dia passado cai aqui: o dia volta a ficar pendente justamente porque
       // o caixa foi reaberto. Devolve o caixa em aberto junto (quando existe) pra tela de
@@ -3097,10 +3119,20 @@ async function mostrarHome() {
             : `<span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;font-weight:600;color:var(--ok)">✅ Conferido</span>`)
           : badge(false, 'Conferido');
         const borderStyle = conf?.tem_divergencia && !conf?.divergencia_resolvida ? 'border-color:#DC2626;background:rgba(255,68,68,0.06)' : '';
+        // Quando este caixa absorveu o movimento de outro(s) dia(s), diz isso na própria
+        // linha: sem essa marca, o dia absorvido some do histórico sem explicação e o
+        // total desse caixa parece alto demais pra um dia só.
+        const absorvidos = Object.keys(S._caixaDiasJuntos || {})
+          .filter(dia => (S._caixaDiasJuntos[dia] || {}).com === f.data)
+          .sort();
+        const juntoBadge = absorvidos.length
+          ? `<div style="font-size:10px;font-weight:800;color:#7c3aed;background:rgba(124,58,237,.10);border:1px solid rgba(124,58,237,.25);border-radius:6px;padding:2px 7px;margin-top:4px;display:inline-block">🔗 Inclui o movimento de ${absorvidos.map(d => d.split('-').reverse().slice(0,2).join('/')).join(' e ')}</div>`
+          : '';
         html += `<div class="hist-item" style="${borderStyle}">
           <div style="flex:1">
             <div style="font-size:13px;font-weight:bold">${data} ${chip}</div>
             <div class="hi-meta">${f.operador||'—'}</div>
+            ${juntoBadge}
             <div style="display:flex;align-items:center;gap:10px;margin-top:5px;flex-wrap:wrap">
               ${badge(chkOk,'Check-list')}${confBadge}
               <div style="margin-left:auto;display:flex;gap:6px;flex-shrink:0">
