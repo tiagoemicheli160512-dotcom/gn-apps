@@ -2402,13 +2402,37 @@ async function _verificarBloqueioCaixaOntem(sess, isMaster) {
   const ontemD = new Date(); ontemD.setDate(ontemD.getDate()-1);
   const ontem = ontemD.getFullYear()+'-'+String(ontemD.getMonth()+1).padStart(2,'0')+'-'+String(ontemD.getDate()).padStart(2,'0');
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
-  const rows = await window.gnFetchJson(
-    `${SB_URL}/rest/v1/gn_caixa_fechamento?loja=eq.${encodeURIComponent(sess.loja)}&data=eq.${ontem}&select=turno,status`,
-    H, 'bloqueioCaixaOntem', null);
+  const comKey = LOJA_COM_KEY[sess.loja] || sess.loja;
+  const [rows, lojaRows] = await Promise.all([
+    window.gnFetchJson(
+      `${SB_URL}/rest/v1/gn_caixa_fechamento?loja=eq.${encodeURIComponent(sess.loja)}&data=eq.${ontem}&select=turno,status`,
+      H, 'bloqueioCaixaOntem', null),
+    // Exceção "dias juntos" — mesma fonte que o app Caixa lê (gn_lojas.all_data.
+    // caixa_dias_juntos, ver _caixaDiasJuntos em gn-caixa.html).
+    window.gnFetchJson(
+      `${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`,
+      H, 'bloqueioCaixaOntem:juntos', []),
+  ]);
   if (rows === null) return; // falha de rede — não bloqueia por erro de conexão
-  // [].every(...) dá true num array vazio — por isso o "rows.length &&" na
-  // frente, senão "nenhum caixa aberto ontem" passaria como liberado.
-  if (rows.length && rows.every(r => r.status==='FECHADO')) return; // todo turno aberto foi fechado — liberado
+  // [].every(...) dá true num array vazio — por isso o "rs.length &&" na frente,
+  // senão "nenhum caixa aberto no dia" passaria como liberado.
+  const _tudoFechado = rs => !!(rs && rs.length && rs.every(r => r.status==='FECHADO'));
+  if (_tudoFechado(rows)) return; // todo turno aberto foi fechado — liberado
+
+  // DIAS JUNTOS — a loja lançou o movimento de ontem dentro do caixa de outro dia (ex.:
+  // Nova América, 16 e 17/09 num caixa só). Esse dia nunca vai ter caixa próprio, então
+  // sem ler a exceção aqui a Home ficava exigindo pra sempre um caixa que não existe e
+  // bloqueava TODOS os apps — mesmo com o app Caixa já destravado, que é o único lugar
+  // onde a exceção era lida. Vale só se o caixa que absorveu estiver mesmo fechado:
+  // senão ela esconderia uma falta de verdade em vez de explicar uma.
+  const junto = ((lojaRows?.[0]?.all_data?.caixa_dias_juntos) || {})[ontem];
+  if (junto && junto.com) {
+    const rowsCom = await window.gnFetchJson(
+      `${SB_URL}/rest/v1/gn_caixa_fechamento?loja=eq.${encodeURIComponent(sess.loja)}&data=eq.${junto.com}&select=turno,status`,
+      H, 'bloqueioCaixaOntem:junto', null);
+    if (rowsCom === null) return;      // falha de rede — não bloqueia por erro de conexão
+    if (_tudoFechado(rowsCom)) return; // o movimento de ontem está no caixa daquele dia
+  }
 
   const abertos = (rows||[]).filter(r => r.status !== 'FECHADO').map(r => r.turno);
   const dataDisp = String(ontemD.getDate()).padStart(2,'0')+'/'+String(ontemD.getMonth()+1).padStart(2,'0');
