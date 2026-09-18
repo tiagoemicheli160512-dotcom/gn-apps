@@ -2277,6 +2277,27 @@ async function _confirmarFornecedoresSelecionados() {
 
     const fornsSet = new Set(selecionados);
 
+    // 1b. RE-CONFIRMAÇÃO DEPOIS DE REVERTER — reverterConfirmacaoFornecedor só apaga as
+    // provisões AGUARDANDO; entrega que a loja já recebeu fica de pé, de propósito (é
+    // evento real). Sem este passo, a confirmação seguinte recria TODAS as linhas do
+    // fornecedor e as já entregues viram provisão em dobro. Foi exatamente o que
+    // aconteceu com a SAUDALI/CIACARNE: 9 linhas já recebidas recriadas, 105 kg a mais
+    // numa semana só.
+    // Vale SÓ pra quem está marcado como revertido (S.fornecedoresRevertidos). Fornecedor
+    // em "2ª rodada" precisa poder repetir os mesmos itens — é um pedido novo de
+    // propósito, não a repetição de um que já saiu.
+    const fornsRevertidos = selecionados.filter(f => S.fornecedoresRevertidos[f]);
+    const jaTemProvisao = new Set();
+    if (fornsRevertidos.length > 0) {
+      const { data: provAntigas } = await db.from('gn_provisoes')
+        .select('catalogo_id,loja_slug,fornecedor')
+        .eq('pedido_id', S.pedidoAtual.id)
+        .neq('status', 'CANCELADO')
+        .in('fornecedor', fornsRevertidos);
+      (provAntigas || []).forEach(p => jaTemProvisao.add(p.fornecedor + '|' + p.catalogo_id + '|' + p.loja_slug));
+    }
+    const puladas = [];
+
     // 2. Gerar provisões — uma por produto×loja com qtd > 0, só dos fornecedores selecionados
     const provisoes = [];
     S.catalogo.forEach(prod => {
@@ -2286,6 +2307,12 @@ async function _confirmarFornecedoresSelecionados() {
       S.lojas.forEach(loja => {
         const item = itensLoja[loja.slug_pedido];
         if (!item || !item.qtd || item.qtd <= 0) return;
+
+        // Já saiu antes do revert e a loja recebeu: não entra de novo (ver 1b).
+        if (jaTemProvisao.has(prod.fornecedor + '|' + prod.id + '|' + loja.slug_pedido)) {
+          puladas.push({ produto: prod.produto, loja: loja.nome_display || loja.slug_pedido, qtd: item.qtd });
+          return;
+        }
 
         const forn = S.fornecedores.find(f => f.nome === prod.fornecedor);
         const diasForn = forn?.dias_entrega || [];
@@ -2341,6 +2368,20 @@ async function _confirmarFornecedoresSelecionados() {
         });
       });
     });
+
+    // 2b. Avisa o que foi pulado ANTES de gravar, com os itens na tela: a pessoa acabou de
+    // reverter justamente pra refazer o pedido, então ela precisa ver quais linhas o app
+    // não vai repetir — e poder desistir se o que ela queria era outra coisa.
+    if (puladas.length > 0) {
+      const lista = puladas.slice(0, 12).map(p => `• ${p.produto} — ${p.loja} (${p.qtd})`).join('\n');
+      const resto = puladas.length > 12 ? `\n… e mais ${puladas.length - 12} item(ns)` : '';
+      const seguir = confirm(
+        `⚠️ ${puladas.length} item(ns) já tinham sido entregues antes da reversão e NÃO vão ser pedidos de novo:\n\n`
+        + lista + resto
+        + `\n\nReverter não apaga entrega já recebida pela loja — repetir essas linhas geraria provisão em dobro.\n\n`
+        + `OK = confirmar só o que falta.\nCancelar = não confirmar nada agora.`);
+      if (!seguir) { renderPedido(); return; }
+    }
 
     // 3. Inserir provisões por fornecedor — cada fornecedor é tratado como uma unidade:
     // internet instável (ex.: loja com conexão ruim, ou o próprio comprador em rede
