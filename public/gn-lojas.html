@@ -5066,10 +5066,10 @@ async function _sincronizarProdutosPedidoComCatalogo() {
    segunda e quinta viram lotes separados automaticamente, sem esbarrar no pedido semanal
    nem na lógica de dedupe que já existe pra ele (ver _buscarOuCriarPedidoAtivo). */
 let hortifrutiCatalogo = [];  // [{id (catalogo uuid), fornecedor, subgrupo, produto, und, custo}]
-let hortifrutiQtd = {};       // catalogo_id -> {kg, und} quantidade digitada (ainda não enviada) — dois campos
-                               // fixos por item (igual Cx/Und da aba Pedido), não unidade escolhível: kg e und não
-                               // convertem entre si, então só um dos dois é enviado por item (kg tem prioridade se
-                               // os dois vierem preenchidos por engano).
+let hortifrutiQtd = {};       // catalogo_id -> quantidade digitada (ainda não enviada), um número só por item.
+                               // A unidade não é escolhida aqui: é a que está cadastrada no catálogo (p.und). Antes
+                               // eram dois campos fixos (Kg/Und) pra todo item, o que não tinha resposta certa pros
+                               // itens cadastrados em SC ou CX — o saco de cebola virava "kg" ou "und" na marra.
 let hortifrutiEnviado = null; // { pedidoId, itens:[{catalogo_id,produto,und,qtd_pedida}] } quando já mandou hoje
 let hortifrutiCarregando = false;
 let hortifrutiLiberadoHoje = false; // liberação especial pra hoje (fora de segunda/quinta), feita pelo Compras
@@ -5114,7 +5114,10 @@ async function carregarHortifruti() {
             pedidoId: pedidoHoje.id,
             itens: itens.map(function(it) {
               const prod = hortifrutiCatalogo.find(function(p) { return p.id === it.catalogo_id; });
-              return { catalogo_id: it.catalogo_id, qtd_pedida: it.qtd_pedida, produto: prod ? prod.produto : '—', und: it.unidade || (prod ? prod.und : '') };
+              // Unidade do catálogo na frente da gravada: pedidos antigos foram enviados
+              // quando a tela só oferecia KG/UND, e mostrar aquilo aqui divergiria do que
+              // o Estoque e Pedido exibe pro mesmo item.
+              return { catalogo_id: it.catalogo_id, qtd_pedida: it.qtd_pedida, produto: prod ? prod.produto : '—', und: prod ? _hortifrutiUnd(prod) : (it.unidade || '') };
             }),
           };
         }
@@ -5129,19 +5132,24 @@ async function carregarHortifruti() {
   }
 }
 
-function setHortifrutiQtd(catalogoId, campo, val) {
-  if (!hortifrutiQtd[catalogoId]) hortifrutiQtd[catalogoId] = {};
-  hortifrutiQtd[catalogoId][campo] = Math.max(0, parseFloat(val) || 0);
+function setHortifrutiQtd(catalogoId, val) {
+  hortifrutiQtd[catalogoId] = Math.max(0, parseFloat(val) || 0);
 }
 
-// Monta a lista de itens a enviar a partir de hortifrutiQtd — um item só entra com UM dos
-// dois campos (kg tem prioridade se os dois vierem preenchidos, já que gn_pedido_itens só
-// aceita uma linha por catálogo+loja+pedido, então não dá pra mandar os dois juntos).
+// Unidade de cada item do Hortifruti: sempre a cadastrada no catálogo. É o mesmo valor que
+// o app Estoque e Pedido mostra na linha do item, então os dois lados nunca divergem.
+function _hortifrutiUnd(p) { return String((p && p.und) || 'UN').toUpperCase(); }
+
+// Cor do selo por unidade — só pra leitura rápida na lista; unidade nova cai no cinza.
+const HORTI_UND_COR = { KG: '#059669', UND: '#7c3aed', SC: '#b45309', CX: '#0369a1' };
+function _hortifrutiUndCor(und) { return HORTI_UND_COR[und] || '#475569'; }
+
+// Monta a lista de itens a enviar a partir de hortifrutiQtd — um item, uma quantidade, na
+// unidade do catálogo (gn_pedido_itens aceita uma linha por catálogo+loja+pedido).
 function _hortifrutiItensParaEnviar() {
   return hortifrutiCatalogo.reduce(function(itens, p) {
-    const q = hortifrutiQtd[p.id] || {};
-    if ((q.kg || 0) > 0) itens.push({ catalogo_id: p.id, qtd_pedida: q.kg, unidade: 'KG' });
-    else if ((q.und || 0) > 0) itens.push({ catalogo_id: p.id, qtd_pedida: q.und, unidade: 'UND' });
+    const q = hortifrutiQtd[p.id] || 0;
+    if (q > 0) itens.push({ catalogo_id: p.id, qtd_pedida: q, unidade: _hortifrutiUnd(p) });
     return itens;
   }, []);
 }
@@ -5183,8 +5191,8 @@ async function enviarPedidoHortifruti() {
 
   const provAntMap = await _buscarProvAntHortifruti(slug);
   const zerados = hortifrutiCatalogo
-    .filter(function(p) { const q = hortifrutiQtd[p.id] || {}; return !((q.kg||0) > 0) && !((q.und||0) > 0) && (provAntMap[p.id] || 0) > 0; })
-    .map(function(p) { return { id: p.id, produto: p.produto, und: p.und || 'UN', provAnt: provAntMap[p.id] }; });
+    .filter(function(p) { return !((hortifrutiQtd[p.id] || 0) > 0) && (provAntMap[p.id] || 0) > 0; })
+    .map(function(p) { return { id: p.id, produto: p.produto, und: _hortifrutiUnd(p), provAnt: provAntMap[p.id] }; });
   if (zerados.length > 0) { _abrirAvisoZeradosHortifruti(zerados); return; }
 
   _confirmarEnviarHortifruti();
@@ -5212,7 +5220,7 @@ function _abrirAvisoZeradosHortifruti(zerados) {
         + '<div style="font-size:12px;font-weight:700;color:#1A1D23;margin-bottom:4px">' + it.produto + '</div>'
         + '<div style="font-size:10px;color:#78350F;margin-bottom:6px">Prov.ant: <b>' + it.provAnt + ' ' + it.und + '</b></div>'
         + '<input type="number" step="0.001" min="0" placeholder="0" class="inp-full" style="width:110px;padding:5px 8px;font-size:12px"'
-        + ' oninput="_qtdZeradoHortiChanged(this,\'' + it.id + '\',' + i + ',\'' + (it.und === 'KG' ? 'kg' : 'und') + '\')">'
+        + ' oninput="_qtdZeradoHortiChanged(this,\'' + it.id + '\',' + i + ')">'
         + '</div>';
     }).join('')
     + '</div>'
@@ -5225,11 +5233,10 @@ function _abrirAvisoZeradosHortifruti(zerados) {
 }
 
 // oninput do campo dentro do aviso de zerados do Hortifruti — reaproveita setHortifrutiQtd
-// (mesmo estado usado pelo grid normal da aba), escrevendo no campo (kg/und) que
-// corresponde à unidade que o item usava da última vez. Só marca a linha como resolvida
+// (mesmo estado usado pelo grid normal da aba). Só marca a linha como resolvida
 // visualmente assim que o valor deixa de ser zero.
-function _qtdZeradoHortiChanged(el, catalogoId, idx, campo) {
-  setHortifrutiQtd(catalogoId, campo, el.value);
+function _qtdZeradoHortiChanged(el, catalogoId, idx) {
+  setHortifrutiQtd(catalogoId, el.value);
   const row = document.getElementById('zerado-horti-row-' + idx);
   if (row) row.style.opacity = (parseFloat(el.value) || 0) > 0 ? '0.5' : '1';
 }
@@ -8898,21 +8905,16 @@ function render() {
         ${podeEnviar && hortifrutiLiberadoHoje ? `<div style="background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.25);border-radius:13px;padding:10px 12px;font-size:11px;color:#065F46;margin-bottom:10px">🔓 Envio liberado hoje pelo Estoque e Pedido (dia especial).</div>` : ''}
         <div class="card">
           ${hortifrutiCatalogo.map(function(p) {
-            const _hq = hortifrutiQtd[p.id] || {};
+            const _hq = hortifrutiQtd[p.id] || '';
+            const _und = _hortifrutiUnd(p);
             return `<div class="row-item" style="flex-direction:column;align-items:flex-start;gap:6px">
               <div style="display:flex;width:100%;align-items:center;gap:6px">
                 <span class="item-name" style="font-weight:700;font-size:12px;flex:1;min-width:0">${p.produto}</span>
                 <span style="font-size:9px;color:#64748b;flex-shrink:0">${p.subgrupo||''}</span>
               </div>
-              <div style="display:flex;gap:6px;width:100%">
-                <div style="flex:1">
-                  <label style="font-size:9px;color:#64748b;font-weight:700;text-transform:uppercase">Kg</label>
-                  ${campoComBadgeSemAutoSave(_hq.kg||'', 'KG', '#059669', "oninput=\"setHortifrutiQtd('"+p.id+"','kg',this.value)\"")}
-                </div>
-                <div style="flex:1">
-                  <label style="font-size:9px;color:#475569;font-weight:700;text-transform:uppercase">Und</label>
-                  ${campoComBadgeSemAutoSave(_hq.und||'', 'UND', '#7c3aed', "oninput=\"setHortifrutiQtd('"+p.id+"','und',this.value)\"")}
-                </div>
+              <div style="width:100%">
+                <label style="font-size:9px;color:${_hortifrutiUndCor(_und)};font-weight:700;text-transform:uppercase">Quantidade em ${_und}</label>
+                ${campoComBadgeSemAutoSave(_hq||'', _und, _hortifrutiUndCor(_und), "oninput=\"setHortifrutiQtd('"+p.id+"',this.value)\"")}
               </div>
             </div>`;
           }).join('')}
