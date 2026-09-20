@@ -3,22 +3,103 @@
 // (Norte Shopping já usou 'norte' no passado, mas a tabela hoje só tem 'norte_shopping'
 // gravado — confirmado direto no banco; manter os dois campos separados só por precaução
 // caso surja outra exceção real no futuro).
+// municipio: cidade onde a loja fica, usada pelos feriados locais (ver GN_MUNICIPIOS e
+// gnFeriadosLocais abaixo). Pedreira fica em Nova Iguaçu, na Baixada — não no município
+// do Rio, apesar de existir um bairro Pedreira na cidade do Rio (confirmado com o usuário).
 window.GN_LOJAS = [
-  { display:'Bangu',          userKey:'BANGU',         chkKey:'Bangu',          comKey:'BANGU',        lojaSlug:'bangu',          trioSlug:'bangu',        cor:'#b81a1a' },
-  { display:'Caxias',         userKey:'CAXIAS',        chkKey:'Caxias',         comKey:'CAXIAS',       lojaSlug:'caxias',         trioSlug:'caxias',       cor:'#1a6bbd' },
-  { display:'São Gonçalo',    userKey:'SÃO GONÇALO',   chkKey:'São Gonçalo',    comKey:'SAO_GONCALO',  lojaSlug:'sao_goncalo',    trioSlug:'sao_goncalo',  cor:'#8B1A8B' },
-  { display:'Norte Shopping', userKey:'NORTE SHOPPING',chkKey:'Norte Shopping', comKey:'NORTE',        lojaSlug:'norte_shopping', trioSlug:'norte_shopping', cor:'#1a7a4a' },
-  { display:'Boulevard',      userKey:'BOULEVARD',     chkKey:'Boulevard',      comKey:'BOULEVARD',    lojaSlug:'boulevard',      trioSlug:'boulevard',    cor:'#b85a00' },
-  { display:'Nova Iguaçu',    userKey:'RANCHO',        chkKey:'Rancho',         comKey:'RANCHO',       lojaSlug:'nova_iguacu',    trioSlug:'nova_iguacu',  cor:'#0e7490' },
-  { display:'Pedreira',       userKey:'PEDREIRA',      chkKey:'Pedreira',       comKey:'PEDREIRA',     lojaSlug:'pedreira',       trioSlug:'pedreira',     cor:'#7c3aed' },
-  { display:'Nova América',   userKey:'NOVA AMERICA',  chkKey:'Nova América',   comKey:'NOVA_AMERICA', lojaSlug:'nova_america',   trioSlug:'nova_america', cor:'#b45309' },
-  { display:'Campo Grande',   userKey:'CAMPO GRANDE',  chkKey:'Campo Grande',   comKey:'CAMPO_GRANDE', lojaSlug:'campo_grande',   trioSlug:'campo_grande', cor:'#065f46' },
-  { display:'Itaquera',       userKey:'ITAQUERA',      chkKey:'Itaquera',       comKey:'ITAQUERA',     lojaSlug:'itaquera',       trioSlug:'itaquera',     cor:'#be123c' },
-  { display:'Guarulhos',      userKey:'GUARULHOS',     chkKey:'Guarulhos',      comKey:'GUARULHOS',    lojaSlug:'guarulhos',      trioSlug:'guarulhos',    cor:'#1e40af' },
+  { display:'Bangu',          userKey:'BANGU',         chkKey:'Bangu',          comKey:'BANGU',        lojaSlug:'bangu',          trioSlug:'bangu',        cor:'#b81a1a', municipio:'RIO' },
+  { display:'Caxias',         userKey:'CAXIAS',        chkKey:'Caxias',         comKey:'CAXIAS',       lojaSlug:'caxias',         trioSlug:'caxias',       cor:'#1a6bbd', municipio:'DUQUE_DE_CAXIAS' },
+  { display:'São Gonçalo',    userKey:'SÃO GONÇALO',   chkKey:'São Gonçalo',    comKey:'SAO_GONCALO',  lojaSlug:'sao_goncalo',    trioSlug:'sao_goncalo',  cor:'#8B1A8B', municipio:'SAO_GONCALO' },
+  { display:'Norte Shopping', userKey:'NORTE SHOPPING',chkKey:'Norte Shopping', comKey:'NORTE',        lojaSlug:'norte_shopping', trioSlug:'norte_shopping', cor:'#1a7a4a', municipio:'RIO' },
+  { display:'Boulevard',      userKey:'BOULEVARD',     chkKey:'Boulevard',      comKey:'BOULEVARD',    lojaSlug:'boulevard',      trioSlug:'boulevard',    cor:'#b85a00', municipio:'RIO' },
+  { display:'Nova Iguaçu',    userKey:'RANCHO',        chkKey:'Rancho',         comKey:'RANCHO',       lojaSlug:'nova_iguacu',    trioSlug:'nova_iguacu',  cor:'#0e7490', municipio:'NOVA_IGUACU' },
+  { display:'Pedreira',       userKey:'PEDREIRA',      chkKey:'Pedreira',       comKey:'PEDREIRA',     lojaSlug:'pedreira',       trioSlug:'pedreira',     cor:'#7c3aed', municipio:'NOVA_IGUACU' },
+  { display:'Nova América',   userKey:'NOVA AMERICA',  chkKey:'Nova América',   comKey:'NOVA_AMERICA', lojaSlug:'nova_america',   trioSlug:'nova_america', cor:'#b45309', municipio:'RIO' },
+  { display:'Campo Grande',   userKey:'CAMPO GRANDE',  chkKey:'Campo Grande',   comKey:'CAMPO_GRANDE', lojaSlug:'campo_grande',   trioSlug:'campo_grande', cor:'#065f46', municipio:'RIO' },
+  { display:'Itaquera',       userKey:'ITAQUERA',      chkKey:'Itaquera',       comKey:'ITAQUERA',     lojaSlug:'itaquera',       trioSlug:'itaquera',     cor:'#be123c', municipio:'SAO_PAULO' },
+  { display:'Guarulhos',      userKey:'GUARULHOS',     chkKey:'Guarulhos',      comKey:'GUARULHOS',    lojaSlug:'guarulhos',      trioSlug:'guarulhos',    cor:'#1e40af', municipio:'GUARULHOS' },
   // Operação independente (cardápio e gorjetas próprios), gerida pelo grupo — mesmo
-  // controle das demais lojas.
-  { display:'Maglia',         userKey:'MAGLIA',        chkKey:'Maglia',         comKey:'MAGLIA',       lojaSlug:'maglia',         trioSlug:'maglia',       cor:'#059669' },
+  // controle das demais lojas. Sem município: feriado local é assunto que ainda não foi
+  // combinado pra ela (regra do CLAUDE.md — Maglia só entra quando for citada).
+  { display:'Maglia',         userKey:'MAGLIA',        chkKey:'Maglia',         comKey:'MAGLIA',       lojaSlug:'maglia',         trioSlug:'maglia',       cor:'#059669', municipio:null },
 ];
+
+// ── Feriados locais (estaduais e municipais) ───────────────────────────────
+// Feriado nacional e data comemorativa continuam na lista DATAS_ESPECIAIS_BASE de cada
+// app — valem pra rede inteira. O que está aqui é o contrário: só vale pra quem é
+// daquele estado/município, e mostrar pra todo mundo só atrapalhava (a loja de Itaquera
+// não fecha no São Jorge, a de Bangu não fecha no aniversário de SP).
+// Dia e mês fixos: o ano entra na hora, então não precisa de manutenção ano a ano.
+window.GN_MUNICIPIOS = {
+  RIO:             { nome: 'Rio de Janeiro',  uf: 'RJ' },
+  DUQUE_DE_CAXIAS: { nome: 'Duque de Caxias', uf: 'RJ' },
+  SAO_GONCALO:     { nome: 'São Gonçalo',     uf: 'RJ' },
+  NOVA_IGUACU:     { nome: 'Nova Iguaçu',     uf: 'RJ' },
+  SAO_PAULO:       { nome: 'São Paulo',       uf: 'SP' },
+  GUARULHOS:       { nome: 'Guarulhos',       uf: 'SP' },
+};
+
+window.GN_FERIADOS_ESTADUAIS = {
+  RJ: [{ dm: '04-23', nome: 'São Jorge' }],
+  SP: [{ dm: '07-09', nome: 'Revolução Constitucionalista' }],
+};
+
+window.GN_FERIADOS_MUNICIPAIS = {
+  RIO:             [{ dm: '01-20', nome: 'São Sebastião' }, { dm: '12-08', nome: 'N. Sra. da Conceição' }],
+  DUQUE_DE_CAXIAS: [{ dm: '12-31', nome: 'Aniversário de Duque de Caxias' }],
+  SAO_GONCALO:     [{ dm: '09-22', nome: 'Aniversário de São Gonçalo' }],
+  NOVA_IGUACU:     [{ dm: '01-15', nome: 'Aniversário de Nova Iguaçu' }],
+  SAO_PAULO:       [{ dm: '01-25', nome: 'Aniversário de São Paulo' }],
+  GUARULHOS:       [{ dm: '12-08', nome: 'N. Sra. da Conceição (padroeira)' }],
+};
+
+// Aceita qualquer chave de loja em uso nos apps (userKey do login, chkKey do Check-list,
+// comKey das comissões ou o slug do pedido) — cada app guarda a loja de um jeito.
+window.gnLojaPorChave = function (chave) {
+  if (!chave) return null;
+  const k = String(chave);
+  return (window.GN_LOJAS || []).find(l =>
+    l.userKey === k || l.chkKey === k || l.comKey === k || l.lojaSlug === k || l.display === k) || null;
+};
+
+// Feriados locais de UMA loja no ano — é o que a loja (e só ela) precisa ver.
+window.gnFeriadosLocais = function (chaveLoja, ano) {
+  const loja = window.gnLojaPorChave(chaveLoja);
+  const mun = loja && loja.municipio;
+  if (!mun) return [];
+  const info = window.GN_MUNICIPIOS[mun] || {};
+  const out = [];
+  ((window.GN_FERIADOS_ESTADUAIS || {})[info.uf] || []).forEach(f =>
+    out.push({ data: ano + '-' + f.dm, nome: f.nome, tipo: 'estadual', escopo: info.uf, lojas: [] }));
+  ((window.GN_FERIADOS_MUNICIPAIS || {})[mun] || []).forEach(f =>
+    out.push({ data: ano + '-' + f.dm, nome: f.nome, tipo: 'municipal', escopo: info.nome, lojas: [] }));
+  return out;
+};
+
+// Linha de contexto do feriado local, usada igual nos três apps que mostram as datas
+// especiais (Check-list, Home e Estoque e Pedido).
+window.gnFeriadoLocalDetalhe = function (f) {
+  if (!f || (f.tipo !== 'municipal' && f.tipo !== 'estadual')) return '';
+  if (f.lojas && f.lojas.length) {
+    return f.lojas.length <= 3 ? 'só ' + f.lojas.join(', ') : f.escopo + ' · ' + f.lojas.length + ' lojas';
+  }
+  return f.tipo === 'estadual' ? 'feriado estadual ' + f.escopo : 'feriado municipal · ' + f.escopo;
+};
+
+// Mesma coisa pra quem enxerga a rede inteira (Compras e Painel de Gestão): uma linha por
+// data, dizendo quais lojas param — sem isso o Compras perderia a data ao montar o pedido
+// das outras lojas.
+window.gnFeriadosLocaisRede = function (ano) {
+  const porChave = {};
+  (window.GN_LOJAS || []).filter(l => l.municipio).forEach(loja => {
+    window.gnFeriadosLocais(loja.userKey, ano).forEach(f => {
+      const k = f.data + '|' + f.nome;
+      if (!porChave[k]) porChave[k] = { ...f, lojas: [] };
+      porChave[k].lojas.push(loja.display);
+    });
+  });
+  return Object.values(porChave).sort((a, b) => a.data.localeCompare(b.data));
+};
 
 // ── Buffet de feijoada e rodízio ───────────────────────────────────────────
 // Fonte única dos preços e das regras de dia, usada pelo app Caixa (lançamento da
