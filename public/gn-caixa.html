@@ -2140,6 +2140,47 @@ function calcDifSistema() {
   }
 }
 
+// REPIQUE FORA DA CURVA — o repique é digitado à mão, em reais, e alimenta três coisas
+// de uma vez: a venda de salão do Check-list/Painel de Gestão (salão = entradas −
+// repique − delivery), o bruto do rateio de gorjetas da semana e o relatório do dia.
+// Um erro de vírgula zera a venda do dia em SILÊNCIO nos três lugares, porque a conta do
+// salão dá negativo e é gravada como 0. Caso real: Bangu, 18/09, repique digitado como
+// 86254 no lugar de 862,54 — a venda de salão do dia (R$ 9.380,16) sumiu do Painel e o
+// bruto da semana de gorjetas foi de R$ 5.396 pra R$ 90.787 sem ninguém perceber.
+const REPIQUE_PCT_ALERTA = 0.20; // acima disso o repique já é desproporcional à venda
+function _avisoRepique(rq) {
+  const entradas = totEntradas();
+  if (!(rq > 0) || entradas <= 0) return null;
+  const delivery = deliveryVal();
+  const salao = entradas - rq - delivery;
+  const base = `As entradas do dia somam ${money(entradas)}`;
+  const destino = `\n\nO repique vai pro Check-list, pro Painel de Gestão e pro rateio de gorjetas da semana.`
+    + `\n\nConfira se não faltou a vírgula (ex.: ${money(rq / 100)}).`
+    + `\n\nOK = gravar assim mesmo.\nCancelar = voltar e corrigir.`;
+  if (salao <= 0) {
+    return `⚠️ Repique de ${money(rq)} — com esse valor a venda de SALÃO do dia fica em R$ 0,00.`
+      + `\n\n${base} e o delivery ${money(delivery)}; descontando o repique não sobra nada de salão.`
+      + destino;
+  }
+  if (rq > entradas * REPIQUE_PCT_ALERTA) {
+    return `⚠️ Repique de ${money(rq)} — bem acima do normal: ${(rq / entradas * 100).toFixed(0)}% das entradas do dia.`
+      + `\n\n${base}, e com esse repique a venda de salão do dia fica em ${money(salao)}.`
+      + destino;
+  }
+  return null;
+}
+// Guarda o valor que o operador já confirmou no aviso, pra não perguntar de novo a cada
+// blur/fechamento com o MESMO valor (o aviso volta na hora que o número muda).
+let _repiqueConfirmado = null;
+function _confirmarRepique(rq) {
+  if (_repiqueConfirmado === rq) return true;
+  const msg = _avisoRepique(rq);
+  if (!msg) return true;
+  if (!confirm(msg)) return false;
+  _repiqueConfirmado = rq;
+  return true;
+}
+
 async function fecharCaixa() {
   // Reabertura exige autorização de cargo superior
   if (S.fech.status === 'FECHADO') { abrirModalReabrir(); return; }
@@ -2186,6 +2227,9 @@ async function fecharCaixa() {
   // com a tela mostrando o valor certo — ao fechar o caixa logo em seguida, esse repique
   // desatualizado sobrescrevia silenciosamente o que tinha acabado de ser salvo.
   const rq = parseMoney($('repiqueInput').value);
+  // Última barreira antes de fechar: fechado, o valor já foi pro Check-list, pro Painel
+  // e pro rateio da semana, e desfazer depois é conserto em três lugares.
+  if (!_confirmarRepique(rq)) { $('repiqueInput').focus(); return; }
   try {
     const u = await sb(`gn_caixa_fechamento?id=eq.${S.fech.id}`, {
       method: 'PATCH', prefer: 'return=representation',
@@ -3358,6 +3402,9 @@ function atualizarRepiqueLocal(el) {
 async function salvarRepique(el) {
   if (!S.fech) return;
   const v = parseMoney(el.value);
+  // Aqui é onde o estrago realmente acontece: salvar o repique já sincroniza o
+  // Check-list e o bruto das gorjetas na hora, sem esperar o caixa fechar.
+  if (!_confirmarRepique(v)) { el.focus(); el.select(); return; }
   try {
     const u = await sb(`gn_caixa_fechamento?id=eq.${S.fech.id}`, { method: 'PATCH', prefer: 'return=representation', body: { repique: v } });
     S.fech = u[0];
