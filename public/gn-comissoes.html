@@ -1092,6 +1092,33 @@ function adicionarFuncionario(){
     if(el) el.focus();
   },50);
 }
+function _normNomeFunc(s){
+  return (s||'').trim().toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
+}
+// Tira o funcionário das semanas JÁ CRIADAS depois da semana em que ele foi excluído,
+// deixando a mesma lápide (_removidoEm/_removidoNome) na vaga. Sem isso ele continuava nas
+// semanas seguintes (que nasceram herdando a semana anterior) e voltava pra tela assim que
+// alguém navegava pra frente — um dos caminhos de "excluí e ele voltou". Semana passada é
+// registro fechado e nunca é tocada.
+function _removerDeSemanasFuturasGor(nome, semIdx, ts){
+  const alvo=_normNomeFunc(nome);
+  if(!alvo) return 0;
+  let mexeu=0;
+  Object.keys(state.allData||{}).forEach(k=>{
+    if(!/^\d+$/.test(k) || Number(k)<=semIdx) return;
+    const wd=state.allData[k];
+    if(!wd || !Array.isArray(wd.funcs)) return;
+    let achou=false;
+    const funcs=wd.funcs.map((f,i)=>{
+      if(!f || !f.nome || _normNomeFunc(f.nome)!==alvo) return f;
+      achou=true;
+      return {id:f.id!=null?f.id:i,nome:'',tipo:'CLT / MENSALISTA',dias:Array(7).fill('PRESENTE'),
+              _removidoEm:ts,_removidoNome:nome};
+    });
+    if(achou){ state.allData[k]={...wd,funcs,_lastEdit:ts}; mexeu++; }
+  });
+  return mexeu;
+}
 function removerFuncionario(i, btnEl){
   const wd=getWD(state.semIdx);
   const nomeAtual=(wd.funcs[i]&&wd.funcs[i].nome||'').trim();
@@ -1123,11 +1150,21 @@ function removerFuncionario(i, btnEl){
     return;
   }
 
+  // _removidoNome junto do _removidoEm: a vaga anônima (só com a hora da exclusão) não diz
+  // QUEM saiu, e o app Check-list, que reinsere na semana atual quem está na semana anterior,
+  // não tinha como saber que aquela vaga foi esvaziada de propósito — trazia a pessoa de
+  // volta no render seguinte e a exclusão parecia não ter pegado (caso real: Bangu, Daiana
+  // e Cristiane). Mesma marca que o Check-list já grava em removeComissoesFunc.
+  const agora=Date.now();
   const wd2={...wd};
   wd2.funcs=[...wd2.funcs];
-  wd2.funcs[i]={id:i,nome:'',tipo:'CLT / MENSALISTA',dias:Array(7).fill('PRESENTE'),_removidoEm:Date.now()};
-  wd2._lastEdit = Date.now();
+  wd2.funcs[i]={id:i,nome:'',tipo:'CLT / MENSALISTA',dias:Array(7).fill('PRESENTE'),_removidoEm:agora,_removidoNome:nomeAtual};
+  wd2._lastEdit = agora;
   state.allData[String(state.semIdx)]=wd2;
+  // Semana futura é projeção herdada, não registro do que aconteceu: quem sai da loja tem
+  // que sair dela também, senão reaparece assim que alguém abre a semana seguinte. Semana
+  // passada nunca é tocada. (Mesma regra de _comissoesRemoverDeSemanasFuturas no Check-list.)
+  _removerDeSemanasFuturasGor(nomeAtual, state.semIdx, agora);
   sv('allData',state.allData);
   const semanaLabel='S'+String(CAL[state.semIdx]?.num||'?').padStart(2,'0');
   const entry={ts:new Date().toLocaleString('pt-BR'),usuario:usuarioAtual,semana:semanaLabel,desc:'Funcionário removido'};
@@ -1895,9 +1932,16 @@ function mergeWD(local,remoto){
   }
   return {brutos,funcs,dist:rec.dist!=null?rec.dist:ant.dist,vDist:rec.vDist,saldoSaida:rec.saldoSaida,motivo:rec.motivo||ant.motivo,saidas:rec.saidas||ant.saidas||[],_lastEdit:Math.max(tsL,tsR)};
 }
+// all_data guarda as semanas em chaves numéricas ("0","1",...), mas também guarda coisas de
+// outros apps na mesma linha — ferias_geral (histórico de férias, aba Férias do Check-list e
+// app RH) e o cadastro de funcionários. Antes o merge tratava TODA chave como se fosse uma
+// semana: mergeWD pegava esses objetos, não achava funcs/brutos e devolvia uma semana vazia
+// no lugar deles, apagando o conteúdo (foi assim que o ferias_geral de 9 lojas virou
+// {funcs:[],saidas:[],_lastEdit:0}). Este app só é dono das semanas — o resto fica como veio
+// do servidor, sem passar pelo merge.
 function mergeAllData(local,remoto){
   const merged={...remoto};
-  Object.keys(local).forEach(k=>{merged[k]=mergeWD(local[k],remoto[k]);});
+  Object.keys(local).forEach(k=>{ if(/^\d+$/.test(k)) merged[k]=mergeWD(local[k],remoto[k]); });
   return merged;
 }
 async function _syncNow(){
