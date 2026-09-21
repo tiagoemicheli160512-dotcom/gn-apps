@@ -348,6 +348,8 @@
 
   <div id="banco-horas-fecha-home-card"></div>
 
+  <div id="barris-semanal-home-card"></div>
+
   <div id="pendencias-loja-home-card"></div>
 
   <div id="visita-supervisao-home-card"></div>
@@ -2487,6 +2489,95 @@ async function _verificarBloqueioCaixaOntem(sess, isMaster) {
   document.body.appendChild(overlay);
 }
 
+// ── CONTAGEM SEMANAL DE BARRIS ─────────────────────────────────────────────
+// A contagem é feita no app Lojas (o formulário já existe lá, com o comparativo da semana
+// anterior) — aqui a Home só cobra. Era obrigação exclusiva do estoquista, e como cada
+// loja tem um só cadastrado, bastava ele faltar na segunda pra semana passar em branco
+// (Guarulhos ficou duas semanas assim). Agora a gerência responde junto.
+// Segunda-feira é aviso (card que dá pra ignorar); da terça em diante vira bloqueio, do
+// mesmo tipo do caixa — sem contagem, não entra em nenhum outro app.
+const BARRIS_SEM_CARGOS = ['estoquista', 'gerente', 'sub_gerente'];
+const BARRIS_SEM_TRAVA_DOW = 2; // terça (0=dom) — antes disso é só aviso
+let _barrisSemHomePendente = null; // {semanaIni, trava} enquanto pendente; null quando ok
+
+function _segundaDaSemanaHome(d) {
+  const dow = d.getDay();
+  const mon = new Date(d);
+  mon.setDate(d.getDate() + (dow === 0 ? -6 : 1 - dow));
+  return mon.getFullYear() + '-' + _p2(mon.getMonth() + 1) + '-' + _p2(mon.getDate());
+}
+
+// Dia da semana que já passou do limite: terça a domingo travam; segunda só avisa.
+function _barrisSemDiaDeTravar(d) {
+  const dow = d.getDay();
+  return dow === 0 || dow >= BARRIS_SEM_TRAVA_DOW; // domingo também é "depois de terça"
+}
+
+async function _verificarBarrisSemanalHome(sess, isMaster) {
+  document.getElementById('barris-semanal-bloqueio-overlay')?.remove();
+  _barrisSemHomePendente = null;
+  try {
+    await _calcularBarrisSemanalHome(sess, isMaster);
+  } finally {
+    // O card é desenhado aqui, e não no bloco de cards do showHome: a consulta é async e
+    // aquele bloco já terminou quando a resposta chega.
+    _renderBarrisSemanalHome((!isMaster || !!masterLoja) && !_ehCargoModuloUnico(sess));
+  }
+}
+
+async function _calcularBarrisSemanalHome(sess, isMaster) {
+  const loja = (isMaster && masterLoja) ? masterLoja : (sess && sess.loja);
+  // Mestre/supervisão sem loja escolhida, sessão sem loja e Maglia (CLAUDE.md) ficam fora.
+  if (!loja || loja === 'GERAL' || loja === 'MAGLIA') return;
+  // Só cobra de quem pode resolver — mesmo carve-out das outras pendências.
+  if (!BARRIS_SEM_CARGOS.includes(sess && sess.cargo)) return;
+  const slug = (GN_LOJAS.find(l => l.userKey === loja) || {}).lojaSlug;
+  if (!slug) return;
+
+  const hoje = new Date();
+  const semanaIni = _segundaDaSemanaHome(hoje);
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const rows = await window.gnFetchJson(
+    `${SB_URL}/rest/v1/gn_barris_semanal_confirmacao?loja_slug=eq.${encodeURIComponent(slug)}&semana_inicio=eq.${semanaIni}&select=loja_slug`,
+    H, 'barrisSemanal:confirmacao', null);
+  if (rows === null) return;      // falha de rede não cobra nem bloqueia
+  if (rows.length) return;        // loja já contou nesta semana
+
+  _barrisSemHomePendente = { semanaIni, trava: _barrisSemDiaDeTravar(hoje) };
+  if (!_barrisSemHomePendente.trava) return; // segunda: só o card de aviso
+
+  const overlay = document.createElement('div');
+  overlay.id = 'barris-semanal-bloqueio-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:99998;display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.innerHTML = `
+    <div style="background:#FFFFFF;border-radius:18px;padding:26px 22px;width:100%;max-width:380px;text-align:center">
+      <div style="font-size:38px;margin-bottom:10px">🍺</div>
+      <div style="font-size:16px;font-weight:800;color:#1A1D23;margin-bottom:8px">Contagem de barris da semana não foi feita</div>
+      <div style="font-size:13px;color:#475569;line-height:1.5;margin-bottom:18px">
+        A contagem é de segunda-feira e ainda não foi lançada nesta loja. Os outros módulos ficam bloqueados até isso ser resolvido — gerência, sub-gerência ou estoquista podem fazer.
+      </div>
+      <button onclick="navTo('gn-lojas.html')" style="display:block;width:100%;background:#E8580A;border:none;border-radius:10px;color:#fff;padding:13px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">🍺 Ir fazer a contagem</button>
+    </div>`;
+  document.body.appendChild(overlay);
+}
+
+// Card de aviso da segunda-feira — some no instante em que a loja confirma a contagem, e
+// na terça dá lugar ao bloqueio acima.
+function _renderBarrisSemanalHome(mostrar) {
+  const el = document.getElementById('barris-semanal-home-card');
+  if (!el) return;
+  if (!mostrar || !_barrisSemHomePendente || _barrisSemHomePendente.trava) { el.innerHTML = ''; return; }
+  el.innerHTML = `<div onclick="navTo('gn-lojas.html')" style="background:rgba(232,88,10,.06);border:1px solid rgba(232,88,10,.2);border-left:3px solid #E8580A;border-radius:14px;padding:14px 16px;margin:0 16px 14px;cursor:pointer">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px">
+      <div style="font-size:12px;font-weight:800;color:#1A1D23">🍺 Contagem de barris da semana</div>
+      <div style="font-size:10px;font-weight:800;color:#E8580A;flex-shrink:0">Hoje</div>
+    </div>
+    <div style="font-size:11px;color:rgba(0,0,0,.55);line-height:1.5">
+      Ainda não foi lançada nesta loja. Gerência, sub-gerência ou estoquista podem fazer — <b>a partir de amanhã o app trava</b> até a contagem sair. Toque aqui pra abrir.
+    </div>
+  </div>`;
+}
+
 // ── Sino de notificações no cabeçalho ──────────────────────────────────────
 // Ponto único e sempre visível (não depende de rolar a tela) pro que já é
 // calculado em outros lugares: os alertas do Painel de Gestão consolidado
@@ -2752,6 +2843,7 @@ function showHome(sess) {
   const lojaEfetiva = masterLoja || sess.loja;
   setTheme(lojaEfetiva);
   _verificarBloqueioCaixaOntem(sess, isMaster);
+  _verificarBarrisSemanalHome(sess, isMaster);
 
   // Header: nome do usuário
   document.getElementById('hdr-user').textContent = sess.nome + (sess.cargo ? ' · ' + sess.cargo : '');
