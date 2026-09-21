@@ -4874,6 +4874,30 @@ function _fmtBRLs(n) {
   return _fmtBRL(n);
 }
 
+// Rodízio e feijoada do período, por loja — mesma regra do card do Painel (ver byBuffet
+// em _loadDashAll): soma as quantidades lançadas no fechamento de caixa e converte em R$
+// com o preço do DIA de cada lançamento, porque rodízio de fim de semana custa mais que o
+// de segunda a sexta — somar tudo e multiplicar no fim daria valor errado.
+// Maglia fica de fora (GN_BUFFET_FORA), igual no resto do app.
+async function _fetchBuffet(dates) {
+  const porLoja = {};
+  LOJAS_LISTA.forEach(k => { porLoja[k] = { feijoadaQtd:0, rodizioQtd:0, feijoada:0, rodizio:0, total:0 }; });
+  if (!dates || !dates.length) return porLoja;
+  const from = dates[0], to = dates[dates.length - 1];
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const rows = await window.gnFetchJson(
+    `${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${from}&data=lte.${to}&select=loja,data,feijoada_inteira,feijoada_meia,rodizio_inteira,rodizio_meia`,
+    H, 'rel:buffet', []);
+  (rows || []).forEach(r => {
+    const acc = porLoja[_normLoja(r.loja)];
+    if (!acc || (window.GN_BUFFET_FORA || []).includes(r.loja)) return;
+    const v = gnBuffetValores(r, gnBuffetDow(r.data));
+    acc.feijoadaQtd += v.feijoadaQtd; acc.rodizioQtd += v.rodizioQtd;
+    acc.feijoada    += v.feijoada;    acc.rodizio    += v.rodizio;    acc.total += v.total;
+  });
+  return porLoja;
+}
+
 async function _fetchFat(dates) {
   if (!dates || !dates.length) return {};
   const from = dates[0], to = dates[dates.length - 1];
@@ -7667,7 +7691,23 @@ function gerarPDF(texto,titulo){
 // Converte um texto simples num PDF de verdade (multi-página, fonte monoespaçada),
 // usando jsPDF — necessário pra ter um arquivo real pra anexar no WhatsApp (o botão
 // de PDF "normal" só abre a janela de impressão do navegador, sem gerar um Blob).
-function _textoParaPdfBlob(texto, titulo){
+// O jsPDF vem de CDN no <head>: normalmente já está pronto, mas numa conexão ruim (ou com
+// o script ainda em voo) a geração falhava com um erro incompreensível pro usuário
+// ("Cannot destructure property 'jsPDF'"). Aqui espera/recarrega antes de usar.
+async function _garantirJsPDF(){
+  if(window.jspdf) return;
+  await new Promise((resolve,reject)=>{
+    const jaNoDOM=document.querySelector('script[src*="jspdf"]');
+    if(jaNoDOM){ jaNoDOM.addEventListener('load',resolve); jaNoDOM.addEventListener('error',reject); }
+    const s=document.createElement('script');
+    s.src='https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js';
+    s.onload=resolve; s.onerror=reject;
+    document.head.appendChild(s);
+  });
+}
+
+async function _textoParaPdfBlob(texto, titulo){
+  await _garantirJsPDF();
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ unit:'pt', format:'a4' });
   const marginX=40, topo=56, lineHeight=13;
@@ -7693,7 +7733,7 @@ function _textoParaPdfBlob(texto, titulo){
 // baixa o PDF e abre o WhatsApp com um texto pra anexar manualmente.
 async function _compartilharPdfWpp(msg, titulo){
   try{
-    const blob=_textoParaPdfBlob(msg, titulo);
+    const blob=await _textoParaPdfBlob(msg, titulo);
     const file=new File([blob], titulo.replace(/\s+/g,'_')+'.pdf', { type:'application/pdf' });
     if(navigator.canShare && navigator.canShare({ files:[file] })){
       await navigator.share({ files:[file], title:titulo, text:titulo });
@@ -7754,6 +7794,9 @@ async function _relCarregarPeriodo(per) {
   }
   else if (usaDashAtual && _dashFat) { fat = _dashFat; fatPrev = _dashFatPrev || {}; }
   else { [fat, fatPrev] = await Promise.all([ _fetchFat(range.dates), _fetchFat(prevRange.dates) ]); }
+  // Rodízio/feijoada do mesmo período — falha aqui não derruba o relatório inteiro, só
+  // deixa a seção de buffet de fora.
+  const buffet = await _fetchBuffet(range.dates).catch(() => ({}));
   const perTipo = _REL_PER_TIPO[per] || 'Mensal';
   const metaFunc = _metaFuncPeriodo(per);
   const metaFuncAtencao = metaFunc * 15000/18000;
@@ -7776,7 +7819,7 @@ async function _relCarregarPeriodo(per) {
     // Em "3 Meses", cada loja carrega também o valor de cada mês separado (na mesma ordem
     // de range.meses) — é o que alimenta a tabela/linha "mês a mês" do PDF e do WhatsApp.
     const porMes = mesesFat ? mesesFat.map(mf => mf[k]||0) : null;
-    lojasDados.push({ k, v, vP, meta, manut, chkOk, funcN, vendaPorFunc, porMes, nome: LOJA_DISPLAY[k]||k });
+    lojasDados.push({ k, v, vP, meta, manut, chkOk, funcN, vendaPorFunc, porMes, buf: buffet[k] || null, nome: LOJA_DISPLAY[k]||k });
   });
   lojasDados.sort((a,b) => b.v - a.v);
   // Total de cada mês, com a mesma regra do Total geral (Maglia fora do consolidado,
@@ -7817,8 +7860,11 @@ function _relModalHtml() {
     <button onclick="_relPDF()" style="display:block;width:100%;background:rgba(124,131,253,.16);border:1px solid rgba(124,131,253,.4);border-radius:10px;color:#fff;padding:13px 16px;font-size:13px;font-weight:700;cursor:pointer;margin-bottom:10px;text-align:left;font-family:inherit">
       📥 Gerar PDF
     </button>
-    <button onclick="_relWhatsApp()" style="display:block;width:100%;background:rgba(34,197,94,.16);border:1px solid rgba(34,197,94,.4);border-radius:10px;color:#fff;padding:13px 16px;font-size:13px;font-weight:700;cursor:pointer;margin-bottom:14px;text-align:left;font-family:inherit">
+    <button onclick="_relWhatsApp()" style="display:block;width:100%;background:rgba(34,197,94,.16);border:1px solid rgba(34,197,94,.4);border-radius:10px;color:#fff;padding:13px 16px;font-size:13px;font-weight:700;cursor:pointer;margin-bottom:10px;text-align:left;font-family:inherit">
       💬 Compartilhar via WhatsApp
+    </button>
+    <button onclick="_relPdfWhatsApp()" style="display:block;width:100%;background:rgba(34,197,94,.16);border:1px solid rgba(34,197,94,.4);border-radius:10px;color:#fff;padding:13px 16px;font-size:13px;font-weight:700;cursor:pointer;margin-bottom:14px;text-align:left;font-family:inherit">
+      📎 Enviar PDF no WhatsApp
     </button>
     <button onclick="document.getElementById('_rel-modal').remove()" style="display:block;width:100%;background:transparent;border:1px solid rgba(255,255,255,.12);border-radius:10px;color:rgba(255,255,255,.5);padding:11px;font-size:12px;cursor:pointer;font-family:inherit">
       Cancelar
@@ -7900,7 +7946,13 @@ function _relPDF() {
       ${totaisMes.map(t=>`<td style="padding:8px 10px;text-align:right;font-weight:800;font-family:monospace">${_fmtBRL(t)}</td>`).join('')}
       <td style="padding:8px 10px;text-align:right;font-weight:800;font-family:monospace">${_fmtBRL(total)}</td>
     </tr></tfoot></table>`;
-  const rows = lojasDados.map(({ nome, v, vP, meta, manut, chkOk, funcN, vendaPorFunc }) => {
+  // Rodízio e feijoada entram na linha da própria loja (e não numa tabela à parte): é
+  // assim que dá pra ler "faturou X, e desse X tanto veio do buffet" sem cruzar tabela.
+  // O valor JÁ está dentro do faturamento — a coluna mostra a parte, não uma soma nova.
+  const celBuf = (qtd, valor) => qtd > 0
+    ? `${qtd} · ${_fmtBRLs(valor)}`
+    : (qtd === 0 ? '0' : '—');
+  const rows = lojasDados.map(({ nome, v, vP, meta, manut, chkOk, funcN, vendaPorFunc, buf }) => {
     const pct  = meta>0 ? Math.round(v/meta*100) : null;
     const diff = vP>0  ? Math.round((v-vP)/vP*100) : null;
     const pctC = !pct?'#888':pct>=100?'#15803d':pct>=75?'#b45309':'#b91c1c';
@@ -7913,10 +7965,22 @@ function _relPDF() {
       <td style="padding:7px 10px;text-align:right;border-bottom:1px solid #f0f0f0;color:${pctC};font-weight:700">${pct!==null?pct+'%':'—'}</td>
       <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0f0f0">${funcN!=null?funcN:'—'}</td>
       <td style="padding:7px 10px;text-align:right;border-bottom:1px solid #f0f0f0;color:${vpfC};font-weight:700">${vendaPorFunc!=null?_fmtBRLs(vendaPorFunc):'—'}</td>
+      <td style="padding:7px 10px;text-align:right;border-bottom:1px solid #f0f0f0;font-size:9.5pt">${buf?celBuf(buf.rodizioQtd, buf.rodizio):'—'}</td>
+      <td style="padding:7px 10px;text-align:right;border-bottom:1px solid #f0f0f0;font-size:9.5pt">${buf?celBuf(buf.feijoadaQtd, buf.feijoada):'—'}</td>
       <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0f0f0">${chkOk===true?'✅':chkOk===false?'⚠':'—'}</td>
       <td style="padding:7px 10px;text-align:center;border-bottom:1px solid #f0f0f0">${manut>0?'🔧 '+manut:'—'}</td>
     </tr>`;
   }).join('');
+  const bufTot = lojasDados.reduce((a, l) => ({
+    rodizioQtd: a.rodizioQtd + (l.buf ? l.buf.rodizioQtd : 0), rodizio: a.rodizio + (l.buf ? l.buf.rodizio : 0),
+    feijoadaQtd: a.feijoadaQtd + (l.buf ? l.buf.feijoadaQtd : 0), feijoada: a.feijoada + (l.buf ? l.buf.feijoada : 0),
+  }), { rodizioQtd:0, rodizio:0, feijoadaQtd:0, feijoada:0 });
+  const temBuf = bufTot.rodizioQtd > 0 || bufTot.feijoadaQtd > 0;
+  const bufFoot = !temBuf ? '' : `<tfoot><tr style="background:#fafafa">
+    <td colspan="6" style="padding:8px 10px;font-weight:800">Total rodízio e feijoada</td>
+    <td style="padding:8px 10px;text-align:right;font-weight:800;font-size:9.5pt">${bufTot.rodizioQtd} · ${_fmtBRLs(bufTot.rodizio)}</td>
+    <td style="padding:8px 10px;text-align:right;font-weight:800;font-size:9.5pt">${bufTot.feijoadaQtd} · ${_fmtBRLs(bufTot.feijoada)}</td>
+    <td colspan="2"></td></tr></tfoot>`;
   const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
     <title>GN Gestão — ${perTipo} ${range.label}</title>
     <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:11pt;color:#111;background:#fff;padding:28px}
@@ -7927,7 +7991,7 @@ function _relPDF() {
     .kpi-val{font-size:14pt;font-weight:700;color:#CA8A04;font-family:monospace}
     table{width:100%;border-collapse:collapse;margin-bottom:16px}
     thead{background:#FACC15}thead th{padding:8px 8px;text-align:left;color:#1a1a1a;font-size:7.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.3px}
-    thead th:not(:first-child){text-align:right}thead th:nth-child(5){text-align:center}thead th:nth-child(7),thead th:nth-child(8){text-align:center}
+    thead th:not(:first-child){text-align:right}thead th:nth-child(5){text-align:center}thead th:nth-child(9),thead th:nth-child(10){text-align:center}
     .footer{font-size:7.5pt;color:#aaa;border-top:1px solid #eee;padding-top:8px;margin-top:4px}
     h2.sec{font-size:11pt;font-weight:800;color:#1a1a1a;margin:4px 0 8px}
     tfoot td{border-top:2px solid #FACC15}
@@ -7941,8 +8005,9 @@ function _relPDF() {
       <div class="kpi"><div class="kpi-label">Lojas com dados</div><div class="kpi-val">${storesWithData}/${lojasDados.length}</div></div>
       <div class="kpi"><div class="kpi-label">Período</div><div class="kpi-val" style="font-size:10pt">${range.label}</div></div>
     </div>
-    <table><thead><tr><th>Loja</th><th>Faturamento</th><th>Δ vs Ant.</th><th>% Meta</th><th>Func.</th><th>R$/Func</th><th>CHK</th><th>Manut.</th></tr></thead>
-    <tbody>${rows}</tbody></table>
+    <table><thead><tr><th>Loja</th><th>Faturamento</th><th>Δ vs Ant.</th><th>% Meta</th><th>Func.</th><th>R$/Func</th><th>🍖 Rodízio</th><th>🍲 Feijoada</th><th>CHK</th><th>Manut.</th></tr></thead>
+    <tbody>${rows}</tbody>${bufFoot}</table>
+    <div style="font-size:8pt;color:#888;margin:-10px 0 16px">🍖 rodízio e 🍲 feijoada: quantidade vendida · valor — já incluído no faturamento da loja.</div>
     ${mesesHtml}
     <div class="footer">GN Operações · ${perTipo} · ${range.label} · meta de venda por funcionário: ${_fmtBRLs(metaFunc)}</div>
     <script>window.onload=function(){window.print()}<\/script>
@@ -7951,40 +8016,76 @@ function _relPDF() {
   if (w) { w.document.write(html); w.document.close(); }
 }
 
-function _relWhatsApp() {
+// Texto do relatório — usado tanto no "Compartilhar via WhatsApp" (mensagem) quanto no
+// "PDF no WhatsApp" (o mesmo conteúdo vira arquivo). wpp=false tira os asteriscos do
+// negrito, que no PDF apareceriam crus.
+function _relTexto(wpp) {
   const { range, perTipo, total, lojasDados, dtGer, metaFunc, metaFuncAtencao, mesesLabels, totaisMes } = window._relData || {};
-  if (!range) return;
-  document.getElementById('_rel-modal')?.remove();
+  if (!range) return '';
+  const b = t => wpp ? `*${t}*` : t;
+  const i = t => wpp ? `_${t}_` : t;
   const comDados  = lojasDados.filter(l => l.v > 0);
   const semDados  = lojasDados.filter(l => l.v === 0);
   const comManut  = lojasDados.filter(l => l.manut > 0);
-  let txt = `📊 *GN Gestão — ${perTipo} ${range.label}*\n\n`;
-  txt += `💰 *Total: ${_fmtBRL(total)}*\n`;
+  let txt = `📊 ${b(`GN Gestão — ${perTipo} ${range.label}`)}\n\n`;
+  txt += `💰 ${b(`Total: ${_fmtBRL(total)}`)}\n`;
   txt += `${comDados.length} de ${lojasDados.length} lojas com dados\n\n`;
   if (comDados.length) {
-    txt += `📍 *Por loja:*\n`;
-    comDados.forEach(({ nome, v, vP, meta, funcN, vendaPorFunc }) => {
+    txt += `📍 ${b('Por loja:')}\n`;
+    comDados.forEach(({ nome, v, vP, meta, funcN, vendaPorFunc, buf }) => {
       const pct  = meta>0 ? ` · meta ${Math.round(v/meta*100)}%` : '';
       const diff = vP>0  ? ` (${v>=vP?'+':''}${Math.round((v-vP)/vP*100)}% vs ant.)` : '';
       const vpfIcone = vendaPorFunc==null?'':vendaPorFunc>=metaFunc?' ✅':vendaPorFunc>=metaFuncAtencao?' ⚠️':' 🔴';
       const func = funcN!=null ? ` · 👥${funcN}${vendaPorFunc!=null?' · '+_fmtBRLs(vendaPorFunc)+'/func'+vpfIcone:''}` : '';
       txt += `• ${nome}: ${_fmtBRL(v)}${pct}${diff}${func}\n`;
+      // Buffet na linha de baixo, recuado: é detalhe da loja, não pode competir com o
+      // faturamento na leitura rápida do celular.
+      if (buf && (buf.rodizioQtd > 0 || buf.feijoadaQtd > 0)) {
+        const partes = [];
+        if (buf.rodizioQtd  > 0) partes.push(`🍖 ${buf.rodizioQtd} rodízio${buf.rodizioQtd>1?'s':''} (${_fmtBRLs(buf.rodizio)})`);
+        if (buf.feijoadaQtd > 0) partes.push(`🍲 ${buf.feijoadaQtd} feijoada${buf.feijoadaQtd>1?'s':''} (${_fmtBRLs(buf.feijoada)})`);
+        txt += `   ${partes.join(' · ')}\n`;
+      }
     });
     txt += '\n';
+  }
+  const bufTot = lojasDados.reduce((a, l) => ({
+    rodizioQtd: a.rodizioQtd + (l.buf ? l.buf.rodizioQtd : 0), rodizio: a.rodizio + (l.buf ? l.buf.rodizio : 0),
+    feijoadaQtd: a.feijoadaQtd + (l.buf ? l.buf.feijoadaQtd : 0), feijoada: a.feijoada + (l.buf ? l.buf.feijoada : 0),
+  }), { rodizioQtd:0, rodizio:0, feijoadaQtd:0, feijoada:0 });
+  if (bufTot.rodizioQtd > 0 || bufTot.feijoadaQtd > 0) {
+    txt += `🍽 ${b('Rodízio e feijoada:')} 🍖 ${bufTot.rodizioQtd} (${_fmtBRLs(bufTot.rodizio)}) · 🍲 ${bufTot.feijoadaQtd} (${_fmtBRLs(bufTot.feijoada)})\n`;
+    txt += `${i('Já incluído no faturamento acima.')}\n\n`;
   }
   // Em "3 Meses", a quebra mês a mês vai numa seção própria (valores compactos, com
   // _fmtBRLs, pra mensagem não virar um paredão de texto no celular).
   if (mesesLabels) {
-    txt += `🗓 *Mês a mês:*\n`;
+    txt += `🗓 ${b('Mês a mês:')}\n`;
     comDados.forEach(({ nome, porMes, v }) => {
-      txt += `• ${nome}: ${porMes.map((mv,i)=>`${mesesLabels[i].split(' ')[0]} ${_fmtBRLs(mv)}`).join(' · ')} = *${_fmtBRLs(v)}*\n`;
+      txt += `• ${nome}: ${porMes.map((mv,ix)=>`${mesesLabels[ix].split(' ')[0]} ${_fmtBRLs(mv)}`).join(' · ')} = ${b(_fmtBRLs(v))}\n`;
     });
-    txt += `_Totais:_ ${totaisMes.map((t,i)=>`${mesesLabels[i].split(' ')[0]} ${_fmtBRLs(t)}`).join(' · ')}\n\n`;
+    txt += `${i('Totais:')} ${totaisMes.map((t,ix)=>`${mesesLabels[ix].split(' ')[0]} ${_fmtBRLs(t)}`).join(' · ')}\n\n`;
   }
-  if (semDados.length)  txt += `⚠ *Sem dados:* ${semDados.map(l=>l.nome).join(', ')}\n`;
-  if (comManut.length)  txt += `🔧 *Manutenção:* ${comManut.map(l=>`${l.nome} (${l.manut})`).join(', ')}\n`;
-  txt += `\n_Meta de venda por funcionário: ${_fmtBRLs(metaFunc)}_`;
-  txt += `\n_GN Operações · ${dtGer}_`;
+  if (semDados.length)  txt += `⚠ ${b('Sem dados:')} ${semDados.map(l=>l.nome).join(', ')}\n`;
+  if (comManut.length)  txt += `🔧 ${b('Manutenção:')} ${comManut.map(l=>`${l.nome} (${l.manut})`).join(', ')}\n`;
+  txt += `\n${i(`Meta de venda por funcionário: ${_fmtBRLs(metaFunc)}`)}`;
+  txt += `\n${i(`GN Operações · ${dtGer}`)}`;
+  return txt;
+}
+
+// Envia o relatório como PDF anexo — o "Gerar PDF" acima só abre a janela de impressão,
+// que serve pra imprimir/salvar mas não dá um arquivo pra anexar na conversa.
+async function _relPdfWhatsApp() {
+  const { range, perTipo } = window._relData || {};
+  if (!range) return;
+  document.getElementById('_rel-modal')?.remove();
+  await _compartilharPdfWpp(_relTexto(false), `GN Gestão — ${perTipo} ${range.label}`);
+}
+
+function _relWhatsApp() {
+  if (!window._relData || !window._relData.range) return;
+  document.getElementById('_rel-modal')?.remove();
+  const txt = _relTexto(true);
   if (navigator.share) {
     navigator.share({ text: txt }).catch(() => {});
   } else {
