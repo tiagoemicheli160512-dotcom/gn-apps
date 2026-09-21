@@ -277,6 +277,9 @@ const S = {
   data:       null,
   patTransferCtx: null,     // { itemId, tipo:'patrimonio'|'mkt' } — item sendo transferido (form aberto)
   patManutCtx: null,        // { itemId } — item de patrimônio sendo enviado pra manutenção (form aberto)
+  relLojas:   null,         // lojas marcadas no Relatório; null/vazio = só a loja aberta
+  relCache:   {},           // {userKey: dados} das OUTRAS lojas, lidos de gn_inventario_cloud
+  relCarregando: false,
 };
 
 // Catálogo global de nomes de patrimônio (gn_patrimonio_catalogo) — compartilhado entre
@@ -483,6 +486,7 @@ function atualizarHeaderLoja(){
 async function changeLojaAtiva(v){
   if(S.lojaForcada||!v||v===S.lojaAtiva) return;
   S.lojaAtiva=v;
+  S.relLojas=null;   // trocou de loja: o relatório volta a ser só o dela
   try{ localStorage.setItem('gn_inv_loja_ativa',v); }catch(_){}
   atualizarHeaderLoja();
   await loadDataCloud();
@@ -1022,7 +1026,170 @@ function saveEditItem(){
 }
 
 // ─── RELATÓRIO ───────────────────────────────────────────
+// Lojas do relatório: por padrão só a que está aberta, como sempre foi. Quem pode
+// alternar de loja (mestre/supervisor/administrador — mesmo critério de
+// _resolverLojaAtiva) pode marcar várias: aí o relatório vira comparativo, uma coluna por
+// loja e o total no fim, que é como dá pra ver sobra numa e falta na outra sem abrir loja
+// por loja. Vale pro Inventário, pro Marketing e pro Patrimônio.
+//
+// A loja aberta lê S.data (tem o que acabou de ser digitado, antes mesmo de sincronizar);
+// as outras vêm de gn_inventario_cloud e ficam em cache enquanto o app estiver aberto,
+// pra marcar/desmarcar loja não refazer consulta toda hora.
+function _relLojasSel(){
+  const sel=(S.relLojas||[]).filter(k=>(window.GN_LOJAS||[]).some(l=>l.userKey===k));
+  return sel.length?sel:[S.lojaAtiva].filter(Boolean);
+}
+function _relMulti(){ return _relLojasSel().length>1; }
+function _relDados(lojaKey){ return lojaKey===S.lojaAtiva ? S.data : (S.relCache||{})[lojaKey]||null; }
+function _relLojaNome(lojaKey){ return (window.GN_LOJAS||[]).find(l=>l.userKey===lojaKey)?.display||lojaKey; }
+
+async function _relCarregarLojas(){
+  const faltando=_relLojasSel().filter(k=>!_relDados(k));
+  if(!faltando.length||S.relCarregando) return;
+  S.relCarregando=true; render();
+  try{
+    const lista=faltando.map(k=>'"'+k.replace(/"/g,'')+'"').join(',');
+    const rows=await sb(`gn_inventario_cloud?loja=in.(${encodeURIComponent(lista)})&select=loja,dados`);
+    S.relCache=S.relCache||{};
+    // Loja sem linha na nuvem entra como vazia — senão ficaria "carregando" pra sempre e
+    // o relatório nunca sairia por causa de uma loja que ainda não lançou nada.
+    faltando.forEach(k=>{ S.relCache[k]={items:[],mkt:{},mktCustomItems:[],patrimonio:[]}; });
+    (rows||[]).forEach(r=>{ if(r.dados) S.relCache[r.loja]=r.dados; });
+  }catch(e){
+    toast('Não deu pra carregar as outras lojas — tente de novo.');
+    S.relLojas=[S.lojaAtiva];
+  }finally{
+    S.relCarregando=false; render();
+  }
+}
+
+function toggleRelLoja(key){
+  const atual=_relLojasSel();
+  let nova=atual.includes(key)?atual.filter(k=>k!==key):atual.concat([key]);
+  if(!nova.length) nova=[S.lojaAtiva];          // nunca deixa o relatório sem loja nenhuma
+  S.relLojas=nova; render(); _relCarregarLojas();
+}
+function relTodasLojas(){
+  S.relLojas=(window.GN_LOJAS||[]).map(l=>l.userKey);
+  render(); _relCarregarLojas();
+}
+function relSoLojaAtual(){ S.relLojas=[S.lojaAtiva]; render(); }
+
+// Uma linha por item, com a quantidade de cada loja. Itens de lojas diferentes se juntam
+// pelo nome (setor+nome no Inventário/Patrimônio): o id do item de marketing customizado,
+// por exemplo, é criado por loja, então comparar por id deixaria "Banner" da Bangu e
+// "Banner" da Caxias em linhas separadas.
+function _relItensInv(d){
+  return (d.items||[]).map(i=>({chave:(i.setor||'')+'|'+String(i.nome||'').trim().toLowerCase(),
+    nome:i.nome, icon:setorIcon(i.setor), setor:i.setor||'', qtd:Number(i.quantidade)||0}));
+}
+function _relItensMkt(d){
+  const base=MKT_ITEMS.map(m=>({id:m.key,nome:m.key,icon:m.icon}));
+  const custom=(d.mktCustomItems||[]).map(m=>({id:m.id,nome:m.nome,icon:m.icon}));
+  return base.concat(custom).map(m=>({chave:String(m.nome||'').trim().toLowerCase(),
+    nome:m.nome, icon:m.icon, setor:'', qtd:Number((d.mkt||{})[m.id])||0}));
+}
+function _relItensPat(d){
+  return (d.patrimonio||[]).map(i=>({chave:(i.setor||'')+'|'+String(i.nome||'').trim().toLowerCase(),
+    nome:i.nome, icon:setorIcon(i.setor), setor:i.setor||'', qtd:Number(i.quantidade)||0}));
+}
+
+function _relMatriz(extrator){
+  const lojas=_relLojasSel();
+  const mapa={};
+  lojas.forEach(lj=>{
+    const d=_relDados(lj);
+    if(!d) return;
+    extrator(d).forEach(it=>{
+      if(!mapa[it.chave]) mapa[it.chave]={nome:it.nome, icon:it.icon, setor:it.setor, porLoja:{}, total:0};
+      mapa[it.chave].porLoja[lj]=(mapa[it.chave].porLoja[lj]||0)+it.qtd;
+      mapa[it.chave].total+=it.qtd;
+    });
+  });
+  return Object.values(mapa)
+    .filter(l=>l.total>0)   // item que ninguém tem só faria a tabela crescer à toa
+    .sort((a,b)=>(a.setor||'').localeCompare(b.setor||'')||String(a.nome).localeCompare(String(b.nome)));
+}
+
+function _relTabelaHtml(titulo, linhas){
+  const lojas=_relLojasSel();
+  if(!linhas.length) return `<div class="relat-card"><div class="relat-title">${titulo}</div>
+    <div style="color:var(--mut);font-size:12px;text-align:center;padding:12px 0">Nada lançado nas lojas selecionadas</div></div>`;
+  const th=lojas.map(l=>`<th style="padding:6px 8px;text-align:right;font-size:10px;color:var(--mut);white-space:nowrap">${esc(_relLojaNome(l))}</th>`).join('');
+  const linhasHtml=linhas.map(l=>{
+    const tds=lojas.map(lj=>{
+      const q=l.porLoja[lj]||0;
+      return `<td style="padding:6px 8px;text-align:right;font-size:12px;font-weight:700;color:${q?'#1A1D23':'rgba(0,0,0,.25)'}">${q}</td>`;
+    }).join('');
+    return `<tr style="border-top:1px solid var(--card2)">
+      <td style="padding:6px 8px;font-size:12px;font-weight:600;color:#1A1D23">${l.icon||''} ${esc(l.nome)}</td>
+      ${tds}
+      <td style="padding:6px 8px;text-align:right;font-size:12px;font-weight:800;color:var(--ouro)">${l.total}</td>
+    </tr>`;
+  }).join('');
+  const totalGeral=linhas.reduce((a,l)=>a+l.total,0);
+  const totaisLoja=lojas.map(lj=>`<td style="padding:7px 8px;text-align:right;font-size:12px;font-weight:800">${linhas.reduce((a,l)=>a+(l.porLoja[lj]||0),0)}</td>`).join('');
+  return `<div class="relat-card">
+    <div class="relat-title">${titulo}</div>
+    <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+      <table style="width:100%;border-collapse:collapse;min-width:max-content">
+        <thead><tr><th style="padding:6px 8px;text-align:left;font-size:10px;color:var(--mut)">Item</th>${th}
+          <th style="padding:6px 8px;text-align:right;font-size:10px;color:var(--mut)">Total</th></tr></thead>
+        <tbody>${linhasHtml}</tbody>
+        <tfoot><tr style="border-top:2px solid var(--card2)">
+          <td style="padding:7px 8px;font-size:12px;font-weight:800">Total</td>${totaisLoja}
+          <td style="padding:7px 8px;text-align:right;font-size:12px;font-weight:800;color:var(--ouro)">${totalGeral}</td>
+        </tr></tfoot>
+      </table>
+    </div>
+  </div>`;
+}
+
+function _relSeletorLojasHtml(){
+  if(S.lojaForcada) return '';   // gerente enxerga só a própria loja — sem seletor
+  const sel=_relLojasSel();
+  const chips=(window.GN_LOJAS||[]).map(l=>{
+    const on=sel.includes(l.userKey);
+    return `<button class="chip${on?' sel':''}" onclick="toggleRelLoja('${esc(l.userKey)}')"
+      style="${on&&l.cor?`border-color:${l.cor}88;background:${l.cor}1a;color:${l.cor}`:''}">${on?'✓ ':''}${esc(l.display)}</button>`;
+  }).join('');
+  return `<div style="padding:10px 12px 0">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+      <div style="font-size:11px;font-weight:800;color:var(--mut)">Lojas do relatório (${sel.length})</div>
+      <div style="display:flex;gap:6px">
+        <button class="btn-sm sec" onclick="relTodasLojas()">Todas</button>
+        <button class="btn-sm sec" onclick="relSoLojaAtual()">Só esta</button>
+      </div>
+    </div>
+    <div class="chips-wrap" style="padding:0 0 4px">${chips}</div>
+  </div>`;
+}
+
+function renderRelatorioMulti(c){
+  const lojas=_relLojasSel();
+  const hoje=new Date().toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',year:'numeric'});
+  if(S.relCarregando||lojas.some(l=>!_relDados(l))){
+    c.innerHTML=`${_relSeletorLojasHtml()}<div class="content">
+      <div style="color:var(--mut);font-size:12px;text-align:center;padding:24px 0">Carregando as lojas…</div></div>`;
+    return;
+  }
+  c.innerHTML=`${_relSeletorLojasHtml()}
+    <div class="content">
+      <div style="font-size:11px;color:var(--mut);font-weight:700;text-align:center;padding:2px 0 12px;letter-spacing:.3px">${lojas.length} lojas · ${hoje}</div>
+      ${_relTabelaHtml('📦 Inventário',_relMatriz(_relItensInv))}
+      ${_relTabelaHtml('📣 Marketing',_relMatriz(_relItensMkt))}
+      ${_relTabelaHtml('🏛️ Patrimônio',_relMatriz(_relItensPat))}
+      <button class="wpp-btn" onclick="compartilharWpp()">
+        <span style="font-size:18px">📤</span> Compartilhar via WhatsApp
+      </button>
+      <button class="wpp-btn" onclick="gerarPDFInventario()" style="background:#c0392b;">
+        <span style="font-size:18px">📄</span> Gerar PDF
+      </button>
+    </div>`;
+}
+
 function renderRelatorio(c){
+  if(_relMulti()){ renderRelatorioMulti(c); return; }
   const loja=S.lojaAtiva||'Loja';
   const hoje=new Date().toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',year:'numeric'});
   const itemsAbaixo=S.data.items.filter(i=>i.minimo>0&&i.quantidade<i.minimo);
@@ -1060,7 +1227,16 @@ function renderRelatorio(c){
     </div>`).join('');
   const totalMkt=allMkt.reduce((a,m)=>a+(S.data.mkt[m.id]||0),0);
 
+  const patRows=(S.data.patrimonio||[]).slice()
+    .sort((a,b)=>String(a.setor||'').localeCompare(String(b.setor||''))||String(a.nome).localeCompare(String(b.nome)))
+    .map(p=>`<div class="relat-row">
+      <div class="relat-name">${setorIcon(p.setor)} ${esc(p.nome)}</div>
+      <div class="relat-val">${Number(p.quantidade)||0}</div>
+    </div>`).join('');
+  const totalPat=(S.data.patrimonio||[]).reduce((a,p)=>a+(Number(p.quantidade)||0),0);
+
   c.innerHTML=`
+    ${_relSeletorLojasHtml()}
     <div class="content">
       <div style="font-size:11px;color:var(--mut);font-weight:700;text-align:center;padding:2px 0 12px;letter-spacing:.3px">${esc(loja)} · ${hoje}</div>
       ${bannerAlerta}
@@ -1077,6 +1253,11 @@ function renderRelatorio(c){
           <span style="color:var(--ouro)">${totalMkt} un</span>
         </div>
       </div>
+      <div class="relat-card">
+        <div class="relat-title">🏛️ Patrimônio</div>
+        ${patRows||`<div style="color:var(--mut);font-size:12px;text-align:center;padding:12px 0">Sem itens cadastrados</div>`}
+        ${patRows?`<div class="relat-total"><span>Total</span><span style="color:var(--ouro)">${totalPat} un</span></div>`:''}
+      </div>
       <button class="wpp-btn" onclick="compartilharWpp()">
         <span style="font-size:18px">📤</span> Compartilhar via WhatsApp
       </button>
@@ -1086,7 +1267,36 @@ function renderRelatorio(c){
     </div>`;
 }
 
+// Texto comparativo (WhatsApp e PDF) quando há mais de uma loja: uma linha por item, com
+// a quantidade de cada loja e o total. Mantém as lojas zeradas na linha de propósito —
+// enxergar quem está sem o item é metade do motivo do relatório.
+function _relTextoSecao(titulo, linhas, wpp){
+  const lojas=_relLojasSel();
+  const b=t=>wpp?`*${t}*`:t;
+  let txt=`\n${wpp?'*':''}─ ${titulo} ─${wpp?'*':''}\n`;
+  if(!linhas.length){ return txt+(wpp?'_(nada lançado)_\n':'(nada lançado)\n'); }
+  linhas.forEach(l=>{
+    const det=lojas.map(lj=>`${_relLojaNome(lj)} ${l.porLoja[lj]||0}`).join(' · ');
+    txt+=`${l.icon||''} ${l.nome}: ${det} → ${b('Total '+l.total)}\n`;
+  });
+  txt+=`${b('Total geral')}: ${linhas.reduce((a,l)=>a+l.total,0)}\n`;
+  return txt;
+}
+
+function _buildTextoMultiLojas(wpp){
+  const lojas=_relLojasSel();
+  const hoje=new Date().toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',year:'numeric'});
+  let txt=(wpp?`📦 *GN Inventário — ${lojas.length} lojas*\n📅 ${hoje}\n`:`GN Inventário — ${lojas.length} lojas\n${hoje}\n`);
+  txt+=`${wpp?'_':''}Lojas: ${lojas.map(_relLojaNome).join(', ')}${wpp?'_':''}\n`;
+  txt+=_relTextoSecao('INVENTÁRIO',_relMatriz(_relItensInv),wpp);
+  txt+=_relTextoSecao('MARKETING',_relMatriz(_relItensMkt),wpp);
+  txt+=_relTextoSecao('PATRIMÔNIO',_relMatriz(_relItensPat),wpp);
+  txt+=`\n${wpp?'_':''}Gerado em ${new Date().toLocaleString('pt-BR')}${wpp?'_':''}`;
+  return txt;
+}
+
 function _buildTextoInventario(){
+  if(_relMulti()) return _buildTextoMultiLojas(false);
   const loja=S.lojaAtiva||'Loja';
   const hoje=new Date().toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',year:'numeric'});
   let txt=`GN Inventário — ${loja}\n${hoje}\n`;
@@ -1102,11 +1312,16 @@ function _buildTextoInventario(){
   if(!hasInv) txt+=`(sem itens cadastrados)\n`;
   txt+=`\n─ MARKETING ─\n`;
   allMktList().forEach(m=>{ txt+=`${m.icon} ${m.nome}: ${S.data.mkt[m.id]||0}\n`; });
+  txt+=`\n─ PATRIMÔNIO ─\n`;
+  const pat=(S.data.patrimonio||[]).slice().sort((a,b)=>String(a.setor||'').localeCompare(String(b.setor||''))||String(a.nome).localeCompare(String(b.nome)));
+  if(pat.length) pat.forEach(p=>{ txt+=`${setorIcon(p.setor)} ${p.nome}: ${Number(p.quantidade)||0}\n`; });
+  else txt+=`(sem itens cadastrados)\n`;
   txt+=`\nGerado em ${new Date().toLocaleString('pt-BR')}`;
   return txt;
 }
 
 function compartilharWpp(){
+  if(_relMulti()){ _enviarWpp(_buildTextoMultiLojas(true)); return; }
   const loja=S.lojaAtiva||'Loja';
   const hoje=new Date().toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',year:'numeric'});
   let txt=`📦 *GN Inventário — ${loja}*\n📅 ${hoje}\n`;
@@ -1127,8 +1342,17 @@ function compartilharWpp(){
   txt+=`\n*─ MARKETING ─*\n`;
   allMktList().forEach(m=>{ txt+=`${m.icon} ${m.nome}: *${S.data.mkt[m.id]||0}*\n`; });
 
-  txt+=`\n_Gerado em ${new Date().toLocaleString('pt-BR')}_`;
+  // Patrimônio
+  txt+=`\n*─ PATRIMÔNIO ─*\n`;
+  const patW=(S.data.patrimonio||[]).slice().sort((a,b)=>String(a.setor||'').localeCompare(String(b.setor||''))||String(a.nome).localeCompare(String(b.nome)));
+  if(patW.length) patW.forEach(p=>{ txt+=`${setorIcon(p.setor)} ${p.nome}: *${Number(p.quantidade)||0}*\n`; });
+  else txt+=`_(sem itens cadastrados)_\n`;
 
+  txt+=`\n_Gerado em ${new Date().toLocaleString('pt-BR')}_`;
+  _enviarWpp(txt);
+}
+
+function _enviarWpp(txt){
   if(navigator.share && navigator.canShare({text:txt})){
     navigator.share({text:txt}).catch(()=>openWppUrl(txt));
   } else {
@@ -1147,7 +1371,10 @@ function gerarPDF(texto,titulo){
   const w=window.open('','_blank');
   if(w){w.document.write(html);w.document.close();}
 }
-function gerarPDFInventario(){gerarPDF(_buildTextoInventario(),`GN Inventário — ${S.lojaAtiva||'Loja'}`);}
+function gerarPDFInventario(){
+  const titulo=_relMulti()?`GN Inventário — ${_relLojasSel().length} lojas`:`GN Inventário — ${S.lojaAtiva||'Loja'}`;
+  gerarPDF(_buildTextoInventario(),titulo);
+}
 
 // ─── PATRIMÔNIO ──────────────────────────────────────────
 // Bem fixo (freezer, balcão, prateleira, TV...), diferente do estoque de insumo: sem
