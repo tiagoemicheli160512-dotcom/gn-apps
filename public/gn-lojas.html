@@ -4671,7 +4671,66 @@ function adicionarItemPedido(dados) {
   }
   autoSave();
   showToast("✅ Item '" + novoItem.produto + "' adicionado à lista e aos insumos!");
+  // Cadastra no Catálogo pra o item já nascer ligado ao app Estoque e Pedido (ver
+  // _cadastrarItemNoCatalogo). Não bloqueia a criação: se a rede falhar, o item existe
+  // aqui do mesmo jeito e o aviso diz o que fazer.
+  _cadastrarItemNoCatalogo(novoItem).then(r => {
+    if (r && r.ok) {
+      if (!r.jaExistia) showToast("☁️ '" + novoItem.produto + "' também foi cadastrado no Catálogo.", 'success');
+    } else {
+      showToast("⚠️ '" + novoItem.produto + "' NÃO foi cadastrado no Catálogo — o app Estoque não vai enxergar esse item. Avise o financeiro/TI.", 'warn', 8000);
+    }
+  });
   return true;
+}
+
+// Item criado pelo "+ Novo" nascia solto: entrava na lista da loja com um id local
+// ("C" + timestamp) que o Catálogo nunca vai ter — gn_catalogo.item_id é numérico —, então
+// o app Estoque e Pedido só enxergava esse item se, por acaso, existisse um produto no
+// catálogo com o nome EXATAMENTE igual (ver _resolverCatalogoId). Foi o que aconteceu com
+// STELLA e PANO: criados em todas as lojas, contados por semanas e nunca chegando ao
+// Compras — o aviso no fim do pedido só mostrava o estrago depois de feito.
+// Agora o produto é cadastrado no catálogo na hora da criação e já nasce ligado.
+async function _cadastrarItemNoCatalogo(item) {
+  const nome = (item.produto || '').trim().toUpperCase();
+  if (!nome) return { ok: false };
+  try {
+    await _carregarCatalogo();
+    // Já existe produto com esse nome: o vínculo por nome já funciona, não duplica.
+    if (_catalogoMap && _catalogoMap[nome]) return { ok: true, jaExistia: true };
+    const corpo = {
+      produto: item.produto,
+      grupo: item.grupo || 'GERAL',
+      subgrupo: item.subgrupo || 'GERAL',
+      fornecedor: item.fornecedor || '',
+      und: item.und || 'UN',
+      custo: Number(item.custo) || 0,
+      und_por_caixa: item.und_por_caixa || null,
+      ativo: true,
+    };
+    // item_id é numérico, obrigatório e único — pega o próximo livre. Se duas lojas
+    // criarem um item no mesmo instante, o insert falha por duplicidade e a tentativa
+    // seguinte já usa o número seguinte.
+    for (let tent = 0; tent < 3; tent++) {
+      try {
+        const topo = await sbRequest('gn_catalogo?select=item_id&order=item_id.desc&limit=1', { method: 'GET' });
+        const proximo = ((topo && topo[0] && Number(topo[0].item_id)) || 0) + 1 + tent;
+        const criado = await sbRequest('gn_catalogo', {
+          method: 'POST', headers: { 'Prefer': 'return=representation' },
+          body: JSON.stringify(Object.assign({}, corpo, { item_id: proximo }))
+        });
+        const row = Array.isArray(criado) ? criado[0] : criado;
+        if (row && row.id) {
+          // Vale já nesta sessão: sem isso, um pedido confirmado logo depois de criar o
+          // item ainda cairia em "não sincronizado", porque o mapa em memória é o de antes.
+          if (_catalogoMap) _catalogoMap[nome] = row.id;
+          if (_catalogoPorItemId && row.item_id != null) _catalogoPorItemId[row.item_id] = row.id;
+          return { ok: true, row };
+        }
+      } catch (e) { /* número tomado ou falha passageira — tenta o próximo */ }
+    }
+  } catch (e) { /* cai no retorno de falha abaixo */ }
+  return { ok: false };
 }
 
 function removerItemPedido(id) {
