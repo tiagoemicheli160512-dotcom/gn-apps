@@ -7492,6 +7492,23 @@ async function _carregarCarnesAutoLojas(force){
     const entradasAllLojas = (lojaRows && lojaRows[0] && lojaRows[0].all_data && lojaRows[0].all_data.entradasAll) || {};
     const entradasSemana = entradasAllLojas[userKey+'|'+semanaIni] || [];
 
+    // Entregas confirmadas da semana (aba Entregas do app Lojas): é o que a loja conferiu e
+    // recebeu de fato — quantidade pesada na portaria, já com a divergência resolvida. Fonte
+    // preferida pras 4 carnes, porque é o item do catálogo (não depende do nome digitado na
+    // nota) e o número é o que entrou mesmo, não o que a nota diz.
+    const dFim = new Date(semanaIni+'T12:00:00'); dFim.setDate(dFim.getDate()+6);
+    const semanaFim = toISO(dFim);
+    let entregasRows = [];
+    if(idsRelevantes.length){
+      const {data,error} = await sb.from('gn_provisoes')
+        .select('catalogo_id,data_entrega,gn_recebimentos(qtd_recebida)')
+        .eq('loja_slug', lojaSlug)
+        .in('catalogo_id', idsRelevantes)
+        .gte('data_entrega', semanaIni).lte('data_entrega', semanaFim);
+      if(error) throw error;
+      entregasRows = data||[];
+    }
+
     // A loja pode ter trocado de semana (ou de tudo) enquanto as consultas acima ainda
     // estavam no ar — gravar mesmo assim escreveria os dados de `semanaIni` dentro de
     // stateWeek/checklist_carnes da OUTRA semana que ficou carregada nesse meio tempo
@@ -7514,19 +7531,45 @@ async function _carregarCarnesAutoLojas(force){
       }
       if(rowFim && (force || cd.contagem_final===undefined || cd.contagem_final==='')){ cd.contagem_final=parseFloat(rowFim.atual)||0; changed=true; }
 
-      const totaisDia = {ter:0,qua:0,qui:0,sex:0,sab:0,dom:0};
+      // Entrega confirmada manda; a nota de Entrada de Mercadoria é o plano B, pro dia em que
+      // a carne chegou fora de uma entrega programada (compra de emergência, por exemplo).
+      // Somar as duas contaria a mesma carne duas vezes — é a mesma mercadoria vista de dois
+      // lugares: uma pela portaria, outra pela nota.
+      const porDia = {seg:0,ter:0,qua:0,qui:0,sex:0,sab:0,dom:0};
+      entregasRows.forEach(p=>{
+        if(p.catalogo_id !== catId) return;
+        const diaKey = _diaSemanaKeyFromISO(p.data_entrega);
+        if(!diaKey || porDia[diaKey]===undefined) return;
+        const recs = Array.isArray(p.gn_recebimentos) ? p.gn_recebimentos : (p.gn_recebimentos?[p.gn_recebimentos]:[]);
+        recs.forEach(r=>{ porDia[diaKey] += parseFloat(r && r.qtd_recebida)||0; });
+      });
+      const porDiaNota = {seg:0,ter:0,qua:0,qui:0,sex:0,sab:0,dom:0};
       entradasSemana.forEach(e=>{
         const nome = (e.insumo||'').toUpperCase();
         const m = CARNES_ENTRADA_MATCH[c.key];
         if(!m.inc.some(re=>re.test(nome))) return;
         if(m.exc.some(re=>re.test(nome))) return;
         const diaKey = _diaSemanaKeyFromISO(e.dataNF);
-        if(!diaKey || totaisDia[diaKey]===undefined) return;
-        totaisDia[diaKey] += parseFloat(e.qtd)||0;
+        if(!diaKey || porDiaNota[diaKey]===undefined) return;
+        porDiaNota[diaKey] += parseFloat(e.qtd)||0;
       });
+      const totaisDia = {};
+      Object.keys(porDia).forEach(d=>{ totaisDia[d] = porDia[d]>0 ? porDia[d] : porDiaNota[d]; });
+
       Object.keys(totaisDia).forEach(d=>{
         if(totaisDia[d]<=0) return;
-        if(force || cd['ent_'+d]===undefined || cd['ent_'+d]===''){ cd['ent_'+d]=totaisDia[d]; changed=true; }
+        // autoEnt_<dia> guarda o último valor que a automação escreveu naquele dia. Serve pra
+        // duas coisas: a segunda entrega do mesmo dia atualiza o total (o campo ainda está no
+        // valor que a automação pôs), e um número digitado à mão nunca é sobrescrito (o campo
+        // deixou de bater com o que a automação tinha posto). 🔄 Atualizar (force) manda em tudo.
+        const atual = cd['ent_'+d];
+        const vazio = atual===undefined || atual==='';
+        const aindaDaAutomacao = !vazio && cd['autoEnt_'+d]!==undefined && Number(atual)===Number(cd['autoEnt_'+d]);
+        if(force || vazio || aindaDaAutomacao){
+          if(Number(atual)!==totaisDia[d]) changed=true;
+          cd['ent_'+d]=totaisDia[d];
+        }
+        if(cd['autoEnt_'+d]!==totaisDia[d]){ cd['autoEnt_'+d]=totaisDia[d]; changed=true; }
       });
     });
     // autoSave (local) + envio pro servidor — o card de resumo de Carnes na Home lê
@@ -7544,6 +7587,10 @@ async function _carregarCarnesAutoLojas(force){
 
 function setCarneTab(tab){
   carneTabAtiva = tab;
+  // Só a aba Entrada tem segunda-feira; as outras vão de terça a domingo e compartilham o
+  // mesmo diaAtivoIdx. Sem isso, escolher Segunda na Entrada e trocar de aba deixava a outra
+  // aba sem nenhum dia marcado, editando o dia errado em silêncio.
+  if(tab!=='entradas' && diaAtivoIdx===0) diaAtivoIdx = 1;
   CARNE_TABS.forEach(t=>{
     const b=document.getElementById('ctab-'+t);
     if(b){ b.style.background=t===tab?'#E8580A':'#EBEEF2'; b.style.color=t===tab?'#fff':'#1A1D23'; }
@@ -7670,8 +7717,10 @@ function renderCarnes(){
   // ---- ABA ENTRADA (agora puxada automaticamente das Entradas de Mercadoria do app
   // Lojas — mesma nota que a loja já lança lá; só edita manualmente se necessário) ----
   if(carneTabAtiva==='entradas'){
-    const diasHtml2 = DIAS_SEMANA.slice(1).map((d,i)=>{
-      const idx=i+1; const ativo=idx===diaAtivoIdx;
+    // Seg→Dom: a entrada de segunda passou a valer (entrega confirmada depois da pesagem da
+    // manhã não está na Contagem de 2ª) — as outras sub-abas de carne seguem Ter→Dom.
+    const diasHtml2 = DIAS_SEMANA.map((d,idx)=>{
+      const ativo=idx===diaAtivoIdx;
       return `<button onclick="diaAtivoIdx=${idx};renderCarnes()"
         style="padding:5px 10px;border:none;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;
           background:${ativo?'#6bcb77':'#3a3a3a'};color:${ativo?'#000':'#666'};transition:all 0.2s;">
@@ -7697,7 +7746,7 @@ function renderCarnes(){
     }).join('');
     c.innerHTML=`<div style="background:rgba(107,203,119,.1);border:1px solid rgba(107,203,119,.3);border-radius:10px;padding:10px 14px;margin-bottom:12px;">
       <div style="font-size:11px;font-weight:700;color:#1A1D23;margin-bottom:3px;">➕ Entradas puxadas do app Lojas</div>
-      <div style="font-size:10px;color:#1A1D23;">Mesmas notas já lançadas em "📥 Entradas de Mercadoria" no app Lojas — não precisa lançar de novo aqui. Edite só se necessário.</div>
+      <div style="font-size:10px;color:#1A1D23;">Entra sozinho quando a loja confirma a entrega em "🚚 Entregas" (JBS/Nogmix e FAFS/Villa Pescados) — a quantidade é a que foi conferida no recebimento. Carne que chegou fora de entrega programada vem da nota de "📥 Entradas de Mercadoria". Não precisa lançar de novo aqui; edite só se necessário.</div>
       <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
         <button onclick="_carregarCarnesAutoLojas(true)" ${_carnesAutoCarregando?'disabled':''} style="background:#6bcb77;border:none;border-radius:7px;padding:6px 12px;color:#1A1D23;font-size:11px;font-weight:700;cursor:pointer;">${_carnesAutoCarregando?'⏳ Atualizando…':'🔄 Atualizar do Lojas'}</button>
         <button onclick="_carneEntradasEditando=true;renderCarnes()" style="background:#EBEEF2;border:1px solid #555;border-radius:7px;padding:6px 12px;color:#1A1D23;font-size:11px;font-weight:700;cursor:pointer;">✏️ Editar</button>
@@ -7812,7 +7861,9 @@ function renderCarnes(){
         const data=stateWeek.carnes[carne.key]||{};
         const totIni=parseFloat(data.inicial)||0;
         const totFim=parseFloat(data.contagem_final)||0;
-        const totEnt=DIAS_SEMANA.slice(1).reduce((a,d)=>a+(parseFloat(data['ent_'+d])||0),0);
+        // Seg→Dom: entrega que chega na segunda DEPOIS da pesagem da manhã não está na
+        // Contagem de 2ª, então precisa contar como entrada da semana igual aos outros dias.
+        const totEnt=DIAS_SEMANA.reduce((a,d)=>a+(parseFloat(data['ent_'+d])||0),0);
         const totDisp=totIni+totEnt;
         const venda  =totDisp-totFim;
         const vCol   =venda>=-0.05?'#6bcb77':'#d05050';
@@ -7820,7 +7871,7 @@ function renderCarnes(){
         return `<div style="background:#EEF1F4;border:1px solid #1e1e1e;border-radius:8px;padding:10px;margin-bottom:10px;">
           <div style="font-size:12px;font-weight:700;color:#1A1D23;margin-bottom:8px;">${carne.icon} ${carne.label}</div>
           ${_row('Início (2ª-feira)', totIni>0?totIni.toFixed(1)+' '+carne.unit:'—', '', '#6b9bcb')}
-          ${_row('+ Compras (Ter→Dom)', '+'+totEnt.toFixed(1)+' '+carne.unit, '', '#6bcb77')}
+          ${_row('+ Compras (Seg→Dom)', '+'+totEnt.toFixed(1)+' '+carne.unit, '', '#6bcb77')}
           ${_row('= Total disponível', totDisp.toFixed(1)+' '+carne.unit, '', '#e2e8f0')}
           ${_row('− Contagem (próx. 2ª)', totFim>0?totFim.toFixed(1)+' '+carne.unit:'—', '', '#6b9bcb')}
           <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0 2px 0;margin-top:2px">
@@ -8476,7 +8527,7 @@ function buildCarnesSection(){
   CARNES_DEF.forEach(c=>{
     const data=stateWeek.carnes[c.key]||{};
     const ini=parseFloat(data.inicial)||0;
-    const entSem=DIAS_SEMANA.slice(1).reduce((a,d)=>a+(parseFloat(data['ent_'+d])||0),0);
+    const entSem=DIAS_SEMANA.reduce((a,d)=>a+(parseFloat(data['ent_'+d])||0),0);
     const fim=parseFloat(data.contagem_final)||0;
     const res=ini+entSem;
     const dif=fim-res;

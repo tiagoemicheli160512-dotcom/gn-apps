@@ -11031,6 +11031,95 @@ function confirmarEntrega(id){
   _epProcessarFila();
 }
 
+// ── Carnes: entrega confirmada vira entrada da semana no Check-list ──────────────────────
+// As 4 carnes controladas na aba Carnes do Check-list (Carne de Sol, Carne Seca, Picanha e
+// Camarão — JBS/Nogmix e FAFS/Villa Pescados) precisavam ser digitadas lá de novo, uma a uma,
+// mesmo já tendo sido pesadas e conferidas aqui na Entrega. Agora, no instante em que a loja
+// confirma o recebimento, a quantidade recebida vira a entrada daquele dia.
+//
+// O que identifica a carne é o ITEM DO CATÁLOGO, não o nome do fornecedor: a mesma carne já
+// apareceu como "JBS", "NOGMIX" e "NOGMIX - JBS" em meses diferentes, e o item nunca mudou.
+// Os 4 itens são vendidos em KG no catálogo, então a quantidade entra direto, sem conversão.
+const CARNES_CHK_ITEM_ID = { 207:'carne_sol', 209:'carne_seca', 392:'picanha', 237:'camarao' };
+let _carnesChkCatIds = null; // {catalogo_id (uuid): chave da carne}
+async function _carnesChkResolverIds(){
+  if(_carnesChkCatIds) return _carnesChkCatIds;
+  const rows = await sbRequest('gn_catalogo?item_id=in.('+Object.keys(CARNES_CHK_ITEM_ID).join(',')+')&select=id,item_id',{method:'GET'});
+  const map = {};
+  (rows||[]).forEach(r=>{ const k = CARNES_CHK_ITEM_ID[r.item_id]; if(k) map[r.id]=k; });
+  // Não cacheia mapa vazio: numa falha de rede isso deixaria a automação morta pelo resto
+  // da sessão, em silêncio (mesma armadilha já documentada no Check-list).
+  if(Object.keys(map).length) _carnesChkCatIds = map;
+  return map;
+}
+// Segunda-feira da semana de uma data ISO — a semana das carnes vai de 2ª a domingo.
+function _carnesChkSemanaIni(iso){
+  const d = new Date(iso+'T12:00:00');
+  if(isNaN(d)) return null;
+  d.setDate(d.getDate() - ((d.getDay()+6)%7));
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function _carnesChkDiaKey(iso){
+  const d = new Date(iso+'T12:00:00');
+  return isNaN(d) ? null : ['dom','seg','ter','qua','qui','sex','sab'][d.getDay()];
+}
+// Lança (ou recalcula) a entrada de uma carne no dia da entrega. Sempre recalcula o TOTAL do
+// dia a partir das entregas confirmadas — assim duas entregas da mesma carne no mesmo dia
+// somam, e reconfirmar não duplica. O dia é o da ENTREGA, não o do toque em Confirmar:
+// entrega de quarta confirmada na quinta de manhã é carne que entrou na quarta.
+async function _lancarCarneEntregaNoChecklist(prov){
+  try{
+    if(!prov || !prov.catalogo_id || !prov.data_entrega) return;
+    const mapa = await _carnesChkResolverIds();
+    const carneKey = mapa[prov.catalogo_id];
+    if(!carneKey) return;
+    const semanaIni = _carnesChkSemanaIni(prov.data_entrega);
+    const diaKey = _carnesChkDiaKey(prov.data_entrega);
+    if(!semanaIni || !diaKey) return;
+    const chkLoja = CHECKLIST_LOJA_MAP[loja] || loja;
+    const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+
+    const entregasDia = await sbRequest('gn_provisoes?loja_slug=eq.'+encodeURIComponent(slug)
+      +'&catalogo_id=eq.'+encodeURIComponent(prov.catalogo_id)
+      +'&data_entrega=eq.'+prov.data_entrega
+      +'&select=gn_recebimentos(qtd_recebida)',{method:'GET'});
+    let total = 0;
+    (entregasDia||[]).forEach(p=>{
+      const recs = Array.isArray(p.gn_recebimentos) ? p.gn_recebimentos : (p.gn_recebimentos?[p.gn_recebimentos]:[]);
+      recs.forEach(r=>{ total += parseFloat(r && r.qtd_recebida)||0; });
+    });
+    if(total<=0) return;
+
+    const rows = await sbRequest('checklist_carnes?semana_inicio=eq.'+semanaIni
+      +'&loja=eq.'+encodeURIComponent(chkLoja)+'&select=carnes,semana_fim&limit=1',{method:'GET'});
+    const row = rows && rows[0];
+    const carnes = JSON.parse(JSON.stringify((row && row.carnes) || {}));
+    if(!carnes[carneKey]) carnes[carneKey] = {};
+    const cd = carnes[carneKey];
+    // autoEnt_<dia> é o último valor que a automação pôs ali. Se o campo ainda está nesse
+    // valor, ninguém mexeu à mão e pode atualizar; se foi editado na loja, respeita a edição
+    // (mesma regra usada no Check-list). Nenhum outro campo da semana é tocado.
+    const atual = cd['ent_'+diaKey];
+    const vazio = atual===undefined || atual==='';
+    const aindaDaAutomacao = !vazio && cd['autoEnt_'+diaKey]!==undefined && Number(atual)===Number(cd['autoEnt_'+diaKey]);
+    if(vazio || aindaDaAutomacao) cd['ent_'+diaKey] = total;
+    cd['autoEnt_'+diaKey] = total;
+
+    const dFim = new Date(semanaIni+'T12:00:00'); dFim.setDate(dFim.getDate()+6);
+    const semanaFim = (row && row.semana_fim) || (dFim.getFullYear()+'-'+String(dFim.getMonth()+1).padStart(2,'0')+'-'+String(dFim.getDate()).padStart(2,'0'));
+    await sbRequest('checklist_carnes?on_conflict=semana_inicio,loja',{
+      method:'POST',
+      headers:{'Prefer':'return=minimal,resolution=merge-duplicates'},
+      body:JSON.stringify({semana_inicio:semanaIni, semana_fim:semanaFim, loja:chkLoja, carnes})
+    });
+  }catch(e){
+    // Nunca derruba a confirmação da entrega por causa disso — a entrega é o que importa aqui.
+    // Se falhar, a aba Carnes recalcula do mesmo jeito quando for aberta (ela lê as entregas
+    // confirmadas direto, ver _carregarCarnesAutoLojas no gn-checklist.html).
+    console.warn('carne da entrega não lançada no Check-list:', e && e.message || e);
+  }
+}
+
 // Envia a fila de confirmações de entrega pendentes pra nuvem. Roda em segundo plano —
 // falha em silêncio (sem toast de erro repetido) e tenta de novo em 8s, igual ao sbPush()
 // da Contagem. Só reconsulta carregarEntregas() quando a fila inteira estiver limpa, pra
@@ -11071,6 +11160,10 @@ async function _epProcessarFila(){
       _epFilaPendente[loja]=(_epFilaPendente[loja]||[]).filter(x=>x.id!==item.id);
       _epFilaSalvar();
       if(_epConfirmadosSessao[item.id]) _epConfirmadosSessao[item.id]._syncPendente=false;
+      // Carne conferida aqui já entra como entrada da semana na aba Carnes do Check-list.
+      // Depois do recebimento gravado (e só então — antes disso o total do dia sairia sem
+      // esta entrega) e sem travar a fila: a entrega já está salva, isto é consequência.
+      _lancarCarneEntregaNoChecklist(item.prov);
       render();
     }catch(e){
       houveErro=true;
