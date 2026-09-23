@@ -1147,6 +1147,9 @@
     <div style="font-size:24px;font-weight:700;color:#1A1D23;font-family:'JetBrains Mono',monospace;" id="display-total">R$ 0,00</div>
   </div>
 
+  <!-- "O que falta hoje" — primeira coisa que a loja vê ao abrir o app (ver _renderFaltaHojeCard) -->
+  <div id="falta-hoje-card"></div>
+
   <div class="card p-4 mb-3">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
       <div style="font-size:12px;font-weight:700;">📅 Período e Data</div>
@@ -2924,6 +2927,8 @@ let _supLockAlvo = 'salao'; // 'salao' | 'cozinha' | 'visitas' — o que o cadea
 // aconteciam antes da declaração ser alcançada, derrubando renderAll()/loadComissoesData() com
 // um ReferenceError silencioso em praticamente todo carregamento do app.
 let carneTabAtiva = 'inicial';
+let _faltaHojeExtras = null;   // {chave:'AAAA-MM-DD|LOJA', itens:[...]} — cartão "O que falta hoje"
+let _faltaHojeBuscando = false;
 let _carneInicialEditando = false;
 let _carneContagemEditando = false;
 let _carneEntradasEditando = false;
@@ -5188,6 +5193,7 @@ async function onDataChange(val){
     renderManutencao();
     autoSave();
   }
+  _atualizarFaltaHoje();
 }
 
 // =============================================
@@ -7335,8 +7341,120 @@ function calcChecklistPct(){
   return totalAll>0?Math.round((doneAll/totalAll)*100):0;
 }
 
+// ── Cartão "O que falta hoje" ──────────────────────────────────────────────────────────
+// O avesso das travas de pendência essencial: a trava só aparece DEPOIS que o dia virou e
+// a tarefa não foi feita — quando já virou problema e o app bloqueia. Este cartão mostra
+// ANTES, enquanto ainda dá pra resolver, e não bloqueia nada: é uma lista com atalho.
+// Pedido do usuário depois de ver os números — abertura/fechamento/caixa saem 100% todo
+// dia, mas o check-list em si fica em branco em 1 dia a cada 4 em algumas lojas.
+//
+// Abertura/Operacional/Fechamento saem do estado que o app já tem na mão (nenhuma consulta
+// nova). Carne e Banda reaproveitam as MESMAS funções das travas, com diasAtras=0 em vez de
+// 1 — por isso precisam de rede, e ficam em cache por dia/loja pra não consultar a cada
+// toque num item do check-list.
+// (_faltaHojeExtras/_faltaHojeBuscando são declarados lá em cima, junto de carneTabAtiva:
+// renderAll() roda no boot e chama updateSummary(), que já lê o cache daqui.)
+function _faltaHojeGruposDeCheck(){
+  const grupos = [
+    { label:'Check-list de abertura', map:SETORES_ABERTURA,   key:'abertura',   tab:'abertura',   icon:'🌅' },
+    { label:'Check-list operacional', map:SETORES_CHECKLIST,  key:'checklist',  tab:'checklist',  icon:'✅' },
+    { label:'Check-list de fechamento', map:SETORES_FECHAMENTO, key:'fechamento', tab:'fechamento', icon:'🌙' },
+  ];
+  const out = [];
+  grupos.forEach(g=>{
+    if(!_temAcessoAbaChecklist(g.tab)) return;
+    let done=0, total=0;
+    Object.keys(g.map).forEach(s=>{
+      total += g.map[s].items.length;
+      done  += Object.values(state[g.key][s]||{}).filter(v=>v&&v.checked).length;
+    });
+    if(total===0 || done>=total) return;
+    out.push({ icon:g.icon, label:g.label,
+      detalhe: done===0 ? 'nenhum item marcado ('+total+' no total)' : 'faltam '+(total-done)+' de '+total+' itens',
+      tab:g.tab });
+  });
+  return out;
+}
+
+async function _faltaHojeBuscarExtras(){
+  const chave = (state.data||'') + '|' + LOJA;
+  if(_faltaHojeExtras && _faltaHojeExtras.chave===chave) return _faltaHojeExtras.itens;
+  if(_faltaHojeBuscando) return (_faltaHojeExtras && _faltaHojeExtras.itens) || [];
+  _faltaHojeBuscando = true;
+  const itens = [];
+  try{
+    // diasAtras=0 = hoje. As mesmas funções que a trava usa pra "ontem".
+    if(LOJA!=='Maglia' && _temAcessoAbaChecklist('carnes')){
+      const gap = await _carneGapNoDia(0);
+      if(gap && gap.faltando.length){
+        itens.push({ icon:'🥩', label:'Contagem de carne de hoje',
+          detalhe: gap.faltando.map(c=>c.label).join(', '),
+          tab:'carnes', diaIdx:gap.diaIdx });
+      }
+    }
+    if(LOJA!=='Maglia' && _temAcessoAbaChecklist('banda')){
+      const gap = await _bandaGapNoDia(0);
+      if(gap && gap.pendente){
+        itens.push({ icon:'🎸', label:'Banda de hoje',
+          detalhe: gap.presencaPendente ? 'presença ainda não confirmada' : 'couvert ainda não lançado',
+          tab:'banda' });
+      }
+    }
+    _faltaHojeExtras = { chave, itens };
+  }catch(e){
+    // Sem rede o cartão continua mostrando o que dá pra saber offline (os 3 check-lists).
+  }finally{ _faltaHojeBuscando = false; }
+  return itens;
+}
+
+function _faltaHojeIr(tab, diaIdx){
+  switchTab(tab, document.querySelector('.tab-btn'));
+  if(tab==='carnes'){
+    setCarneTab('diario');
+    if(diaIdx!=null){ diaAtivoIdx = diaIdx; }
+    renderCarnes();
+  }
+}
+
+function _renderFaltaHojeCard(){
+  const el = document.getElementById('falta-hoje-card');
+  if(!el) return;
+  const itens = _faltaHojeGruposDeCheck().concat((_faltaHojeExtras && _faltaHojeExtras.itens) || []);
+  // Só vale pro dia de hoje: navegando pra um dia passado em Dados, o cartão sai da tela em
+  // vez de cobrar uma tarefa cujo prazo já passou (isso é papel das travas, não daqui).
+  if(state.data !== hojeLocal()){ el.innerHTML=''; return; }
+  if(!itens.length){
+    el.innerHTML = `<div style="background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.25);border-left:3px solid #16a34a;border-radius:12px;padding:12px 14px;margin-bottom:14px;">
+      <div style="font-size:12.5px;font-weight:800;color:#14532d;">✅ Tudo em dia por hoje</div>
+      <div style="font-size:11.5px;color:#166534;margin-top:2px;">Nenhuma tarefa do dia em aberto.</div>
+    </div>`;
+    return;
+  }
+  el.innerHTML = `<div style="background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.28);border-left:3px solid #f59e0b;border-radius:12px;padding:12px 14px;margin-bottom:14px;">
+    <div style="font-size:12.5px;font-weight:800;color:#1A1D23;margin-bottom:2px;">📋 O que falta hoje</div>
+    <div style="font-size:11px;color:#57534e;margin-bottom:9px;">${itens.length} ${itens.length===1?'tarefa':'tarefas'} do dia em aberto. Dá tempo de resolver.</div>
+    ${itens.map(i=>`<div style="display:flex;align-items:center;gap:9px;padding:7px 0;border-top:1px solid rgba(0,0,0,.07);">
+      <span style="font-size:15px;flex-shrink:0;">${i.icon}</span>
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:12px;font-weight:700;color:#1A1D23;">${escHtml(i.label)}</div>
+        <div style="font-size:11px;color:#57534e;">${escHtml(i.detalhe)}</div>
+      </div>
+      <button onclick="_faltaHojeIr('${i.tab}',${i.diaIdx!=null?i.diaIdx:'null'})"
+        style="background:#E8580A;border:none;border-radius:7px;color:#fff;font-size:11.5px;font-weight:700;padding:6px 12px;cursor:pointer;flex-shrink:0;font-family:inherit;">Ir</button>
+    </div>`).join('')}
+  </div>`;
+}
+
+// Atualiza o cartão buscando de novo a parte que depende de rede (carne/banda do dia).
+// Chamado quando muda o dia/loja; o render em si roda a cada updateSummary, de graça.
+async function _atualizarFaltaHoje(){
+  await _faltaHojeBuscarExtras();
+  _renderFaltaHojeCard();
+}
+
 function updateSummary(){
   updateChecklistCount();
+  _renderFaltaHojeCard();
   const c=document.getElementById('checklist-summary');
   if(!c) return;
   const groups=[
@@ -7920,6 +8038,10 @@ function updateCarneDia(carneKey, campoKey, val){
   stateWeek.carnes[carneKey][campoKey]=val;
   autoSave();
   _debouncedSaveAll();
+  // O cartão "O que falta hoje" lê a contagem do servidor — invalida o cache pra ele
+  // parar de cobrar o que acabou de ser preenchido.
+  _faltaHojeExtras = null;
+  _atualizarFaltaHoje();
 }
 
 function updateCarneCampo(carneKey, campoKey, val){
@@ -11702,6 +11824,7 @@ async function initAppWithLoja(){
   aplicarPermissaoAbas();
   aplicarRestricaoAbasMaglia();
   mostrarAvisoGuiaSeNecessario();
+  _atualizarFaltaHoje();
   const [todayFound,,docsFound] = await Promise.all([
     loadSupabaseDay(hoje),
     loadSupabaseWeek(state.semanaInicio),
@@ -13464,6 +13587,7 @@ async function _salvarCouvertBandaHoje(){
     _preencherBandaDiaFromAgenda();
     showToast('✓ Couvert salvo!', 'success');
     if(_pendenciasEssenciaisAtivas.some(p=>p.chave==='banda')) _atualizarPendenciasEssenciais();
+    _faltaHojeExtras = null; _atualizarFaltaHoje();
   }catch(e){
     if(btn){ btn.disabled=false; btn.textContent='💾 Salvar Couvert'; }
     alert('Erro ao salvar couvert: '+(e.message||e));
@@ -13493,6 +13617,7 @@ async function _confirmarPresencaBandaCard(id){
     showToast('✓ Presença confirmada!', 'success');
     _logAuditoriaChk('CONFIRMAR_PRESENCA_BANDA',{artista:_triosHojeRecords[idx].artista});
     if(_pendenciasEssenciaisAtivas.some(p=>p.chave==='banda')) _atualizarPendenciasEssenciais();
+    _faltaHojeExtras = null; _atualizarFaltaHoje();
   }catch(e){
     alert('Erro ao confirmar: '+(e.message||e));
   }
@@ -13526,6 +13651,7 @@ async function _registrarBandaNaoVeioCard(id){
     showToast('Registrado: banda não veio.', 'error');
     _logAuditoriaChk('BANDA_NAO_VEIO',{artista:_triosHojeRecords[idx].artista,motivo});
     if(_pendenciasEssenciaisAtivas.some(p=>p.chave==='banda')) _atualizarPendenciasEssenciais();
+    _faltaHojeExtras = null; _atualizarFaltaHoje();
   }catch(e){
     alert('Erro ao registrar: '+(e.message||e));
   }
