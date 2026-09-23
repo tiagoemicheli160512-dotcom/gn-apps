@@ -920,6 +920,13 @@ select option { background: var(--graf2); color: var(--txt); }
         <select id="saidaCat"></select>
       </div>
     </div>
+    <div class="form-row hidden" id="saidaJustRow">
+      <div class="form-group">
+        <label>Justificativa do extra <span style="color:var(--err)">*</span></label>
+        <textarea id="saidaJust" rows="2" placeholder="Por que precisou de extra hoje? Ex: cobertura da Ana (atestado) no salão"
+          style="width:100%;box-sizing:border-box;resize:vertical;font-family:inherit"></textarea>
+      </div>
+    </div>
     <div class="form-row">
       <div class="form-group">
         <label>Descrição</label>
@@ -1207,6 +1214,17 @@ const SAIDAS = [
   ['funcionario_extra','Funcionário Extra'],['papelaria','Papelaria'],
   ['agua','Água']
 ];
+
+// Categorias de saída em que a despesa só entra com o motivo escrito. Hoje só
+// "Funcionário Extra" (pedido do dono: extra sem explicação é o buraco que ninguém
+// consegue auditar depois). É uma lista porque a próxima categoria a exigir isso não vai
+// precisar de código novo, só de mais uma chave aqui.
+const SAIDAS_COM_JUSTIFICATIVA = ['funcionario_extra'];
+// Curto demais ("x", "ok") não é justificativa — só burla o campo e dá trabalho à toa.
+const JUSTIFICATIVA_MIN = 10;
+const _exigeJustificativa = cat => SAIDAS_COM_JUSTIFICATIVA.includes(cat);
+const _semJustificativa = s => _exigeJustificativa(s.categoria) &&
+  !(s.justificativa && s.justificativa.trim().length >= JUSTIFICATIVA_MIN);
 
 const S = { user: null, loja: null, turnoSel: null, fech: null, comprovantes: [], saidas: [], supr: [], notas10: [], bandAtiva: null, modoConsulta: false, confAtual: null, _saidasFechId: null };
 
@@ -1624,6 +1642,8 @@ function entrarApp() {
       <span class="nm">${b.k}</span><span class="tot" id="bt-${cssId(b.k)}">R$ 0,00</span>
     </button>`).join('');
   $('saidaCat').innerHTML = SAIDAS.map(c => `<option value="${c[0]}">${c[1]}</option>`).join('');
+  $('saidaCat').onchange = _syncSaidaJustRow;
+  _syncSaidaJustRow();
   $('fundoInput').value = String(Number(S.fech.suprimento_inicial) || 700).replace('.', ',');
   if (S.fech.total_real != null) $('valorEncontrado').value = String(S.fech.total_real).replace('.', ',');
   if (S.fech.total_sistema != null) $('totalSistema').value = String(S.fech.total_sistema).replace('.', ',');
@@ -1755,6 +1775,12 @@ function renderTudo() {
     <div class="val">${money(c.valor)}${_pend(c)}</div><button class="del" onclick="excluir('gn_caixa_comprovante','${c.id}','comprovantes')">✕</button></div>`;
   }).join('') : '<div class="vazio">Nenhum recebimento.</div>';
 
+  // A justificativa fica à vista na própria lista: é o que a supervisão lê sem precisar
+  // abrir o lançamento. Extra sem motivo aparece em vermelho, como pendência.
+  const _justLinha = s => !_exigeJustificativa(s.categoria) ? ''
+    : (s.justificativa && s.justificativa.trim()
+        ? `<div style="flex:0 0 100%;font-size:11px;color:var(--mut);margin-top:3px;line-height:1.4">📝 ${escHtmlCx(s.justificativa)}</div>`
+        : `<div style="flex:0 0 100%;font-size:11px;color:var(--err);margin-top:3px;font-weight:600">⚠️ Sem justificativa — trava o fechamento</div>`);
   const _fotoBtn = id => S.modoConsulta ? '' : `<button onclick="_abrirFotoSaida('${id}')" style="background:none;border:none;color:var(--mut);cursor:pointer;font-size:15px;padding:2px 4px;flex-shrink:0;line-height:1" title="Adicionar foto">📷</button>`;
   const _fotoThumb = (foto, id) => foto ? `<div style="flex:0 0 100%;margin-top:6px;position:relative;display:inline-block;max-width:100%">
     <img src="${foto}" style="max-width:100%;max-height:100px;border-radius:6px;object-fit:cover;cursor:pointer;display:block" onclick="this.style.maxHeight=this.style.maxHeight==='none'?'100px':'none'" title="Toque para expandir">
@@ -1762,7 +1788,7 @@ function renderTudo() {
   </div>` : '';
   $('listaSaidas').innerHTML = S.saidas.length ? S.saidas.slice().reverse().map(s =>
     `<div class="linha-item" style="flex-wrap:wrap"><div class="desc">${(saidaMap[s.categoria] || s.categoria)}<small>${s.nome || ''}</small></div>
-    <div class="val">${money(s.valor)}${_pend(s)}</div>${_fotoBtn(s.id)}<button class="del" onclick="excluir('gn_caixa_despesa','${s.id}','saidas')">✕</button>${_fotoThumb(s.foto||'', s.id)}</div>`).join('')
+    <div class="val">${money(s.valor)}${_pend(s)}</div>${_fotoBtn(s.id)}<button class="del" onclick="excluir('gn_caixa_despesa','${s.id}','saidas')">✕</button>${_justLinha(s)}${_fotoThumb(s.foto||'', s.id)}</div>`).join('')
     : '<div class="vazio">Nenhuma saída.</div>';
 
   $('listaSupr').innerHTML = S.supr.length ? S.supr.slice().reverse().map(s =>
@@ -2064,7 +2090,9 @@ function renderPreFechamento() {
     // não é pendência de fechamento.
     const faltaBuffet = buffetFaltando();
     const temBuffet   = faltaBuffet.length === 0;
-    const allOk = temValor && temRepique && temSistema && temFotoSistema && temFotos && temBuffet && isFechado;
+    const semJustCount = S.saidas.filter(_semJustificativa).length;
+    const temJust = semJustCount === 0;
+    const allOk = temValor && temRepique && temSistema && temFotoSistema && temFotos && temBuffet && temJust && isFechado;
     const semFotoCount = S.saidas.filter(s => !s.foto || s.foto.trim() === '').length;
     preChk.innerHTML = `<div style="background:var(--graf3);border:1px solid ${allOk?'var(--ok)':'var(--linha)'};border-radius:8px;padding:10px 14px;margin-bottom:12px">
       <div style="font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Pré-fechamento</div>
@@ -2074,6 +2102,9 @@ function renderPreFechamento() {
       ${ck(temSistema, 'Total do sistema conferido')}
       ${ck(temFotoSistema, 'Foto do caixa do sistema')}
       ${ck(temFotos, semFotoCount > 0 ? `Fotos dos comprovantes (${semFotoCount} sem foto)` : 'Fotos dos comprovantes')}
+      ${S.saidas.some(x => _exigeJustificativa(x.categoria))
+        ? ck(temJust, semJustCount > 0 ? `Justificativa do extra (${semJustCount} sem)` : 'Justificativa do extra')
+        : ''}
       ${buffetObrigatorio() ? (() => {
         // O nome da linha segue o que é obrigatório hoje: em loja que só tem a feijoada
         // obrigatória, falar em "rodízio" mandaria a pessoa procurar pendência que não há.
@@ -2200,6 +2231,14 @@ async function fecharCaixa() {
   // (não vendeu nenhum) — o que trava é o campo em branco, igual ao repique.
   buffetFaltando().forEach(lbl =>
     erros.push(`• ${lbl}: quantidade não informada (informe 0 se não vendeu)`));
+  const saidasSemJust = S.saidas.filter(_semJustificativa);
+  if (saidasSemJust.length > 0) {
+    const SAIDA_MAP_J = Object.fromEntries(SAIDAS);
+    saidasSemJust.forEach(s => {
+      const lbl = SAIDA_MAP_J[s.categoria] || s.categoria;
+      erros.push(`• Sem justificativa: ${lbl}${s.nome ? ` (${s.nome})` : ''} — R$ ${money(s.valor)}`);
+    });
+  }
   const saidasSemFoto = S.saidas.filter(s => !s.foto || s.foto.trim() === '');
   if (saidasSemFoto.length > 0) {
     const SAIDA_MAP = Object.fromEntries(SAIDAS);
@@ -2993,14 +3032,36 @@ async function confirmarBand() {
 }
 
 let _addSaidaEmVoo = false;
+// O campo de justificativa só aparece na categoria que exige — nas outras ele seria mais
+// uma coisa na tela pra ignorar, e campo ignorado é campo que some do radar quando passa a
+// ser obrigatório.
+function _syncSaidaJustRow() {
+  const row = $('saidaJustRow');
+  if (!row) return;
+  const exige = _exigeJustificativa($('saidaCat').value);
+  row.classList.toggle('hidden', !exige);
+  if (!exige) $('saidaJust').value = '';
+}
+
 async function addSaida() {
   // Mesma trava de confirmarBand() — botão "+" + Enter no campo de valor podiam duplicar a
   // despesa, dobrando o total de saídas sincronizado com o Check-list.
   if (_addSaidaEmVoo) return;
   const v = parseMoney($('saidaVal').value); if (v <= 0) { toast('Valor inválido'); return; }
+  const cat = $('saidaCat').value;
+  // Diferente da foto (que só dá pra tirar depois), a justificativa é texto — então é
+  // exigida JÁ no lançamento, que é quando a pessoa lembra do motivo. A trava no
+  // fechamento continua existindo pros casos que escaparem (offline, lançado antes
+  // desta regra) — ver validação em fechar().
+  const just = _exigeJustificativa(cat) ? $('saidaJust').value.trim() : '';
+  if (_exigeJustificativa(cat) && just.length < JUSTIFICATIVA_MIN) {
+    toast(just ? 'Explique melhor o motivo do extra' : 'Funcionário extra exige justificativa');
+    $('saidaJust').focus();
+    return;
+  }
   _addSaidaEmVoo = true;
-  const body = { fechamento_id: S.fech.id, categoria: $('saidaCat').value, nome: $('saidaNome').value.trim() || null, valor: v };
-  $('saidaVal').value = ''; $('saidaNome').value = '';
+  const body = { fechamento_id: S.fech.id, categoria: cat, nome: $('saidaNome').value.trim() || null, valor: v, justificativa: just || null };
+  $('saidaVal').value = ''; $('saidaNome').value = ''; $('saidaJust').value = '';
   try {
     const row = await sb('gn_caixa_despesa', { method: 'POST', prefer: 'return=representation', body });
     S.saidas.push(row[0]); renderTudo(); toast('Saída registrada');
@@ -3009,7 +3070,7 @@ async function addSaida() {
     if (S.fech?.data) sincronizarChecklist(S.fech.data).catch(()=>{});
   } catch(e) {
     const tempId = uuid();
-    S.saidas.push({id:tempId,_pendente:true,fechamento_id:S.fech.id,categoria:body.categoria,nome:body.nome,valor:v});
+    S.saidas.push({id:tempId,_pendente:true,fechamento_id:S.fech.id,categoria:body.categoria,nome:body.nome,valor:v,justificativa:body.justificativa});
     _pfEnqueue({tempId,tabela:'gn_caixa_despesa',method:'POST',body});
     renderTudo(); toast('⚠️ Offline — salvo localmente');
   } finally {
