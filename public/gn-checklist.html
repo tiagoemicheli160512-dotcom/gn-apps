@@ -1301,6 +1301,11 @@
     </div>
   </div>
 
+  <!-- Aviso de cadastro incompleto (nome sem sobrenome / sem função) — ver
+       _renderCadastroIncompletoCard(). Fica ACIMA do card de funcionários de propósito:
+       é o aviso que dá o prazo antes da trava entrar. -->
+  <div id="cadastro-incompleto-card"></div>
+
   <!-- Funcionários (espelha o app de Gorjetas) -->
   <div class="card p-4 mb-3">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
@@ -2951,6 +2956,17 @@ let _carneInicialEditando = false;
 let _carneContagemEditando = false;
 let _carneEntradasEditando = false;
 let escalaAllData = null; // cache do all_data para visão mensal
+// Cadastro de funcionário: nome completo (nome + sobrenome) e função são obrigatórios.
+// Motivo do pedido: sem sobrenome, duas pessoas chamadas "Ana" viram a mesma linha (ou a
+// mesma pessoa vira duas) — e é justamente por nome que o Check-list, o Home e o RH casam
+// funcionário entre apps. Declaradas aqui em cima porque renderAll() roda no boot e chega
+// em renderComissoesFuncs(), que já lê isto (mesmo TDZ de carneTabAtiva/CHECKLIST_JANELA).
+// Duas datas, não uma: a regra vale pra cadastro NOVO desde o deploy, mas quem já estava
+// cadastrado incompleto tem um mês de prazo (combinado com o usuário) antes de travar.
+const CADASTRO_FUNC_REGRA_DESDE = '2026-09-23'; // cadastro feito daqui pra frente já nasce obrigado
+const CADASTRO_FUNC_TRAVA_DESDE = '2026-10-23'; // prazo pra quem já estava cadastrado sem os dados
+// Partículas de nome não contam como sobrenome — "Ana de" não pode passar por nome completo.
+const CADASTRO_NOME_PARTICULAS = ['de','da','do','das','dos','e','di','del','della','van','von','y','la','le'];
 const BANDA_CONSUMO_FRANQUIA = 150.00; // renderAll() -> renderBandaDia() -> _calcBanda() já lê no boot
 const BANDA_COUVERT_VALOR = 7.00;      // idem
 const CARGOS_VISITAS = ['supervisor','mestre']; // só esses cargos dão entrada/saída na aba Visitas
@@ -5400,11 +5416,85 @@ function _calcHorasSemanais(f){
   return m>0?`${h}h${m}min`:`${h}h`;
 }
 
+// ── Cadastro obrigatório: nome completo + função ───────────────────────────
+// "Sobrenome" aqui é: pelo menos duas palavras de verdade, ignorando partículas (de, da,
+// do…) e iniciais soltas. "Daiana" reprova; "Ana de Souza" passa; "Ana D" reprova, porque
+// uma inicial não distingue duas Anas — que é o problema inteiro que isto resolve.
+function _nomeTemSobrenome(nome){
+  const partes=String(nome||'').trim().split(/\s+/)
+    .filter(p=>p.length>=2 && !CADASTRO_NOME_PARTICULAS.includes(p.toLowerCase()));
+  return partes.length>=2;
+}
+// Devolve o que falta nesse cadastro: [] = completo. Só olha quem tem nome de verdade —
+// vaga vazia e lápide de funcionário removido (nome '') nunca são cobradas.
+function _cadastroFuncFaltando(f){
+  if(!f || !f.nome || !f.nome.trim() || f.arquivado) return [];
+  const falta=[];
+  if(!_nomeTemSobrenome(f.nome)) falta.push('sobrenome');
+  if(!(f.setor && f.setor.trim())) falta.push('função');
+  return falta;
+}
+function _cadastroFuncIncompletos(funcs){
+  return (funcs||[]).map((f,i)=>({f,i,falta:_cadastroFuncFaltando(f)})).filter(x=>x.falta.length);
+}
+// Dias que faltam pro prazo acabar (negativo = já venceu).
+function _cadastroDiasDePrazo(){
+  const hoje=new Date(hojeLocal()+'T12:00:00');
+  const fim=new Date(CADASTRO_FUNC_TRAVA_DESDE+'T12:00:00');
+  return Math.round((fim-hoje)/86400000);
+}
+
+// Card de aviso da aba Dados. Durante o prazo é só isto — nada trava. Depois do prazo o
+// bloqueio entra por _checarCadastroFuncIncompleto, e o card continua servindo de lista de
+// quem falta. Maglia fica de fora: o pedido não citou a loja pelo nome (regra do CLAUDE.md);
+// pra incluir, é só tirar o `LOJA==='Maglia'` daqui e do check.
+function _renderCadastroIncompletoCard(){
+  const el=document.getElementById('cadastro-incompleto-card');
+  if(!el) return;
+  if(LOJA==='Maglia'||!comissoesWD||comissoesWeekIdx==null){ el.innerHTML=''; return; }
+  const incompletos=_cadastroFuncIncompletos(comissoesWD.funcs);
+  if(!incompletos.length){ el.innerHTML=''; return; }
+  const dias=_cadastroDiasDePrazo();
+  const vencido=dias<0;
+  const prazoTxt=vencido
+    ? '⛔ Prazo encerrado — o app fica bloqueado até completar.'
+    : dias===0
+      ? '⏳ Último dia do prazo — amanhã o app trava até completar.'
+      : `⏳ Prazo até ${_fmtDataBRChk(CADASTRO_FUNC_TRAVA_DESDE)} (${dias} dia${dias>1?'s':''}). Depois disso o app trava até completar.`;
+  const MOSTRAR=6;
+  const linhas=incompletos.slice(0,MOSTRAR).map(({f,i,falta})=>`
+    <div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-top:1px solid rgba(0,0,0,.06);">
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:12px;font-weight:700;color:#1A1D23;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(f.nome)}</div>
+        <div style="font-size:11px;color:#b91c1c;">falta ${falta.join(' e ')}</div>
+      </div>
+      <button onclick="_irCompletarCadastro(${i})" style="background:#E8580A;border:none;border-radius:7px;color:#fff;padding:5px 11px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;flex-shrink:0;">Completar</button>
+    </div>`).join('');
+  const resto=incompletos.length-MOSTRAR;
+  el.innerHTML=`<div class="card p-4 mb-3" style="border:1px solid rgba(239,68,68,.35);background:rgba(239,68,68,.05);">
+    <div style="font-size:12px;font-weight:800;color:#b91c1c;">⚠️ Cadastro incompleto — ${incompletos.length} funcionário${incompletos.length>1?'s':''}</div>
+    <div style="font-size:11px;color:#475569;margin-top:3px;line-height:1.45;">Todo funcionário precisa de <strong>nome e sobrenome</strong> e de <strong>função</strong> cadastrada. Sem isso, dois funcionários de mesmo primeiro nome viram a mesma pessoa nos relatórios — e a mesma pessoa vira duas quando alguém escreve o nome de outro jeito.</div>
+    <div style="font-size:11px;color:${vencido?'#b91c1c':'#92400e'};margin-top:6px;font-weight:700;">${prazoTxt}</div>
+    <div style="margin-top:8px;">${linhas}</div>
+    ${resto>0?`<div style="font-size:11px;color:#64748b;margin-top:6px;">e mais ${resto} na lista abaixo.</div>`:''}
+  </div>`;
+}
+// Abre o card do funcionário e rola até ele — mesmo caminho do acaoExtra da Escala.
+function _irCompletarCadastro(i){
+  comissoesExpanded[i]=true;
+  renderComissoesFuncs();
+  setTimeout(()=>{
+    const el=document.getElementById('cf-'+i);
+    if(el) el.scrollIntoView({behavior:'smooth',block:'center'});
+  },80);
+}
+
 function renderComissoesFuncs(){
   const lista=document.getElementById('func-lista');
   const empty=document.getElementById('func-empty');
   const countEl=document.getElementById('func-count');
   if(!lista||!empty||!countEl) return;
+  _renderCadastroIncompletoCard();
 
   if(comissoesLoadErr){
     lista.innerHTML='';
@@ -5462,6 +5552,11 @@ function renderComissoesFuncs(){
       const cfg=STATUS_BADGE_CFG[k], n=statusContagens[k];
       return `<span style="font-size:11px;background:${cfg.cor}22;color:${cfg.cor};border:1px solid ${cfg.cor}55;border-radius:4px;padding:1px 6px;font-weight:700;flex-shrink:0;white-space:nowrap;">${cfg.ico} ${cfg.label}${n>1?' ×'+n:''}</span>`;
     }).join('');
+
+    // Cadastro incompleto (nome sem sobrenome e/ou sem função). Marca na linha fechada pra
+    // dar pra varrer a lista inteira sem abrir card por card.
+    const faltaCad=_cadastroFuncFaltando(f);
+    const cadBadge=faltaCad.length?`<span style="font-size:11px;background:rgba(239,68,68,.12);color:#b91c1c;border:1px solid rgba(239,68,68,.4);border-radius:4px;padding:1px 6px;font-weight:700;flex-shrink:0;white-space:nowrap;">⚠️ Falta ${faltaCad.join(' e ')}</span>`:'';
 
     // Grid de presença semanal
     const diasHtml=sem.days.map((day,d)=>{
@@ -5577,10 +5672,11 @@ function renderComissoesFuncs(){
     return `<div class="card-inner p-3" id="cf-${i}">
       <div style="display:flex;align-items:center;gap:8px;cursor:pointer;flex-wrap:wrap;row-gap:6px;" onclick="toggleComissoesFunc(${i})">
         <div style="font-size:10px;color:var(--t3);font-weight:700;width:16px;flex-shrink:0;">${pos+1}</div>
-        <input type="text" placeholder="Funcionário ${pos+1}" value="${escHtml(f.nome)}"
+        <input type="text" placeholder="Nome e sobrenome" value="${escHtml(f.nome)}"
           onclick="event.stopPropagation()" onblur="updComissoesNome(${i},this.value)"
-          style="flex:1;min-width:90px;">
+          style="flex:1;min-width:90px;${faltaCad.includes('sobrenome')?'border:1px solid rgba(239,68,68,.55);':''}">
         ${expBadge}
+        ${cadBadge}
         ${statusBadges}
         ${f.setor&&f.setor.trim()?`<span style="font-size:11px;color:var(--ouro,#F5D98A);background:rgba(245,217,138,.12);border-radius:4px;padding:1px 6px;white-space:nowrap;font-weight:700;flex-shrink:0">${escHtml(f.setor)}</span>`:''}
         ${f.nome&&f.nome.trim()?_badgeAvaliacaoAppToggleHtmlChk(f.nome,`chk_${i}`):''}
@@ -5590,13 +5686,17 @@ function renderComissoesFuncs(){
         <div style="font-size:11px;color:var(--t3);">${expI?'▲':'▼'}</div>
       </div>
       ${expI?`<div style="margin-top:9px;">
+        ${faltaCad.length?`<div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);border-radius:8px;padding:8px 10px;margin-bottom:9px;">
+          <div style="font-size:11px;font-weight:700;color:#b91c1c;">⚠️ Cadastro incompleto — falta ${faltaCad.join(' e ')}</div>
+          <div style="font-size:11px;color:#475569;margin-top:2px;line-height:1.4;">Todo funcionário precisa de nome e sobrenome e de função cadastrada. É assim que os apps sabem que dois "${escHtml((f.nome||'').trim().split(/\\s+/)[0]||'Ana')}" são pessoas diferentes.</div>
+        </div>`:''}
         <label class="field-label">Tipo</label>
         <select onchange="updComissoesTipo(${i},this.value)">
           ${COMISSOES_TIPOS.map(t=>`<option${t===f.tipo?' selected':''}>${t}</option>`).join('')}
         </select>
-        <label class="field-label" style="margin-top:8px;">Setor</label>
-        <select onchange="updComissoeSetor(${i},this.value)" style="font-size:11px;">
-          ${COMISSOES_SETORES.map(s=>`<option value="${s}"${s===(f.setor||'')?' selected':''}>${s||'— Setor —'}</option>`).join('')}
+        <label class="field-label" style="margin-top:8px;">Função (Setor)${faltaCad.includes('função')?' <span style="color:#b91c1c">*</span>':''}</label>
+        <select onchange="updComissoeSetor(${i},this.value)" style="font-size:11px;${faltaCad.includes('função')?'border:1px solid rgba(239,68,68,.55);':''}">
+          ${COMISSOES_SETORES.map(s=>`<option value="${s}"${s===(f.setor||'')?' selected':''}>${s||'— Escolha a função —'}</option>`).join('')}
         </select>
         ${_avaliacaoAppPainelHtmlChk(f.nome,`chk_${i}`)}
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;">
@@ -5835,12 +5935,35 @@ function toggleComissoesFunc(i){
   renderComissoesFuncs();
 }
 
-function updComissoesNome(i,v){
+function updComissoesNome(i,v,semRender){
   if(!comissoesWD) return;
-  const mutator=wd=>{ wd={...wd}; wd.funcs=[...wd.funcs]; wd.funcs[i]={...wd.funcs[i],nome:v}; return wd; };
+  // Carimba QUANDO essa vaga virou um cadastro de verdade (primeira vez que ganha nome).
+  // É o que separa "cadastro novo, já nasce obrigado a ter nome completo e função" de
+  // "quem já estava aí antes da regra, que tem prazo" — ver _checarCadastroFuncIncompleto.
+  const nomeAnterior=((comissoesWD.funcs[i]||{}).nome||'').trim();
+  const virouCadastro=!nomeAnterior && v && v.trim();
+  const faltavaAntes=_cadastroFuncFaltando(comissoesWD.funcs[i]).join(',');
+  const mutator=wd=>{
+    wd={...wd}; wd.funcs=[...wd.funcs]; wd.funcs[i]={...wd.funcs[i],nome:v};
+    if(virouCadastro && !wd.funcs[i].cadastro_em) wd.funcs[i].cadastro_em=hojeLocal();
+    return wd;
+  };
   comissoesWD=mutator(comissoesWD);
   if(v && v.trim()) comissoesVisibleSlots[i]=true;
   scheduleComissoesOp(mutator);
+  // Avisa na hora, sem recusar o que foi digitado: quem está no meio do cadastro não pode
+  // perder o que já escreveu — a cobrança de verdade vem do card de aviso e, no fim do
+  // prazo, do bloqueio.
+  if(v && v.trim() && !_nomeTemSobrenome(v)){
+    showToast('⚠️ Cadastre o nome completo (nome e sobrenome) — só o primeiro nome faz dois funcionários virarem um só.','error');
+  }
+  // Redesenha só quando MUDA o que está faltando nesse cadastro — inclusive quando some só
+  // uma das duas pendências, senão a marca continuaria dizendo "falta sobrenome e função"
+  // depois do sobrenome já ter sido posto. Corrigir uma letra do nome (segue faltando o
+  // mesmo) não redesenha: redesenhar a cada blur destruía e recriava #func-lista inteiro no
+  // meio da edição, e no celular o toque seguinte cai num elemento que já não existe mais.
+  const faltaAgora=_cadastroFuncFaltando(comissoesWD.funcs[i]).join(',');
+  if(!semRender && faltavaAntes!==faltaAgora) renderComissoesFuncs();
 }
 
 function updComissoesTipo(i,v){
@@ -12519,6 +12642,56 @@ async function _checarSalarioIncompleto() {
   };
 }
 
+// Cadastro de funcionário sem nome completo e/ou sem função. Diferente das outras
+// pendências, esta NÃO tem etapa "soft": durante o prazo combinado com o usuário ela não
+// entra na lista (o aviso fica só no card da aba Dados, sem travar nada). Ela só aparece
+// aqui — já como bloqueio — em dois casos:
+//   1. o prazo de um mês acabou e alguém ainda está incompleto; ou
+//   2. o cadastro foi FEITO depois da regra entrar (cadastro_em >= CADASTRO_FUNC_REGRA_DESDE)
+//      e já nasceu incompleto — aí não há prazo nenhum a cumprir.
+// No caso 2 a cobrança é só de quem é novo: misturar os antigos aqui mataria o prazo que o
+// usuário deu pra eles.
+async function _checarCadastroFuncIncompleto() {
+  if (LOJA === 'Maglia') return null;
+  if (!_temAcessoAbaChecklist('dados')) return null;
+  const idxHoje = comissoesSemIdx(hojeLocal());
+  if (idxHoje == null) return null; // fora do calendário conhecido — não trava
+  let funcs;
+  try {
+    const allData = await fetchComissoesAllData(comissoesLojaKey());
+    funcs = getComissoesWD(allData, idxHoje).funcs || [];
+  } catch (e) { return null; } // falha de rede nunca trava
+  const incompletos = _cadastroFuncIncompletos(funcs);
+  if (!incompletos.length) return null;
+  const prazoVencido = hojeLocal() >= CADASTRO_FUNC_TRAVA_DESDE;
+  const cobrados = prazoVencido
+    ? incompletos
+    : incompletos.filter(({ f }) => (f.cadastro_em || '') >= CADASTRO_FUNC_REGRA_DESDE);
+  if (!cobrados.length) return null;
+  const nomes = cobrados.map(({ f }) => f.nome).join(', ');
+  return {
+    chave: 'cadastro',
+    titulo: '👤 Cadastro de funcionário incompleto',
+    mensagem: prazoVencido
+      ? 'O prazo pra completar o cadastro acabou. Falta nome completo e/ou função de: ' + nomes + '.'
+      : 'Cadastro feito sem nome completo e/ou função: ' + nomes + '.',
+    tabAlvo: 'dados',
+    hard: true,
+    idxHoje,
+    // Só o necessário pro formulário inline — o resto é relido de comissoesWD na hora.
+    cobrados: cobrados.map(({ f, i, falta }) => ({ i, nome: f.nome, setor: f.setor || '', falta })),
+    acaoExtra: async () => {
+      switchTab('dados', document.querySelector('.tab-btn'));
+      cobrados.forEach(({ i }) => { comissoesExpanded[i] = true; });
+      renderComissoesFuncs();
+      setTimeout(() => {
+        const el = document.getElementById('cf-' + cobrados[0].i);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 300);
+    },
+  };
+}
+
 async function _atualizarPendenciasEssenciais() {
   // Mestre/supervisor/administrador/compras nunca travam por pendência de loja — mesmo
   // bypass de acesso já usado em outras partes do app (CARGOS_MASTER_EQUIV, ver GN RH/
@@ -12539,6 +12712,7 @@ async function _atualizarPendenciasEssenciais() {
       _checarEscalaPendenteOntem(),
       _checarBancoHorasPendente(),
       _checarSalarioIncompleto(),
+      _checarCadastroFuncIncompleto(),
     ]);
   } catch (e) { resultados = []; }
   _pendenciasEssenciaisAtivas = resultados.filter(Boolean);
@@ -12571,6 +12745,7 @@ const INLINE_HARD_RESOLVERS = {
   banda: _renderInlineHardBanda,
   escala: _renderInlineHardEscala,
   banco: _renderInlineHardBanco,
+  cadastro: _renderInlineHardCadastro,
 };
 
 function _renderPendenciasEssenciaisLock(forcarExibicao) {
@@ -12661,13 +12836,21 @@ async function _renderPendenciasEssenciaisLockEscaladoImpl(pendHard) {
       <div style="font-size:11px;color:#64748b;margin-bottom:8px">${p.mensagem}</div>
       <button onclick="_irResolverPendenciaEssencial('${p.chave}')" style="width:100%;background:#E8580A;border:none;border-radius:8px;color:#fff;padding:9px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">Resolver</button>
     </div>`).join('');
+  // O cadastro incompleto não é "passou 1 dia sem resolver" como as outras — ou o prazo de
+  // um mês acabou, ou o cadastro nasceu incompleto depois da regra. Dizer o motivo errado
+  // na tela de bloqueio faz a loja procurar a pendência errada.
+  const soCadastro = pendHard.every(p => p.chave === 'cadastro');
+  const tituloLock = soCadastro ? 'App bloqueado — cadastro incompleto' : 'App bloqueado — passou 1 dia sem resolver';
+  const subLock = soCadastro
+    ? 'Todo funcionário precisa de nome e sobrenome e de função cadastrada. Complete aqui embaixo pra liberar o app.'
+    : 'Essas pendências continuam sem resposta desde ontem. Preencha aqui embaixo pra liberar o app de novo.';
   el.innerHTML = `
     <div style="background:#FFFFFF;border-radius:18px;padding:24px 20px;width:100%;max-width:420px;max-height:92vh;overflow-y:auto">
       <div style="text-align:center">
         <div style="font-size:36px;margin-bottom:8px">⛔</div>
-        <div style="font-size:16px;font-weight:800;color:#1A1D23;margin-bottom:6px">App bloqueado — passou 1 dia sem resolver</div>
+        <div style="font-size:16px;font-weight:800;color:#1A1D23;margin-bottom:6px">${tituloLock}</div>
         <div style="font-size:12px;color:#475569;line-height:1.5;margin-bottom:16px">
-          Essas pendências continuam sem resposta desde ontem. Preencha aqui embaixo pra liberar o app de novo.
+          ${subLock}
         </div>
       </div>
       <div id="pend-hard-forms"></div>
@@ -12892,6 +13075,66 @@ async function _salvarInlineHardBanco() {
   _bhAtualizarBadge();
   const tabEl = document.getElementById('tab-banco');
   if (tabEl && tabEl.classList.contains('active')) renderBancoHoras();
+  _atualizarPendenciasEssenciais();
+}
+
+// Cadastro: nome completo + função de quem está sendo cobrado. Diferente dos outros
+// resolvedores, aqui os campos já vêm PREENCHIDOS com o que existe hoje — o que falta é
+// completar ("Daiana" → "Daiana Souza"), não digitar do zero, e apagar o que já está certo
+// seria trabalho jogado fora.
+async function _renderInlineHardCadastro(containerId, p) {
+  const elLoading = document.getElementById(containerId);
+  if (!elLoading) return;
+  elLoading.innerHTML = '<div style="font-size:11px;color:#94a3b8">Carregando…</div>';
+  // O check lê a semana de hoje direto do banco; a tela pode estar em outra semana (ex.:
+  // alguém navegando no histórico). Sem isto, o nome corrigido seria gravado na semana
+  // errada — o mesmo bug que a Escala já teve (ver _garantirSemanaComissoesPara).
+  if (comissoesWeekIdx !== p.idxHoje) {
+    _garantirSemanaComissoesPara(hojeLocal());
+    const inp = document.getElementById('data-dia-atual');
+    if (inp) inp.value = hojeLocal();
+    await onDataChange(hojeLocal());
+  }
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  const funcs = (comissoesWD && comissoesWD.funcs) || [];
+  const campoCss = 'width:100%;box-sizing:border-box;padding:6px 8px;border-radius:8px;border:1px solid rgba(0,0,0,.15);font-size:12px;font-family:inherit';
+  const linhas = p.cobrados.map(c => {
+    const f = funcs[c.i] || {};
+    const nomeAtual = f.nome || c.nome || '';
+    const setorAtual = f.setor || c.setor || '';
+    const opts = COMISSOES_SETORES.map(s =>
+      `<option value="${_esc(s)}"${s === setorAtual ? ' selected' : ''}>${s || '— Escolha a função —'}</option>`).join('');
+    return `<div style="margin-bottom:10px">
+      <div style="font-size:11px;color:#64748b;margin-bottom:3px">${_esc(c.nome)} — falta ${c.falta.join(' e ')}</div>
+      <input type="text" data-cadastro-hard-nome="${c.i}" value="${_esc(nomeAtual)}" placeholder="Nome e sobrenome" style="${campoCss}">
+      <select data-cadastro-hard-setor="${c.i}" style="${campoCss};margin-top:5px">${opts}</select>
+    </div>`;
+  }).join('');
+  el.innerHTML = linhas + `<button onclick="_salvarInlineHardCadastro()" style="width:100%;margin-top:4px;background:#E8580A;border:none;border-radius:8px;color:#fff;padding:9px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">💾 Salvar cadastro</button>`;
+}
+async function _salvarInlineHardCadastro() {
+  const inputs = document.querySelectorAll('[data-cadastro-hard-nome]');
+  const alteracoes = [];
+  let erro = '';
+  inputs.forEach(inp => {
+    const i = parseInt(inp.dataset.cadastroHardNome, 10);
+    const sel = document.querySelector('[data-cadastro-hard-setor="' + i + '"]');
+    const nome = (inp.value || '').trim();
+    const setor = sel ? (sel.value || '').trim() : '';
+    if (!_nomeTemSobrenome(nome)) { erro = erro || 'Preencha nome e sobrenome de todos.'; return; }
+    if (!setor) { erro = erro || 'Escolha a função de todos.'; return; }
+    alteracoes.push({ i, nome, setor });
+  });
+  if (erro || !alteracoes.length) { showToast('⚠️ ' + (erro || 'Nada pra salvar.'), 'error'); return; }
+  // semRender=true: renderComissoesFuncs() a cada nome redesenharia a lista inteira N vezes
+  // por baixo do overlay, à toa.
+  alteracoes.forEach(({ i, nome, setor }) => {
+    updComissoesNome(i, nome, true);
+    updComissoeSetor(i, setor);
+  });
+  await flushComissoesOps();
+  renderComissoesFuncs();
   _atualizarPendenciasEssenciais();
 }
 
