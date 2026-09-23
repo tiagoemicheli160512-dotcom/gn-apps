@@ -106,6 +106,112 @@ window.gnAvalComparavel = function (a, b) {
   return window.gnAvalPesado(a) === window.gnAvalPesado(b);
 };
 
+// ── Corte de faixa por falta ───────────────────────────────────────────────────────────
+//
+// Peso sozinho não resolveu o que motivou tudo: com os pesos definidos, a fatia da
+// pontualidade só foi de 8,3% pra 8,9%–11,8% (subir uma pergunta junto com quase todas as
+// outras não muda a fatia de ninguém), e o funcionário "bom no serviço, falta muito" saía
+// de 75% pra 74% — seguia "Dentro do Padrão". O corte age sobre a FAIXA, não sobre a nota:
+//
+//   1 falta no período  → não pode ser Ouro (teto: Dentro do Padrão)
+//   2 ou mais           → teto: Alerta Amarelo
+//
+// A nota em % não muda; o que muda é o rótulo. Assim o corte é explicável pro funcionário
+// ("sua nota é 88%, mas teve 2 faltas") em vez de aparecer como uma nota mexida.
+window.GN_AVAL_CORTE_JANELA_DIAS = 90;
+// Conta como falta o que a regra de gorjeta já trata como ausência não justificada (ver
+// calcSemana em gn-lojas-config.js: nFS = FALTA + SUSPENSÃO). ATESTADO, JUSTIFICATIVA,
+// FÉRIAS, FOLGA e AFASTAMENTO nunca entram — falta abonada não é falta.
+window.GN_AVAL_FALTA_STATUS = ['FALTA', 'SUSPENSÃO'];
+
+window.GN_AVAL_FAIXAS = ['vermelho', 'amarelo', 'padrao', 'ouro'];
+
+window.gnAvalFaixaPorPct = function (p) {
+  return p >= 85 ? 'ouro' : p >= 60 ? 'padrao' : p >= 40 ? 'amarelo' : 'vermelho';
+};
+
+// Teto que o número de faltas impõe. `null`/`undefined` = não se sabe (avaliação antiga,
+// sem o campo) → sem teto, nada muda.
+window.gnAvalTetoPorFalta = function (faltas) {
+  if (faltas === null || faltas === undefined || isNaN(faltas)) return null;
+  if (faltas >= 2) return 'amarelo';
+  if (faltas >= 1) return 'padrao';
+  return null;
+};
+
+window.gnAvalAplicarCorte = function (faixa, faltas) {
+  var teto = window.gnAvalTetoPorFalta(faltas);
+  if (!teto) return faixa;
+  var F = window.GN_AVAL_FAIXAS;
+  return F.indexOf(faixa) > F.indexOf(teto) ? teto : faixa;
+};
+
+// Quantas faltas ficaram gravadas na avaliação. É gravado UMA VEZ, quando a avaliação é
+// finalizada — não relido depois. Faltas que a pessoa der no mês seguinte não podem
+// rebaixar, meses depois, uma avaliação já assinada e conversada com ela.
+window.gnAvalFaltas = function (av) {
+  var n = av && av.faltasPeriodo;
+  return (typeof n === 'number' && n >= 0) ? n : null;
+};
+
+// A faixa final da avaliação, já com o corte. É por aqui que os quatro apps devem passar.
+window.gnAvalFaixa = function (av) {
+  return window.gnAvalAplicarCorte(
+    window.gnAvalFaixaPorPct(window.gnAvalPct(av)),
+    window.gnAvalFaltas(av)
+  );
+};
+
+// O corte de fato rebaixou esta avaliação? Serve pra explicar na tela em vez de o número
+// e o rótulo parecerem brigar entre si.
+window.gnAvalCorteAplicado = function (av) {
+  return window.gnAvalFaixaPorPct(window.gnAvalPct(av)) !== window.gnAvalFaixa(av);
+};
+
+window.gnAvalCorteTxt = function (av) {
+  if (!window.gnAvalCorteAplicado(av)) return '';
+  var n = window.gnAvalFaltas(av);
+  return n === 1 ? 'teto por 1 falta no período' : 'teto por ' + n + ' faltas no período';
+};
+
+// Conta FALTA/SUSPENSÃO de um funcionário nos últimos `dias` antes de `ateISO`, lendo o
+// all_data de gn_comissoes (o mesmo que o app Gorjetas grava dia a dia).
+//
+// O calendário guarda só dia e mês, sem ano — a semana do fim de dezembro cairia no ano
+// errado quando a avaliação é de janeiro. Por isso a data de cada semana é montada com o
+// ano da avaliação e recuada um ano quando cai muito à frente dela.
+window.gnAvalContarFaltas = function (allData, nome, ateISO, dias) {
+  var cal = window.COMISSOES_CAL;
+  if (!allData || !nome || !ateISO || !cal) return null;
+  var alvo = String(nome).trim().toLowerCase();
+  if (!alvo) return null;
+  var ate = new Date(ateISO + 'T12:00:00');
+  if (isNaN(ate)) return null;
+  var janela = (typeof dias === 'number' ? dias : window.GN_AVAL_CORTE_JANELA_DIAS);
+  var de = new Date(ate); de.setDate(de.getDate() - janela);
+  var status = window.GN_AVAL_FALTA_STATUS;
+  var total = 0;
+
+  Object.keys(allData).forEach(function (k) {
+    if (!/^\d+$/.test(k)) return;               // ferias_geral e afins não são semanas
+    var sem = cal[Number(k)];                    // índice do all_data = índice do calendário
+    if (!sem || !sem.days) return;
+    var wd = allData[k];
+    if (!wd || !wd.funcs) return;
+    var func = wd.funcs.filter(function (f) {
+      return f && f.nome && String(f.nome).trim().toLowerCase() === alvo;
+    })[0];
+    if (!func || !func.dias) return;
+    sem.days.forEach(function (d, i) {
+      if (status.indexOf(func.dias[i]) < 0) return;
+      var dt = new Date(ate.getFullYear(), d.m - 1, d.d, 12, 0, 0);
+      if (dt - ate > 180 * 86400000) dt.setFullYear(dt.getFullYear() - 1);
+      if (dt >= de && dt <= ate) total++;
+    });
+  });
+  return total;
+};
+
 // Confere que peso e pergunta continuam alinhados. Chamado pelos testes; devolve a lista
 // de problemas (vazia = tudo certo).
 window.gn_aval_pesos_conferir = function () {
