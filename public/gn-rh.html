@@ -799,7 +799,7 @@ async function carregarFinanceiro() {
     const ids = S.caixaSemana.map(r => r.id);
     const [resComp, resDes, resSup, resGor] = await Promise.all([
       db.from('gn_caixa_comprovante').select('fechamento_id,bandeira,valor').in('fechamento_id', ids),
-      db.from('gn_caixa_despesa').select('id,fechamento_id,categoria,nome,valor').in('fechamento_id', ids),
+      db.from('gn_caixa_despesa').select('id,fechamento_id,categoria,nome,valor,justificativa').in('fechamento_id', ids),
       db.from('gn_caixa_suprimento').select('fechamento_id,descricao,valor').in('fechamento_id', ids),
       db.from('gn_caixa_gorjeta').select('fechamento_id,mesa,garcom,valor').in('fechamento_id', ids),
     ]);
@@ -3248,7 +3248,7 @@ async function _finFetchIntervalo(de, ate, lojaChk) {
     for (let i = 0; i < ids.length; i += 100) lotes.push(ids.slice(i, i + 100));
     const resultados = await Promise.all(lotes.flatMap(lote => [
       db.from('gn_caixa_comprovante').select('fechamento_id,bandeira,valor').in('fechamento_id', lote),
-      db.from('gn_caixa_despesa').select('fechamento_id,categoria,nome,valor').in('fechamento_id', lote),
+      db.from('gn_caixa_despesa').select('fechamento_id,categoria,nome,valor,justificativa').in('fechamento_id', lote),
     ]));
     resultados.forEach((res, i) => {
       if (i % 2 === 0) (res.data || []).forEach(c => {
@@ -3581,7 +3581,18 @@ async function verConferencia(lojaUserKey, data, id) {
       + '</tr>';
   }
 
-  function makeDespRow(key, rowLabel, sistValue, fotoB64) {
+  // Categorias em que o app Caixa exige justificativa (hoje só Funcionário Extra). Quem
+  // confere o caixa aqui precisa ler o motivo junto do valor — sem isso, a justificativa
+  // ficaria só no app da loja e a conferência continuaria vendo "Funcionário Extra
+  // R$ 120" sem saber por quê, que é exatamente o problema que o campo veio resolver.
+  var CATS_COM_JUSTIFICATIVA_RH = ['funcionario_extra'];
+  function _justRhHtml(d) {
+    if (CATS_COM_JUSTIFICATIVA_RH.indexOf(d.categoria) < 0) return '';
+    return d.justificativa && String(d.justificativa).trim()
+      ? '<div style="font-size:11px;color:var(--muted);margin-top:2px;line-height:1.4">📝 ' + esc(d.justificativa) + '</div>'
+      : '<div style="font-size:11px;color:var(--red);margin-top:2px;font-weight:600">⚠️ Sem justificativa</div>';
+  }
+  function makeDespRow(key, rowLabel, sistValue, fotoB64, justHtml) {
     var sist = sistValue != null ? parseFloat(sistValue) : null;
     var sk = safeKey(key);
     var confVal = getConfVal(key, sist);
@@ -3591,7 +3602,7 @@ async function verConferencia(lojaUserKey, data, id) {
       ? '<img src="' + fotoB64 + '" onclick="verFotoConf(\'' + sk + '\')" style="display:block;max-width:52px;height:34px;object-fit:cover;border-radius:3px;border:1px solid var(--border);margin-top:3px;cursor:zoom-in">'
       : '';
     return '<tr style="border-top:1px solid var(--border)">'
-      + '<td style="padding:4px 8px;vertical-align:top"><div style="font-size:12px;color:var(--muted)">' + rowLabel + '</div>' + thumb + '</td>'
+      + '<td style="padding:4px 8px;vertical-align:top"><div style="font-size:12px;color:var(--muted)">' + rowLabel + '</div>' + (justHtml || '') + thumb + '</td>'
       + '<td style="' + tdSist + ';vertical-align:top">' + sistStr + '</td>'
       + '<td style="padding:3px 4px;vertical-align:top"><input type="number" class="conf-input" id="cfinp-' + sk + '" data-key="' + key + '" data-sist="' + sistAttr + '" data-label="' + esc(rowLabel) + '" data-foto="' + (fotoB64 ? sk : '') + '" step="0.01" min="0" value="' + confVal + '" oninput="calcConfDif()" style="' + inputStyle + '"></td>'
       + '<td id="cfdif-' + sk + '" style="' + tdDif + ';color:var(--muted);vertical-align:top">—</td>'
@@ -3632,7 +3643,7 @@ async function verConferencia(lojaUserKey, data, id) {
     despesas.forEach(function(d) {
       var baseLabel = SAIDA_LABEL[d.categoria] || d.categoria;
       var fullLabel = d.nome && d.nome !== baseLabel ? baseLabel + ' · ' + d.nome : baseLabel;
-      confRows += makeDespRow('desp_' + d.id, fullLabel, d.valor, despesaFotos[String(d.id)] || null);
+      confRows += makeDespRow('desp_' + d.id, fullLabel, d.valor, despesaFotos[String(d.id)] || null, _justRhHtml(d));
     });
     confRows += makeReadRow('Total Saídas', totalDesp);
   }
@@ -3730,6 +3741,10 @@ async function verConferencia(lojaUserKey, data, id) {
       var baseLabel = SAIDA_LABEL[d.categoria] || d.categoria;
       var fullLabel = d.nome && d.nome !== baseLabel ? baseLabel + ' · ' + d.nome : baseLabel;
       pdfLinhas.push('  ' + fullLabel + ': ' + money(d.valor));
+      // O motivo do extra vai junto no relatório — é o documento que circula fora do app.
+      if (CATS_COM_JUSTIFICATIVA_RH.indexOf(d.categoria) >= 0) {
+        pdfLinhas.push('      motivo: ' + ((d.justificativa && String(d.justificativa).trim()) || 'NÃO INFORMADO'));
+      }
     });
     pdfLinhas.push('  Total Saídas: ' + money(totalDesp));
     pdfLinhas.push('');
