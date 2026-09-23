@@ -705,6 +705,10 @@ let S = {
   ultimoPedido:{},     // { catalogoId: { lojaSlug: qtd } } — semana anterior
   provisaoAnterior:{}, // { catalogoId: { lojaSlug: qtd } } — provisionado pelo Compras na semana anterior, independente de entrada de NF
   pedidosConfirmados:{},// { catalogoId: { lojaSlug: qtd } } — confirmados desta semana
+  // Todos os pedidos vivos (não-cancelados) da semana ativa, do mais novo pro mais antigo.
+  // Uma semana pode ter mais de um (ex.: confirmado + rascunho de 2ª rodada) — ver
+  // carregarPedidoAtual/_outroPedidoSemanaCardHtml.
+  pedidosDaSemana: [],
   fornecedoresConfirmados: new Set(), // fornecedores do pedidoAtual já com provisões geradas
   // Fornecedores já confirmados nesta semana, mas liberados de novo pra uma 2ª rodada de
   // pedido (ex.: Petiscos pede mais de uma vez por semana) — local à sessão, some ao
@@ -1111,18 +1115,40 @@ async function carregarPedidoAtual() {
   const ehSemAtual = S.semanaAtiva.toDateString() === mondayHoje.toDateString();
   await carregarProvisaoAnterior();
 
-  // Busca pedido da semana — prioriza CONFIRMADO/ENVIADO sobre RASCUNHO, ignora CANCELADO
+  // Busca os pedidos da semana (ignora CANCELADO), do mais novo pro mais antigo.
+  //
+  // BUG real (23/09, Matheus): antes isto ordenava por `status` crescente e pegava só o
+  // primeiro — e 'CONFIRMADO' vem antes de 'RASCUNHO' no alfabeto, ou seja, uma semana já
+  // confirmada SEMPRE ganhava do rascunho. Com os 35 fornecedores da semana confirmados,
+  // todo campo de quantidade renderiza `disabled` (ver prodConfirmado em renderPedido), e
+  // clicar em "Novo" não adiantava nada: o rascunho recém-criado nascia órfão, porque no
+  // carregamento seguinte o app voltava pro CONFIRMADO. O Matheus criou seis pedidos
+  // seguidos em 8 minutos tentando destravar e nenhum deles apareceu.
+  //
+  // Agora: rascunho em aberto tem prioridade sobre pedido já fechado — é nele que se
+  // digita. Só cai pro CONFIRMADO/ENVIADO quando não existe rascunho nenhum. É exatamente
+  // a mesma correção que a aba Hortifruti já tinha recebido pelo mesmo motivo (ver
+  // carregarPedidoHortifruti); o pedido semanal tinha ficado com o defeito antigo.
   const { data } = await db.from('gn_pedidos')
     .select('*')
     .eq('semana_inicio', semIsoStr)
     .eq('regiao', 'RJ')
     .in('status', ['CONFIRMADO', 'ENVIADO', 'RASCUNHO'])
-    .order('status', { ascending: true })
-    .order('criado_em', { ascending: false })
-    .limit(1);
+    .order('criado_em', { ascending: false });
+
+  // Guardado pro aviso de "essa semana tem outro pedido" (ver _outroPedidoSemanaCardHtml):
+  // com o rascunho ganhando a prioridade, o pedido confirmado sairia de vista sem deixar
+  // rastro — e com ele o botão de Reverter confirmação.
+  S.pedidosDaSemana = data || [];
 
   if (data && data.length > 0) {
-    S.pedidoAtual = data[0];
+    // Entre rascunhos, o MAIS ANTIGO — mesma regra de convergência do bloco de corrida logo
+    // abaixo ("todo mundo converge pro mais antigo"). Se dois aparelhos acabarem com
+    // rascunhos diferentes na mesma semana, os dois caem no mesmo, em vez de cada um
+    // digitar no seu. Sem rascunho nenhum, mostra o pedido fechado mais recente (é o que dá
+    // acesso a Ver Provisões/Reverter).
+    const rascunhos = data.filter(p => p.status === 'RASCUNHO');
+    S.pedidoAtual = rascunhos.length ? rascunhos[rascunhos.length - 1] : data[0];
   } else if (ehSemAtual) {
     // Semana atual sem pedido → cria rascunho
     const { data: novo } = await db.from('gn_pedidos')
@@ -3225,6 +3251,52 @@ async function _carregarTotalCompradorSemana(pedidoId, fornecedores) {
 // Aviso de "fornecedor revertido, esperando confirmar de novo" — ver
 // carregarFornecedoresRevertidos(). Some sozinho assim que o fornecedor for confirmado de
 // novo (deixa de estar em S.fornecedoresRevertidos).
+// Aviso de que a semana tem mais de um pedido vivo. Sem isto, o rascunho ganhando a
+// prioridade (ver carregarPedidoAtual) faria o pedido já confirmado sumir da tela em
+// silêncio — junto com "Ver Provisões" e o "↩️ Reverter" de cada fornecedor, que só existem
+// na tela do pedido confirmado. Também é o que evita a confusão inversa: quem abre o app
+// numa semana já fechada e vê tudo em branco precisa saber que está num rascunho novo, não
+// que o pedido confirmado se perdeu.
+function _outroPedidoSemanaCardHtml() {
+  if (S.hortifrutiAtivo) return '';
+  const outros = (S.pedidosDaSemana || []).filter(p => p.id !== S.pedidoAtual?.id);
+  if (!outros.length || !S.pedidoAtual) return '';
+  const fechado = outros.find(p => p.status === 'CONFIRMADO' || p.status === 'ENVIADO');
+  const emRascunho = S.pedidoAtual.status === 'RASCUNHO';
+  let txt, alvo, rotulo;
+  if (emRascunho && fechado) {
+    txt = 'Esta semana já tem um pedido <strong>' + esc(fechado.status.toLowerCase()) + '</strong>. Você está num <strong>rascunho novo</strong> — o que digitar aqui é um pedido à parte, não mexe no que já foi confirmado.';
+    alvo = fechado; rotulo = 'Ver o pedido ' + fechado.status.toLowerCase();
+  } else if (!emRascunho) {
+    const rascunho = outros.find(p => p.status === 'RASCUNHO');
+    if (!rascunho) return '';
+    txt = 'Esta semana também tem um <strong>rascunho em aberto</strong>.';
+    alvo = rascunho; rotulo = 'Ver o rascunho';
+  } else {
+    return ''; // vários rascunhos e nenhum fechado: nada de útil a oferecer
+  }
+  return `<div style="background:rgba(37,99,235,.08);border:1px solid rgba(37,99,235,.35);border-left:3px solid #2563EB;border-radius:var(--r);padding:10px 14px;margin-bottom:10px;font-size:12px;color:var(--text);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <div style="flex:1;min-width:180px">📋 ${txt}</div>
+    <button class="btn-sm btn-outline" onclick="abrirPedidoDaSemana('${alvo.id}')">${rotulo}</button>
+  </div>`;
+}
+
+// Troca qual pedido da semana está na tela, sem recarregar a página. Refaz exatamente as
+// mesmas cargas que carregarPedidoAtual faz depois de escolher o pedido — sem isso, os
+// itens e os fornecedores confirmados continuariam sendo os do pedido anterior.
+async function abrirPedidoDaSemana(id) {
+  const alvo = (S.pedidosDaSemana || []).find(p => p.id === id);
+  if (!alvo) { toast('Pedido não encontrado nesta semana.', 'err'); return; }
+  S.pedidoAtual = alvo;
+  S.pedidoItens = {};
+  await carregarItensPedido();
+  await carregarFornecedoresConfirmados();
+  await carregarEstadoAuditoriaFornecedores();
+  calcularTotais();
+  renderPedido();
+  toast(`Mostrando o pedido ${alvo.status.toLowerCase()} desta semana.`, 'ok');
+}
+
 function _fornecedoresRevertidosAlertHtml() {
   const forns = Object.keys(S.fornecedoresRevertidos || {}).filter(f => _fornecedorNoEscopoAtivo(f));
   if (!forns.length) return '';
@@ -3750,6 +3822,7 @@ function renderPedido() {
       </div>
     </div>
 
+    ${_outroPedidoSemanaCardHtml()}
     ${_fornecedoresRevertidosAlertHtml()}
     ${_totalCompradorSemanaCardHtml()}
 
