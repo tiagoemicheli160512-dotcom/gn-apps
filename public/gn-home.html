@@ -370,6 +370,8 @@
 
   <div id="avaliacoes-aviso-home-card"></div>
 
+  <div id="ocorrencias-semana-home-card"></div>
+
   <div id="carnes-docs-home-card"></div>
 
   <div id="datas-especiais-home-card"></div>
@@ -1713,6 +1715,161 @@ function _buildPendenciasEssenciaisCard(){
 let _carnesDocsHomeData = null;
 let _carnesDocsHomeExpanded = false;
 
+// ── Card "Ocorrências da semana passada" ───────────────────────────────────────────────
+// Quem teve falta, suspensão, atestado ou justificativa na semana que fechou — e o que isso
+// fez com a gorjeta dele. A regra de quem recebe e quem é zerado NÃO é reescrita aqui: o
+// card chama a MESMA calcSemana() de gn-lojas-config.js que o app Gorjetas usa pra fazer o
+// pagamento. Se a regra mudar lá, muda aqui junto, sem ninguém lembrar de atualizar.
+//
+// Pra referência, a regra que a calcSemana aplica hoje:
+//   • 1 falta/suspensão  → cota do funcionário cai pela METADE
+//   • 2 ou mais          → cota ZERADA
+//   • qualquer falta/suspensão/atestado/justificativa → fica fora do RATEIO do que sobrou
+// Atestado e justificativa não cortam a cota, mas tiram do rateio — é a diferença que mais
+// gera dúvida na loja, então o card diz isso com todas as letras.
+const OCORRENCIAS_STATUS = {
+  'FALTA':         { ico: '❌', label: 'Falta' },
+  'SUSPENSÃO':     { ico: '🚫', label: 'Suspensão' },
+  'ATESTADO':      { ico: '📄', label: 'Atestado' },
+  'JUSTIFICATIVA': { ico: '📝', label: 'Justificativa' },
+};
+let _ocorrenciasHomeData = null;
+let _ocorrenciasHomeAberto = false;
+
+// Saldo retido acumulado até a semana idx — mesma cadeia do getSaldoAntes() do app
+// Gorjetas: cada semana parte do que sobrou da anterior, menos as saídas.
+function _ocorrSaldoAntes(allData, idx) {
+  let s = 0;
+  for (let i = 0; i < idx; i++) {
+    const wd = allData[String(i)];
+    if (!wd || !Array.isArray(wd.funcs)) continue;
+    try {
+      const c = calcSemana({ ...wd, semIdx: i }, s);
+      s = c.retido - (parseFloat(wd.saldoSaida) || 0);
+    } catch (e) { /* semana corrompida não pode derrubar o card inteiro */ }
+  }
+  return s;
+}
+
+async function _renderOcorrenciasSemanaHome(mostrar, sess, isMasterAtivo) {
+  const el = document.getElementById('ocorrencias-semana-home-card');
+  if (!el) return;
+  const loja = (isMasterAtivo && masterLoja) ? masterLoja : (sess && sess.loja);
+  // Maglia fora: o pedido não citou a loja pelo nome (regra do CLAUDE.md). Ela USA gorjetas,
+  // então tecnicamente o card funcionaria — é uma decisão de escopo, não uma limitação.
+  // Pra incluir, basta tirar 'MAGLIA' daqui.
+  if (!mostrar || !sess || !loja || loja === 'MAGLIA') { el.innerHTML = ''; _ocorrenciasHomeData = null; return; }
+  const comKey = LOJA_COM_KEY[loja] || loja;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+
+  // Semana anterior: a que fechou no domingo passado.
+  const hoje = new Date();
+  const hojeSemHora = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate());
+  const segunda = new Date(hojeSemHora);
+  segunda.setDate(hojeSemHora.getDate() - ((hojeSemHora.getDay() + 6) % 7));
+  const segAnterior = new Date(segunda); segAnterior.setDate(segunda.getDate() - 7);
+  const domAnterior = new Date(segAnterior); domAnterior.setDate(segAnterior.getDate() + 6);
+  const fmtISO = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const idx = (typeof _escalaHomeSemIdx === 'function') ? _escalaHomeSemIdx(fmtISO(segAnterior)) : null;
+  if (idx == null) { el.innerHTML = ''; return; }
+
+  const rows = await window.gnFetchJson(
+    `${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'ocorrSemana:rows', []);
+  const allData = (rows[0] && rows[0].all_data) || {};
+  const wd = allData[String(idx)];
+  if (!wd || !Array.isArray(wd.funcs)) { el.innerHTML = ''; _ocorrenciasHomeData = null; return; }
+
+  let calc;
+  try { calc = calcSemana({ ...wd, semIdx: idx }, _ocorrSaldoAntes(allData, idx)); }
+  catch (e) { el.innerHTML = ''; return; }
+
+  const pessoas = [];
+  (calc.funcCalc || []).forEach(f => {
+    const nome = (f.nome || '').trim();
+    if (!nome || f.arquivado) return;
+    const contagem = {};
+    (f.dias || []).forEach(st => { if (OCORRENCIAS_STATUS[st]) contagem[st] = (contagem[st] || 0) + 1; });
+    const tipos = Object.keys(contagem);
+    if (!tipos.length) return;
+    // f.mult vem da calcSemana: 0 = cota zerada, 0.5 = metade, 1 = cota inteira.
+    // f.elegivel = entrou no rateio do que sobrou no caixa da semana.
+    // Jovem Aprendiz NUNCA entra no rateio — é o contrato dele, não a ocorrência. Sem esta
+    // ressalva o card culpava o atestado/justificativa por algo que já valia antes.
+    const jaPorContrato = f.tipo === 'JOVEM APRENDIZ';
+    const efeito = f.mult === 0
+      ? { txt: 'Comissão zerada', cor: '#b91c1c', bg: 'rgba(185,28,28,.10)' }
+      : f.mult === 0.5
+        ? { txt: 'Recebeu metade', cor: '#b45309', bg: 'rgba(180,83,9,.10)' }
+        : jaPorContrato
+          ? { txt: 'Recebeu (Jovem Aprendiz não entra no rateio)', cor: '#15803d', bg: 'rgba(21,128,61,.10)' }
+          : !f.elegivel
+            ? { txt: 'Recebeu, mas ficou fora do rateio', cor: '#b45309', bg: 'rgba(180,83,9,.10)' }
+            : { txt: 'Recebeu normalmente', cor: '#15803d', bg: 'rgba(21,128,61,.10)' };
+    pessoas.push({ nome, tipos: tipos.map(t => ({ ...OCORRENCIAS_STATUS[t], n: contagem[t] })), efeito,
+                   grave: f.mult === 0 ? 0 : f.mult === 0.5 ? 1 : 2 });
+  });
+  // Quem perdeu mais aparece primeiro — é quem a gerência precisa olhar.
+  pessoas.sort((a, b) => a.grave - b.grave || a.nome.localeCompare(b.nome));
+
+  _ocorrenciasHomeData = { pessoas, de: segAnterior, ate: domAnterior };
+  _renderOcorrenciasBody();
+}
+
+function _toggleOcorrenciasHome() {
+  _ocorrenciasHomeAberto = !_ocorrenciasHomeAberto;
+  _renderOcorrenciasBody();
+}
+
+function _renderOcorrenciasBody() {
+  const el = document.getElementById('ocorrencias-semana-home-card');
+  const d = _ocorrenciasHomeData;
+  if (!el || !d) return;
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  const ddmm = dt => String(dt.getDate()).padStart(2, '0') + '/' + String(dt.getMonth() + 1).padStart(2, '0');
+  const periodo = ddmm(d.de) + ' a ' + ddmm(d.ate);
+  const n = d.pessoas.length;
+  const zerados = d.pessoas.filter(p => p.grave === 0).length;
+
+  if (!n) {
+    el.innerHTML = `<div style="background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.22);border-left:3px solid #16a34a;border-radius:14px;padding:13px 16px;margin:0 16px 14px">
+      <div style="font-size:12.5px;font-weight:800;color:#14532d">✅ Semana passada sem ocorrências</div>
+      <div style="font-size:11.5px;color:#166534;margin-top:2px">Ninguém teve falta, suspensão, atestado ou justificativa entre ${periodo}.</div>
+    </div>`;
+    return;
+  }
+
+  const resumo = zerados
+    ? `${n} ${n > 1 ? 'funcionários' : 'funcionário'} · ${zerados} com comissão zerada`
+    : `${n} ${n > 1 ? 'funcionários' : 'funcionário'}`;
+
+  const corpo = !_ocorrenciasHomeAberto ? '' : d.pessoas.map(p => `
+    <div style="padding:9px 0;border-top:1px solid rgba(0,0,0,.07)">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="font-size:12px;font-weight:700;color:#1A1D23">${esc(p.nome)}</span>
+        <span style="font-size:10.5px;font-weight:700;color:${p.efeito.cor};background:${p.efeito.bg};border-radius:99px;padding:2px 9px;white-space:nowrap">${p.efeito.txt}</span>
+      </div>
+      <div style="font-size:11px;color:#57534e;margin-top:3px">
+        ${p.tipos.map(t => `${t.ico} ${t.label}${t.n > 1 ? ' ×' + t.n : ''}`).join(' · ')}
+      </div>
+    </div>`).join('') + `
+    <div style="font-size:10.5px;color:#78716c;line-height:1.5;border-top:1px solid rgba(0,0,0,.07);padding-top:8px;margin-top:2px">
+      Como o app Gorjetas calcula: <b>1 falta ou suspensão</b> corta a comissão pela metade,
+      <b>2 ou mais</b> zeram. <b>Atestado e justificativa</b> não cortam a comissão, mas tiram
+      do rateio do que sobra no caixa da semana.
+    </div>`;
+
+  el.innerHTML = `<div onclick="_toggleOcorrenciasHome()" style="background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.25);border-left:3px solid #f59e0b;border-radius:14px;padding:13px 16px;margin:0 16px 14px;cursor:pointer">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+      <div style="min-width:0">
+        <div style="font-size:12.5px;font-weight:800;color:#1A1D23">⚠️ Ocorrências da semana passada</div>
+        <div style="font-size:11.5px;color:#57534e;margin-top:2px">${resumo} · ${periodo}</div>
+      </div>
+      <span style="font-size:13px;color:rgba(0,0,0,.35);flex-shrink:0">${_ocorrenciasHomeAberto ? '▴' : '▾'}</span>
+    </div>
+    ${corpo}
+  </div>`;
+}
+
 async function _renderCarnesDocsHome(mostrar, sess, isMasterAtivo) {
   const el = document.getElementById('carnes-docs-home-card');
   if (!el) return;
@@ -2709,6 +2866,7 @@ function _refreshPermUI(sess) {
   _renderXmlMesHome(_mostrarCards, sess, isMaster);
   _renderAvaliacoesAvisoHome(_mostrarCards, sess, isMaster);
   _renderCarnesDocsHome(_mostrarCards, sess, isMaster);
+  _renderOcorrenciasSemanaHome(_mostrarCards, sess, isMaster);
   _renderEscalaDiaHome(_mostrarCards, sess, isMaster);
   _renderPlantaoHome(_mostrarCards, sess, isMaster);
   _renderBotNav(sess, isMaster);
@@ -2946,6 +3104,7 @@ function showHome(sess) {
   _renderXmlMesHome(_mostrarCards, sess, isMaster);
   _renderAvaliacoesAvisoHome(_mostrarCards, sess, isMaster);
   _renderCarnesDocsHome(_mostrarCards, sess, isMaster);
+  _renderOcorrenciasSemanaHome(_mostrarCards, sess, isMaster);
   _renderEscalaDiaHome(_mostrarCards, sess, isMaster);
   _renderPlantaoHome(_mostrarCards, sess, isMaster);
 
