@@ -1,0 +1,131 @@
+// Pesos das perguntas da avaliação de desempenho — fonte única.
+//
+// Até 22/09/2026 a avaliação não tinha peso nenhum: as 12 perguntas (2 gerais + 10 do
+// setor) valiam 5 pontos cada, 60 no total, ou seja 8,3% da nota cada uma. Na prática
+// "Pontualidade e Assiduidade" pesava o mesmo que "Sigilo com Informações Financeiras".
+// Efeito medido sobre as 246 avaliações finalizadas até 23/09/2026: 36 pessoas tiraram 1
+// ou 2 em pontualidade, 35 delas terminaram "Dentro do Padrão" ou melhor e 2 ficaram
+// "Ouro" — porque tirar 1 em vez de 5 custava 4 pontos de 60, só 6,7 pontos percentuais.
+//
+// Agora cada pergunta tem um multiplicador definido pelo dono da rede, por setor. Peso 1
+// = 5 pontos (como antes); peso 4 = 20 pontos. O total deixa de ser 60 e passa a variar
+// por cargo (135 no Caixa, 225 no Gerente), mas a nota continua saindo em % — as faixas
+// (Ouro 85, Padrão 60, Amarelo 40) não mudam.
+//
+// A ordem de cada array é: [Pontualidade, Uniforme, ...os 10 critérios do setor NA ORDEM
+// em que aparecem em SETORES (gn-avaliacoes-setores.js)]. Trocar a ordem lá sem mexer
+// aqui desalinha peso e pergunta em silêncio — por isso gn_aval_pesos_conferir() existe.
+window.GN_AVAL_PESOS = {
+  //                     pont unif │ 1  2  3  4  5  6  7  8  9 10
+  'Caixa':             [ 3, 2,       4, 1, 2, 1, 2, 2, 3, 3, 1, 3 ], // 135 pts
+  'Copa':              [ 4, 2,       2, 3, 3, 4, 2, 2, 2, 4, 2, 4 ], // 170 pts
+  'Cozinha':           [ 4, 4,       4, 3, 3, 4, 4, 4, 2, 4, 4, 4 ], // 220 pts
+  'Garçom/Garçonete':  [ 4, 3,       4, 4, 2, 4, 4, 2, 4, 3, 4, 4 ], // 210 pts
+  'ASG':               [ 4, 3,       3, 4, 4, 2, 3, 3, 4, 3, 2, 4 ], // 195 pts
+  'Estoquista':        [ 4, 3,       4, 4, 2, 4, 2, 2, 4, 4, 2, 4 ], // 195 pts
+  'Recepcionista':     [ 4, 3,       4, 3, 4, 2, 4, 4, 3, 2, 4, 4 ], // 205 pts
+  'Sub-Gerente':       [ 4, 4,       3, 3, 4, 4, 4, 4, 4, 4, 4, 3 ], // 225 pts
+  'Gerente':           [ 4, 4,       4, 3, 3, 4, 4, 4, 4, 4, 4, 3 ]  // 225 pts
+};
+
+// Totais informados junto com os pesos — conferidos um a um contra a soma real.
+// Servem de trava: se alguém editar um peso acima sem atualizar o total, o teste acusa.
+window.GN_AVAL_PESOS_TOTAL = {
+  'Caixa': 135, 'Copa': 170, 'Cozinha': 220, 'Garçom/Garçonete': 210, 'ASG': 195,
+  'Estoquista': 195, 'Recepcionista': 205, 'Sub-Gerente': 225, 'Gerente': 225
+};
+
+// Avaliação com data ANTERIOR a esta continua valendo 60 pontos, sem peso.
+//
+// Não é cautela genérica: o app não guarda foto da nota, recalcula tudo na hora a partir
+// das respostas cruas. Sem este corte, as 246 avaliações já finalizadas, assinadas e
+// conversadas com cada funcionário mudariam de nota (e de faixa) sozinhas — gente que foi
+// informada como "Ouro" apareceria como "Padrão" no dia seguinte, sem ninguém ter mexido
+// em nada. Mesmo raciocínio do GN_GORJETA_JA_METADE_DESDE_SEM em gn-lojas-config.js.
+// Pra aplicar os pesos no histórico inteiro, basta pôr uma data bem antiga aqui.
+window.GN_AVAL_PESOS_DESDE = '2026-09-23';
+
+// Uma avaliação usa pesos? Depende da data dela e de o cargo ter pesos cadastrados.
+window.gnAvalPesado = function (av) {
+  if (!av) return false;
+  var cargo = av.cargo;
+  if (!cargo || !window.GN_AVAL_PESOS[cargo]) return false;
+  var data = av.data || '';
+  return data >= window.GN_AVAL_PESOS_DESDE;
+};
+
+// Os 12 pesos que valem pra essa avaliação — tudo 1 quando ela é anterior ao corte, o que
+// devolve exatamente a conta antiga (12 × 5 = 60).
+window.gnAvalPesos = function (av) {
+  if (window.gnAvalPesado(av)) return window.GN_AVAL_PESOS[av.cargo];
+  return [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+};
+
+// Respostas na mesma ordem dos pesos. Critério ainda não respondido conta 0 (igual antes).
+function _gnAvalRespostas(av) {
+  var crit = (av && av.criteriosSetor) || [];
+  var out = [(av && av.pontualidade) || 0, (av && av.uniforme) || 0];
+  for (var i = 0; i < 10; i++) out.push(crit[i] || 0);
+  return out;
+}
+
+window.gnAvalNota = function (av) {
+  var w = window.gnAvalPesos(av), r = _gnAvalRespostas(av), s = 0;
+  for (var i = 0; i < 12; i++) s += (w[i] || 0) * r[i];
+  return s;
+};
+
+// Máximo só conta os 10 critérios do setor quando o cargo TEM critérios cadastrados —
+// mesma regra da conta antiga (10 + 50 se houver setor), pra avaliação sem cargo definido
+// não virar 0% por causa de um denominador inflado.
+//
+// O reconhecimento do cargo não pode depender só de `window.SETORES`: nos apps que
+// carregam gn-avaliacoes-setores.js (e no gn-avaliacoes.html, que tem a sua própria
+// cópia), SETORES é declarado com `const` no topo do script — e `const` NÃO vira
+// propriedade de window. Ou seja, window.SETORES é undefined em todo lugar, e confiar
+// nele zerava os 10 critérios do denominador, jogando toda avaliação pra perto de 100%.
+// GN_AVAL_PESOS tem exatamente os mesmos 9 cargos, então serve de reconhecedor.
+window.gnAvalMax = function (av) {
+  var w = window.gnAvalPesos(av);
+  var cargo = av && av.cargo;
+  var temSetor = !!(cargo && ((window.SETORES && window.SETORES[cargo]) || window.GN_AVAL_PESOS[cargo]));
+  var s = (w[0] + w[1]) * 5;
+  if (temSetor) for (var i = 2; i < 12; i++) s += w[i] * 5;
+  return s;
+};
+
+window.gnAvalPct = function (av) {
+  var mx = window.gnAvalMax(av);
+  return mx > 0 ? window.gnAvalNota(av) / mx * 100 : 0;
+};
+
+// Duas avaliações só são comparáveis (o "↑+3pp" da evolução) quando as duas estão no mesmo
+// regime. Comparar uma de 60 pontos sem peso com uma de 220 com peso mede coisas
+// diferentes e inventaria uma queda ou uma alta que ninguém teve.
+window.gnAvalComparavel = function (a, b) {
+  return window.gnAvalPesado(a) === window.gnAvalPesado(b);
+};
+
+// Confere que peso e pergunta continuam alinhados. Chamado pelos testes; devolve a lista
+// de problemas (vazia = tudo certo).
+window.gn_aval_pesos_conferir = function () {
+  var erros = [];
+  Object.keys(window.GN_AVAL_PESOS).forEach(function (cargo) {
+    var w = window.GN_AVAL_PESOS[cargo];
+    if (w.length !== 12) erros.push(cargo + ': tem ' + w.length + ' pesos, deveria ter 12');
+    var soma = w.reduce(function (a, x) { return a + x * 5; }, 0);
+    if (soma !== window.GN_AVAL_PESOS_TOTAL[cargo]) {
+      erros.push(cargo + ': soma ' + soma + ' pts, mas o total cadastrado é ' + window.GN_AVAL_PESOS_TOTAL[cargo]);
+    }
+    if (window.SETORES) {
+      if (!window.SETORES[cargo]) erros.push(cargo + ': tem peso mas não existe em SETORES');
+      else if (window.SETORES[cargo].length !== 10) erros.push(cargo + ': SETORES tem ' + window.SETORES[cargo].length + ' critérios, os pesos assumem 10');
+    }
+  });
+  if (window.SETORES) {
+    Object.keys(window.SETORES).forEach(function (cargo) {
+      if (!window.GN_AVAL_PESOS[cargo]) erros.push(cargo + ': existe em SETORES mas ficou sem peso');
+    });
+  }
+  return erros;
+};
