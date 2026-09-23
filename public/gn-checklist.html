@@ -1402,6 +1402,8 @@
     <div style="font-size:10px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:0.8px;margin-bottom:6px;">💬 Observações do Fechamento</div>
     <textarea id="obs-fechamento" rows="3" placeholder="Registre aqui qualquer observação sobre o fechamento..." style="width:100%;background:var(--s4);color:var(--t1);border:1px solid var(--b2);border-radius:var(--r-md);padding:10px 12px;font-size:13px;resize:vertical;outline:none;" oninput="state.obs_fechamento=this.value;autoSave();"></textarea>
   </div>
+  <!-- Fecho do dia: o momento em que o gerente confere tudo de uma vez (ver _renderFecharDia) -->
+  <div id="fechar-dia-card" style="margin-top:16px;"></div>
 </div>
 
 <!-- ===================== ABA CARNES ===================== -->
@@ -2835,6 +2837,9 @@ let state = {
   banda:{nome:'',valor:0,consumo:0,qtd_couvert:0},
   vendas:{},
   checklist:{}, abertura:{}, fechamento:{},
+  // Hora em que cada check-list foi concluído e o fecho do dia — ver CHECKLIST_JANELA
+  // e _fecharDia(). O app já sabia SE foi feito; agora sabe se foi feito na hora.
+  concluidoEm:{}, diaFechadoEm:'', diaFechadoPor:'',
   obs_abertura:'', obs_checklist:'', obs_fechamento:'',
   faltasFuncionarios:[], faltas:[], manutencao:[], manutOficial:[],
   supervisao: {
@@ -2934,6 +2939,12 @@ let _supLockAlvo = 'salao'; // 'salao' | 'cozinha' | 'visitas' — o que o cadea
 // aconteciam antes da declaração ser alcançada, derrubando renderAll()/loadComissoesData() com
 // um ReferenceError silencioso em praticamente todo carregamento do app.
 let carneTabAtiva = 'inicial';
+// Janela de horário de cada check-list. Declarada aqui em cima, e não perto do uso, porque
+// renderAll() roda no boot e chama updateSummary() -> _selo(), que já lê isto.
+const CHECKLIST_JANELA = {
+  abertura:   { ateHora: 11, label: 'até 11h' },
+  fechamento: { ateHora: 2, madrugada: true, label: 'até 2h' },
+};
 let _faltaHojeExtras = null;   // {chave:'AAAA-MM-DD|LOJA', itens:[...]} — cartão "O que falta hoje"
 let _faltaHojeBuscando = false;
 let _carneInicialEditando = false;
@@ -4825,7 +4836,7 @@ async function saveAll(){
     let _servRow = null, _caixaTemDados = false;
     try {
       const { data, error: eServ } = await sb.from('checklist_diario')
-        .select('dinheiro_caixa,checklist,abertura,fechamento,faltas,retiradas,entradas_manuais,despesas,supervisao,supervisao_cozinha,auditorias_padrao,faltas_funcionarios')
+        .select('dinheiro_caixa,checklist,abertura,fechamento,faltas,retiradas,entradas_manuais,despesas,supervisao,supervisao_cozinha,auditorias_padrao,faltas_funcionarios,concluido_em,dia_fechado_em,dia_fechado_por')
         .eq('data_operacao', state.data).eq('loja', LOJA).maybeSingle();
       if (eServ) throw eServ;
       _servRow = data;
@@ -4878,7 +4889,10 @@ async function saveAll(){
       supervisao: state.supervisao,
       supervisao_cozinha: state.supervisaoCozinha,
       auditorias_padrao: state.auditoriasPadrao,
-      checklist_pct: calcChecklistPct()
+      checklist_pct: calcChecklistPct(),
+      concluido_em: state.concluidoEm,
+      dia_fechado_em: state.diaFechadoEm || null,
+      dia_fechado_por: state.diaFechadoPor || null
     };
     const {error:e1}=await sb.from('checklist_diario').upsert(_upsert,{onConflict:'data_operacao,loja'});
     if(e1) throw e1;
@@ -5035,6 +5049,19 @@ function mergeState(rows){
   if(rows.faltas && rows.faltas.length) state.faltas=rows.faltas;
   if(rows.manutencao && rows.manutencao.length) state.manutencao=rows.manutencao;
   if(rows.faltas_funcionarios) state.faltasFuncionarios=rows.faltas_funcionarios;
+  // Hora de conclusão: o servidor manda quando outro aparelho concluiu primeiro. Fica a
+  // PRIMEIRA hora de cada grupo — quem concluiu antes é a resposta certa pra "a que horas
+  // ficou pronto", e reconcluir depois (alguém desmarca e marca de novo) não reescreve.
+  if(rows.concluido_em && typeof rows.concluido_em==='object'){
+    Object.keys(rows.concluido_em).forEach(g=>{
+      const remoto=rows.concluido_em[g], local=state.concluidoEm[g];
+      if(remoto && (!local || remoto<local)) state.concluidoEm[g]=remoto;
+    });
+  }
+  if(rows.dia_fechado_em && !state.diaFechadoEm){
+    state.diaFechadoEm=rows.dia_fechado_em;
+    state.diaFechadoPor=rows.dia_fechado_por||'';
+  }
   if(rows.supervisao && rows.supervisao.supervisor!==undefined){
     const _localSup = state.supervisao;
     state.supervisao = {..._localSup, ...rows.supervisao};
@@ -5168,6 +5195,7 @@ async function onDataChange(val){
   // Zera só dados do DIA — carnes (stateWeek) não são afetadas
   state.data=val;
   state.checklist={}; state.abertura={}; state.fechamento={};
+  state.concluidoEm={}; state.diaFechadoEm=''; state.diaFechadoPor='';
   state.obs_abertura=''; state.obs_checklist=''; state.obs_fechamento='';
   state.faltas=[]; state.manutencao=[]; state.faltasFuncionarios=[];
   state.vendaSalao=0; state.vendaDelivery=0; state.repique=0; state.dinheiroCaixa=0;
@@ -7465,9 +7493,123 @@ async function _atualizarFaltaHoje(){
   _renderFaltaHojeCard();
 }
 
+// ── Horário-alvo de cada check-list ────────────────────────────────────────────────────
+// O app sabia SE foi feito, não se foi feito na hora: uma abertura preenchida às 22h não é
+// abertura. Agora, quando um grupo chega a 100%, a hora fica registrada, e o relatório
+// aponta o que saiu fora da janela. Janela definida com o usuário: abertura até 11h,
+// fechamento até 2h da manhã seguinte. O operacional roda o dia inteiro e não tem janela.
+// (CHECKLIST_JANELA é declarada lá em cima, junto de carneTabAtiva — ver o porquê lá.)
+function _horaDoISO(iso){
+  const d = new Date(iso);
+  return isNaN(d) ? '' : String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
+}
+// Concluído fora da janela? Pro fechamento a janela atravessa a meia-noite: vale das 2h da
+// manhã seguinte pra trás, então concluir às 23h está DENTRO e às 3h já está fora.
+function _foraDaJanela(grupo, iso){
+  const j = CHECKLIST_JANELA[grupo];
+  if(!j || !iso) return false;
+  const d = new Date(iso);
+  if(isNaN(d)) return false;
+  const h = d.getHours() + d.getMinutes()/60;
+  return j.madrugada ? (h > j.ateHora && h < 12) : (h > j.ateHora);
+}
+// Registra a hora na PRIMEIRA vez que o grupo fecha 100%. Nunca reescreve: desmarcar um
+// item e marcar de novo não muda a que horas o check-list ficou pronto.
+function _marcarConclusao(grupo){
+  if(state.concluidoEm[grupo]) return false;
+  state.concluidoEm[grupo] = new Date().toISOString();
+  return true;
+}
+function _selo(grupo){
+  const iso = state.concluidoEm[grupo];
+  if(!iso) return '';
+  const hora = _horaDoISO(iso);
+  const fora = _foraDaJanela(grupo, iso);
+  const j = CHECKLIST_JANELA[grupo];
+  return fora
+    ? `<span title="Fora do horário (${j.label})" style="font-size:10px;font-weight:700;color:#b45309;">⏰ ${hora}</span>`
+    : `<span style="font-size:10px;font-weight:700;color:#15803d;">✅ ${hora}</span>`;
+}
+
+// ── Fechar o dia ───────────────────────────────────────────────────────────────────────
+// Não existia um FIM explícito: o dia simplesmente virava. Aqui o gerente confere tudo de
+// uma vez e assina — fica registrado quem fechou e a que horas. Não bloqueia nada e não
+// impede correção depois: o dia pode ser reaberto, e a reabertura também fica registrada.
+function _resumoDoDia(){
+  const grupos = [
+    {label:'Abertura',   map:SETORES_ABERTURA,   key:'abertura'},
+    {label:'Operacional',map:SETORES_CHECKLIST,  key:'checklist'},
+    {label:'Fechamento', map:SETORES_FECHAMENTO, key:'fechamento'},
+  ];
+  const linhas = grupos.map(g=>{
+    let done=0,total=0;
+    Object.keys(g.map).forEach(sec=>{
+      total += g.map[sec].items.length;
+      done  += Object.values(state[g.key][sec]||{}).filter(v=>v&&v.checked).length;
+    });
+    const iso = state.concluidoEm[g.key];
+    const hora = iso ? _horaDoISO(iso) : '';
+    const fora = _foraDaJanela(g.key, iso);
+    return { label:g.label, done, total, completo: total>0 && done>=total, hora, fora };
+  });
+  const fat = (state.vendaSalao||0)+(state.vendaDelivery||0);
+  return { linhas, fat, pendentes: linhas.filter(l=>!l.completo) };
+}
+async function _fecharDia(){
+  const r = _resumoDoDia();
+  const txt = r.linhas.map(l=>{
+    const marca = l.completo ? (l.fora ? '⏰ '+l.hora+' (fora do horário)' : '✅ '+(l.hora||'ok')) : '⚠️ faltam '+(l.total-l.done);
+    return '  • '+l.label+': '+l.done+'/'+l.total+'  '+marca;
+  }).join('\n');
+  const aviso = r.pendentes.length
+    ? '\n\n⚠️ '+r.pendentes.length+' check-list ainda não está completo. Dá pra fechar assim mesmo, mas fica registrado.'
+    : '';
+  if(!confirm('Fechar o dia '+fmtBR(state.data)+'?\n\n'+txt+'\n  • Faturamento: '+_fmtBRL(r.fat)+aviso)) return;
+  state.diaFechadoEm = new Date().toISOString();
+  state.diaFechadoPor = (usuarioLogado && usuarioLogado.nome) || LOJA;
+  autoSave();
+  _renderFecharDia();
+  await saveAll();
+  showToast('🌙 Dia fechado por '+state.diaFechadoPor+'.','success');
+  _logAuditoriaChk && _logAuditoriaChk('FECHAR_DIA',{data:state.data,pendentes:r.pendentes.length});
+}
+async function _reabrirDia(){
+  if(!confirm('Reabrir o dia '+fmtBR(state.data)+'?\n\nO fecho registrado vai ser apagado — quem fechar de novo entra no lugar.')) return;
+  const quem = state.diaFechadoPor;
+  state.diaFechadoEm=''; state.diaFechadoPor='';
+  autoSave();
+  _renderFecharDia();
+  await saveAll();
+  showToast('Dia reaberto.','info');
+  _logAuditoriaChk && _logAuditoriaChk('REABRIR_DIA',{data:state.data,fechadoAntesPor:quem});
+}
+function _renderFecharDia(){
+  const el = document.getElementById('fechar-dia-card');
+  if(!el) return;
+  if(state.diaFechadoEm){
+    el.innerHTML = `<div style="background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.25);border-left:3px solid #16a34a;border-radius:12px;padding:12px 14px;">
+      <div style="font-size:12.5px;font-weight:800;color:#14532d;">🌙 Dia fechado</div>
+      <div style="font-size:11.5px;color:#166534;margin-top:2px;">Por ${escHtml(state.diaFechadoPor||'—')} às ${_horaDoISO(state.diaFechadoEm)}.</div>
+      <button onclick="_reabrirDia()" style="margin-top:9px;background:transparent;border:1px solid rgba(0,0,0,.2);border-radius:7px;color:#1A1D23;font-size:11.5px;font-weight:700;padding:6px 12px;cursor:pointer;font-family:inherit;">Reabrir o dia</button>
+    </div>`;
+    return;
+  }
+  const r = _resumoDoDia();
+  const pend = r.pendentes.length;
+  el.innerHTML = `<div style="background:var(--s4);border:1px solid var(--b2);border-radius:12px;padding:12px 14px;">
+    <div style="font-size:12.5px;font-weight:800;color:#1A1D23;">🌙 Fechar o dia</div>
+    <div style="font-size:11.5px;color:#57534e;margin-top:2px;margin-bottom:9px;">${
+      pend ? pend+' check-list ainda não está completo — dá pra fechar assim mesmo, fica registrado.'
+           : 'Tudo completo. Confira o resumo e assine o fecho do dia.'
+    }</div>
+    <button onclick="_fecharDia()" style="background:#E8580A;border:none;border-radius:8px;color:#fff;font-size:12px;font-weight:700;padding:9px 16px;cursor:pointer;font-family:inherit;">🌙 Fechar o dia</button>
+  </div>`;
+}
+
 function updateSummary(){
   updateChecklistCount();
   _renderFaltaHojeCard();
+  _renderFecharDia();
   const c=document.getElementById('checklist-summary');
   if(!c) return;
   const groups=[
@@ -7485,10 +7627,15 @@ function updateSummary(){
     doneAll+=done; totalAll+=total;
     const pct=total>0?(done/total)*100:0;
     const col=pct===100?'#5cb85c':pct>0?'#f0c050':'#E8580A';
+    // Fechou 100% agora: carimba a hora (só na primeira vez) e leva junto no próximo save.
+    if(total>0 && done>=total && _marcarConclusao(g.key)){ autoSave(); _debouncedSaveAll(); }
     return `<div>
       <div style="display:flex;justify-content:space-between;margin-bottom:3px;">
         <span style="font-size:11px;">${g.icon} ${g.label}</span>
-        <span style="font-size:10px;color:${col};font-family:'JetBrains Mono',monospace;">${done}/${total}</span>
+        <span style="display:flex;align-items:center;gap:7px;">
+          ${_selo(g.key)}
+          <span style="font-size:10px;color:${col};font-family:'JetBrains Mono',monospace;">${done}/${total}</span>
+        </span>
       </div>
       <div class="progress-track"><div class="progress-fill" style="width:${pct}%;background:${col};"></div></div>
     </div>`;
