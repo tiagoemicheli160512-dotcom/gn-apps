@@ -2383,7 +2383,10 @@ function _comissoesHerdarFunc(f, semAlvo){
     }
     return 'PRESENTE';
   });
-  return {id:f.id, nome:f.nome, tipo:f.tipo, setor:f.setor||'', turno:f.turno||'', horario:f.horario||'', ferias_ini:f.ferias_ini||'', ferias_fim:f.ferias_fim||'', afastamento_just:f.afastamento_just||'', inicio_contrato:f.inicio_contrato||'', fim_contrato:f.fim_contrato||'', horario_dias:f.horario_dias||null, aval_exp_45:f.aval_exp_45||null, aval_exp_90:f.aval_exp_90||null, encerramento_solicitado:f.encerramento_solicitado||false, encerramento_data:f.encerramento_data||'', dias:diasHerd};
+  // _nomesAnteriores e cadastro_em viajam junto: sem o primeiro, a fusão da semana que vem
+  // ressuscitaria o nome antigo de novo; sem o segundo, um cadastro novo perderia a data
+  // que decide se ele já nasce obrigado a ter nome completo (ver CADASTRO_FUNC_REGRA_DESDE).
+  return {id:f.id, nome:f.nome, _nomesAnteriores:f._nomesAnteriores||undefined, cadastro_em:f.cadastro_em||undefined, tipo:f.tipo, setor:f.setor||'', turno:f.turno||'', horario:f.horario||'', ferias_ini:f.ferias_ini||'', ferias_fim:f.ferias_fim||'', afastamento_just:f.afastamento_just||'', inicio_contrato:f.inicio_contrato||'', fim_contrato:f.fim_contrato||'', horario_dias:f.horario_dias||null, aval_exp_45:f.aval_exp_45||null, aval_exp_90:f.aval_exp_90||null, encerramento_solicitado:f.encerramento_solicitado||false, encerramento_data:f.encerramento_data||'', dias:diasHerd};
 }
 function getComissoesFuncsHerdados(allData, idx){
   for(let i=idx-1;i>=0;i--){
@@ -2428,6 +2431,16 @@ function _comissoesNomesRemovidos(funcs, funcsAnt){
 // foi criada. Aqui a gente busca a semana anterior mais próxima com gente cadastrada e, pra
 // quem estiver faltando na semana atual (comparação exata por nome normalizado, sem fuzzy —
 // ver _comissoesNormNome), insere numa vaga vazia. Nunca mexe em quem já está presente.
+// Nomes que já foram usados por alguém que continua na lista, só que com outro nome hoje.
+// Sem isso a fusão trata renomear como sumir e devolve o nome velho numa vaga vazia.
+function _comissoesNomesRenomeados(funcs){
+  const out = new Set();
+  (funcs||[]).forEach(f=>{
+    if(!f || !f._nomesAnteriores) return;
+    f._nomesAnteriores.forEach(n=>{ if(n && String(n).trim()) out.add(_comissoesNormNome(n)); });
+  });
+  return out;
+}
 function _comissoesMesclarFuncsFaltantes(funcs, allData, idx){
   for(let i=idx-1;i>=0;i--){
     const wdAnt = allData[String(i)];
@@ -2448,9 +2461,11 @@ function _comissoesMesclarFuncsFaltantes(funcs, allData, idx){
     // render e a exclusão parecia não funcionar (caso real: Bangu, Cristiane e Dayna).
     // removeComissoesFunc grava _removidoNome na vaga que esvaziou justamente pra isso.
     const removidos = _comissoesNomesRemovidos(funcs, wdAnt.funcs);
+    const renomeados = _comissoesNomesRenomeados(funcs);
     const faltantes = comNome.filter(f=>!f.arquivado
       && !nomesAtuais.has(_comissoesNormNome(f.nome))
-      && !removidos.has(_comissoesNormNome(f.nome)));
+      && !removidos.has(_comissoesNormNome(f.nome))
+      && !renomeados.has(_comissoesNormNome(f.nome)));
     if(faltantes.length===0) return funcs;
     const semAlvo = COMISSOES_CAL[idx];
     const resultado = [...funcs];
@@ -5950,10 +5965,24 @@ function updComissoesNome(i,v,semRender){
   // "quem já estava aí antes da regra, que tem prazo" — ver _checarCadastroFuncIncompleto.
   const nomeAnterior=((comissoesWD.funcs[i]||{}).nome||'').trim();
   const virouCadastro=!nomeAnterior && v && v.trim();
+  // RENOMEAR não pode parecer EXCLUIR. A fusão automática (_comissoesMesclarFuncsFaltantes)
+  // compara os nomes desta semana com os da semana anterior e reinsere quem "sumiu" — e
+  // trocar "Thiago" por "Thiago Alves" faz o nome antigo sumir exatamente como se a pessoa
+  // tivesse saído. Resultado real (São Gonçalo, 23/09): cada correção de nome criava um
+  // funcionário a mais, e a loja foi de 32 pra 39 depois de corrigir 7 nomes.
+  // O nome antigo fica registrado aqui pelo mesmo motivo que removeComissoesFunc grava
+  // _removidoNome: é o que diz pra fusão "esse nome não sumiu, virou outro".
+  const renomeou = nomeAnterior && v && v.trim() &&
+    _comissoesNormNome(v) !== _comissoesNormNome(nomeAnterior);
   const faltavaAntes=_cadastroFuncFaltando(comissoesWD.funcs[i]).join(',');
   const mutator=wd=>{
     wd={...wd}; wd.funcs=[...wd.funcs]; wd.funcs[i]={...wd.funcs[i],nome:v};
     if(virouCadastro && !wd.funcs[i].cadastro_em) wd.funcs[i].cadastro_em=hojeLocal();
+    if(renomeou){
+      const ants=(wd.funcs[i]._nomesAnteriores||[]).slice();
+      if(!ants.some(n=>_comissoesNormNome(n)===_comissoesNormNome(nomeAnterior))) ants.push(nomeAnterior);
+      wd.funcs[i]._nomesAnteriores=ants;
+    }
     return wd;
   };
   comissoesWD=mutator(comissoesWD);
