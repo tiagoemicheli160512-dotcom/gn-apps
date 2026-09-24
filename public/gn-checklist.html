@@ -4335,6 +4335,24 @@ function _bhFmtR(valor){
   return 'R$ '+Math.abs(valor).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
 }
 
+// Hora POSITIVA que sobra quando o período do banco fecha não vira mais folga — ela é paga
+// em dinheiro, e aí entra o adicional de 50% (hora extra). Hora NEGATIVA não leva adicional:
+// ela já saiu do caixa como salário normal no mês, o que se mede aqui é só esse custo.
+const BH_ADICIONAL_EXTRA = 0.5;
+
+/* ─── Horas → R$ já com a regra de pagamento do fechamento ─── */
+// Usar SEMPRE esta função em vez de |horas| × valor/hora: é ela que garante que o +50% não
+// fique valendo numa tela e faltando na outra (tabela, alertas, resumo e os 2 relatórios).
+function _bhValorHoras(horas, vh){
+  const h = parseFloat(horas)||0;
+  const v = parseFloat(vh)||0;
+  if(v<=0||!h) return 0;
+  return h>0 ? h*v*(1+BH_ADICIONAL_EXTRA) : Math.abs(h)*v;
+}
+
+/* ─── Valor da hora extra (com adicional) ─── */
+function _bhValorHoraExtra(vh){ return (parseFloat(vh)||0)*(1+BH_ADICIONAL_EXTRA); }
+
 /* ─── Valor/hora do funcionário baseado no setor ─── */
 function _bhValorHoraFunc(nome){
   if(!_bhConfig||!_bhConfig.salariosSetor) return 0;
@@ -4353,11 +4371,11 @@ function renderSalariosSetorCard(){
   const salariosSetor = _bhConfig?.salariosSetor||{};
   const rows = setores.map(s=>{
     const sal = salariosSetor[s]!=null ? salariosSetor[s] : '';
-    const vh = sal!=='' ? ' = '+_bhFmtR(parseFloat(sal)/220)+'/h' : '';
+    const vh = sal!=='' ? ' = '+_bhFmtR(parseFloat(sal)/220)+'/h · extra '+_bhFmtR(_bhValorHoraExtra(parseFloat(sal)/220))+'/h' : '';
     return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
       <label style="font-size:11px;color:#1A1D23;width:110px;flex-shrink:0;">${_esc(s)}</label>
       <input type="number" min="0" step="0.01" data-setor="${_esc(s)}" value="${sal}"
-        oninput="this.nextElementSibling.textContent=this.value?' = '+_bhFmtR(parseFloat(this.value)/220)+'/h':''"
+        oninput="this.nextElementSibling.textContent=this.value?' = '+_bhFmtR(parseFloat(this.value)/220)+'/h · extra '+_bhFmtR(_bhValorHoraExtra(parseFloat(this.value)/220))+'/h':''"
         style="width:110px;padding:5px 8px;border-radius:8px;border:1px solid rgba(0,0,0,.1);background:rgba(0,0,0,.04);color:#1A1D23;font-size:12px;font-family:inherit;">
       <span style="font-size:10px;color:#1A1D23;font-family:'JetBrains Mono',monospace;">${vh}</span>
     </div>`;
@@ -4365,7 +4383,7 @@ function renderSalariosSetorCard(){
   card.innerHTML=`
     <div class="card" style="padding:14px;">
       <div style="font-size:13px;font-weight:700;color:#1A1D23;margin-bottom:4px;">💰 Salários por Setor</div>
-      <div style="font-size:10px;color:#1A1D23;margin-bottom:12px;">Valor hora = salário ÷ 220 — usado no banco de horas</div>
+      <div style="font-size:10px;color:#1A1D23;margin-bottom:12px;">Valor hora = salário ÷ 220 — usado no banco de horas. Hora extra não compensada sai com adicional de 50%.</div>
       ${rows}
       <button onclick="salvarSalariosSetor()" style="margin-top:6px;padding:8px 18px;border-radius:10px;background:#E9F7EE;border:1px solid #4ade80;color:#1A1D23;font-size:12px;font-weight:700;font-family:inherit;cursor:pointer;">💾 Salvar Salários</button>
     </div>`;
@@ -4435,7 +4453,7 @@ function renderBancoHoras(){
         <div style="font-size:10px;color:#1A1D23;margin-bottom:8px;">Funcionários com saldo acima de ±8h:</div>
         ${alertas.map(a=>{
           const vh = _bhValorHoraFunc(a.nome);
-          const valorStr = vh>0 ? ' · <span style="font-size:11px;color:#1A1D23;">'+_bhFmtR(a.abs*vh)+'</span>' : '';
+          const valorStr = vh>0 ? ' · <span style="font-size:11px;color:#1A1D23;">'+_bhFmtR(_bhValorHoras(a.saldo,vh))+(a.saldo>0?' <span style="font-size:10px;">(+50%)</span>':'')+'</span>' : '';
           return `<div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(0,0,0,0.05);">
             <span style="font-size:12px;color:#1A1D23;font-weight:600;">${_esc(a.nome)}</span>
             <span style="font-size:12px;font-weight:800;font-family:'JetBrains Mono',monospace;color:${a.saldo>0?'#4ade80':'#f87171'};">${_bhFmtH(a.saldo)}${valorStr}</span>
@@ -4479,7 +4497,9 @@ function renderBancoHoras(){
     const saldoAbs = Math.abs(saldoTotal);
     const alerta = saldoAbs > 8 ? ' ⚠️' : '';
     const vh = _bhValorHoraFunc(nome);
-    const tdValor = temSalarios ? `<td style="text-align:center;font-size:10px;font-weight:700;font-family:'JetBrains Mono',monospace;color:${vh>0?(saldoTotal>0?'#4ade80':'#f87171'):'#555'};padding:4px 4px;white-space:nowrap;">${vh>0?_bhFmtR(saldoAbs*vh):'—'}</td>` : '';
+    // Saldo positivo já sai com o adicional de 50% — é o que a loja vai pagar de verdade se
+    // a hora não for compensada até o fim do período (ver _bhValorHoras).
+    const tdValor = temSalarios ? `<td style="text-align:center;font-size:10px;font-weight:700;font-family:'JetBrains Mono',monospace;color:${vh>0?(saldoTotal>0?'#4ade80':'#f87171'):'#555'};padding:4px 4px;white-space:nowrap;" title="${vh>0&&saldoTotal>0?'Inclui adicional de 50% de hora extra':''}">${vh>0?_bhFmtR(_bhValorHoras(saldoTotal,vh))+(saldoTotal>0?' *':''):'—'}</td>` : '';
     return `
       <tr style="border-bottom:1px solid #505050;">
         <td style="font-size:11px;font-weight:700;color:#1A1D23;padding:6px 6px 6px 2px;white-space:nowrap;">
@@ -4493,7 +4513,7 @@ function renderBancoHoras(){
       </tr>`;
   }).join('');
 
-  const thValor = temSalarios ? `<th style="font-size:11px;color:#1A1D23;font-weight:700;text-align:center;padding:5px 4px;white-space:nowrap;">Valor R$</th>` : '';
+  const thValor = temSalarios ? `<th style="font-size:11px;color:#1A1D23;font-weight:700;text-align:center;padding:5px 4px;white-space:nowrap;" title="Saldo positivo já com o adicional de 50% de hora extra">Valor R$ <span style="font-weight:400;">*+50%</span></th>` : '';
 
   document.getElementById('bh-tabela').innerHTML=`
     <div class="card" style="padding:0;overflow:hidden;">
@@ -4540,14 +4560,14 @@ function _bhRenderResumoMonetario(meses, funcionarios, hoje){
     const vh = _bhValorHoraFunc(nome);
     if(vh<=0) return;
     const saldoGeral = _bhSaldoFunc(nome);
-    if(saldoGeral>0) posGeral += saldoGeral*vh;
-    else if(saldoGeral<0) negGeral += Math.abs(saldoGeral)*vh;
+    if(saldoGeral>0) posGeral += _bhValorHoras(saldoGeral,vh);
+    else if(saldoGeral<0) negGeral += _bhValorHoras(saldoGeral,vh);
 
     if(mesAnterior){
       const r = _bhFindReg(_bhRegistros[mesAnterior], nome);
       const h = r ? parseFloat(r.horas)||0 : 0;
-      if(h>0) posFecha += h*vh;
-      else if(h<0) negFecha += Math.abs(h)*vh;
+      if(h>0) posFecha += _bhValorHoras(h,vh);
+      else if(h<0) negFecha += _bhValorHoras(h,vh);
     }
   });
 
@@ -4562,7 +4582,7 @@ function _bhRenderResumoMonetario(meses, funcionarios, hoje){
     <div style="margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid rgba(0,0,0,.07);">
       <div style="font-size:10px;color:#1A1D23;font-weight:700;letter-spacing:.5px;margin-bottom:6px;">FECHAMENTO ${_bhMesLabel(mesAnterior).toUpperCase()}</div>
       <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
-        <span style="font-size:11px;color:#1A1D23;">✅ Horas extras</span>
+        <span style="font-size:11px;color:#1A1D23;">✅ Horas extras <span style="font-size:10px;">(+50%)</span></span>
         <span style="font-size:11px;font-weight:700;color:#1A1D23;font-family:'JetBrains Mono',monospace;">${posFecha>0?_bhFmtR(posFecha):'—'}</span>
       </div>
       <div style="display:flex;justify-content:space-between;">
@@ -4576,7 +4596,7 @@ function _bhRenderResumoMonetario(meses, funcionarios, hoje){
       <div style="font-size:11px;font-weight:700;color:#1A1D23;margin-bottom:6px;">⚠️ Alerta para o Próximo Período</div>
       <div style="font-size:10px;color:#1A1D23;line-height:1.5;">
         Neste período foram pagos <span style="color:#1A1D23;font-weight:700;">${_bhFmtR(negGeral)}</span> em horas negativas
-        e gerados <span style="color:#1A1D23;font-weight:700;">${_bhFmtR(posGeral)}</span> em horas extras.
+        e gerados <span style="color:#1A1D23;font-weight:700;">${_bhFmtR(posGeral)}</span> em horas extras (já com o adicional de 50%).
         Revise o planejamento de escala para o próximo período para evitar repetição.
       </div>
     </div>` : '';
@@ -4588,7 +4608,7 @@ function _bhRenderResumoMonetario(meses, funcionarios, hoje){
       ${fechaHtml}
       <div style="font-size:10px;color:#1A1D23;font-weight:700;letter-spacing:.5px;margin-bottom:6px;">PERÍODO COMPLETO</div>
       <div style="display:flex;justify-content:space-between;margin-bottom:5px;">
-        <span style="font-size:12px;color:#1A1D23;">✅ Total extras (a pagar)</span>
+        <span style="font-size:12px;color:#1A1D23;">✅ Total extras (a pagar, +50%)</span>
         <span style="font-size:12px;font-weight:700;color:#1A1D23;font-family:'JetBrains Mono',monospace;">${_bhFmtR(posGeral)}</span>
       </div>
       <div style="display:flex;justify-content:space-between;margin-bottom:5px;">
@@ -4628,17 +4648,17 @@ function abrirRelatorioBancoHoras(){
     const func = comissoesWD?.funcs?.find(f=>_bhNormNome(f.nome)===_bhNormNome(nome));
     if(func?.setor) txt += `👤 ${nome} (${func.setor})\n`;
     else txt += `👤 ${nome}\n`;
-    if(temSal && vh>0) txt += `  Valor/hora: ${_bhFmtR(vh)}/h\n`;
+    if(temSal && vh>0) txt += `  Valor/hora: ${_bhFmtR(vh)}/h · extra ${_bhFmtR(_bhValorHoraExtra(vh))}/h\n`;
     meses.forEach(m=>{
       const r = _bhFindReg(_bhRegistros[m], nome);
       if(r){
         const h = parseFloat(r.horas)||0;
-        const valorMes = temSal && vh>0 ? ` → ${_bhFmtR(Math.abs(h)*vh)}` : '';
+        const valorMes = temSal && vh>0 ? ` → ${_bhFmtR(_bhValorHoras(h,vh))}${h>0?' (+50%)':''}` : '';
         txt += `  ${_bhMesLabel(m)}: ${_bhFmtH(r.horas)}${valorMes}${r.obs?' ('+r.obs+')':''}\n`;
       }
     });
     txt += `  Saldo total: ${_bhFmtH(saldo)}`;
-    if(temSal && vh>0) txt += ` → ${_bhFmtR(Math.abs(saldo)*vh)}`;
+    if(temSal && vh>0) txt += ` → ${_bhFmtR(_bhValorHoras(saldo,vh))}${saldo>0?' (+50%)':''}`;
     if(Math.abs(saldo)>LIMITE) txt += ' ⚠️ ACIMA DO LIMITE';
     txt += '\n\n';
   });
@@ -4649,13 +4669,13 @@ function abrirRelatorioBancoHoras(){
     funcionarios.forEach(nome=>{
       const vh=_bhValorHoraFunc(nome); if(vh<=0) return;
       const s=_bhSaldoFunc(nome);
-      if(s>0) posGeral+=s*vh; else if(s<0) negGeral+=Math.abs(s)*vh;
+      if(s>0) posGeral+=_bhValorHoras(s,vh); else if(s<0) negGeral+=_bhValorHoras(s,vh);
     });
     const liquido=posGeral-negGeral;
     const totalPerdido=posGeral+negGeral;
     txt += `─────────────────────\n`;
     txt += `💰 RESUMO MONETÁRIO DO PERÍODO\n`;
-    txt += `✅ Extras (a pagar):     ${_bhFmtR(posGeral)}\n`;
+    txt += `✅ Extras (a pagar, +50%): ${_bhFmtR(posGeral)}\n`;
     txt += `❌ Negativos (já pagos): ${_bhFmtR(negGeral)}\n`;
     txt += `😢 Total perdido:        ${_bhFmtR(totalPerdido)}\n`;
     txt += `📊 Diferença a recuperar até fechar: ${_bhFmtR(Math.abs(liquido))} ${liquido>0?'(a pagar)':liquido<0?'(a recuperar)':'(equilibrado)'}\n`;
@@ -4668,11 +4688,11 @@ function abrirRelatorioBancoHoras(){
         const vh=_bhValorHoraFunc(nome); if(vh<=0) return;
         const r=_bhFindReg(_bhRegistros[mesAnt], nome);
         const h=r?parseFloat(r.horas)||0:0;
-        if(h>0) posMes+=h*vh; else if(h<0) negMes+=Math.abs(h)*vh;
+        if(h>0) posMes+=_bhValorHoras(h,vh); else if(h<0) negMes+=_bhValorHoras(h,vh);
       });
       txt += `\n📅 FECHAMENTO ${_bhMesLabel(mesAnt).toUpperCase()}\n`;
-      txt += `  Extras:    ${posMes>0?_bhFmtR(posMes):'—'}\n`;
-      txt += `  Negativos: ${negMes>0?_bhFmtR(negMes):'—'}\n`;
+      txt += `  Extras (+50%): ${posMes>0?_bhFmtR(posMes):'—'}\n`;
+      txt += `  Negativos:     ${negMes>0?_bhFmtR(negMes):'—'}\n`;
     }
     const mesesDecorridos=meses.filter(m=>m<=hoje).length;
     if(mesesDecorridos>=meses.length-1 && meses.length>0){
@@ -11662,7 +11682,7 @@ function buildRelatorioBanco(cab){
       const abs = Math.abs(saldo);
       const icone = abs > 8 ? (saldo < 0 ? '❌' : '⚠️') : '✅';
       const vh = _bhValorHoraFunc(nome);
-      const valorStr = temSal && vh>0 ? ` → ${_bhFmtR(abs*vh)}` : '';
+      const valorStr = temSal && vh>0 ? ` → ${_bhFmtR(_bhValorHoras(saldo,vh))}${saldo>0?' (+50%)':''}` : '';
       txt += `${icone} ${nome}: ${_bhFmtH(saldo)}${valorStr}\n`;
     });
     txt += '\n';
@@ -11671,7 +11691,7 @@ function buildRelatorioBanco(cab){
       txt += `⚠️ ALERTAS (saldo > ±8h):\n`;
       alertas.forEach(a=>{
         const vh = _bhValorHoraFunc(a.nome);
-        const valorStr = temSal && vh>0 ? ` → ${_bhFmtR(a.abs*vh)}` : '';
+        const valorStr = temSal && vh>0 ? ` → ${_bhFmtR(_bhValorHoras(a.saldo,vh))}${a.saldo>0?' (+50%)':''}` : '';
         txt += `  • ${a.nome}: ${_bhFmtH(a.saldo)}${valorStr} ${a.tipo==='critico'?'🚨 CRÍTICO':''}\n`;
       });
       txt += '\n';
@@ -11683,14 +11703,14 @@ function buildRelatorioBanco(cab){
         const vh=_bhValorHoraFunc(nome);
         if(vh<=0) return;
         const s=_bhSaldoFunc(nome);
-        if(s>0) posGeral+=s*vh;
-        else if(s<0) negGeral+=Math.abs(s)*vh;
+        if(s>0) posGeral+=_bhValorHoras(s,vh);
+        else if(s<0) negGeral+=_bhValorHoras(s,vh);
       });
       const liquido = posGeral-negGeral;
       const totalPerdido = posGeral+negGeral;
       txt += `─────────────────────\n`;
       txt += `💰 RESUMO MONETÁRIO DO PERÍODO\n`;
-      txt += `✅ Extras (a pagar):     ${_bhFmtR(posGeral)}\n`;
+      txt += `✅ Extras (a pagar, +50%): ${_bhFmtR(posGeral)}\n`;
       txt += `❌ Negativos (já pagos): ${_bhFmtR(negGeral)}\n`;
       txt += `😢 Total perdido:        ${_bhFmtR(totalPerdido)}\n`;
       txt += `📊 Diferença a recuperar até fechar: ${_bhFmtR(Math.abs(liquido))} ${liquido>0?'(a pagar)':liquido<0?'(a recuperar)':'(equilibrado)'}\n`;
@@ -11704,11 +11724,11 @@ function buildRelatorioBanco(cab){
           if(vh<=0) return;
           const r=_bhFindReg(_bhRegistros[mesAnt], nome);
           const h=r?parseFloat(r.horas)||0:0;
-          if(h>0) posMes+=h*vh; else if(h<0) negMes+=Math.abs(h)*vh;
+          if(h>0) posMes+=_bhValorHoras(h,vh); else if(h<0) negMes+=_bhValorHoras(h,vh);
         });
         txt += `\n📅 FECHAMENTO ${_bhMesLabel(mesAnt).toUpperCase()}\n`;
-        txt += `  Extras:    ${posMes>0?_bhFmtR(posMes):'—'}\n`;
-        txt += `  Negativos: ${negMes>0?_bhFmtR(negMes):'—'}\n`;
+        txt += `  Extras (+50%): ${posMes>0?_bhFmtR(posMes):'—'}\n`;
+        txt += `  Negativos:     ${negMes>0?_bhFmtR(negMes):'—'}\n`;
       }
       // Alerta próximo período
       const mesesDecorridos=meses.filter(m=>m<=hoje).length;
