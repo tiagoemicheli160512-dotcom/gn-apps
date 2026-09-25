@@ -4367,14 +4367,75 @@ function _bhValorHoras(horas, vh){
 /* ─── Valor da hora extra (com adicional) ─── */
 function _bhValorHoraExtra(vh){ return (parseFloat(vh)||0)*(1+BH_ADICIONAL_EXTRA); }
 
+/* ─── Achar o funcionário do cadastro a partir do nome do lançamento ─── */
+// O lançamento do Banco de Horas guarda o nome que estava valendo NA ÉPOCA. Quando a loja
+// renomeia alguém no cadastro, o lançamento antigo deixa de casar e a coluna Valor zera —
+// sem aviso nenhum. Foi o que aconteceu na Bangu: a loja renomeou o cadastro inteiro pra
+// incluir os sobrenomes (AMANDA → AMANDA DE SOUZA, SABRYNNA → SABRYNNA FAUSTINO, ANTÔNIO →
+// ANTÔNIO LIMA…) e 19 dos 22 lançamentos de setembro ficaram sem valor.
+// O próprio app já registra cada renomeação em _nomesAnteriores, então casar também por ele
+// faz o Banco de Horas acompanhar a renomeação sozinho. Não é chute: é a trilha que o app
+// gravou quando a loja renomeou.
+// O nome ATUAL tem precedência. O nome anterior só vale quando UM único funcionário o
+// reivindica — se duas pessoas já se chamaram "JULIANA", escolher uma seria chutar salário.
+function _bhAchaFuncCadastro(nome){
+  const key = _bhNormNome(nome);
+  if(!key) return null;
+  const cad = (comissoesWD?.funcs||[]).filter(f=>f && f.nome && f.nome.trim());
+  const exato = cad.find(f=>_bhNormNome(f.nome)===key);
+  if(exato) return exato;
+  const porAnterior = cad.filter(f=>(f._nomesAnteriores||[]).some(n=>_bhNormNome(n)===key));
+  return porAnterior.length===1 ? porAnterior[0] : null;
+}
+
 /* ─── Valor/hora do funcionário baseado no setor ─── */
 function _bhValorHoraFunc(nome){
   if(!_bhConfig||!_bhConfig.salariosSetor) return 0;
-  const key = _bhNormNome(nome);
-  const func = comissoesWD?.funcs?.find(f=>_bhNormNome(f.nome)===key);
+  const func = _bhAchaFuncCadastro(nome);
   if(!func||!func.setor) return 0;
   const salario = parseFloat(_bhConfig.salariosSetor[func.setor])||0;
   return salario/220;
+}
+
+/* ─── Por que este funcionário está sem valor/hora ─── */
+// A coluna Valor depende de achar a pessoa no cadastro (aba Dados > Funcionários) pelo nome
+// EXATO e, do setor dela, chegar no salário. Quando qualquer elo falhava a coluna mostrava
+// só "—", sem dizer o que fazer — e ficava assim por meses sem ninguém notar. Caso real:
+// Bangu, 19 dos 22 lançamentos de setembro sem valor, porque o Banco de Horas foi lançado
+// com o primeiro nome ("SABRYNNA", 60,57 h) e o cadastro tem nome e sobrenome ("SABRYNNA
+// FAUSTINO"). O cadastro da aba Dados é a fonte: o nome do lançamento tem que ser igual ao
+// de lá. Aqui o app não adivinha o valor — ele diz qual elo quebrou e, quando dá, sugere o
+// cadastro correspondente pra loja acertar o nome.
+function _bhMotivoSemValor(nome){
+  // Mesma condição do `temSalarios` que decide se a coluna Valor existe: sem nenhum salário
+  // cadastrado não há coluna, então não há o que explicar.
+  if(!_bhConfig||!_bhConfig.salariosSetor||Object.keys(_bhConfig.salariosSetor).length===0) return null;
+  const pref = _bhNormNome(nome);
+  const ativos = (comissoesWD?.funcs||[]).filter(f=>f.nome&&f.nome.trim());
+  const func = _bhAchaFuncCadastro(nome);
+  if(!func){
+    // Duas pessoas já se chamaram assim: a renomeação não desempata, e apontar uma seria
+    // escolher o salário no chute (o caso dos três ANTÔNIOs da Bangu).
+    const disputam = ativos.filter(f=>(f._nomesAnteriores||[]).some(n=>_bhNormNome(n)===pref));
+    if(disputam.length>1)
+      return {tag:'nome repetido',
+        ajuda:'Mais de um funcionário já se chamou "'+nome.trim()+'": '
+          + disputam.map(f=>f.nome.trim()).join(', ') + '. Acerte o nome do lançamento pra dizer qual é.'};
+    // Sugestão pelo começo do nome, só quando houver UM único candidato.
+    const cands = ativos.filter(f=>{
+      const k = _bhNormNome(f.nome);
+      return k !== pref && k.startsWith(pref) && f.nome.trim().length > nome.trim().length;
+    });
+    const sug = cands.length===1 ? cands[0].nome.trim() : '';
+    return {tag:'fora do cadastro',
+      ajuda:'Este nome não existe na aba Dados > Funcionários. O nome do lançamento precisa ser igual ao do cadastro.'
+        + (sug ? ' Provavelmente é "'+sug+'".' : (cands.length>1 ? ' Há '+cands.length+' cadastros parecidos — confira qual é.' : ''))};
+  }
+  if(!func.setor||!func.setor.trim())
+    return {tag:'sem função', ajuda:'Cadastre a função desta pessoa na aba Dados > Funcionários.'};
+  if(!(parseFloat(_bhConfig.salariosSetor[func.setor])>0))
+    return {tag:'setor sem salário', ajuda:'O setor "'+func.setor+'" não tem salário no card Salários por Setor, na aba Escala.'};
+  return null;
 }
 
 /* ─── Renderizar card de salários por setor (aba escala) ─── */
@@ -4513,7 +4574,11 @@ function renderBancoHoras(){
     const vh = _bhValorHoraFunc(nome);
     // Saldo positivo já sai com o adicional de 50% — é o que a loja vai pagar de verdade se
     // a hora não for compensada até o fim do período (ver _bhValorHoras).
-    const tdValor = temSalarios ? `<td style="text-align:center;font-size:10px;font-weight:700;font-family:'JetBrains Mono',monospace;color:${vh>0?(saldoTotal>0?'#4ade80':'#f87171'):'#555'};padding:4px 4px;white-space:nowrap;" title="${vh>0&&saldoTotal>0?'Inclui adicional de 50% de hora extra':''}">${vh>0?_bhFmtR(_bhValorHoras(saldoTotal,vh))+(saldoTotal>0?' *':''):'—'}</td>` : '';
+    const motivo = vh>0 ? null : _bhMotivoSemValor(nome);
+    const semValorHtml = motivo
+      ? `<span style="font-size:10px;font-weight:700;color:#b45309;white-space:normal;display:inline-block;line-height:1.25;">⚠️ ${_esc(motivo.tag)}</span>`
+      : '—';
+    const tdValor = temSalarios ? `<td style="text-align:center;font-size:10px;font-weight:700;font-family:'JetBrains Mono',monospace;color:${vh>0?(saldoTotal>0?'#4ade80':'#f87171'):'#555'};padding:4px 4px;white-space:nowrap;" title="${vh>0?(saldoTotal>0?'Inclui adicional de 50% de hora extra':''):_esc(motivo?motivo.ajuda:'')}">${vh>0?_bhFmtR(_bhValorHoras(saldoTotal,vh))+(saldoTotal>0?' *':''):semValorHtml}</td>` : '';
     return `
       <tr style="border-bottom:1px solid #505050;">
         <td style="font-size:11px;font-weight:700;color:#1A1D23;padding:6px 6px 6px 2px;white-space:nowrap;">
