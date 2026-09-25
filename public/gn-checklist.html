@@ -2821,6 +2821,12 @@ async function flushComissoesOps(immediate){
     allData[String(idx)] = wd;
     await patchComissoesAllData(lojaKey, allData);
     comissoesWD = wd;
+    // A visão Mensal da Escala busca o all_data uma vez e guarda em escalaAllData. Esse
+    // cache só era zerado em loadComissoesData() — ou seja, só ao recarregar o app —
+    // então editar folga/horário na aba Dados e voltar pra Escala → Mensal mostrava o
+    // retrato antigo, e parecia que a alteração não tinha sido salva. Zera aqui, depois
+    // do PATCH ter dado certo (numa falha de rede o cache antigo é melhor que nenhum).
+    escalaAllData = null;
     if(msgEl){ msgEl.textContent='✓ Sincronizado com Gorjetas'; msgEl.style.color='#3ddc6f'; }
   }catch(e){
     console.error('Erro ao sincronizar com Gorjetas:', e.message||e);
@@ -5570,7 +5576,7 @@ function renderComissoesFuncs(){
   empty.style.display=indicesVisiveis.length?'none':'block';
   empty.textContent='Nenhum funcionário cadastrado';
 
-  const DIAS_NOMES_HD=['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
+  const DIAS_NOMES_HD=HORARIO_DIAS_NOMES;
   lista.innerHTML=indicesVisiveis.map((i,pos)=>{
     const f=comissoesWD.funcs[i];
     const expI=comissoesExpanded[i]||false;
@@ -5755,6 +5761,7 @@ function renderComissoesFuncs(){
               onblur="updComissoesHorario(${i},this.value)" style="font-size:11px;">
           </div>
         </div>
+        ${_avisoHorarioGeralDivergenteHtml(f,i)}
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;">
           <div>
             <label class="field-label">📅 Início de contrato</label>
@@ -6037,11 +6044,97 @@ function updComissoesTurno(i,v){
   scheduleComissoesOp(mutator);
 }
 
+// O grid de horário por dia é fixo Seg–Dom, mesma ordem de f.dias/f.horario_dias.
+const HORARIO_DIAS_NOMES=['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
+
+// "Horário geral" (f.horario) e o grid por dia (f.horario_dias) são dois campos diferentes,
+// e a Escala usa o grid: a visão Semanal e a Mensal leem SÓ ele, e a Diária só cai no geral
+// quando o dia do grid está vazio. Então mexer apenas no campo geral não mudava nada na
+// escala. Caso real: São Gonçalo, 25/09 — 6 pessoas com os dois campos divergindo (Cleber
+// Ribamar marcado 15:00-23:00 no geral e 08:00-16:00 na escala, Harison Deolindo o inverso).
+// Agora o app oferece copiar o geral pro grid, mas PERGUNTANDO: sobrescrever calado apagaria
+// os ajustes feitos de propósito dia a dia (a Alessandra tem sexta 14:00 e o resto 15:00).
+// Aceita 8:00-16:00, 08:00–16:00 (meia-risca), 8h00 às 16h00 e afins.
+function _parseHorarioGeral(v){
+  const m=String(v||'').match(/(\d{1,2})\s*[:h]\s*(\d{2})\D+?(\d{1,2})\s*[:h]\s*(\d{2})/);
+  if(!m) return null;
+  const hhmm=(a,b)=>{ const H=+a, M=+b; return (H>23||M>59)?null:String(H).padStart(2,'0')+':'+String(M).padStart(2,'0'); };
+  const entrada=hhmm(m[1],m[2]), saida=hhmm(m[3],m[4]);
+  return (entrada&&saida)?{entrada,saida}:null;
+}
+// Dias (0=Seg) que o grid mudaria se o horário geral fosse aplicado. Só dias de trabalho —
+// folga, férias, afastamento e falta continuam sem horário —, e só onde já está diferente.
+function _horarioGeralDiasAfetados(f,hor){
+  if(!f||!hor) return [];
+  const hd=f.horario_dias||[];
+  const alvos=[];
+  for(let d=0;d<7;d++){
+    const st=(f.dias||[])[d]||'PRESENTE';
+    if(!ESCALA_PRESENTE_SET.has(st)) continue;
+    const h=hd[d]||{entrada:'',saida:''};
+    if(h.entrada===hor.entrada && h.saida===hor.saida) continue;
+    alvos.push(d);
+  }
+  return alvos;
+}
+function _oferecerPropagarHorarioGeral(i,v){
+  const hor=_parseHorarioGeral(v);
+  if(!hor) return;
+  const f=comissoesWD&&comissoesWD.funcs&&comissoesWD.funcs[i];
+  if(!f) return;
+  const alvos=_horarioGeralDiasAfetados(f,hor);
+  if(!alvos.length) return;
+  const nome=(f.nome||'').trim()||'este funcionário';
+  const dias=alvos.map(d=>HORARIO_DIAS_NOMES[d]).join(', ');
+  if(!confirm(`Aplicar ${hor.entrada}–${hor.saida} também no horário por dia de ${nome}?\n\n`
+    +`Dias que mudam: ${dias}\n\n`
+    +`A Escala mostra o horário POR DIA — sem isso, o "Horário geral" não aparece lá.\n`
+    +`Folga, férias e afastamento não são alterados.`)) return;
+  const mutator=wd=>{
+    wd={...wd}; wd.funcs=[...wd.funcs]; wd.funcs[i]={...wd.funcs[i]};
+    const base=wd.funcs[i].horario_dias||Array(7).fill(null).map(()=>({entrada:'',saida:''}));
+    const hd=[...base];
+    alvos.forEach(d=>{ hd[d]={...(hd[d]||{entrada:'',saida:''}),entrada:hor.entrada,saida:hor.saida}; });
+    wd.funcs[i].horario_dias=hd;
+    return wd;
+  };
+  comissoesWD=mutator(comissoesWD);
+  scheduleComissoesOp(mutator);
+  renderComissoesFuncs();
+  _agendarRecheckEscalaPendencia();
+  showToast(`⏱ Horário aplicado em ${alvos.length} dia${alvos.length>1?'s':''} — já vale na Escala`);
+}
+// Os casos que JÁ estão divergentes no banco não passam pela pergunta acima (ela só dispara
+// numa edição nova), e o "Horário geral" fica dizendo uma coisa enquanto a Escala mostra
+// outra sem ninguém perceber. Este aviso na aba Dados torna a divergência visível e dá o
+// botão pra acertar. (Divergência é normal quando é de propósito — por isso é aviso, não erro.)
+function _avisoHorarioGeralDivergenteHtml(f,i){
+  const hor=_parseHorarioGeral(f&&f.horario);
+  if(!hor) return '';
+  const alvos=_horarioGeralDiasAfetados(f,hor);
+  if(!alvos.length) return '';
+  const dias=alvos.map(d=>HORARIO_DIAS_NOMES[d]).join(', ');
+  return `<div style="margin-top:6px;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.35);border-radius:8px;padding:7px 9px;">
+    <div style="font-size:10px;color:#1A1D23;line-height:1.45;">
+      ⚠️ O <b>Horário geral</b> (${escHtml(hor.entrada)}–${escHtml(hor.saida)}) não bate com o horário por dia em: <b>${escHtml(dias)}</b>.
+      A <b>Escala usa o horário por dia</b> — é ele que aparece lá.
+    </div>
+    <button onclick="aplicarHorarioGeralNoGrid(${i})"
+      style="margin-top:6px;background:#f59e0b;color:#000;border:none;border-radius:7px;padding:5px 12px;font-size:10px;font-weight:700;cursor:pointer;">
+      Aplicar ${escHtml(hor.entrada)}–${escHtml(hor.saida)} nesses dias</button>
+  </div>`;
+}
+function aplicarHorarioGeralNoGrid(i){
+  const f=comissoesWD&&comissoesWD.funcs&&comissoesWD.funcs[i];
+  if(!f) return;
+  _oferecerPropagarHorarioGeral(i,f.horario);
+}
 function updComissoesHorario(i,v){
   if(!comissoesWD) return;
   const mutator=wd=>{ wd={...wd}; wd.funcs=[...wd.funcs]; wd.funcs[i]={...wd.funcs[i],horario:v}; return wd; };
   comissoesWD=mutator(comissoesWD);
   scheduleComissoesOp(mutator);
+  _oferecerPropagarHorarioGeral(i,v);
 }
 function updComissoesFeriasIni(i,v){
   if(!comissoesWD) return;
@@ -6138,6 +6231,19 @@ const ESCALA_TURNO_COLOR  = {MANHÃ:'#f59e0b',TARDE:'#3b82f6',NOITE:'#8b5cf6',MI
 const ESCALA_STATUS_COLOR = {PRESENTE:'#10b981',FALTA:'#ef4444',ATESTADO:'#f59e0b',JUSTIFICATIVA:'#ec4899','SUSPENSÃO':'#f97316','NÃO TRABALHADO':'#94a3b8',HORISTA:'#38bdf8','JOVEM APRENDIZ':'#a78bfa',FOLGA:'#06b6d4','BANCO DE HORAS':'#8b5cf6',FÉRIAS:'#0ea5e9',AFASTAMENTO:'#14b8a6'};
 const ESCALA_PRESENTE_SET = new Set(['PRESENTE','HORISTA','JOVEM APRENDIZ']);
 
+// A aba Dados esconde quem está arquivado por fim de contrato (renderComissoesFuncs já
+// filtra !arquivado); a Escala não escondia. Quem o app arquivava sozinho desaparecia de
+// Dados — e a loja nem conseguia excluir, porque lá não havia mais o que excluir — e
+// continuava na escala pra sempre. Caso real: São Gonçalo, Felipe, contrato encerrado em
+// 16/09, arquivado automaticamente em 21/09 e ainda na escala da semana de 21–27/09; em
+// 23/09 a loja tentou excluir e apagou outra vaga, sem efeito nenhum na escala.
+// Não reescreve histórico: o arquivamento marca só a vaga da semana em que aconteceu
+// (_comissoesHerdarFunc nem herda arquivado pra semana seguinte), então as semanas
+// anteriores seguem com a pessoa e com os dias trabalhados dela intactos.
+function _escalaFuncsAtivos(funcs){
+  return (funcs||[]).filter(f=>f && f.nome && f.nome.trim() && !f.arquivado);
+}
+
 function _escalaAtualizaBotoes(){
   ['diaria','semanal','mensal'].forEach(m=>{
     const btn = document.getElementById('escala-modo-'+m);
@@ -6227,7 +6333,7 @@ function _renderEscalaSemanal(){
   if(labelEl)  labelEl.textContent  = sem.header;
   if(tituloEl) tituloEl.textContent = '📅 Escala Semanal';
 
-  let funcs = comissoesWD.funcs.filter(f=>f.nome&&f.nome.trim());
+  let funcs = _escalaFuncsAtivos(comissoesWD.funcs);
   if(!funcs.length){ container.innerHTML='<div style="text-align:center;padding:30px;color:#1A1D23;font-size:12px;">Nenhum funcionário cadastrado.</div>'; return; }
 
   // Contagem por dia para o resumo
@@ -6331,7 +6437,7 @@ function _renderEscalaDiaria(){
   if(labelEl)  labelEl.textContent  = `${dia.nome}, ${String(dia.d).padStart(2,'0')}/${String(dia.m).padStart(2,'0')}`;
   if(tituloEl) tituloEl.textContent = '📅 Escala Diária';
 
-  const funcs = comissoesWD.funcs.filter(f=>f.nome&&f.nome.trim());
+  const funcs = _escalaFuncsAtivos(comissoesWD.funcs);
   if(!funcs.length){ container.innerHTML='<div style="text-align:center;padding:30px;color:#1A1D23;font-size:12px;">Nenhum funcionário cadastrado.</div>'; return; }
 
   // Separa presentes, folgas e ausentes
@@ -6483,7 +6589,7 @@ async function _renderEscalaMensal(){
   const empMap = {};
   semsDoMes.forEach(({w,idx})=>{
     const wd = getComissoesWD(escalaAllData, idx);
-    (wd.funcs||[]).filter(f=>f.nome&&f.nome.trim()).forEach(f=>{
+    _escalaFuncsAtivos(wd.funcs).forEach(f=>{
       const nome = f.nome.trim();
       if(!empMap[nome]) empMap[nome]={setor:f.setor||'',turno:f.turno||'',horario:f.horario||'',dias:{}};
       // Atualizar setor/turno/horario se ainda não definido
@@ -11844,7 +11950,7 @@ function _buildEscalaDiariaRel(cab){
   })();
   const dia = sem.days[dIdx];
   txt += `📆 ${dia.nome}, ${String(dia.d).padStart(2,'0')}/${String(dia.m).padStart(2,'0')}\n\n`;
-  const funcs = comissoesWD.funcs.filter(f=>f.nome&&f.nome.trim());
+  const funcs = _escalaFuncsAtivos(comissoesWD.funcs);
   const presentes = funcs.filter(f=>ESCALA_PRESENTE_SET.has((f.dias||[])[dIdx]||'PRESENTE'));
   const folgas    = funcs.filter(f=>{ const s=(f.dias||[])[dIdx]||'PRESENTE'; return s==='FOLGA'||s==='BANCO DE HORAS'||s==='FÉRIAS'||s==='AFASTAMENTO'; });
   const ausentes  = funcs.filter(f=>{ const s=(f.dias||[])[dIdx]||'PRESENTE'; return !ESCALA_PRESENTE_SET.has(s)&&s!=='FOLGA'&&s!=='BANCO DE HORAS'&&s!=='FÉRIAS'&&s!=='AFASTAMENTO'; });
@@ -11880,7 +11986,7 @@ function _buildEscalaSemanalRel(cab){
   txt += `Gerado em: ${new Date().toLocaleDateString('pt-BR')}\n\n`;
   if(!comissoesWD || comissoesWeekIdx==null) return txt+'Dados de escala não disponíveis.\n\n_GN Operações_';
   const sem = COMISSOES_CAL[comissoesWeekIdx];
-  const funcs = comissoesWD.funcs.filter(f=>f.nome&&f.nome.trim());
+  const funcs = _escalaFuncsAtivos(comissoesWD.funcs);
   if(!funcs.length) return txt+'Nenhum funcionário cadastrado.\n\n_GN Operações_';
   const resumo = sem.days.map((d,i)=>{
     const p=funcs.filter(f=>ESCALA_PRESENTE_SET.has((f.dias||[])[i]||'PRESENTE')).length;
@@ -11923,7 +12029,7 @@ function _buildEscalaMensalRel(cab){
   const empMap={};
   semsDoMes.forEach(({w,idx})=>{
     const wd=getComissoesWD(escalaAllData,idx);
-    (wd.funcs||[]).filter(f=>f.nome&&f.nome.trim()).forEach(f=>{
+    _escalaFuncsAtivos(wd.funcs).forEach(f=>{
       const nome=f.nome.trim();
       if(!empMap[nome]) empMap[nome]={setor:f.setor||'',turno:f.turno||'',dias:{}};
       if(!empMap[nome].setor&&f.setor) empMap[nome].setor=f.setor;
