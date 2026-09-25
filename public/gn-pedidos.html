@@ -692,6 +692,11 @@ let S = {
   loading: false,
   abasPermitidas: null, // Set of allowed tab IDs, null = all allowed
 
+  // Região de compra aberta na tela: 'RJ' (11 lojas + Mandacaru + Maglia) ou 'SP'
+  // (Itaquera + Guarulhos). Decide o catálogo, as colunas de loja e QUAL pedido está
+  // sendo montado — o de SP é um gn_pedidos separado, com confirmar e provisões próprios.
+  regiao: (localStorage.getItem('gn_pedidos_regiao') === 'SP') ? 'SP' : 'RJ',
+
   // Data
   catalogo: [],
   fornecedores: [],
@@ -1026,9 +1031,52 @@ async function _fetchTodasPaginas(queryFn, paginaSize) {
   return todas;
 }
 
+// Troca RJ ⇄ SP. Recarrega tudo que depende da região (catálogo, colunas de loja e o
+// próprio pedido da semana) e zera o estado de confirmação, que é por pedido — sem isso
+// os fornecedores já confirmados no RJ apareceriam como confirmados no pedido de SP,
+// que é outro pedido, e o botão de confirmar sumiria sem motivo.
+async function trocarRegiaoPedido(nova) {
+  if (nova !== 'RJ' && nova !== 'SP') return;
+  if (nova === S.regiao) return;
+  S.regiao = nova;
+  try { localStorage.setItem('gn_pedidos_regiao', nova); } catch(e) {}
+  S.pedidoAtual = null;
+  S.pedidoItens = {};
+  S.pedidosConfirmados = {};
+  S.fornecedoresConfirmados = new Set();
+  S.fornecedoresReabertos = new Set();
+  S.fornecedoresRevertidos = {};
+  S.totalCompradorCache = {};
+  await Promise.all([carregarCatalogo(), carregarLojas(), carregarContagens()]);
+  await carregarPedidoAtual();
+  if (typeof renderPedido === 'function') renderPedido();
+  if (typeof renderCatalogo === 'function') renderCatalogo();
+  toast('Região: ' + (nova === 'SP' ? 'São Paulo' : 'Rio de Janeiro'), 'ok');
+}
+
+// Seletor RJ / SP — fica no topo, sempre visível, porque a consequência de confirmar um
+// pedido na região errada é uma entrega real indo pro lugar errado.
+function _regiaoSwitcherHtml() {
+  return `<div style="display:flex;gap:6px;align-items:center;margin-bottom:10px">
+    <span style="font-size:10px;font-weight:800;color:var(--muted);letter-spacing:.5px">REGIÃO</span>
+    ${['RJ','SP'].map(r => {
+      const ativo = S.regiao === r;
+      const lbl = r === 'RJ' ? '🌉 Rio de Janeiro' : '🏙 São Paulo';
+      return `<button onclick="trocarRegiaoPedido('${r}')" style="padding:6px 14px;border-radius:20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:800;
+        border:1px solid ${ativo ? (r==='SP'?'#be123c':'#0e7490') : 'rgba(0,0,0,.15)'};
+        background:${ativo ? (r==='SP'?'rgba(190,18,60,.14)':'rgba(14,116,144,.14)') : 'transparent'};
+        color:${ativo ? (r==='SP'?'#be123c':'#0e7490') : 'var(--muted)'}">${lbl}</button>`;
+    }).join('')}
+  </div>`;
+}
+
+// Catálogo, lojas e pedido são SEMPRE da região aberta na tela (S.regiao). Itaquera e
+// Guarulhos compram em SP, com preço e fornecedor próprios do mesmo item — misturar as
+// duas listas faria o produto aparecer repetido e, pior, deixaria confirmar um pedido de
+// SP gerando provisão com o preço do Rio.
 async function carregarCatalogo() {
   const { data } = await db.from('gn_catalogo')
-    .select('*').order('grupo').order('fornecedor').order('produto');
+    .select('*').eq('regiao', S.regiao).order('grupo').order('fornecedor').order('produto');
   S.catalogo = data || [];
 }
 
@@ -1040,8 +1088,11 @@ async function carregarFornecedores() {
 
 async function carregarLojas() {
   const { data } = await db.from('gn_lojas_pedido')
-    .select('*').eq('ativo', true).order('ordem');
+    .select('*').eq('ativo', true).eq('regiao', S.regiao).order('ordem');
   S.lojas = data || [];
+  // A loja ativa pode ser de outra região (acabou de trocar de RJ pra SP) — nesse caso
+  // cai na primeira da região nova em vez de ficar apontando pra uma coluna que sumiu.
+  if (S.lojaAtiva && !S.lojas.some(l => l.slug_pedido === S.lojaAtiva)) S.lojaAtiva = null;
   if (!S.lojaAtiva && S.lojas.length > 0) S.lojaAtiva = S.lojas[0].slug_pedido;
 }
 
@@ -1132,7 +1183,7 @@ async function carregarPedidoAtual() {
   const { data } = await db.from('gn_pedidos')
     .select('*')
     .eq('semana_inicio', semIsoStr)
-    .eq('regiao', 'RJ')
+    .eq('regiao', S.regiao)
     .in('status', ['CONFIRMADO', 'ENVIADO', 'RASCUNHO'])
     .order('criado_em', { ascending: false });
 
@@ -1152,7 +1203,7 @@ async function carregarPedidoAtual() {
   } else if (ehSemAtual) {
     // Semana atual sem pedido → cria rascunho
     const { data: novo } = await db.from('gn_pedidos')
-      .insert([{ data_pedido: hoje(), semana_inicio: semIsoStr, status: 'RASCUNHO', regiao: 'RJ' }])
+      .insert([{ data_pedido: hoje(), semana_inicio: semIsoStr, status: 'RASCUNHO', regiao: S.regiao }])
       .select().single();
     // Corrida: se duas sessões abrirem o app quase juntas sem nenhum pedido ainda criado
     // pra semana, as duas veem "nenhum pedido" e cada uma insere o seu — itens lançados
@@ -1161,7 +1212,7 @@ async function carregarPedidoAtual() {
     // após o insert e, se achar mais de um, todo mundo converge pro mais antigo.
     const { data: concorrentes } = await db.from('gn_pedidos')
       .select('*')
-      .eq('semana_inicio', semIsoStr).eq('regiao', 'RJ')
+      .eq('semana_inicio', semIsoStr).eq('regiao', S.regiao)
       .in('status', ['CONFIRMADO', 'ENVIADO', 'RASCUNHO'])
       .order('criado_em', { ascending: true });
     if (concorrentes && concorrentes.length > 1) {
@@ -1369,7 +1420,7 @@ async function carregarUltimoPedido() {
   const { data: ultPed } = await db.from('gn_pedidos')
     .select('id')
     .eq('semana_inicio', semAntIso)
-    .eq('regiao', 'RJ')
+    .eq('regiao', S.regiao)
     .in('status', ['CONFIRMADO', 'RASCUNHO'])
     .order('criado_em', { ascending: false })
     .limit(1);
@@ -1409,7 +1460,7 @@ async function carregarConfirmadosSemana() {
     const { data: peds } = await db.from('gn_pedidos')
       .select('id')
       .eq('semana_inicio', semIsoStr)
-      .eq('regiao', 'RJ')
+      .eq('regiao', S.regiao)
       .in('status', ['CONFIRMADO', 'ENVIADO']);
     if (!peds || peds.length === 0) return;
 
@@ -2590,7 +2641,7 @@ async function novoPedido() {
     _logAuditoria('CANCELAR_PEDIDO', { itens_ocultados: totalItensAtuais }, { pedido_id: pedidoCanceladoId });
   }
   const { data } = await db.from('gn_pedidos')
-    .insert([{ data_pedido: hoje(), semana_inicio: semIsoStr, status: 'RASCUNHO', regiao: 'RJ' }])
+    .insert([{ data_pedido: hoje(), semana_inicio: semIsoStr, status: 'RASCUNHO', regiao: S.regiao }])
     .select().single();
   S.pedidoAtual = data;
   S.pedidoItens = {};
@@ -3429,8 +3480,11 @@ function renderPedido() {
   const mondayHoje = getMondayOfWeek();
   const podeAvancar = S.semanaAtiva < mondayHoje;
 
-  // Barra de semana (sempre visível)
+  // Barra de semana (sempre visível), precedida pelo seletor de região — confirmar um
+  // pedido na região errada vira entrega real no lugar errado, então ele fica antes de
+  // tudo e sempre à vista.
   const semNavHtml = `
+    ${_regiaoSwitcherHtml()}
     <div class="semana-nav">
       <button class="semana-nav-arrow" onclick="navegarSemana(-1)" title="Semana anterior">‹</button>
       <div class="semana-info">
@@ -4672,7 +4726,10 @@ async function salvarNovoProduto() {
   if (!produto || !grupo || !item_id) { toast('Preencha código, produto e grupo.','err'); return; }
 
   const { data, error } = await db.from('gn_catalogo')
-    .insert([{ item_id, produto, grupo, subgrupo, fornecedor, und, custo, und_por_caixa: undPorCaixa }]).select().single();
+    .insert([{ item_id, produto, grupo, subgrupo, fornecedor, und, custo, und_por_caixa: undPorCaixa,
+      // Nasce na região aberta na tela: o mesmo produto existe nas duas com preço e
+      // fornecedor próprios, então criar um item é sempre criar pra UMA região.
+      regiao: S.regiao }]).select().single();
 
   if (error) { toast('Erro: '+error.message,'err'); return; }
   S.catalogo.push(data);
