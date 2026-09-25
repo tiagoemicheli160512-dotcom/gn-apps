@@ -346,6 +346,7 @@ summary.loja-card-header::-webkit-details-marker{display:none}
   <button class="sidebar-link" data-sidebar-tab="financeiro" onclick="setTab('financeiro')"><span class="sl-icon">💰</span>Financeiro</button>
   <button class="sidebar-link" data-sidebar-tab="rh" onclick="setTab('rh')"><span class="sl-icon">👥</span>RH / BH</button>
   <button class="sidebar-link" data-sidebar-tab="comparativo" onclick="setTab('comparativo')"><span class="sl-icon">🔍</span>Comparativo</button>
+  <button class="sidebar-link" data-sidebar-tab="admissoes" onclick="setTab('admissoes')"><span class="sl-icon">🆕</span>Admissões<span id="sidebar-admissoes-badge" style="display:none;margin-left:5px;background:var(--red);color:#fff;font-size:9px;font-weight:800;padding:1px 5px;border-radius:8px;vertical-align:middle"></span></button>
   <button class="sidebar-link" data-sidebar-tab="avarias" onclick="setTab('avarias')"><span class="sl-icon">⚠️</span>Avarias<span id="sidebar-avarias-badge" style="display:none;margin-left:5px;background:var(--red);color:#fff;font-size:9px;font-weight:800;padding:1px 5px;border-radius:8px;vertical-align:middle"></span></button>
   <button class="sidebar-link" data-sidebar-tab="dossie" onclick="setTab('dossie')"><span class="sl-icon">📋</span>Dossiê</button>
   <button class="sidebar-link" data-sidebar-tab="vencimentos" onclick="setTab('vencimentos')"><span class="sl-icon">📅</span>Boletos</button>
@@ -412,6 +413,11 @@ summary.loja-card-header::-webkit-details-marker{display:none}
     <button class="nav-btn" data-tab="comparativo" onclick="setTab('comparativo')">
       <span class="nav-icon">🔍</span>
       <span class="nav-label">Comparativo</span>
+    </button>
+    <button class="nav-btn" data-tab="admissoes" onclick="setTab('admissoes')" style="position:relative">
+      <span class="nav-icon">🆕</span>
+      <span class="nav-label">Admissões</span>
+      <span id="admissoes-badge" style="display:none;position:absolute;top:6px;right:14px;background:var(--red);color:#fff;border-radius:10px;font-size:9px;font-weight:800;padding:1px 5px;min-width:16px;text-align:center;line-height:14px"></span>
     </button>
     <button class="nav-btn" data-tab="avarias" onclick="setTab('avarias')" style="position:relative">
       <span class="nav-icon">⚠️</span>
@@ -508,6 +514,7 @@ let S = {
   // Operações
   usuarios: [],          // [{nome, loja(userKey), cargo, ativo}]
   comissoesData: {},     // { comKey: allData }
+  admissoes: [],         // gn_admissoes: funcionário novo do Check-list → conferência do RH
   opCaixa: [],           // caixa records for selected period
   opMode: 'dia',         // 'dia' | 'sem' | 'mes'
   opData: null,          // Date representing selected day / week Monday / month
@@ -2328,8 +2335,19 @@ function _rtShowBanner() {
   content.prepend(el);
 }
 
+// A aba Admissões nasceu depois das permissões já cadastradas, então ninguém tem
+// 'admissoes' em rh_abas — sem isto ela ficaria invisível pra todo usuário com lista de
+// abas explícita, que é justamente o pessoal de RH. Quem já cuida de RH passa a ver
+// Admissões, sem precisar editar o cadastro de cada usuário um por um.
+function _rhAbaLiberada(tab) {
+  if (tab === 'guia') return true;
+  if (!S.abasPermitidas) return true;
+  if (S.abasPermitidas.has(tab)) return true;
+  return tab === 'admissoes' && S.abasPermitidas.has('rh');
+}
+
 function setTab(tab) {
-  if (tab !== 'guia' && S.abasPermitidas && !S.abasPermitidas.has(tab)) return;
+  if (!_rhAbaLiberada(tab)) return;
   _rtUnsubscribe();
   S.tab = tab;
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('ativo', b.dataset.tab===tab));
@@ -2339,6 +2357,101 @@ function setTab(tab) {
   renderContent();
   if (tab === 'avarias') _rtSubscribeAvarias();
 }
+
+// ══════════════════════════════════════════════
+// DATA — ADMISSÕES (funcionário novo cadastrado no Check-list)
+// ══════════════════════════════════════════════
+// Todo funcionário novo cadastrado na aba Dados > Funcionários do Check-list tem que chegar
+// ao RH, com o acompanhamento até o registro. O fluxo tem dois lados: a LOJA marca que
+// enviou a documentação (no Check-list) e o RH confirma o recebimento e depois o registro.
+//
+// A lista vem de gn_admissoes, mas quem manda é sempre o cadastro: esta função também faz
+// uma varredura de rede em gn_comissoes e cria a linha de quem é admissão recente e ainda
+// não tem registro aqui. Isso é de propósito — se o Check-list falhar em gravar (queda de
+// rede na loja, aparelho com versão antiga do app), a pessoa apareceria pro RH de qualquer
+// jeito. "Aparecer pro RH" é o requisito; depender de uma única gravação seria frágil.
+const ADMISSAO_DESDE = '2026-08-01';   // janela do backfill, combinada com o usuário
+
+function _admNormNome(n) {
+  return (n || '').trim().toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[\s\-]+/g, '');
+}
+
+// Status derivado, na ordem do fluxo. Só o RH fecha as duas últimas etapas.
+function _admStatus(a) {
+  if (a.registro_em)      return { key:'registrado', label:'Registro feito',        cor:'#10b981' };
+  if (a.doc_recebida_em)  return { key:'doc_ok',     label:'Documentação recebida', cor:'#3b82f6' };
+  if (a.doc_enviada_em)   return { key:'doc_env',    label:'Documentação enviada',  cor:'#f59e0b' };
+  return { key:'aguardando', label:'Aguardando documentação', cor:'#94a3b8' };
+}
+
+async function carregarAdmissoes() {
+  const { data, error } = await db.from('gn_admissoes')
+    .select('*').order('inicio_contrato', { ascending: false, nullsFirst: false });
+  if (error) throw error;
+  let linhas = data || [];
+
+  // Varredura de segurança: admissão recente que ainda não tem linha aqui.
+  try {
+    const { data: com } = await db.from('gn_comissoes')
+      .select('loja,all_data').in('loja', LOJAS.map(l => l.comKey));
+    const existentes = new Set(linhas.map(a => a.loja + '|' + a.nome_norm));
+    const novas = [];
+    (com || []).forEach(row => {
+      const semanas = Object.keys(row.all_data || {}).filter(k => /^\d+$/.test(k));
+      if (!semanas.length) return;
+      const ultima = String(Math.max(...semanas.map(Number)));
+      // Só a semana mais recente já salva: quem saiu da loja nao volta a aparecer por aqui.
+      ((row.all_data[ultima] || {}).funcs || []).forEach(f => {
+        const nome = (f && f.nome || '').trim();
+        if (!nome || f.arquivado) return;
+        const quando = f.cadastro_em || f.inicio_contrato || '';
+        if (quando < ADMISSAO_DESDE) return;
+        const norm = _admNormNome(nome);
+        if (existentes.has(row.loja + '|' + norm)) return;
+        existentes.add(row.loja + '|' + norm);
+        novas.push({ loja: row.loja, nome, nome_norm: norm, setor: f.setor || null,
+          tipo: f.tipo || null, cadastro_em: f.cadastro_em || null,
+          inicio_contrato: f.inicio_contrato || null, origem: 'checklist' });
+      });
+    });
+    if (novas.length) {
+      // ignoreDuplicates: duas telas de RH abertas ao mesmo tempo não podem virar erro.
+      await db.from('gn_admissoes').upsert(novas, { onConflict: 'loja,nome_norm', ignoreDuplicates: true });
+      const { data: recarregado } = await db.from('gn_admissoes')
+        .select('*').order('inicio_contrato', { ascending: false, nullsFirst: false });
+      if (recarregado) linhas = recarregado;
+    }
+  } catch (e) { /* a varredura é rede de segurança: falhar nela não pode esconder a lista */ }
+
+  S.admissoes = linhas;
+
+  // O aviso é "tem admissão nova que o RH ainda não viu" — sai com a ciência.
+  const naoVistas = linhas.filter(a => !a.visto_rh_em).length;
+  [['admissoes-badge', naoVistas], ['sidebar-admissoes-badge', naoVistas]].forEach(([id, n]) => {
+    const el = $(id);
+    if (!el) return;
+    el.textContent = n;
+    el.style.display = n > 0 ? 'inline-block' : 'none';
+  });
+}
+
+async function _admPatch(id, patch) {
+  const { error } = await db.from('gn_admissoes')
+    .update({ ...patch, atualizado_em: new Date().toISOString() }).eq('id', id);
+  if (error) { alert('Não salvou: ' + error.message); return; }
+  await carregarAdmissoes();
+  renderAdmissoes();
+}
+const _admQuem = () => (S.usuario && S.usuario.nome) || '';
+function admissaoCiencia(id)      { _admPatch(id, { visto_rh_em: new Date().toISOString(), visto_rh_por: _admQuem() }); }
+function admissaoDocRecebida(id)  { _admPatch(id, { visto_rh_em: new Date().toISOString(), visto_rh_por: _admQuem(), doc_recebida_em: new Date().toISOString(), doc_recebida_por: _admQuem() }); }
+function admissaoRegistroFeito(id){ _admPatch(id, { registro_em: new Date().toISOString(), registro_por: _admQuem() }); }
+// Desfazer existe porque as duas confirmações são de um clique e um toque errado esconderia
+// a pessoa da fila de conferência — o que é exatamente o que esta aba serve pra evitar.
+function admissaoDesfazerDoc(id)      { if (confirm('Desfazer "documentação recebida"?')) _admPatch(id, { doc_recebida_em: null, doc_recebida_por: null }); }
+function admissaoDesfazerRegistro(id) { if (confirm('Desfazer "registro feito"?')) _admPatch(id, { registro_em: null, registro_por: null }); }
 
 // ══════════════════════════════════════════════
 // DATA — AVARIAS
@@ -2696,6 +2809,7 @@ function renderContent() {
       if (S.tab === 'operacoes')    { await carregarOperacoes();    renderOperacoes();    }
       if (S.tab === 'financeiro')  { await carregarFinanceiro();  renderFinanceiro();   }
       if (S.tab === 'rh')          { await carregarRH();          renderRH();           }
+      if (S.tab === 'admissoes')   { await carregarAdmissoes();   renderAdmissoes();    }
       if (S.tab === 'comparativo') { await carregarComparativo(); renderComparativo();  }
       if (S.tab === 'avarias')     { await carregarAvarias();     renderAvarias();      }
       if (S.tab === 'dossie')      { await carregarDossie();      renderDossie();       }
@@ -5162,6 +5276,69 @@ function filtrarFeriasLoja(chkKey) {
   renderFerias();
 }
 
+function renderAdmissoes() {
+  const itens = S.admissoes || [];
+  const emAberto = itens.filter(a => !a.registro_em);
+  const concluidas = itens.filter(a => a.registro_em)
+    .sort((a, b) => String(b.registro_em).localeCompare(String(a.registro_em)));
+  const novas = itens.filter(a => !a.visto_rh_em);
+
+  const nomeLoja = ck => { const l = lojaByComKey(ck); return l ? l.display : ck; };
+  const dt = v => v ? fmtBRShort(String(v).slice(0, 10)) : '—';
+  const quando = (ts, quem) => ts
+    ? fmtBRShort(String(ts).slice(0, 10)) + (quem ? ' · ' + esc(quem) : '')
+    : '';
+
+  const linha = a => {
+    const st = _admStatus(a);
+    const novo = !a.visto_rh_em;
+    const passos = [
+      ['📄 Documentação enviada pela loja', a.doc_enviada_em, a.doc_enviada_por],
+      ['📥 Documentação recebida pelo RH', a.doc_recebida_em, a.doc_recebida_por],
+      ['✅ Registro feito', a.registro_em, a.registro_por],
+    ].map(([label, ts, quem]) => `<div style="display:flex;justify-content:space-between;gap:8px;font-size:10px;padding:2px 0">
+        <span style="color:${ts ? 'var(--text,#1A1D23)' : 'var(--muted)'}">${ts ? '✔' : '○'} ${label}</span>
+        <span style="color:var(--muted);flex-shrink:0">${quando(ts, quem)}</span>
+      </div>`).join('');
+
+    const acoes = [];
+    if (novo) acoes.push(`<button onclick="admissaoCiencia('${a.id}')" style="background:var(--accent,#0969da);color:#fff;border:none;border-radius:7px;padding:6px 11px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">👁 Dar ciência</button>`);
+    if (!a.doc_recebida_em) acoes.push(`<button onclick="admissaoDocRecebida('${a.id}')" style="background:#3b82f6;color:#fff;border:none;border-radius:7px;padding:6px 11px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">📥 Recebi a documentação</button>`);
+    else if (!a.registro_em) acoes.push(`<button onclick="admissaoDesfazerDoc('${a.id}')" style="background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:7px;padding:6px 9px;font-size:10px;cursor:pointer;font-family:inherit">↩︎ desfazer</button>`);
+    if (a.doc_recebida_em && !a.registro_em) acoes.push(`<button onclick="admissaoRegistroFeito('${a.id}')" style="background:#10b981;color:#fff;border:none;border-radius:7px;padding:6px 11px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">✅ Registro feito</button>`);
+    if (a.registro_em) acoes.push(`<button onclick="admissaoDesfazerRegistro('${a.id}')" style="background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:7px;padding:6px 9px;font-size:10px;cursor:pointer;font-family:inherit">↩︎ desfazer</button>`);
+
+    return `<div style="border-bottom:1px solid var(--border);padding:10px 12px;${novo ? 'background:rgba(239,68,68,.05)' : ''}">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;font-weight:700">${esc(a.nome)}${novo ? ' <span style="font-size:9px;font-weight:800;color:#fff;background:var(--red);border-radius:6px;padding:1px 6px;margin-left:4px">NOVO</span>' : ''}</div>
+          <div style="font-size:10px;color:var(--muted)">${esc(nomeLoja(a.loja))}${a.setor ? ' · ' + esc(a.setor) : ''}${a.tipo ? ' · ' + esc(a.tipo) : ''}</div>
+          <div style="font-size:10px;color:var(--muted);margin-top:1px">Início de contrato: <b>${dt(a.inicio_contrato)}</b>${a.cadastro_em ? ' · cadastrado em ' + dt(a.cadastro_em) : ''}</div>
+        </div>
+        <span style="font-size:9px;font-weight:800;color:${st.cor};background:${st.cor}1f;border-radius:6px;padding:2px 7px;white-space:nowrap;flex-shrink:0">${st.label}</span>
+      </div>
+      <div style="margin-top:6px;padding-left:2px">${passos}</div>
+      ${acoes.length ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">${acoes.join('')}</div>` : ''}
+    </div>`;
+  };
+
+  const bloco = (titulo, lista, vazio) => `<div class="card" style="margin-bottom:12px">
+    <div class="card-head"><span>${titulo}</span><span style="font-size:11px;color:var(--muted)">${lista.length}</span></div>
+    ${lista.length ? lista.map(linha).join('') : `<div style="padding:14px;text-align:center;font-size:11px;color:var(--muted)">${vazio}</div>`}
+  </div>`;
+
+  const aviso = novas.length
+    ? `<div style="background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);border-radius:9px;padding:10px 12px;margin-bottom:12px">
+        <div style="font-size:12px;font-weight:800;color:var(--red)">🔔 ${novas.length} admissão${novas.length > 1 ? 'ões' : ''} nova${novas.length > 1 ? 's' : ''} pra conferir</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">Cadastradas pela loja no Check-list e ainda sem ciência do RH. Dar ciência não conclui nada — só tira o aviso.</div>
+      </div>`
+    : '';
+
+  $('content').innerHTML = aviso
+    + bloco('🆕 Em aberto', emAberto, 'Nenhuma admissão em aberto.')
+    + bloco('✅ Registro concluído', concluidas, 'Nada concluído ainda.');
+}
+
 function renderFerias() {
   const lojaFiltros = [
     `<button class="ftab${S.feriasLoja===''?' ativo':''}" onclick="filtrarFeriasLoja('')">Todas</button>`,
@@ -5344,10 +5521,10 @@ async function iniciarApp() {
   const abasArr = (S.usuario.permissoes || {}).rh_abas;
   S.abasPermitidas = Array.isArray(abasArr) ? new Set(abasArr) : null;
   document.querySelectorAll('.nav-btn').forEach(b => {
-    b.style.display = (b.dataset.tab !== 'guia' && S.abasPermitidas && !S.abasPermitidas.has(b.dataset.tab)) ? 'none' : '';
+    b.style.display = _rhAbaLiberada(b.dataset.tab) ? '' : 'none';
   });
   document.querySelectorAll('.sidebar-link[data-sidebar-tab]').forEach(b => {
-    b.style.display = (b.dataset.sidebarTab !== 'guia' && S.abasPermitidas && !S.abasPermitidas.has(b.dataset.sidebarTab)) ? 'none' : '';
+    b.style.display = _rhAbaLiberada(b.dataset.sidebarTab) ? '' : 'none';
   });
 
   S.opData    = new Date(); S.opData.setHours(12,0,0,0);
@@ -5359,13 +5536,17 @@ async function iniciarApp() {
 
   // Ir para a primeira aba permitida
   const primeiraAba = S.abasPermitidas
-    ? (['operacoes','financeiro','rh','comparativo','avarias','dossie','vencimentos','ferias','auditoria'].find(t => S.abasPermitidas.has(t)) || 'operacoes')
+    ? (['operacoes','financeiro','rh','admissoes','comparativo','avarias','dossie','vencimentos','ferias','auditoria'].find(t => _rhAbaLiberada(t)) || 'operacoes')
     : 'operacoes';
   setTab(primeiraAba);
 
   // Carrega badge de avarias em background para qualquer aba ativa
   if (!S.abasPermitidas || S.abasPermitidas.has('avarias')) {
     carregarAvarias().catch(() => {});
+  }
+  // Idem pro aviso de admissão nova: o RH precisa ver o badge sem ter aberto a aba.
+  if (_rhAbaLiberada('admissoes')) {
+    carregarAdmissoes().catch(() => {});
   }
 }
 
