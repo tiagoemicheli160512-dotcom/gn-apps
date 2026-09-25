@@ -12539,6 +12539,22 @@ const ESCALA_TRAVA_DESDE = '2026-09-06';
 // ANTEONTEM (o que prova que o gap já durava 2 dias) seja depois desse corte, o que só
 // passa a ser matematicamente possível 2 dias depois do deploy.
 const CARNE_HARD_TRAVA_DESDE = '2026-09-07';
+// A contagem de carne tem PRAZO no próprio dia: até as 17h. Antes, a trava só olhava
+// "ontem", então o dia inteiro podia passar em branco e a cobrança só chegava no dia
+// seguinte — foi o que permitiu a loja empurrar a contagem sempre pra equipe da noite.
+// Das 17h em diante, sem a contagem do dia, é trava leve (só a aba Carnes liberada);
+// virar o dia sem contar escalona pro bloqueio total, porque aí o prazo foi perdido
+// inteiro. Segunda continua de fora: a contagem dela vem do campo "inicial", preenchido
+// por outro app (ver o `diaIdx === 0` em _carneGapNoDia).
+const CARNE_HORA_LIMITE = 17;
+// Cortes próprios, mesmo motivo de sempre: no dia do deploy nenhuma loja pode acordar
+// travada por um prazo que ainda não existia quando ela deixou de contar. Como as duas
+// regras novas olham pra "hoje" e "ontem", um corte no dia seguinte ao deploy já garante
+// que só gaps nascidos sob a regra nova contem.
+const CARNE_HOJE_TRAVA_DESDE = '2026-09-26';
+// O escalonamento de 1 dia; abaixo deste corte continua valendo a regra antiga (2 dias em
+// branco), pra nunca ficar mais frouxo do que já era.
+const CARNE_HARD_1DIA_DESDE = '2026-09-26';
 // Mesmo corte, mesmo motivo, agora pro bloqueio escalado de Banda e Escala — confirmado
 // direto no banco antes deste deploy: Rancho tem ~25 funcionários sem horário cadastrado
 // há semanas (gap crônico, gn_comissoes), Boulevard/Caxias/Norte/Pedreira também têm
@@ -12600,19 +12616,42 @@ async function _carneGapNoDia(diasAtras) {
 async function _checarCarnePendenteOntem() {
   if (LOJA === 'Maglia') return null;
   if (!_temAcessoAbaChecklist('carnes')) return null;
-  const gap = await _carneGapNoDia(1);
-  if (!gap || !gap.faltando.length) return null;
-  const { diaIdx, diaKey, semanaIni, faltando } = gap;
-  // "hard": o mesmo gap (mesma semana/dia) já estava faltando há 2 dias — ficou um dia
-  // inteiro sem ninguém resolver, escalona pro bloqueio total (ver INLINE_HARD_RESOLVERS).
-  // O formulário de resolução continua cobrando só o gap de ontem — anteontem nunca
-  // precisa ser preenchido retroativamente (mesmo espírito "sem retroatividade" de sempre).
-  const gapAnteontem = await _carneGapNoDia(2);
-  const hard = !!(gapAnteontem && gapAnteontem.faltando.length && gapAnteontem.dataAlvo >= CARNE_HARD_TRAVA_DESDE);
+  // Cobra sempre o dia mais ANTIGO em aberto — ontem antes de hoje. Uma pendência por vez,
+  // com o mesmo formato de antes: resolvido o dia mais velho, o render seguinte cobra o de
+  // hoje. Evita duas linhas de carne na mesma trava e dois formulários inline competindo.
+  const gapOntem = await _carneGapNoDia(1);
+  if (gapOntem && gapOntem.faltando.length) return _carnePendenciaDoGap(gapOntem, 'ontem');
+  // Prazo do próprio dia: antes das 17h o dia ainda está correndo e não há o que cobrar.
+  if (new Date().getHours() < CARNE_HORA_LIMITE) return null;
+  const gapHoje = await _carneGapNoDia(0);
+  if (!gapHoje || !gapHoje.faltando.length) return null;
+  if (gapHoje.dataAlvo < CARNE_HOJE_TRAVA_DESDE) return null;
+  return _carnePendenciaDoGap(gapHoje, 'hoje');
+}
+
+// Monta a pendência a partir de um gap já resolvido. `quando` é 'hoje' (prazo das 17h
+// estourado, trava leve) ou 'ontem' (o dia virou sem contar, bloqueio total).
+async function _carnePendenciaDoGap(gap, quando) {
+  const { dataAlvo, diaIdx, diaKey, semanaIni, faltando } = gap;
+  // "hard" = bloqueio total (ver INLINE_HARD_RESOLVERS). O prazo das 17h transformou
+  // "perdeu o dia inteiro" no próprio escalonamento: antes era preciso DOIS dias em branco.
+  // Abaixo do corte novo, a regra antiga de 2 dias continua valendo — o app nunca fica mais
+  // frouxo do que já era pra um gap que nasceu antes desta mudança.
+  let hard = false;
+  if (quando === 'ontem') {
+    hard = dataAlvo >= CARNE_HARD_1DIA_DESDE;
+    if (!hard) {
+      const gapAnteontem = await _carneGapNoDia(2);
+      hard = !!(gapAnteontem && gapAnteontem.faltando.length && gapAnteontem.dataAlvo >= CARNE_HARD_TRAVA_DESDE);
+    }
+  }
+  const listaFalta = faltando.map(c => c.label).join(', ');
   return {
     chave: 'carnes',
-    titulo: '🥩 Contagem de carne pendente',
-    mensagem: 'A contagem de ontem (' + DIAS_LABEL[diaIdx] + ') não foi preenchida pra: ' + faltando.map(c => c.label).join(', ') + '.',
+    titulo: quando === 'hoje' ? '🥩 Contagem de carne de hoje — prazo 17h' : '🥩 Contagem de carne pendente',
+    mensagem: quando === 'hoje'
+      ? 'A contagem de hoje (' + DIAS_LABEL[diaIdx] + ') tem que ser lançada até as ' + CARNE_HORA_LIMITE + 'h e ainda falta: ' + listaFalta + '.'
+      : 'A contagem de ontem (' + DIAS_LABEL[diaIdx] + ') não foi preenchida pra: ' + listaFalta + '.',
     tabAlvo: 'carnes',
     hard,
     semanaIni, diaKey, diaIdx,
@@ -12967,6 +13006,23 @@ async function _atualizarPendenciasEssenciais() {
   _pendenciasEssenciaisAtivas = resultados.filter(Boolean);
   _renderPendenciasEssenciaisLock();
 }
+
+// A trava do prazo das 17h precisa APARECER sozinha. _atualizarPendenciasEssenciais() só
+// roda no carregamento e depois de salvar certas coisas — e a loja costuma deixar o app
+// aberto o turno inteiro. Sem isto, quem abriu às 15h atravessava as 17h sem nunca ver a
+// cobrança, e o prazo não valeria nada na prática.
+// Dispara UMA vez por dia, na virada do horário, em vez de revarrer o banco de minuto a
+// minuto: o relógio é checado localmente e a consulta só sai quando o prazo estoura.
+let _carnePrazoRevistoEm = '';
+setInterval(() => {
+  if (document.hidden) return;                       // aba em segundo plano: espera voltar
+  const agora = new Date();
+  if (agora.getHours() < CARNE_HORA_LIMITE) return;
+  const hojeISO = toISO(agora);
+  if (_carnePrazoRevistoEm === hojeISO) return;
+  _carnePrazoRevistoEm = hojeISO;
+  _atualizarPendenciasEssenciais();
+}, 60000);
 
 // Chamado depois de salvar Carnes quando havia pendência ativa (ver saveAll()). Se
 // resolver o Domingo pendente exigiu carregar uma semana passada (ver acaoExtra de
