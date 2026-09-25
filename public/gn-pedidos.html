@@ -1031,6 +1031,32 @@ async function _fetchTodasPaginas(queryFn, paginaSize) {
   return todas;
 }
 
+// Chave do pedido de hortifruti da região aberta: 'HORTIFRUTI' (Rio) ou 'HORTIFRUTI_SP'
+// (ver gnPedidoRegiaoHortifruti em gn-lojas-config.js). O lote do dia é separado por
+// região, então o Compras resolve o de SP sem misturar com o do Rio.
+// Faixa na tela de confirmar dizendo pra ONDE a entrega vai e pra quais lojas. Confirmar
+// é o passo que vira pedido real pro fornecedor, e na região errada isso é caminhão indo
+// pro estado errado — daí o aviso ficar no próprio modal, não só no seletor lá em cima.
+function _avisoRegiaoConfirmarHtml() {
+  const sp = S.regiao === 'SP';
+  const lojas = (S.lojas || []).map(l => l.nome_display).join(', ') || '—';
+  const cor = sp ? '#be123c' : '#0e7490';
+  return `<div style="display:flex;gap:9px;align-items:flex-start;padding:9px 11px;margin-bottom:10px;border-radius:9px;
+    background:${sp ? 'rgba(190,18,60,.08)' : 'rgba(14,116,144,.08)'};border:1px solid ${cor}55;border-left:3px solid ${cor}">
+    <span style="font-size:15px;line-height:1.2">${sp ? '🏙' : '🌉'}</span>
+    <div style="min-width:0">
+      <div style="font-size:12px;font-weight:800;color:${cor}">Entrega para ${sp ? 'SÃO PAULO' : 'RIO DE JANEIRO'}</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:2px;line-height:1.45">Com o preço e o fornecedor de ${sp ? 'SP' : 'RJ'}. Lojas: ${lojas}</div>
+    </div>
+  </div>`;
+}
+
+function _regiaoHortifrutiAtiva() {
+  return window.gnPedidoRegiaoHortifruti
+    ? window.gnPedidoRegiaoHortifruti(S.regiao)
+    : 'HORTIFRUTI';
+}
+
 // Troca RJ ⇄ SP. Recarrega tudo que depende da região (catálogo, colunas de loja e o
 // próprio pedido da semana) e zera o estado de confirmação, que é por pedido — sem isso
 // os fornecedores já confirmados no RJ apareceriam como confirmados no pedido de SP,
@@ -1047,8 +1073,16 @@ async function trocarRegiaoPedido(nova) {
   S.fornecedoresReabertos = new Set();
   S.fornecedoresRevertidos = {};
   S.totalCompradorCache = {};
+  // O dia escolhido no navegador do Hortifruti é da região anterior — um dia com pedido
+  // pendente no Rio pode nem existir em SP. Volta pro padrão (hoje) na região nova.
+  S.hortifrutiData = null;
+  S.hortifrutiDiasPendentes = [];
   await Promise.all([carregarCatalogo(), carregarLojas(), carregarContagens()]);
-  await carregarPedidoAtual();
+  // Cada aba tem o seu pedido: na aba Hortifruti o que vale é o lote do dia, não o
+  // semanal. Sem isto, trocar de região ali carregava o pedido semanal por baixo e a tela
+  // continuava mostrando o hortifruti da região anterior.
+  if (S.hortifrutiAtivo) await carregarPedidoHortifruti();
+  else await carregarPedidoAtual();
   if (typeof renderPedido === 'function') renderPedido();
   if (typeof renderCatalogo === 'function') renderCatalogo();
   toast('Região: ' + (nova === 'SP' ? 'São Paulo' : 'Rio de Janeiro'), 'ok');
@@ -1265,7 +1299,7 @@ async function carregarPedidoHortifruti() {
   try {
     const { data: pendentes } = await db.from('gn_pedidos')
       .select('data_pedido')
-      .eq('regiao', 'HORTIFRUTI')
+      .eq('regiao', _regiaoHortifrutiAtiva())
       .eq('status', 'RASCUNHO')
       .order('data_pedido', { ascending: true });
     const hojeStr = hoje();
@@ -1278,7 +1312,7 @@ async function carregarPedidoHortifruti() {
 
     const { data } = await db.from('gn_pedidos')
       .select('*')
-      .eq('regiao', 'HORTIFRUTI')
+      .eq('regiao', _regiaoHortifrutiAtiva())
       .eq('data_pedido', dataAlvo)
       .order('criado_em', { ascending: true })
       .limit(1);
@@ -2269,9 +2303,10 @@ async function confirmarPedido() {
   const itensZerados = _itensZeradosComContagem(pendentes);
 
   abrirModal(`
-    <div class="modal-titulo">✓ Confirmar Pedido${escopoAtivo?' — '+(S.eduAtivo?'Edu':S.oseasAtivo?'Oseas':S.hortifrutiAtivo?'Hortifruti':'Matheus'):''}
+    <div class="modal-titulo">✓ Confirmar Pedido — ${S.regiao === 'SP' ? '🏙 SÃO PAULO' : '🌉 RIO DE JANEIRO'}${escopoAtivo?' · '+(S.eduAtivo?'Edu':S.oseasAtivo?'Oseas':S.hortifrutiAtivo?'Hortifruti':'Matheus'):''}
       <button class="modal-close" onclick="$('modal-bg').classList.remove('ativo')">×</button>
     </div>
+    ${_avisoRegiaoConfirmarHtml()}
     ${_htmlAvisoZerados(itensZerados)}
     <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Selecione os fornecedores pra gerar as provisões agora. Os demais continuam em aberto pra confirmar depois.</div>
     <div style="display:flex;justify-content:flex-end;margin-bottom:6px">
@@ -2323,7 +2358,13 @@ async function _confirmarFornecedoresSelecionados() {
   // verdade pro fornecedor (a entrega é registrada e alguém vai receber), e confirmar
   // fornecedor errado (ou todos de uma vez sem querer, pela aba Pedido geral) já
   // aconteceu mais de uma vez.
-  if (!confirm(`Confirmar pedido de ${selecionados.length} fornecedor${selecionados.length>1?'es':''}?\n\n${selecionados.join(', ')}\n\nIsso gera as provisões de entrega pra cada um.`)) return;
+  // A região entra no texto do confirm porque é o último ponto antes de virar entrega
+  // real: um pedido de SP confirmado como RJ manda caminhão pro estado errado.
+  const _regLbl = S.regiao === 'SP' ? 'SÃO PAULO' : 'RIO DE JANEIRO';
+  const _regLojas = (S.lojas || []).map(l => l.nome_display).join(', ');
+  if (!confirm(`Confirmar pedido de ${selecionados.length} fornecedor${selecionados.length>1?'es':''} para ${_regLbl}?\n\n`
+    + `Fornecedores: ${selecionados.join(', ')}\n`
+    + `Lojas: ${_regLojas}\n\nIsso gera as provisões de entrega pra cada um.`)) return;
   if (!confirm(`Tem certeza mesmo? Depois de confirmar, os itens desses fornecedores ficam travados pra edição (dá pra desfazer com o botão "↩️ Reverter" depois, mas só enquanto a entrega ainda não foi recebida).`)) return;
 
   $('modal-bg').classList.remove('ativo');
