@@ -78,6 +78,15 @@ window.gnRegiaoLoja = function (chave) {
 };
 window.gnRegiaoLabel = function (r) { return r === 'SP' ? 'São Paulo' : 'Rio de Janeiro'; };
 
+// gn_pedidos.regiao guarda duas coisas ao mesmo tempo: a região de compra E o tipo de
+// pedido. O semanal usa 'RJ'/'SP'; o hortifruti tem lote próprio por dia de envio e usa
+// 'HORTIFRUTI' (Rio) / 'HORTIFRUTI_SP'. Parece estranho, mas é o que mantém os quatro
+// lotes separados sem coluna nova — e o RJ fica com a chave que sempre teve, então nenhum
+// pedido de hortifruti já enviado muda de lugar.
+window.gnPedidoRegiaoHortifruti = function (regiao) {
+  return regiao === 'SP' ? 'HORTIFRUTI_SP' : 'HORTIFRUTI';
+};
+
 // Feriados locais de UMA loja no ano — é o que a loja (e só ela) precisa ver.
 window.gnFeriadosLocais = function (chaveLoja, ano) {
   const loja = window.gnLojaPorChave(chaveLoja);
