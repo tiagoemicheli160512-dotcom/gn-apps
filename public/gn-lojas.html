@@ -4707,6 +4707,10 @@ async function _cadastrarItemNoCatalogo(item) {
       custo: Number(item.custo) || 0,
       und_por_caixa: item.und_por_caixa || null,
       ativo: true,
+      // Nasce na região de quem criou: item inventado pela loja de SP não deve aparecer
+      // no pedido do Rio (e vice-versa). Se o item passar a valer nas duas, o Compras
+      // duplica pela tela de Catálogo, que é onde essa decisão cabe.
+      regiao: _regiaoDaLoja(),
     };
     // item_id é numérico, obrigatório e único — pega o próximo livre. Se duas lojas
     // criarem um item no mesmo instante, o insert falha por duplicidade e a tentativa
@@ -5070,7 +5074,14 @@ async function _carregarCatalogo() {
     let offset = 0;
     const pageSize = 1000;
     while (true) {
-      const page = await sbRequest('gn_catalogo?select=id,item_id,produto&order=id&limit=' + pageSize + '&offset=' + offset, { method: 'GET' });
+      // Filtrado pela região da loja: o mesmo produto existe nas duas regiões com o MESMO
+      // nome e uuid diferente, então sem isto o mapa por nome (usado como fallback em
+      // _resolverCatalogoId) ficaria com o uuid de quem viesse por último na ordenação —
+      // uma loja de SP podia acabar lançando o pedido no item do RJ. O mapa por item_id
+      // não tem esse problema (item_id é único entre regiões), mas filtrar os dois mantém
+      // os dois caminhos concordando.
+      const page = await sbRequest('gn_catalogo?regiao=eq.' + _regiaoDaLoja()
+        + '&select=id,item_id,produto&order=id&limit=' + pageSize + '&offset=' + offset, { method: 'GET' });
       rows.push(...(page || []));
       if (!page || page.length < pageSize) break;
       offset += pageSize;
@@ -5093,6 +5104,14 @@ async function _carregarCatalogo() {
   return _catalogoMap;
 }
 
+// Região de compra da loja logada (ver gnRegiaoLoja em gn-lojas-config.js). Itaquera e
+// Guarulhos compram em SP, com preço e fornecedor próprios; todo o resto é RJ. TODA leitura
+// de gn_catalogo nesta tela tem que passar por aqui — sem o filtro, a loja do Rio abriria o
+// pedido vendo o catálogo das duas regiões somado, com o item repetido.
+function _regiaoDaLoja() {
+  return (window.gnRegiaoLoja ? window.gnRegiaoLoja(loja) : null) || 'RJ';
+}
+
 // Fonte única de verdade pra itens/preços do Pedido: o Catálogo do app Estoque e Pedidos
 // (gn_catalogo). Substitui a lista estática PRODUTOS_PEDIDO pelos itens ativos do catálogo
 // sempre que o app abre, pra evitar desalinhamento quando o catálogo é atualizado lá.
@@ -5101,7 +5120,8 @@ async function _carregarCatalogo() {
 async function _sincronizarProdutosPedidoComCatalogo() {
   try {
     const rows = await sbRequest(
-      'gn_catalogo?ativo=eq.true&grupo=neq.HORTIFRUTI&select=item_id,fornecedor,grupo,subgrupo,produto,und,custo,und_por_caixa&order=grupo,fornecedor,produto',
+      'gn_catalogo?ativo=eq.true&grupo=neq.HORTIFRUTI&regiao=eq.' + _regiaoDaLoja()
+        + '&select=item_id,fornecedor,grupo,subgrupo,produto,und,custo,und_por_caixa&order=grupo,fornecedor,produto',
       { method: 'GET' }
     );
     const atualizados = (rows || [])
@@ -5155,7 +5175,8 @@ async function carregarHortifruti() {
   try {
     const hoje = wkKey(new Date());
     const [catalogo, liberacoes, bloqueio] = await Promise.all([
-      sbRequest('gn_catalogo?grupo=eq.HORTIFRUTI&ativo=eq.true&select=id,fornecedor,subgrupo,produto,und,custo&order=subgrupo,produto', { method: 'GET' }),
+      sbRequest('gn_catalogo?grupo=eq.HORTIFRUTI&ativo=eq.true&regiao=eq.' + _regiaoDaLoja()
+        + '&select=id,fornecedor,subgrupo,produto,und,custo&order=subgrupo,produto', { method: 'GET' }),
       sbRequest('gn_hortifruti_liberacoes?data=eq.' + hoje + '&select=data', { method: 'GET' }),
       sbRequest('gn_hortifruti_bloqueio?id=eq.GERAL&select=bloqueado,motivo', { method: 'GET' }),
     ]);

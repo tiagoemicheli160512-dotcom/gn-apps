@@ -7,21 +7,21 @@
 // gnFeriadosLocais abaixo). Pedreira fica em Nova Iguaçu, na Baixada — não no município
 // do Rio, apesar de existir um bairro Pedreira na cidade do Rio (confirmado com o usuário).
 window.GN_LOJAS = [
-  { display:'Bangu',          userKey:'BANGU',         chkKey:'Bangu',          comKey:'BANGU',        lojaSlug:'bangu',          trioSlug:'bangu',        cor:'#b81a1a', municipio:'RIO' },
-  { display:'Caxias',         userKey:'CAXIAS',        chkKey:'Caxias',         comKey:'CAXIAS',       lojaSlug:'caxias',         trioSlug:'caxias',       cor:'#1a6bbd', municipio:'DUQUE_DE_CAXIAS' },
-  { display:'São Gonçalo',    userKey:'SÃO GONÇALO',   chkKey:'São Gonçalo',    comKey:'SAO_GONCALO',  lojaSlug:'sao_goncalo',    trioSlug:'sao_goncalo',  cor:'#8B1A8B', municipio:'SAO_GONCALO' },
-  { display:'Norte Shopping', userKey:'NORTE SHOPPING',chkKey:'Norte Shopping', comKey:'NORTE',        lojaSlug:'norte_shopping', trioSlug:'norte_shopping', cor:'#1a7a4a', municipio:'RIO' },
-  { display:'Boulevard',      userKey:'BOULEVARD',     chkKey:'Boulevard',      comKey:'BOULEVARD',    lojaSlug:'boulevard',      trioSlug:'boulevard',    cor:'#b85a00', municipio:'RIO' },
-  { display:'Nova Iguaçu',    userKey:'RANCHO',        chkKey:'Rancho',         comKey:'RANCHO',       lojaSlug:'nova_iguacu',    trioSlug:'nova_iguacu',  cor:'#0e7490', municipio:'NOVA_IGUACU' },
-  { display:'Pedreira',       userKey:'PEDREIRA',      chkKey:'Pedreira',       comKey:'PEDREIRA',     lojaSlug:'pedreira',       trioSlug:'pedreira',     cor:'#7c3aed', municipio:'NOVA_IGUACU' },
-  { display:'Nova América',   userKey:'NOVA AMERICA',  chkKey:'Nova América',   comKey:'NOVA_AMERICA', lojaSlug:'nova_america',   trioSlug:'nova_america', cor:'#b45309', municipio:'RIO' },
-  { display:'Campo Grande',   userKey:'CAMPO GRANDE',  chkKey:'Campo Grande',   comKey:'CAMPO_GRANDE', lojaSlug:'campo_grande',   trioSlug:'campo_grande', cor:'#065f46', municipio:'RIO' },
-  { display:'Itaquera',       userKey:'ITAQUERA',      chkKey:'Itaquera',       comKey:'ITAQUERA',     lojaSlug:'itaquera',       trioSlug:'itaquera',     cor:'#be123c', municipio:'SAO_PAULO' },
-  { display:'Guarulhos',      userKey:'GUARULHOS',     chkKey:'Guarulhos',      comKey:'GUARULHOS',    lojaSlug:'guarulhos',      trioSlug:'guarulhos',    cor:'#1e40af', municipio:'GUARULHOS' },
+  { display:'Bangu',          userKey:'BANGU',         chkKey:'Bangu',          comKey:'BANGU',        lojaSlug:'bangu',          trioSlug:'bangu',        cor:'#b81a1a', regiao:'RJ', municipio:'RIO' },
+  { display:'Caxias',         userKey:'CAXIAS',        chkKey:'Caxias',         comKey:'CAXIAS',       lojaSlug:'caxias',         trioSlug:'caxias',       cor:'#1a6bbd', regiao:'RJ', municipio:'DUQUE_DE_CAXIAS' },
+  { display:'São Gonçalo',    userKey:'SÃO GONÇALO',   chkKey:'São Gonçalo',    comKey:'SAO_GONCALO',  lojaSlug:'sao_goncalo',    trioSlug:'sao_goncalo',  cor:'#8B1A8B', regiao:'RJ', municipio:'SAO_GONCALO' },
+  { display:'Norte Shopping', userKey:'NORTE SHOPPING',chkKey:'Norte Shopping', comKey:'NORTE',        lojaSlug:'norte_shopping', trioSlug:'norte_shopping', cor:'#1a7a4a', regiao:'RJ', municipio:'RIO' },
+  { display:'Boulevard',      userKey:'BOULEVARD',     chkKey:'Boulevard',      comKey:'BOULEVARD',    lojaSlug:'boulevard',      trioSlug:'boulevard',    cor:'#b85a00', regiao:'RJ', municipio:'RIO' },
+  { display:'Nova Iguaçu',    userKey:'RANCHO',        chkKey:'Rancho',         comKey:'RANCHO',       lojaSlug:'nova_iguacu',    trioSlug:'nova_iguacu',  cor:'#0e7490', regiao:'RJ', municipio:'NOVA_IGUACU' },
+  { display:'Pedreira',       userKey:'PEDREIRA',      chkKey:'Pedreira',       comKey:'PEDREIRA',     lojaSlug:'pedreira',       trioSlug:'pedreira',     cor:'#7c3aed', regiao:'RJ', municipio:'NOVA_IGUACU' },
+  { display:'Nova América',   userKey:'NOVA AMERICA',  chkKey:'Nova América',   comKey:'NOVA_AMERICA', lojaSlug:'nova_america',   trioSlug:'nova_america', cor:'#b45309', regiao:'RJ', municipio:'RIO' },
+  { display:'Campo Grande',   userKey:'CAMPO GRANDE',  chkKey:'Campo Grande',   comKey:'CAMPO_GRANDE', lojaSlug:'campo_grande',   trioSlug:'campo_grande', cor:'#065f46', regiao:'RJ', municipio:'RIO' },
+  { display:'Itaquera',       userKey:'ITAQUERA',      chkKey:'Itaquera',       comKey:'ITAQUERA',     lojaSlug:'itaquera',       trioSlug:'itaquera',     cor:'#be123c', regiao:'SP', municipio:'SAO_PAULO' },
+  { display:'Guarulhos',      userKey:'GUARULHOS',     chkKey:'Guarulhos',      comKey:'GUARULHOS',    lojaSlug:'guarulhos',      trioSlug:'guarulhos',    cor:'#1e40af', regiao:'SP', municipio:'GUARULHOS' },
   // Operação independente (cardápio e gorjetas próprios), gerida pelo grupo — mesmo
   // controle das demais lojas. Sem município: feriado local é assunto que ainda não foi
   // combinado pra ela (regra do CLAUDE.md — Maglia só entra quando for citada).
-  { display:'Maglia',         userKey:'MAGLIA',        chkKey:'Maglia',         comKey:'MAGLIA',       lojaSlug:'maglia',         trioSlug:'maglia',       cor:'#059669', municipio:null },
+  { display:'Maglia',         userKey:'MAGLIA',        chkKey:'Maglia',         comKey:'MAGLIA',       lojaSlug:'maglia',         trioSlug:'maglia',       cor:'#059669', regiao:'RJ', municipio:null },
 ];
 
 // ── Feriados locais (estaduais e municipais) ───────────────────────────────
@@ -61,6 +61,22 @@ window.gnLojaPorChave = function (chave) {
   return (window.GN_LOJAS || []).find(l =>
     l.userKey === k || l.chkKey === k || l.comKey === k || l.lojaSlug === k || l.display === k) || null;
 };
+
+// ── Região de compra (RJ / SP) ─────────────────────────────────────────────
+// Itaquera e Guarulhos compram em São Paulo: preço e fornecedor do mesmo item são outros.
+// Por isso o catálogo do app Estoque e Pedido é separado por região (gn_catalogo.regiao),
+// e o pedido de cada região é um pedido próprio (gn_pedidos.regiao) — assim o de SP nunca
+// gera provisão com preço do RJ, nem aparece junto no confirmar.
+// Espelha gn_lojas_pedido.regiao, que já marca essas duas como SP. Tudo que não for uma
+// dessas duas é RJ, inclusive o Mandacaru (destino interno, nem está em GN_LOJAS) e a
+// Maglia — quem não está no mapa cai no padrão em vez de ficar sem região.
+window.GN_REGIOES = ['RJ', 'SP'];
+window.GN_REGIAO_PADRAO = 'RJ';
+window.gnRegiaoLoja = function (chave) {
+  const loja = window.gnLojaPorChave(chave);
+  return (loja && loja.regiao) || window.GN_REGIAO_PADRAO;
+};
+window.gnRegiaoLabel = function (r) { return r === 'SP' ? 'São Paulo' : 'Rio de Janeiro'; };
 
 // Feriados locais de UMA loja no ano — é o que a loja (e só ela) precisa ver.
 window.gnFeriadosLocais = function (chaveLoja, ano) {
