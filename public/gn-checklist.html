@@ -5649,7 +5649,22 @@ function autoSave(){
   localStorage.setItem(getLocalKeyWeek(), JSON.stringify(stateWeek));
 }
 
+// O `max` do input segura o clique no calendário, mas não segura data digitada, data vinda
+// de link/histórico, nem navegador que ignora o atributo. Esta é a trava de verdade: o
+// check-list é do dia que já aconteceu, nunca de um que ainda vai chegar.
+function _dataValidaChecklist(val){
+  return !!val && /^\d{4}-\d{2}-\d{2}$/.test(val) && val <= hojeLocal();
+}
+
 async function onDataChange(val){
+  if(!_dataValidaChecklist(val)){
+    const hoje = hojeLocal();
+    showToast('📅 Não dá pra abrir o check-list de um dia que ainda não chegou — voltei pra hoje.','error');
+    const inp = document.getElementById('data-dia-atual');
+    if(inp){ inp.max = hoje; inp.value = hoje; }
+    if(state.data === hoje) return;   // já estamos em hoje: nada a recarregar
+    val = hoje;
+  }
   // Salva o dia que está saindo ANTES de zerar state — sem isso, um toggle de checklist ou
   // uma falta lançada há poucos segundos (que só tinha ido pro autoSave/localStorage, não
   // pro servidor) era apagada da memória aqui embaixo e nunca mais salva: a próxima consulta
@@ -8088,9 +8103,13 @@ function updateBadge(stateKey, setor){
   const map=getMap(stateKey);
   const data=(state[stateKey]||{})[setor]||{};
   const total=map[setor].items.length;
-  const done=Object.values(data).filter(v=>v&&v.checked).length;
+  const done=Object.values(data).filter(v=>v&&(v.checked||v.naoConforme)).length;
   const badge=document.getElementById(`badge-${stateKey}_${setor}`);
   if(!badge) return {done,total};
+  // O número era escrito uma vez só, no render, como "0/N" — updateBadge trocava a cor e
+  // nunca o texto. Marcar os itens deixava o contador parado em 0/3 e a loja lia isso como
+  // "não salvou" (foi o que o print da aba Abertura mostrou, com os 3 itens marcados).
+  badge.textContent=`${done}/${total}`;
   badge.className='setor-badge';
   if(done===total&&total>0) badge.classList.add('badge-ok');
   else if(done>0)           badge.classList.add('badge-warn');
@@ -8109,7 +8128,7 @@ function updateAberturaCount(){
   let d=0,t=0;
   Object.keys(SETORES_ABERTURA).forEach(s=>{
     t+=SETORES_ABERTURA[s].items.length;
-    d+=Object.values((state.abertura[s]||{})).filter(v=>v&&v.checked).length;
+    d+=Object.values((state.abertura[s]||{})).filter(v=>v&&(v.checked||v.naoConforme)).length;
   });
   const el=document.getElementById('abertura-count');
   if(el) el.textContent=`${d}/${t} itens`;
@@ -8119,7 +8138,7 @@ function updateFechamentoCount(){
   let d=0,t=0;
   Object.keys(SETORES_FECHAMENTO).forEach(s=>{
     t+=SETORES_FECHAMENTO[s].items.length;
-    d+=Object.values((state.fechamento[s]||{})).filter(v=>v&&v.checked).length;
+    d+=Object.values((state.fechamento[s]||{})).filter(v=>v&&(v.checked||v.naoConforme)).length;
   });
   const el=document.getElementById('fechamento-count');
   if(el) el.textContent=`${d}/${t} itens`;
@@ -8129,7 +8148,7 @@ function updateChecklistCount(){
   let d=0,t=0;
   Object.keys(SETORES_CHECKLIST).forEach(s=>{
     t+=SETORES_CHECKLIST[s].items.length;
-    d+=Object.values((state.checklist[s]||{})).filter(v=>v&&v.checked).length;
+    d+=Object.values((state.checklist[s]||{})).filter(v=>v&&(v.checked||v.naoConforme)).length;
   });
   const el=document.getElementById('checklist-count');
   if(el) el.textContent=`${d}/${t} itens`;
@@ -8148,7 +8167,7 @@ function calcChecklistPct(){
   groups.forEach(g=>{
     Object.keys(g.map).forEach(s=>{
       totalAll+=g.map[s].items.length;
-      doneAll+=Object.values((state[g.key][s]||{})).filter(v=>v&&v.checked).length;
+      doneAll+=Object.values((state[g.key][s]||{})).filter(v=>v&&(v.checked||v.naoConforme)).length;
     });
   });
   return totalAll>0?Math.round((doneAll/totalAll)*100):0;
@@ -8179,7 +8198,7 @@ function _faltaHojeGruposDeCheck(){
     let done=0, total=0;
     Object.keys(g.map).forEach(s=>{
       total += g.map[s].items.length;
-      done  += Object.values(state[g.key][s]||{}).filter(v=>v&&v.checked).length;
+      done  += Object.values(state[g.key][s]||{}).filter(v=>v&&(v.checked||v.naoConforme)).length;
     });
     if(total===0 || done>=total) return;
     out.push({ icon:g.icon, label:g.label,
@@ -8317,7 +8336,7 @@ function _resumoDoDia(){
     let done=0,total=0;
     Object.keys(g.map).forEach(sec=>{
       total += g.map[sec].items.length;
-      done  += Object.values(state[g.key][sec]||{}).filter(v=>v&&v.checked).length;
+      done  += Object.values(state[g.key][sec]||{}).filter(v=>v&&(v.checked||v.naoConforme)).length;
     });
     const iso = state.concluidoEm[g.key];
     const hora = iso ? _horaDoISO(iso) : '';
@@ -8394,7 +8413,7 @@ function updateSummary(){
     let done=0,total=0;
     Object.keys(g.map).forEach(s=>{
       total+=g.map[s].items.length;
-      done+=Object.values((state[g.key][s]||{})).filter(v=>v&&v.checked).length;
+      done+=Object.values((state[g.key][s]||{})).filter(v=>v&&(v.checked||v.naoConforme)).length;
     });
     doneAll+=done; totalAll+=total;
     const pct=total>0?(done/total)*100:0;
@@ -9299,7 +9318,10 @@ function renderAll(){
 
 function restoreUI(){
   const elData = document.getElementById('data-dia-atual');
-  if(elData) elData.value = state.data || '';
+  // Teto no dia de hoje: o seletor não tinha limite, e bastava esbarrar nele pra ir parar
+  // numa data futura — a partir dali TUDO que a loja marcasse seria gravado no dia errado.
+  // Foi assim que apareceu uma linha de 27/09 na Bangu, criada em 26/09 (ver _dataValida).
+  if(elData){ elData.max = hojeLocal(); elData.value = state.data || ''; }
   document.getElementById('venda-salao').value=state.vendaSalao||'';
   document.getElementById('venda-delivery').value=state.vendaDelivery||'';
   document.getElementById('repique-valor').value=state.repique||'';
@@ -9592,18 +9614,26 @@ function buildRelatorio(tipo){
   return '';
 }
 
+// No relatório, ao contrário dos contadores da tela, "não conforme" NÃO entra junto com
+// "conforme": quem lê precisa ver o que está errado, não um ✅ que esconde o problema. O
+// item avaliado e reprovado aparece contado à parte e listado com ✖.
 function buildCheckSection(stateKey, map, titulo){
   let txt=titulo?titulo+'\n':'';
   Object.keys(map).forEach(setor=>{
     const info=map[setor];
     const data=(state[stateKey]||{})[setor]||{};
-    const done=Object.values(data).filter(v=>v&&v.checked).length;
+    const vals=Object.values(data).filter(v=>v&&typeof v==='object');
+    const done=vals.filter(v=>v.checked).length;
+    const naoConf=vals.filter(v=>v.naoConforme).length;
     const total=info.items.length;
-    const e=done===total?'✅':done>0?'⚠️':'❌';
-    txt+=`${e} ${info.label}: ${done}/${total}\n`;
+    const e=naoConf?'✖':done===total?'✅':done>0?'⚠️':'❌';
+    txt+=`${e} ${info.label}: ${done}/${total}${naoConf?` (${naoConf} não conforme)`:''}\n`;
     Object.keys(data).forEach(i=>{
       const item=data[i];
-      if(item&&item.problema) txt+=`   ↳ ⚠️ ${map[setor].items[i]}: ${item.problema}\n`;
+      if(!item||typeof item!=='object') return;
+      const nome=map[setor].items[i];
+      if(item.naoConforme) txt+=`   ↳ ✖ ${nome}: ${item.problema||'não conforme'}\n`;
+      else if(item.problema) txt+=`   ↳ ⚠️ ${nome}: ${item.problema}\n`;
     });
   });
   return txt+'\n';
