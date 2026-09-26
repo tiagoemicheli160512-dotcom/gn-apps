@@ -4163,6 +4163,25 @@ function _bhCicloLabel(ym, diaCiclo){
   return `${String(diaCiclo).padStart(2,'0')}/${String(mesIni).padStart(2,'0')} → ${String(diaFim).padStart(2,'0')}/${String(m).padStart(2,'0')}/${String(y).slice(2)}`;
 }
 
+// O último dia do período mensal da coluna `ym`. A coluna é o mês em que o período TERMINA,
+// então pra ciclo no dia 26 o período de Set/26 acaba em 25/09. Ciclo no dia 1 é o mês
+// inteiro. Dia que não existe no mês (31 em fevereiro) cai no último dia dele.
+function _bhFimDoMesCiclo(ym, diaCiclo){
+  const [y, m] = ym.split('-').map(Number);
+  const ultimo = new Date(y, m, 0, 12, 0, 0).getDate();
+  const dia = (!diaCiclo || diaCiclo <= 1) ? ultimo : Math.min(diaCiclo - 1, ultimo);
+  return y+'-'+String(m).padStart(2,'0')+'-'+String(dia).padStart(2,'0');
+}
+function _bhProximoYM(ym){
+  const [y, m] = ym.split('-').map(Number);
+  return m === 12 ? (y+1)+'-01' : y+'-'+String(m+1).padStart(2,'0');
+}
+function _bhSomaDias(iso, n){
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(y, m - 1, d + n, 12, 0, 0);
+  return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
+}
+
 function _bhMesLabel(ym){
   const [y,m] = ym.split('-');
   const meses = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
@@ -12969,11 +12988,13 @@ const CARNE_HARD_1DIA_DESDE = '2026-09-26';
 // primeiro dia — exatamente a retroatividade que o resto da feature sempre evitou.
 const BANDA_HARD_TRAVA_DESDE = '2026-09-07';
 const ESCALA_HARD_TRAVA_DESDE = '2026-09-07';
-// Formato YYYY-MM — primeiro mês cujo lançamento passa a ser obrigatório (o mês do deploy
-// em si fica de fora, já que só começou a valer no meio dele). Ex.: deploy em 06/09/2026 →
-// setembro fica de fora, outubro é o primeiro mês cobrado — só checado a partir de 1º de
-// novembro/2026 (dia 1 do mês seguinte a outubro), nunca antes disso.
-const BANCO_HORAS_TRAVA_DESDE_MES = '2026-10';
+// Formato YYYY-MM — primeiro mês cujo lançamento é cobrado. Set/26 é o mês que fechou o ciclo
+// de 6 meses em 25/09 e é o que interessa agora: o período dele encerrou, as horas já estão
+// contadas e é esse lançamento que fecha as contas do ciclo. Mês nenhum antes dele é cobrado,
+// nem pra loja que deixou de lançar (a Norte Shopping nunca lançou Jul e Ago/26) — mesma
+// regra de não-retroatividade do resto da feature; se esses meses tiverem que ser cobrados,
+// é decisão de mudar este corte, não do código.
+const BANCO_HORAS_TRAVA_DESDE_MES = '2026-09';
 const SALARIO_MIN_SETORES = 5;
 // Prazo do próprio dia pros check-lists de abertura e operacional — as lojas simplesmente
 // não estavam fazendo. Mesma forma da trava de carne: passou da hora sem o check-list
@@ -13247,45 +13268,74 @@ async function _checarEscalaPendenteOntem() {
   };
 }
 
+// A cobrança segue o PERÍODO MENSAL DO CICLO da loja, não o calendário. Pra ciclo no dia 26,
+// o mês Set/26 é o período 26/08 → 25/09: fecha em 25/09, e a partir de 26/09 o lançamento
+// está devendo. Antes o check só ligava no dia 1 do mês seguinte, o que dava quase uma semana
+// de folga sem motivo — e pra loja de ciclo no dia 26 cobrava o mês errado.
+//
+// Mês a mês, e sempre o mais ANTIGO em aberto primeiro: resolver um libera o próximo, então
+// cada rodada do formulário inline é pequena em vez de pedir três meses de uma vez.
 async function _checarBancoHorasPendente() {
   if (LOJA === 'Maglia') return null;
   if (!_temAcessoAbaChecklist('banco')) return null;
-  const hoje = new Date();
-  // Liga a partir do dia 1 do mês (cobrando o mês anterior) e continua aparecendo em
-  // qualquer dia até alguém completar — antes só checava no dia 1 (não escalava). O corte
-  // BANCO_HORAS_TRAVA_DESDE_MES já dá mais de um mês de folga antes desse check começar a
-  // valer de verdade (confirmado no banco: nenhuma loja tem gap pendente pro mês de corte
-  // hoje), então "hard" não precisa de um corte próprio como Carnes/Banda/Escala.
-  const mesAnteriorDate = new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1);
-  const mesAnterior = mesAnteriorDate.getFullYear() + '-' + String(mesAnteriorDate.getMonth() + 1).padStart(2, '0');
-  if (BANCO_HORAS_TRAVA_DESDE_MES > mesAnterior) return null; // sem retroatividade
-  const idxHoje = comissoesSemIdx(hojeLocal());
-  let funcs = [], registros = [];
+  const hojeISO = hojeLocal();
+  const idxHoje = comissoesSemIdx(hojeISO);
+  let funcs = [], porMes = {}, cfg = null;
   try {
+    // Uma consulta só traz o CONFIG (pra saber o dia do ciclo) e todos os meses lançados.
     const [allData, bh] = await Promise.all([
       idxHoje != null ? fetchComissoesAllData(comissoesLojaKey()) : Promise.resolve(null),
-      sb.from('gn_banco_horas').select('registros').eq('loja', LOJA).eq('mes', mesAnterior).maybeSingle(),
+      sb.from('gn_banco_horas').select('mes,registros').eq('loja', LOJA),
     ]);
     if (allData && idxHoje != null) funcs = getComissoesWD(allData, idxHoje).funcs || [];
-    registros = (bh.data && bh.data.registros) || [];
+    if (bh.error) return null;
+    (bh.data || []).forEach(r => {
+      if (r.mes === 'CONFIG') cfg = r.registros || null;
+      else porMes[r.mes] = Array.isArray(r.registros) ? r.registros : [];
+    });
   } catch (e) { return null; }
+  // Sem ciclo cadastrado não há período pra cobrar — a exigência de cadastrar o ciclo é outra
+  // pendência (Salário/CONFIG), não esta.
+  if (!cfg || !cfg.periodo_inicio) return null;
   const nomes = new Map();
   funcs.forEach(f => { if (f.nome && f.nome.trim() && !f.arquivado) nomes.set(_bhNormNome(f.nome), f.nome.trim()); });
   if (!nomes.size) return null;
-  const faltando = [...nomes.values()].filter(nome => !_bhFindReg(registros, nome));
-  if (!faltando.length) return null;
-  // "hard": o dia 1 é quando a pendência aparece pela 1ª vez (soft); a partir do dia 2 sem
-  // ninguém completar já ficou aberta desde ontem — mesmo critério "1 dia sem resolver"
-  // das outras pendências.
-  const hard = hoje.getDate() >= 2;
+
+  const diaCiclo = _bhCicloDia(cfg.periodo_inicio) || 1;
+  // Nunca cobra mês anterior ao corte global nem anterior ao 1º mês do ciclo DA LOJA — a
+  // Norte Shopping e a Pedreira começaram em 26/06, não têm nada a lançar antes de Jul/26.
+  const primeiroDaLoja = _bhMesesDoCiclo(cfg.periodo_inicio, _bhFimDoCiclo(cfg.periodo_inicio))[0] || '';
+  let ym = primeiroDaLoja > BANCO_HORAS_TRAVA_DESDE_MES ? primeiroDaLoja : BANCO_HORAS_TRAVA_DESDE_MES;
+  const emAberto = [];
+  for (let guard = 0; guard < 60; guard++) {
+    const fimPeriodo = _bhFimDoMesCiclo(ym, diaCiclo);
+    if (fimPeriodo >= hojeISO) break;   // período ainda não fechou — no último dia ainda dá pra lançar
+    const faltando = [...nomes.values()].filter(nome => !_bhFindReg(porMes[ym], nome));
+    if (faltando.length) emAberto.push({ ym, fimPeriodo, faltando });
+    ym = _bhProximoYM(ym);
+  }
+  if (!emAberto.length) return null;
+
+  const alvo = emAberto[0];
+  // Fechou o período → no dia seguinte a pendência aparece (leve); do outro dia em diante já
+  // ficou um dia inteiro sem ninguém lançar, e escala pro bloqueio total. Mesmo critério de
+  // "1 dia sem resolver" que Carnes, Banda, Escala e Nota Fiscal usam.
+  const hard = hojeISO > _bhSomaDias(alvo.fimPeriodo, 1);
+  const outros = emAberto.length - 1;
+  const br = s => s.split('-').reverse().join('/');
   return {
     chave: 'banco',
-    titulo: '⏱ Banco de Horas do mês anterior pendente',
-    mensagem: 'Falta lançar o banco de horas de ' + _bhMesLabel(mesAnterior) + ' pra: ' + faltando.join(', ') + '.',
+    titulo: '⏱ Banco de Horas de ' + _bhMesLabel(alvo.ym) + ' pendente',
+    mensagem: 'O período ' + _bhMesLabel(alvo.ym) + ' fechou em ' + br(alvo.fimPeriodo)
+      + ' e falta lançar o banco de horas pra: ' + alvo.faltando.join(', ') + '.'
+      + (outros ? ' Depois deste, ainda ' + (outros === 1 ? 'há 1 mês' : 'há ' + outros + ' meses')
+                  + ' em aberto: ' + emAberto.slice(1).map(x => _bhMesLabel(x.ym)).join(', ') + '.' : ''),
     tabAlvo: 'banco',
     hard,
-    mesAnterior,
-    faltandoNomes: faltando,
+    mes: alvo.ym,
+    fimPeriodo: alvo.fimPeriodo,
+    mesesEmAberto: emAberto.map(x => x.ym),
+    faltandoNomes: alvo.faltando,
   };
 }
 
@@ -13841,7 +13891,7 @@ async function _salvarInlineHardEscala(diaIdx) {
 // seletor CSS — a lista de nomes fica guardada em _bancoHardFaltandoNomes/_bancoHardMes
 // (escopo de módulo) entre o render e o salvar, igual ao padrão já usado pela Escala.
 let _bancoHardFaltandoNomes = [];
-let _bancoHardMesAnterior = null;
+let _bancoHardMes = null;
 async function _renderInlineHardBanco(containerId, p) {
   const elLoading = document.getElementById(containerId);
   if (!elLoading) return;
@@ -13850,7 +13900,7 @@ async function _renderInlineHardBanco(containerId, p) {
   const el = document.getElementById(containerId);
   if (!el) return;
   _bancoHardFaltandoNomes = p.faltandoNomes;
-  _bancoHardMesAnterior = p.mesAnterior;
+  _bancoHardMes = p.mes;
   const linhas = p.faltandoNomes.map((nome, i) => `
     <div style="margin-bottom:8px">
       <div style="font-size:11px;font-weight:700;color:#1A1D23;margin-bottom:4px">${_esc(nome)}</div>
@@ -13878,7 +13928,7 @@ async function _salvarInlineHardBanco() {
   // Sequencial (não Promise.all) — cada _salvarBancoHorasFunc lê e regrava
   // _bhRegistros[mes] inteiro; em paralelo, uma gravação sobrescreveria a outra.
   for (const { nome, horas, obs } of pares) {
-    await _salvarBancoHorasFunc(nome, _bancoHardMesAnterior, horas, obs);
+    await _salvarBancoHorasFunc(nome, _bancoHardMes, horas, obs);
   }
   _bhAtualizarBadge();
   const tabEl = document.getElementById('tab-banco');

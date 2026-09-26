@@ -1559,7 +1559,9 @@ const NOTA_TRAVA_DESDE_HOME = '2026-09-06';
 const CARNE_TRAVA_DESDE_HOME = '2026-09-06';
 const BANDA_TRAVA_DESDE_HOME = '2026-09-06';
 const ESCALA_TRAVA_DESDE_HOME = '2026-09-06';
-const BANCO_HORAS_TRAVA_DESDE_MES_HOME = '2026-10';
+// Espelho de BANCO_HORAS_TRAVA_DESDE_MES: Set/26 é o primeiro mês cobrado (o período dele
+// fechou em 25/09, junto com o ciclo de 6 meses).
+const BANCO_HORAS_TRAVA_DESDE_MES_HOME = '2026-09';
 const SALARIO_MIN_SETORES_HOME = 5;
 const LOJA_SLUG_HOME = Object.fromEntries(GN_LOJAS.map(l=>[l.userKey,l.lojaSlug]));
 const SLUG_TO_LOJA_HOME = Object.fromEntries(GN_LOJAS.map(l=>[l.lojaSlug,l.userKey]));
@@ -1580,13 +1582,49 @@ function _bhFindRegHome(arr, nome){
   const key = _bhNormNomeHome(nome);
   return (arr||[]).find(x => _bhNormNomeHome(x.nome) === key);
 }
+// Espelho dos helpers de período mensal do gn-checklist.html (_bhFimDoMesCiclo/_bhProximoYM e
+// o 1º mês do ciclo). A coluna de um mês é o mês em que o período TERMINA: pra ciclo no dia 26,
+// Set/26 é 26/08 → 25/09.
+function _gnBhFimDoMesCiclo(ym, diaCiclo){
+  const [y, m] = ym.split('-').map(Number);
+  const ultimo = new Date(y, m, 0, 12, 0, 0).getDate();
+  const dia = (!diaCiclo || diaCiclo <= 1) ? ultimo : Math.min(diaCiclo - 1, ultimo);
+  return y+'-'+String(m).padStart(2,'0')+'-'+String(dia).padStart(2,'0');
+}
+function _gnBhProximoYM(ym){
+  const [y, m] = ym.split('-').map(Number);
+  return m === 12 ? (y+1)+'-01' : y+'-'+String(m+1).padStart(2,'0');
+}
+function _gnBhPrimeiroMesDoCiclo(ancora){
+  return _gnBhDiaAnterior(_gnBhSomaMeses(ancora, 1)).slice(0, 7);
+}
+const _GN_BH_MES_ABREV = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+function _gnBhMesLabel(ym){
+  const [y, m] = ym.split('-');
+  return _GN_BH_MES_ABREV[parseInt(m,10)-1]+'/'+y.slice(2);
+}
+// Mesma varredura do app: do corte (ou do 1º mês do ciclo da loja, o que for maior) até o
+// último período JÁ FECHADO, devolvendo o mês mais antigo que ainda tem gente sem lançamento.
+function _gnBhMesEmAberto(ancora, registrosPorMes, nomes, hojeISO){
+  if (!ancora) return null;
+  const diaCiclo = (() => { const p = ancora.split('-'); return p.length === 3 ? parseInt(p[2],10) : 1; })();
+  const primeiro = _gnBhPrimeiroMesDoCiclo(ancora);
+  let ym = primeiro > BANCO_HORAS_TRAVA_DESDE_MES_HOME ? primeiro : BANCO_HORAS_TRAVA_DESDE_MES_HOME;
+  for (let guard = 0; guard < 60; guard++) {
+    if (_gnBhFimDoMesCiclo(ym, diaCiclo) >= hojeISO) return null;   // ainda não fechou
+    const registros = registrosPorMes[ym] || [];
+    if (nomes.some(nome => !_bhFindRegHome(registros, nome))) return ym;
+    ym = _gnBhProximoYM(ym);
+  }
+  return null;
+}
 
 // Recebe todas as rows já buscadas em _loadDashAll (sem request extra além das 4
-// novas: provisoesRows, carnesRows, trioAgendaOntemRows, bhMesAnteriorRows) e devolve
+// novas: provisoesRows, carnesRows, trioAgendaOntemRows, bhMesesRows) e devolve
 // {lojaKey: [{chave,emoji,label}]} — mesma forma de _dashEscalaIncompleta/etc.
 function _computePendenciasEssenciais(ctx) {
   const { provisoesRows, lojasOfRows, carnesRows, trioAgendaOntemRows, comissoesAllRows,
-          bhPorLoja, bhMesAnteriorRows, hoje, ontemISO, segueBH, mesAnteriorStr } = ctx;
+          bhPorLoja, bhMesesRows, hoje, ontemISO } = ctx;
   const pend = {};
   const add = (userKey, chave, label) => {
     if (!userKey || userKey === 'MAGLIA' || !LOJAS_LISTA.includes(userKey)) return;
@@ -1688,13 +1726,19 @@ function _computePendenciasEssenciais(ctx) {
     }
   }
 
-  // 5) Banco de Horas — mesma lógica de _checarBancoHorasPendente: só liga no dia 1
-  // do mês (sem tolerância — decisão já validada), cobrando o mês anterior.
-  if (segueBH && BANCO_HORAS_TRAVA_DESDE_MES_HOME <= mesAnteriorStr) {
+  // 5) Banco de Horas — mesma lógica de _checarBancoHorasPendente: a cobrança segue o
+  // PERÍODO MENSAL DO CICLO da loja, não o calendário. Pra ciclo no dia 26, o mês Set/26
+  // fecha em 25/09 e está devendo a partir de 26/09 — antes isso só era checado no dia 1 do
+  // mês seguinte, o que dava quase uma semana de folga e cobrava o mês errado.
+  {
     const idxHoje = _escalaHomeSemIdx(hoje);
     if (idxHoje != null) {
-      const bhMesAnteriorPorLoja = {};
-      (bhMesAnteriorRows || []).forEach(r => { bhMesAnteriorPorLoja[r.loja] = r.registros || []; });
+      // {chkKey: {'YYYY-MM': registros}}
+      const bhPorLojaMes = {};
+      (bhMesesRows || []).forEach(r => {
+        if (!r.loja || r.mes === 'CONFIG') return;
+        (bhPorLojaMes[r.loja] = bhPorLojaMes[r.loja] || {})[r.mes] = Array.isArray(r.registros) ? r.registros : [];
+      });
       (comissoesAllRows || []).forEach(r => {
         const userKey = _COM_KEY_TO_LOJA[r.loja];
         if (!userKey || userKey === 'MAGLIA') return;
@@ -1703,9 +1747,10 @@ function _computePendenciasEssenciais(ctx) {
         funcs.forEach(f => { if (f.nome && f.nome.trim() && !f.arquivado) nomes.set(_bhNormNomeHome(f.nome), f.nome.trim()); });
         if (!nomes.size) return;
         const chkKey = LOJA_DB_KEY[userKey] || userKey;
-        const registros = bhMesAnteriorPorLoja[chkKey] || [];
-        const faltando = [...nomes.values()].some(nome => !_bhFindRegHome(registros, nome));
-        if (faltando) add(userKey, 'banco', 'Banco de Horas do mês anterior pendente');
+        const cfg = bhPorLoja[chkKey];
+        if (!cfg || !cfg.periodo_inicio) return;   // sem ciclo cadastrado é outra pendência
+        const emAberto = _gnBhMesEmAberto(cfg.periodo_inicio, bhPorLojaMes[chkKey] || {}, [...nomes.values()], hoje);
+        if (emAberto) add(userKey, 'banco', 'Banco de Horas de '+_gnBhMesLabel(emAberto)+' pendente');
       });
     }
   }
@@ -5392,9 +5437,7 @@ async function _loadDashAll() {
   const ontemISO = (d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'))(ontemDate);
   const segundaOntemISO = _segundaFeiraISOHome(ontemDate);
   const hojeDate = new Date();
-  const segueBH = hojeDate.getDate() === 1;
-  const mesAnteriorDate = new Date(hojeDate.getFullYear(), hojeDate.getMonth()-1, 1);
-  const mesAnteriorStr = mesAnteriorDate.getFullYear()+'-'+String(mesAnteriorDate.getMonth()+1).padStart(2,'0');
+  const mesCorrenteStr = hojeDate.getFullYear()+'-'+String(hojeDate.getMonth()+1).padStart(2,'0');
   try {
     const weekRange = _weekRange(_dashPer==='sem' ? _dashWoff : 0);
     const trinta = new Date(); trinta.setDate(trinta.getDate()-30);
@@ -5403,7 +5446,7 @@ async function _loadDashAll() {
     const comKeysAll = Object.values(LOJA_COM_KEY).join(',');
     const catorze = new Date(); catorze.setDate(catorze.getDate()-14);
     const from14 = catorze.toISOString().slice(0,10);
-    const [fatCur, fatPrv, fatPrvComp, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows, comissoesAllRows, bhConfigRows, caixaFechadosRows, alertasUrgentesRows, visitasPassadasRows, provisoesRows, carnesRows, trioAgendaOntemRows, bhMesAnteriorRows, buffetRows] = await Promise.all([
+    const [fatCur, fatPrv, fatPrvComp, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows, comissoesAllRows, bhConfigRows, caixaFechadosRows, alertasUrgentesRows, visitasPassadasRows, provisoesRows, carnesRows, trioAgendaOntemRows, bhMesesRows, buffetRows] = await Promise.all([
       _fetchFat(range.dates).catch(e=>{ _errCb('fatCur')(e); return {}; }),
       _fetchFat(prevRange.dates).catch(e=>{ _errCb('fatPrv')(e); return {}; }),
       precisaCompSeparada ? _fetchFat(prevRangeCompDates).catch(e=>{ _errCb('fatPrvComp')(e); return {}; }) : Promise.resolve(null),
@@ -5430,9 +5473,11 @@ async function _loadDashAll() {
       BANDA_TRAVA_DESDE_HOME <= ontemISO
         ? window.gnFetchJson(`${SB_URL}/rest/v1/gn_trios_agenda?data=eq.${ontemISO}&select=loja,presenca_confirmada,banda_nao_veio,couver_valor,horario_inicio&order=loja.asc,horario_inicio.asc`, H, 'dash:trioAgendaOntemRows', [])
         : Promise.resolve([]),
-      segueBH
-        ? window.gnFetchJson(`${SB_URL}/rest/v1/gn_banco_horas?mes=eq.${mesAnteriorStr}&select=loja,registros`, H, 'dash:bhMesAnteriorRows', [])
-        : Promise.resolve([]),
+      // Todos os meses cobráveis (do corte até o mês corrente), porque a cobrança agora
+      // segue o período do ciclo e o mês em aberto pode não ser o mês anterior. O `lte` do
+      // mês corrente também mantém a linha CONFIG fora (o filtro é textual, e 'CONFIG' > o
+      // mês) — e o laço ignora CONFIG de novo, por segurança.
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_banco_horas?mes=gte.${BANCO_HORAS_TRAVA_DESDE_MES_HOME}&mes=lte.${mesCorrenteStr}&select=loja,mes,registros`, H, 'dash:bhMesesRows', []),
       // Buffet de feijoada e rodízio lançados no fechamento de caixa, no MESMO período
       // do faturamento mostrado nos cards (não nos últimos 30 dias como caixaFechadosRows).
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${range.from}&data=lte.${range.to}&select=loja,data,feijoada_inteira,feijoada_meia,rodizio_inteira,rodizio_meia`, H, 'dash:buffetRows', []),
@@ -5672,7 +5717,7 @@ async function _loadDashAll() {
     _dashAlertasUrgentes = alertasUrgentesRows || [];
     _dashPendenciasEssenciais = _computePendenciasEssenciais({
       provisoesRows, lojasOfRows, carnesRows, trioAgendaOntemRows, comissoesAllRows,
-      bhPorLoja, bhMesAnteriorRows, hoje, ontemISO, segueBH, mesAnteriorStr,
+      bhPorLoja, bhMesesRows, hoje, ontemISO,
     });
   } catch(e) {
     window.gnLogError('dash:_loadDashAll', e);
