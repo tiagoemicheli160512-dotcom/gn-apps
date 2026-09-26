@@ -1261,6 +1261,18 @@ function _comDiaIdx(dataISO) {
 // fora do ar) e sincronizarChecklist() nunca sabia disso, sempre reportando sucesso pro
 // operador mesmo quando só a comissão não tinha ido pro Painel de Gestão. Faz 2 retries
 // curtos antes de desistir, já que a causa mais comum é uma instabilidade passageira.
+//
+// ATENÇÃO ao mexer aqui: esta chamada NÃO é mais a garantia de que o repique chega nas
+// Gorjetas. Quem garante é o gatilho gn_checklist_repique_para_comissoes, que roda no
+// banco DENTRO da mesma transação do POST em checklist_diario logo abaixo — se o
+// Check-list gravou, a Gorjetas gravou, sem depender de uma segunda chamada de rede no
+// aparelho da loja (que era o furo: sinal caindo, app fechado antes, 3 tentativas
+// esgotadas, e o valor ficava só no Check-list).
+// Esta chamada continua existindo por um motivo que o gatilho não cobre: o gatilho só
+// dispara quando o repique MUDA. Quando o Check-list já tem o valor certo e só a Gorjetas
+// está divergente (o caso do "Relançar" / abrir a data à mão), nada muda na linha e o
+// gatilho não roda — é esta RPC que reempurra o mesmo valor. Removê-la mataria a única
+// forma de consertar um dia divergente pelo app.
 async function _syncRepiqueComissoes(lojaChk, data, sumRepique) {
   const comKey = LOJA_COM_MAP[S.loja];
   const semIdx = _comSemIdx(data);
@@ -1337,12 +1349,12 @@ async function sincronizarChecklist(data, mostrarToast) {
       prefer: 'return=minimal,resolution=merge-duplicates',
       body: { loja: lojaChk, data_operacao: data, venda_salao: vSalao, venda_delivery: vDelivery, repique: sumRepique, dinheiro_caixa: dinheiroCaixa, despesas }
     });
-    // O resultado da sincronização da comissão agora entra no retorno geral — antes essa
-    // chamada era só "esperada" sem checar o que voltava, então uma falha aqui (repique
-    // não chegando no Painel de Gestão) nunca aparecia pro operador em nenhum dos lugares
-    // que checam o retorno desta função (fechar caixa, salvar repique, relançar).
+    // O POST acima já levou o repique pras Gorjetas pelo gatilho do banco, na mesma
+    // transação. O que esta chamada faz é o reenvio do MESMO valor, que o gatilho não
+    // cobre (ver comentário em _syncRepiqueComissoes). Por isso a falha aqui não significa
+    // mais "o repique não chegou" — significa só que o reenvio não foi.
     const okComissao = await _syncRepiqueComissoes(lojaChk, data, sumRepique);
-    if (mostrarToast) toast(okComissao ? '✅ Lançado no Check-list!' : '⚠️ Lançado no Check-list, mas a comissão não sincronizou — tente "Relançar" de novo.');
+    if (mostrarToast) toast(okComissao ? '✅ Lançado no Check-list!' : '✅ Lançado no Check-list — o reenvio do repique falhou; se o rateio não mostrar o valor, use "Relançar".');
     return okComissao;
   } catch(e) {
     if (window.gnLogError) window.gnLogError('caixa:sincronizarChecklist', e);
