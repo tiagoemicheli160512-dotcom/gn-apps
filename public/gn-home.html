@@ -2204,23 +2204,68 @@ function _escalaHomeFuncsAtual(allData, idx) {
   return _escalaHomeMesclarFuncsFaltantes(atuais, allData, idx, wd.funcs || []);
 }
 
+// Este card tinha QUATRO saídas que deixavam o espaço em branco sem dizer nada: loja não
+// resolvida, dia fora do calendário de semanas, ninguém na escala e falha de rede. Como o
+// silêncio era idêntico nos quatro, "o card não aparece mais" não dava pra diagnosticar nem
+// lendo o código — só desconfiando. Agora cada caso diz o que é. Só continua em branco de
+// propósito quando os cards todos estão escondidos (mestre sem loja escolhida, cargo de
+// módulo único), que é o único silêncio intencional.
+let _escalaDiaHomeUltimoArg = null;
+function _escalaDiaHomeAviso(el, texto, comRetry) {
+  el.innerHTML = `<div style="margin:0 16px 14px">
+    <div style="background:rgba(0,0,0,.04);border:1px solid rgba(0,0,0,.08);border-left:3px solid #94a3b8;border-radius:14px;padding:12px 16px">
+      <div style="font-size:12px;font-weight:800;color:#1A1D23">📅 Escala de Hoje</div>
+      <div style="font-size:10px;color:rgba(0,0,0,.5);margin-top:4px;line-height:1.45">${texto}</div>
+      ${comRetry ? `<button onclick="_escalaDiaHomeTentarDeNovo()" style="margin-top:8px;font-size:10px;font-weight:700;background:rgba(0,0,0,.06);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:5px 10px;cursor:pointer;color:#1A1D23">↻ Tentar de novo</button>` : ''}
+    </div>
+  </div>`;
+}
+window._escalaDiaHomeTentarDeNovo = function () {
+  const a = _escalaDiaHomeUltimoArg;
+  if (a) _renderEscalaDiaHome(a.mostrar, a.sess, a.isMasterAtivo);
+};
+
 async function _renderEscalaDiaHome(mostrar, sess, isMasterAtivo) {
   const el = document.getElementById('escala-dia-home-card');
   if (!el) return;
   if (!mostrar || !sess) { el.innerHTML = ''; return; }
+  _escalaDiaHomeUltimoArg = { mostrar, sess, isMasterAtivo };
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
   const loja = (isMasterAtivo && masterLoja) ? masterLoja : sess.loja;
+  if (!loja) { _escalaDiaHomeAviso(el, 'Escolha uma loja pra ver a escala do dia.'); return; }
   const comKey = LOJA_COM_KEY[loja] || loja;
   const hojeISO = (d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'))(new Date());
   const idx = _escalaHomeSemIdx(hojeISO);
-  if (idx == null) { el.innerHTML = ''; return; }
+  if (idx == null) {
+    _escalaDiaHomeAviso(el, `Hoje (${esc(hojeISO.split('-').reverse().join('/'))}) não tem semana no calendário do app. Avise o suporte — o calendário precisa ser estendido.`);
+    return;
+  }
   const diaIdx = _escalaHomeDiaIdx(hojeISO);
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
-  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'escalaDia:rows', []);
+  // Sentinela `null` em vez de `[]`: assim dá pra separar "a busca falhou" de "a loja não
+  // tem escala". Com o mesmo `[]` nos dois, o card sumia igual e não havia como saber qual.
+  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'escalaDia:rows', null);
+  if (rows === null) {
+    _escalaDiaHomeAviso(el, 'Não consegui carregar a escala agora (falha de conexão).', true);
+    return;
+  }
+  if (!rows.length) {
+    _escalaDiaHomeAviso(el, `A loja ${esc(loja)} ainda não tem escala cadastrada. Lance no Check-list, aba Escala.`);
+    return;
+  }
   const allData = (rows[0] && rows[0].all_data) || {};
-  const funcs = _escalaHomeFuncsAtual(allData, idx);
-  if (!funcs.length) { el.innerHTML = ''; return; }
-
-  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  let funcs;
+  try {
+    funcs = _escalaHomeFuncsAtual(allData, idx);
+  } catch (e) {
+    if (window.gnLogError) window.gnLogError('escalaDia:montar', e);
+    _escalaDiaHomeAviso(el, 'Não consegui montar a escala de hoje. O suporte já tem o registro do erro.', true);
+    return;
+  }
+  if (!funcs.length) {
+    _escalaDiaHomeAviso(el, 'Ninguém lançado na escala desta semana. Lance no Check-list, aba Escala.');
+    return;
+  }
 
   // Presentes agrupados por setor (mesmo padrão da Escala Diária do app Check-list) —
   // folga e ausente continuam em blocos separados, à parte dos setores.
