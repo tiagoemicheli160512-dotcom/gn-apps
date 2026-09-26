@@ -7705,6 +7705,18 @@ function toggleCheck(stateKey, setor, idx, el){
   updateFechamentoCount();
   updateFatSemanal();
   autoSave();
+
+  // Destrava assim que o ÚLTIMO item do grupo travado for marcado. Sem isto a loja
+  // completaria a abertura e continuaria bloqueada até recarregar o app — que é a pior
+  // versão possível de uma trava: cumprir a exigência e não sair dela. Só dispara no
+  // toque que fecha a lista, não a cada item.
+  const prazoAtivo = _pendenciasEssenciaisAtivas.some(p =>
+    (p.chave === 'abertura' && stateKey === 'abertura') ||
+    (p.chave === 'operacional' && stateKey === 'checklist'));
+  if (prazoAtivo) {
+    const { feitos, total } = _contarItensChecklist(state[stateKey], getMap(stateKey));
+    if (total && feitos >= total) _atualizarPendenciasEssenciais();
+  }
 }
 
 function toggleProblem(stateKey, setor, idx){
@@ -12646,19 +12658,26 @@ const ESCALA_TRAVA_DESDE = '2026-09-06';
 // ANTEONTEM (o que prova que o gap já durava 2 dias) seja depois desse corte, o que só
 // passa a ser matematicamente possível 2 dias depois do deploy.
 const CARNE_HARD_TRAVA_DESDE = '2026-09-07';
-// A contagem de carne tem PRAZO no próprio dia: até as 17h. Antes, a trava só olhava
+// A contagem de carne tem PRAZO no próprio dia: até as 11h. Antes, a trava só olhava
 // "ontem", então o dia inteiro podia passar em branco e a cobrança só chegava no dia
 // seguinte — foi o que permitiu a loja empurrar a contagem sempre pra equipe da noite.
-// Das 17h em diante, sem a contagem do dia, é trava leve (só a aba Carnes liberada);
+// Das 11h em diante, sem a contagem do dia, é trava leve (só a aba Carnes liberada);
 // virar o dia sem contar escalona pro bloqueio total, porque aí o prazo foi perdido
 // inteiro. Segunda continua de fora: a contagem dela vem do campo "inicial", preenchido
 // por outro app (ver o `diaIdx === 0` em _carneGapNoDia).
-const CARNE_HORA_LIMITE = 17;
+//
+// Era 17h e desceu pra 11h: contar depois da casa aberta não mede mais o estoque do dia,
+// porque já saiu carne pela porta e não dá pra separar o que era saldo do que foi vendido.
+// O prazo só serve se cair ANTES da abertura.
+const CARNE_HORA_LIMITE = 11;
 // Cortes próprios, mesmo motivo de sempre: no dia do deploy nenhuma loja pode acordar
 // travada por um prazo que ainda não existia quando ela deixou de contar. Como as duas
 // regras novas olham pra "hoje" e "ontem", um corte no dia seguinte ao deploy já garante
 // que só gaps nascidos sob a regra nova contem.
-const CARNE_HOJE_TRAVA_DESDE = '2026-09-26';
+// Adiantado junto com a descida pras 11h: no dia em que o prazo encurtou 6 horas, quem
+// contava às 15h passaria a estar atrasado sem nunca ter tido chance de cumprir o horário
+// novo. Vale a partir do dia seguinte.
+const CARNE_HOJE_TRAVA_DESDE = '2026-09-27';
 // O escalonamento de 1 dia; abaixo deste corte continua valendo a regra antiga (2 dias em
 // branco), pra nunca ficar mais frouxo do que já era.
 const CARNE_HARD_1DIA_DESDE = '2026-09-26';
@@ -12675,6 +12694,18 @@ const ESCALA_HARD_TRAVA_DESDE = '2026-09-07';
 // novembro/2026 (dia 1 do mês seguinte a outubro), nunca antes disso.
 const BANCO_HORAS_TRAVA_DESDE_MES = '2026-10';
 const SALARIO_MIN_SETORES = 5;
+// Prazo do próprio dia pros check-lists de abertura e operacional — as lojas simplesmente
+// não estavam fazendo. Mesma forma da trava de carne: passou da hora sem o check-list
+// completo, é trava LEVE (só a aba que resolve fica liberada). Não escalona pro bloqueio
+// total, porque aqui a aba que resolve JÁ é o próprio check-list — não há formulário
+// inline a inventar, e o caminho de saída é fazer a lista.
+const ABERTURA_HORA_LIMITE = 11;
+const OPERACIONAL_HORA_LIMITE = 13;
+// Mesmo cuidado de sempre com retroatividade: no dia do deploy ninguém pode ser travado
+// por um prazo que não existia de manhã. Medição de 23 a 26/09 (os únicos dias com hora de
+// conclusão gravada): cinco lojas — Bangu, Boulevard, Caxias, Guarulhos e Itaquera — nunca
+// fecharam a abertura antes das 11h. A trava vale a partir do dia seguinte ao deploy.
+const CHECKLIST_PRAZO_TRAVA_DESDE = '2026-09-27';
 let _pendenciasEssenciaisAtivas = [];
 
 function _abasChecklistPermitidas() {
@@ -13085,6 +13116,78 @@ async function _checarCadastroFuncIncompleto() {
   };
 }
 
+// ── Prazo do dia pros check-lists de abertura (11h) e operacional (13h) ───────────────
+// Conta os itens MARCADOS, e não o carimbo `concluido_em`: esse campo só começou a ser
+// gravado em 23/09 e, mesmo depois disso, aparece em uma fração dos dias. Medido no banco:
+// pelo carimbo, a Bangu teria feito a abertura em 2 de 20 dias; contando os itens de
+// verdade, foram 13. Travar pelo carimbo puniria loja que faz o serviço.
+function _contarItensChecklist(grupo, mapSetores) {
+  let feitos = 0, total = 0;
+  Object.keys(mapSetores).forEach(s => {
+    total += mapSetores[s].items.length;
+    const doSetor = (grupo && grupo[s]) || {};
+    feitos += Object.values(doSetor).filter(v => v && v.checked).length;
+  });
+  return { feitos, total };
+}
+
+// O grupo do DIA DE HOJE. Quando a tela já está em hoje (o caso normal), usa o estado em
+// memória — instantâneo e ainda enxerga o item que a pessoa acabou de marcar, antes do
+// autoSave subir. Só busca no banco quando alguém está navegando por outra data, senão a
+// trava julgaria o dia errado. Devolve null quando a busca falha: sem saber, não trava.
+async function _grupoChecklistHoje(stateKey) {
+  const hoje = hojeLocal();
+  if (state.data === hoje) return state[stateKey] || {};
+  try {
+    const { data, error } = await sb.from('checklist_diario')
+      .select(stateKey).eq('data_operacao', hoje).eq('loja', LOJA).maybeSingle();
+    if (error) throw error;
+    return (data && data[stateKey]) || {};
+  } catch (e) {
+    if (window.gnLogError) window.gnLogError('checklist:prazoGrupo', e);
+    return null;
+  }
+}
+
+const CHECKLIST_PRAZOS = [
+  { chave: 'abertura',    stateKey: 'abertura',  tab: 'abertura',  icone: '🌅',
+    rotulo: 'de abertura',  hora: ABERTURA_HORA_LIMITE },
+  { chave: 'operacional', stateKey: 'checklist', tab: 'checklist', icone: '✅',
+    rotulo: 'operacional',  hora: OPERACIONAL_HORA_LIMITE },
+];
+
+async function _checarChecklistPrazo(cfg) {
+  if (LOJA === 'Maglia') return null;
+  if (!_temAcessoAbaChecklist(cfg.tab)) return null;
+  const hoje = hojeLocal();
+  if (hoje < CHECKLIST_PRAZO_TRAVA_DESDE) return null;
+  if (new Date().getHours() < cfg.hora) return null;
+  const grupo = await _grupoChecklistHoje(cfg.stateKey);
+  if (grupo === null) return null;
+  const { feitos, total } = _contarItensChecklist(grupo, getMap(cfg.stateKey));
+  if (!total || feitos >= total) return null;
+  return {
+    chave: cfg.chave,
+    titulo: `${cfg.icone} Check-list ${cfg.rotulo} não concluído`,
+    mensagem: `O check-list ${cfg.rotulo} tem que estar pronto até as ${cfg.hora}h. `
+      + (feitos === 0
+          ? `Nenhum dos ${total} itens foi marcado hoje.`
+          : `Faltam ${total - feitos} de ${total} itens.`),
+    tabAlvo: cfg.tab,
+    hard: false,
+    // Se a pessoa estiver com outra data aberta, "Resolver" tem que voltar pra hoje antes
+    // de abrir a aba — senão ela marcaria o check-list do dia errado.
+    acaoExtra: async () => {
+      if (state.data !== hoje) {
+        const inp = document.getElementById('data-dia-atual');
+        if (inp) inp.value = hoje;
+        await onDataChange(hoje);
+      }
+      switchTab(cfg.tab, document.querySelector('.tab-btn'));
+    },
+  };
+}
+
 async function _atualizarPendenciasEssenciais() {
   // Mestre/supervisor/administrador/compras nunca travam por pendência de loja — mesmo
   // bypass de acesso já usado em outras partes do app (CARGOS_MASTER_EQUIV, ver GN RH/
@@ -13106,26 +13209,33 @@ async function _atualizarPendenciasEssenciais() {
       _checarBancoHorasPendente(),
       _checarSalarioIncompleto(),
       _checarCadastroFuncIncompleto(),
+      _checarChecklistPrazo(CHECKLIST_PRAZOS[0]),
+      _checarChecklistPrazo(CHECKLIST_PRAZOS[1]),
     ]);
   } catch (e) { resultados = []; }
   _pendenciasEssenciaisAtivas = resultados.filter(Boolean);
   _renderPendenciasEssenciaisLock();
 }
 
-// A trava do prazo das 17h precisa APARECER sozinha. _atualizarPendenciasEssenciais() só
-// roda no carregamento e depois de salvar certas coisas — e a loja costuma deixar o app
-// aberto o turno inteiro. Sem isto, quem abriu às 15h atravessava as 17h sem nunca ver a
-// cobrança, e o prazo não valeria nada na prática.
-// Dispara UMA vez por dia, na virada do horário, em vez de revarrer o banco de minuto a
-// minuto: o relógio é checado localmente e a consulta só sai quando o prazo estoura.
-let _carnePrazoRevistoEm = '';
+// As travas de prazo do próprio dia precisam APARECER sozinhas.
+// _atualizarPendenciasEssenciais() só roda no carregamento e depois de salvar certas coisas
+// — e a loja costuma deixar o app aberto o turno inteiro. Sem isto, quem abriu às 9h
+// atravessava as 11h e as 13h sem nunca ver a cobrança, e o prazo não valeria nada.
+// Dispara UMA vez por prazo, por dia, na virada do horário, em vez de revarrer o banco de
+// minuto a minuto: o relógio é checado localmente e a consulta só sai quando um prazo
+// estoura. São três prazos hoje (carne e abertura às 11h, operacional às 13h) — as horas
+// repetidas viram um disparo só.
+const PRAZOS_DO_DIA = [...new Set([CARNE_HORA_LIMITE, ABERTURA_HORA_LIMITE, OPERACIONAL_HORA_LIMITE])].sort((a, b) => a - b);
+let _prazosRevistosDia = '';
+let _prazosRevistos = new Set();
 setInterval(() => {
   if (document.hidden) return;                       // aba em segundo plano: espera voltar
   const agora = new Date();
-  if (agora.getHours() < CARNE_HORA_LIMITE) return;
   const hojeISO = toISO(agora);
-  if (_carnePrazoRevistoEm === hojeISO) return;
-  _carnePrazoRevistoEm = hojeISO;
+  if (_prazosRevistosDia !== hojeISO) { _prazosRevistosDia = hojeISO; _prazosRevistos = new Set(); }
+  const vencido = PRAZOS_DO_DIA.find(h => agora.getHours() >= h && !_prazosRevistos.has(h));
+  if (vencido == null) return;
+  _prazosRevistos.add(vencido);
   _atualizarPendenciasEssenciais();
 }, 60000);
 
