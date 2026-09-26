@@ -1309,7 +1309,7 @@ async function sincronizarChecklist(data, mostrarToast) {
     const ids = caixas.map(c => c.id).join(',');
     const [comps, saidasDB] = await Promise.all([
       sb(`gn_caixa_comprovante?fechamento_id=in.(${ids})&select=bandeira,valor`),
-      sb(`gn_caixa_despesa?fechamento_id=in.(${ids})&select=id,categoria,nome,valor&order=criado_em`)
+      sb(`gn_caixa_despesa?fechamento_id=in.(${ids})&select=id,categoria,nome,valor,foto&order=criado_em`)
     ]);
     const totalEntradas = (comps||[]).reduce((a,c)=>a+Number(c.valor),0);
     const vDelivery = (comps||[]).filter(c=>c.bandeira==='IFOOD'||c.bandeira==='Online').reduce((a,c)=>a+Number(c.valor),0);
@@ -1332,8 +1332,13 @@ async function sincronizarChecklist(data, mostrarToast) {
     // Foi o que aconteceu com o caixa de Bangu de 30/08 (fotos de comprovante/despesa sumidas).
     const caixasIds = caixas.map(c => c.id);
     const saidasConfiavel = S._saidasFechId && caixasIds.includes(S._saidasFechId);
+    // A coluna `foto` de gn_caixa_despesa é a base de tudo — é ela que sobrevive a um sync
+    // ruim. O que vem do checklist_diario entra só como resgate de foto antiga (gravada
+    // antes da coluna existir), e a memória continua tendo a palavra final pra refletir uma
+    // exclusão que ainda não voltou do banco.
     const fotoById = Object.fromEntries([
       ...existingDespesas.filter(d=>d.id && d.foto).map(d=>[String(d.id), d.foto]),
+      ...(saidasDB||[]).filter(s=>s.id && s.foto).map(s=>[String(s.id), s.foto]),
       ...(saidasConfiavel ? (S.saidas||[]) : []).filter(s=>s.id).map(s=>[String(s.id), s.foto||''])
     ]);
     const fotoDinhSentinel = existingDespesas.filter(d=>d._tipo==='foto_dinheiro');
@@ -1556,13 +1561,17 @@ async function carregarFilhos() {
   S._saidasFechId = fid;
   const conferencias = lojaConf?.[0]?.all_data?.caixa_conferencias || {};
   S.confAtual = conferencias[fid] || null;
-  // Restaurar fotos do checklist_diario quando gn_caixa_despesa não tem coluna foto
+  // A foto já vem na própria linha da despesa (coluna `foto`). Esta busca no checklist_diario
+  // fica como resgate das fotos gravadas antes da coluna existir — quando não sobrar nenhuma
+  // despesa sem foto, dá pra remover.
   try {
-    const lojaChk = LOJA_CHK_MAP[S.loja] || S.loja;
-    const chk = await sb(`checklist_diario?loja=eq.${encodeURIComponent(lojaChk)}&data_operacao=eq.${S.fech.data}&select=despesas`);
-    if (chk?.[0]?.despesas) {
-      const fotoMap = Object.fromEntries(chk[0].despesas.filter(d=>d.id && d.foto).map(d=>[String(d.id), d.foto]));
-      S.saidas.forEach(s => { if (!s.foto && fotoMap[String(s.id)]) s.foto = fotoMap[String(s.id)]; });
+    if (S.saidas.some(s => !s.foto)) {
+      const lojaChk = LOJA_CHK_MAP[S.loja] || S.loja;
+      const chk = await sb(`checklist_diario?loja=eq.${encodeURIComponent(lojaChk)}&data_operacao=eq.${S.fech.data}&select=despesas`);
+      if (chk?.[0]?.despesas) {
+        const fotoMap = Object.fromEntries(chk[0].despesas.filter(d=>d.id && d.foto).map(d=>[String(d.id), d.foto]));
+        S.saidas.forEach(s => { if (!s.foto && fotoMap[String(s.id)]) s.foto = fotoMap[String(s.id)]; });
+      }
     }
   } catch(_) {}
   setTimeout(_pfBadge, 0);
@@ -1592,18 +1601,19 @@ async function refreshCaixaVivo() {
       if (statusMudou) toast(S.fech.status === 'FECHADO' ? '🔒 Caixa fechado (outro dispositivo)' : '🔓 Caixa reaberto (outro dispositivo)');
     }
     S.comprovantes = c || [];
-    // gn_caixa_despesa não tem coluna "foto" — a foto vive só em memória e no
-    // checklist_diario. Sem isso, sobrescrever S.saidas com as linhas cruas do
-    // banco a cada 30s apaga a foto que acabou de ser tirada.
+    // A foto agora vem na própria linha do banco. A memória ainda entra como rede: uma foto
+    // tirada há segundos pode não estar no resultado deste refresh de 30s.
     const fotoLocal = Object.fromEntries(S.saidas.filter(x => x.foto).map(x => [String(x.id), x.foto]));
     S.saidas = s || [];
     S.saidas.forEach(item => { if (!item.foto && fotoLocal[String(item.id)]) item.foto = fotoLocal[String(item.id)]; });
     try {
-      const lojaChk = LOJA_CHK_MAP[S.loja] || S.loja;
-      const chk = await sb(`checklist_diario?loja=eq.${encodeURIComponent(lojaChk)}&data_operacao=eq.${S.fech.data}&select=despesas`);
-      if (chk?.[0]?.despesas) {
-        const fotoMap = Object.fromEntries(chk[0].despesas.filter(dd => dd.id && dd.foto).map(dd => [String(dd.id), dd.foto]));
-        S.saidas.forEach(item => { if (!item.foto && fotoMap[String(item.id)]) item.foto = fotoMap[String(item.id)]; });
+      if (S.saidas.some(item => !item.foto)) {   // só pra resgatar foto anterior à coluna
+        const lojaChk = LOJA_CHK_MAP[S.loja] || S.loja;
+        const chk = await sb(`checklist_diario?loja=eq.${encodeURIComponent(lojaChk)}&data_operacao=eq.${S.fech.data}&select=despesas`);
+        if (chk?.[0]?.despesas) {
+          const fotoMap = Object.fromEntries(chk[0].despesas.filter(dd => dd.id && dd.foto).map(dd => [String(dd.id), dd.foto]));
+          S.saidas.forEach(item => { if (!item.foto && fotoMap[String(item.id)]) item.foto = fotoMap[String(item.id)]; });
+        }
       }
     } catch(_) {}
     S._saidasFechId = fid;
@@ -2910,26 +2920,39 @@ function _comprimirImagem(file, maxPx, quality) {
   });
 }
 
+// A foto do comprovante vive na coluna `foto` de gn_caixa_despesa — essa é a fonte da
+// verdade. Antes a coluna não existia: este PATCH voltava 400 e era engolido por um catch
+// vazio, então a URL só sobrevivia dentro de checklist_diario.despesas[], um JSON que
+// sincronizarChecklist() reconstrói inteiro a cada sync. Qualquer sync sem a foto em mãos
+// apagava a referência e o arquivo virava órfão no storage — 22 das 40 fotos enviadas em
+// 26/09/2026 se perderam assim, e foi o que a Itaquera reportou.
 async function onFotoSaidaChange(input) {
   const file = input.files[0];
   if (!file || !_fotoSaidaId) return;
+  const item = S.saidas.find(x => x.id === _fotoSaidaId);
+  const fotoAntiga = item ? item.foto : null;
+  let url = null;
   try {
     toast('📷 Processando...');
     const b64 = await _comprimirImagem(file, 800, 0.7);
-    const item = S.saidas.find(x => x.id === _fotoSaidaId);
-    const fotoAntiga = item ? item.foto : null;
-    const url = await window.gnUploadFotoStorage(SB_URL, SB_KEY, 'caixa-despesa', b64);
-    if (item) item.foto = url;
-    renderTudo();
-    // Tentar salvar na coluna foto da despesa
-    try {
-      await sb(`gn_caixa_despesa?id=eq.${_fotoSaidaId}`, { method: 'PATCH', prefer: 'return=minimal', body: { foto: url } });
-    } catch(_) {}
-    // Sempre persistir no checklist_diario para garantir sobrevivência ao reload
-    if (S.fech?.data) sincronizarChecklist(S.fech.data).catch(()=>{});
-    if (fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
-    toast('📷 Foto salva');
-  } catch(e) { toast('❌ Erro ao processar foto'); }
+    url = await window.gnUploadFotoStorage(SB_URL, SB_KEY, 'caixa-despesa', b64);
+  } catch(e) { toast('❌ Erro ao processar foto'); return; }
+  try {
+    // Grava PRIMEIRO, mostra depois: dizer "Foto salva" pra uma foto que não gravou é o
+    // que fazia a loja descobrir a perda só no dia seguinte.
+    await sb(`gn_caixa_despesa?id=eq.${_fotoSaidaId}`, { method: 'PATCH', prefer: 'return=minimal', body: { foto: url } });
+  } catch(e) {
+    if (window.gnLogError) window.gnLogError('caixa:onFotoSaidaChange', e);
+    toast('❌ A foto não salvou — tente de novo');
+    return;
+  }
+  if (item) item.foto = url;
+  renderTudo();
+  // checklist_diario segue recebendo a foto, mas agora como ESPELHO: se este sync falhar,
+  // a foto continua gravada na despesa.
+  if (S.fech?.data) sincronizarChecklist(S.fech.data).catch(()=>{});
+  if (fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
+  toast('📷 Foto salva');
 }
 
 async function _excluirFotoSaida(id) {
@@ -2937,9 +2960,15 @@ async function _excluirFotoSaida(id) {
   if (!item) return;
   if (!confirm('Excluir esta foto?')) return;
   const fotoAntiga = item.foto;
+  try {
+    await sb(`gn_caixa_despesa?id=eq.${id}`, { method: 'PATCH', prefer: 'return=minimal', body: { foto: null } });
+  } catch(e) {
+    if (window.gnLogError) window.gnLogError('caixa:_excluirFotoSaida', e);
+    toast('❌ Não consegui remover — tente de novo');
+    return;
+  }
   item.foto = '';
   renderTudo();
-  try { await sb(`gn_caixa_despesa?id=eq.${id}`, { method: 'PATCH', prefer: 'return=minimal', body: { foto: null } }); } catch(_) {}
   if (S.fech?.data) sincronizarChecklist(S.fech.data).catch(()=>{});
   if (fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
   toast('🗑️ Foto removida');
@@ -2999,14 +3028,13 @@ async function _excluirFotoSistema() {
   toast('🗑️ Foto removida');
 }
 
-function _limparFotosAntigas() {
-  try {
-    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    sb(`gn_caixa_despesa?foto=not.is.null&criado_em=lt.${cutoff}`, {
-      method: 'PATCH', prefer: 'return=minimal', body: { foto: null }
-    }).catch(() => {});
-  } catch(_) {}
-}
+// DESATIVADA de propósito. Esta rotina apagava a referência da foto de toda despesa com
+// mais de 7 dias — e nunca chegou a rodar só porque a coluna `foto` não existia e o PATCH
+// voltava 400. Com a coluna criada ela passaria a funcionar e a sumir, toda vez que alguém
+// abrisse o app, com o comprovante de qualquer despesa da semana anterior. Pior: só limpava
+// a referência, deixando o arquivo no storage — perda sem nem economizar espaço.
+// A foto do comprovante de despesa é prova fiscal; não tem prazo de validade de 7 dias.
+function _limparFotosAntigas() { /* no-op — ver comentário acima */ }
 
 function abrirModal(k) {
   S.bandAtiva = k; const b = ENTRADAS.find(x => x.k === k);

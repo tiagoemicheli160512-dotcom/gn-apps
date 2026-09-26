@@ -1562,6 +1562,7 @@ const ESCALA_TRAVA_DESDE_HOME = '2026-09-06';
 // Espelho de BANCO_HORAS_TRAVA_DESDE_MES: Set/26 é o primeiro mês cobrado (o período dele
 // fechou em 25/09, junto com o ciclo de 6 meses).
 const BANCO_HORAS_TRAVA_DESDE_MES_HOME = '2026-09';
+const BH_SETORES_SEM_BANCO_HOME = new Set(['Gerente', 'Sub Gerente']);
 const SALARIO_MIN_SETORES_HOME = 5;
 const LOJA_SLUG_HOME = Object.fromEntries(GN_LOJAS.map(l=>[l.userKey,l.lojaSlug]));
 const SLUG_TO_LOJA_HOME = Object.fromEntries(GN_LOJAS.map(l=>[l.lojaSlug,l.userKey]));
@@ -1578,9 +1579,35 @@ function _segundaFeiraISOHome(d) {
 function _bhNormNomeHome(n){
   return (n||'').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[\s\-]+/g,'');
 }
-function _bhFindRegHome(arr, nome){
+// Espelho de _bhFindReg/_bhAliasesDe do gn-checklist.html: o lançamento guarda o nome que
+// valia na época, e a loja que renomeia o cadastro (São Gonçalo passou o cadastro inteiro de
+// "Carol" pra "Carol Marinho") ficaria sendo cobrada de novo por um mês já lançado. A trilha
+// da renomeação é a que o app grava em _nomesAnteriores. Nome antigo que mais de uma pessoa
+// reivindica não desempata nada e fica fora.
+function _bhAliasesHome(nome, cadastro){
   const key = _bhNormNomeHome(nome);
-  return (arr||[]).find(x => _bhNormNomeHome(x.nome) === key);
+  if (!key) return [];
+  const cad = (cadastro||[]).filter(f => f && f.nome && f.nome.trim());
+  const eu = cad.find(f => _bhNormNomeHome(f.nome) === key);
+  if (!eu) return [];
+  return (eu._nomesAnteriores || []).filter(a => {
+    const k = _bhNormNomeHome(a);
+    if (!k || k === key) return false;
+    return !cad.some(f => _bhNormNomeHome(f.nome) !== key &&
+      (_bhNormNomeHome(f.nome) === k || (f._nomesAnteriores||[]).some(n => _bhNormNomeHome(n) === k)));
+  });
+}
+function _bhFindRegHome(arr, nome, aliases){
+  const key = _bhNormNomeHome(nome);
+  const lista = arr || [];
+  const exato = lista.find(x => _bhNormNomeHome(x.nome) === key);
+  if (exato) return exato;
+  for (const a of (aliases || [])) {
+    const k = _bhNormNomeHome(a);
+    const achou = lista.find(x => _bhNormNomeHome(x.nome) === k);
+    if (achou) return achou;
+  }
+  return null;
 }
 // Espelho dos helpers de período mensal do gn-checklist.html (_bhFimDoMesCiclo/_bhProximoYM e
 // o 1º mês do ciclo). A coluna de um mês é o mês em que o período TERMINA: pra ciclo no dia 26,
@@ -1605,7 +1632,7 @@ function _gnBhMesLabel(ym){
 }
 // Mesma varredura do app: do corte (ou do 1º mês do ciclo da loja, o que for maior) até o
 // último período JÁ FECHADO, devolvendo o mês mais antigo que ainda tem gente sem lançamento.
-function _gnBhMesEmAberto(ancora, registrosPorMes, nomes, hojeISO){
+function _gnBhMesEmAberto(ancora, registrosPorMes, nomes, hojeISO, cadastro){
   if (!ancora) return null;
   const diaCiclo = (() => { const p = ancora.split('-'); return p.length === 3 ? parseInt(p[2],10) : 1; })();
   const primeiro = _gnBhPrimeiroMesDoCiclo(ancora);
@@ -1613,7 +1640,7 @@ function _gnBhMesEmAberto(ancora, registrosPorMes, nomes, hojeISO){
   for (let guard = 0; guard < 60; guard++) {
     if (_gnBhFimDoMesCiclo(ym, diaCiclo) >= hojeISO) return null;   // ainda não fechou
     const registros = registrosPorMes[ym] || [];
-    if (nomes.some(nome => !_bhFindRegHome(registros, nome))) return ym;
+    if (nomes.some(nome => !_bhFindRegHome(registros, nome, _bhAliasesHome(nome, cadastro)))) return ym;
     ym = _gnBhProximoYM(ym);
   }
   return null;
@@ -1744,12 +1771,17 @@ function _computePendenciasEssenciais(ctx) {
         if (!userKey || userKey === 'MAGLIA') return;
         const funcs = _escalaHomeFuncsAtual(r.all_data || {}, idxHoje);
         const nomes = new Map();
-        funcs.forEach(f => { if (f.nome && f.nome.trim() && !f.arquivado) nomes.set(_bhNormNomeHome(f.nome), f.nome.trim()); });
+        // Gerente e Sub-Gerente não fazem banco de horas (espelho de BH_SETORES_SEM_BANCO).
+        funcs.forEach(f => {
+          if (!f.nome || !f.nome.trim() || f.arquivado) return;
+          if (BH_SETORES_SEM_BANCO_HOME.has((f.setor||'').trim())) return;
+          nomes.set(_bhNormNomeHome(f.nome), f.nome.trim());
+        });
         if (!nomes.size) return;
         const chkKey = LOJA_DB_KEY[userKey] || userKey;
         const cfg = bhPorLoja[chkKey];
         if (!cfg || !cfg.periodo_inicio) return;   // sem ciclo cadastrado é outra pendência
-        const emAberto = _gnBhMesEmAberto(cfg.periodo_inicio, bhPorLojaMes[chkKey] || {}, [...nomes.values()], hoje);
+        const emAberto = _gnBhMesEmAberto(cfg.periodo_inicio, bhPorLojaMes[chkKey] || {}, [...nomes.values()], hoje, funcs);
         if (emAberto) add(userKey, 'banco', 'Banco de Horas de '+_gnBhMesLabel(emAberto)+' pendente');
       });
     }
