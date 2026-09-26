@@ -1514,26 +1514,31 @@
 
   <!-- Configurar Período -->
   <div class="card p-4 mb-3">
-    <div style="font-size:12px;font-weight:700;margin-bottom:10px;">📅 Período do Banco (6 meses)</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
+    <div style="font-size:12px;font-weight:700;margin-bottom:10px;">📅 Ciclo do Banco (6 meses)</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
       <div>
-        <label class="field-label">Início do período</label>
+        <label class="field-label">Início do 1º ciclo</label>
         <input type="date" id="bh-config-inicio"
           style="width:100%;box-sizing:border-box;background:#F5F6F8;border:1px solid #505050;border-radius:8px;padding:8px 10px;color:#1A1D23;font-size:13px;outline:none;">
       </div>
       <div>
-        <label class="field-label">Fim do período</label>
-        <input type="date" id="bh-config-fim"
-          style="width:100%;box-sizing:border-box;background:#F5F6F8;border:1px solid #505050;border-radius:8px;padding:8px 10px;color:#1A1D23;font-size:13px;outline:none;">
+        <label class="field-label">Fim do ciclo atual (automático)</label>
+        <input type="date" id="bh-config-fim" readonly tabindex="-1"
+          style="width:100%;box-sizing:border-box;background:#ECEEF1;border:1px solid #C9CDD3;border-radius:8px;padding:8px 10px;color:#555;font-size:13px;outline:none;cursor:not-allowed;">
       </div>
+    </div>
+    <div style="font-size:10px;color:#555;margin-bottom:10px;line-height:1.4;">
+      Só o início é cadastrado. O fim sai dele: 6 meses, terminando no dia anterior.
+      Quando o ciclo fecha, o próximo abre sozinho no dia seguinte — sem mexer aqui.
     </div>
     <button onclick="salvarConfigBancoHoras()"
       style="width:100%;background:linear-gradient(135deg,#1d4ed8,#1e40af);border:none;border-radius:10px;padding:10px;color:#fff;font-weight:700;font-size:12px;cursor:pointer;">
-      💾 Salvar Configuração do Período
+      💾 Salvar Início do Ciclo
     </button>
   </div>
 
   <!-- Alertas -->
+  <div id="bh-ciclo-sel" style="display:none;"></div>
   <div id="bh-alertas" style="display:none;margin-bottom:12px;"></div>
 
   <!-- Tabela de saldos -->
@@ -4068,18 +4073,10 @@ function _bhSetSinal(s){
 }
 
 /* ─── Helpers de período ─── */
-function _bhMeses(inicio, fim){
-  // Compara por ano-mês para não perder o mês do fim quando o dia de início > dia do fim
-  // Ex: início 26/03, fim 25/09 → inclui Set mesmo que 26/09 > 25/09
-  const res = [];
-  let [cy, cm] = inicio.slice(0,7).split('-').map(Number);
-  const [fy, fm] = fim.slice(0,7).split('-').map(Number);
-  while(cy < fy || (cy===fy && cm<=fm)){
-    res.push(cy+'-'+String(cm).padStart(2,'0'));
-    cm++; if(cm>12){cm=1;cy++;}
-  }
-  return res;
-}
+// Não existe mais um `_bhMeses(periodo_inicio, periodo_fim)` lendo a configuração direto: o
+// período gravado é só a ÂNCORA do primeiro ciclo, e contar mês a partir dele dava 7 colunas
+// (incluía o mês do início, que é o mês em que o ciclo ANTERIOR fecha). Quem precisa dos
+// meses usa _bhContexto() → _bhMesesDoCiclo(), um lugar só.
 
 function _bhCicloDia(inicio){
   // Retorna o dia do mês em que o ciclo começa (ex: "26/03/2026" → 26)
@@ -4087,14 +4084,83 @@ function _bhCicloDia(inicio){
   return partes.length === 3 ? parseInt(partes[2], 10) : null;
 }
 
+// ── O ciclo do banco de horas ────────────────────────────────────────────────────────
+// A COLUNA DE UM MÊS É O MÊS EM QUE O CICLO MENSAL TERMINA, não em que começa. Ou seja,
+// "Set/26" é o período 26/08 → 25/09. Isso não era chute: o Guarulhos lançou a coluna
+// "Ago/26" em 13/08 — se ela fosse 26/08 → 25/09, o período nem teria começado. E em
+// setembro quatro das cinco lojas lançaram antes de 25/09.
+//
+// O rótulo antigo dizia o contrário (para "Set/26" mostrava "26/09 → 25/10"), e a lista de
+// meses incluía um mês a mais na FRENTE: para o ciclo 26/03 → 25/09 vinham 7 colunas
+// (Mar..Set) quando os 6 meses são Abr..Set. Era isso que fazia a virada parecer errada.
+const BH_CICLO_MESES = 6;
+
+function _bhSomaMeses(iso, n){
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(y, m - 1 + n, d, 12, 0, 0);
+  return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
+}
+function _bhDiaAnterior(iso){
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(y, m - 1, d - 1, 12, 0, 0);
+  return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
+}
+function _bhFimDoCiclo(inicio){ return _bhDiaAnterior(_bhSomaMeses(inicio, BH_CICLO_MESES)); }
+
+// O ciclo vigente sai da ÂNCORA (o início cadastrado), avançando de 6 em 6 meses até
+// conter a data de hoje. Assim a virada é automática nas 11 lojas: ninguém edita data
+// nenhuma, e o ciclo novo já nasce aberto no dia seguinte ao fim do anterior.
+function _bhCicloVigente(ancora, refISO){
+  if(!ancora) return null;
+  let inicio = ancora, fim = _bhFimDoCiclo(inicio), guard = 0;
+  while(fim < refISO && guard++ < 200){
+    inicio = _bhSomaMeses(inicio, BH_CICLO_MESES);
+    fim = _bhFimDoCiclo(inicio);
+  }
+  const anteriorInicio = inicio > ancora ? _bhSomaMeses(inicio, -BH_CICLO_MESES) : null;
+  return {
+    inicio, fim,
+    anterior: anteriorInicio ? { inicio: anteriorInicio, fim: _bhDiaAnterior(inicio) } : null,
+    // Carência pra lançar o último mês do ciclo que fechou: até o fim do mês da virada.
+    // Ciclo novo começou em 26/09 → dá pra lançar o ciclo anterior até 30/09.
+    carenciaFim: _bhUltimoDiaDoMes(inicio),
+  };
+}
+function _bhUltimoDiaDoMes(iso){
+  const [y, m] = iso.split('-').map(Number);
+  const dt = new Date(y, m, 0, 12, 0, 0);
+  return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
+}
+
+// Os meses de um ciclo: cada coluna é o mês em que o período mensal TERMINA. O primeiro
+// período vai do início até o dia anterior a um mês depois, então a primeira coluna é o mês
+// desse último dia — 26/03 → 25/04 cai em Abril; 01/01 → 31/01 cai em Janeiro mesmo. Ciclo
+// 26/03 → 25/09 dá Abr..Set, seis colunas (a grade antiga mostrava sete, com Mar na frente).
+function _bhMesesDoCiclo(inicio, fim){
+  const res = [];
+  let [cy, cm] = _bhDiaAnterior(_bhSomaMeses(inicio, 1)).slice(0,7).split('-').map(Number);
+  const [fy, fm] = fim.slice(0,7).split('-').map(Number);
+  let guard = 0;
+  while((cy < fy || (cy===fy && cm<=fm)) && guard++ < 240){
+    res.push(cy+'-'+String(cm).padStart(2,'0'));
+    cm++; if(cm>12){cm=1;cy++;}
+  }
+  return res;
+}
+
 function _bhCicloLabel(ym, diaCiclo){
-  // Para o mês YYYY-MM com ciclo começando no dia D, retorna "DD/MM → DD/(MM+1)"
+  // Para o mês YYYY-MM com ciclo fechando no dia (D-1) desse mês: "DD/(MM-1) → (D-1)/MM"
   if(!diaCiclo) return null;
   const [y, m] = ym.split('-').map(Number);
+  if(diaCiclo === 1){
+    // Ciclo que começa no dia 1: o mês do período é o próprio mês da coluna.
+    const ult = new Date(y, m, 0, 12, 0, 0).getDate();
+    return `01/${String(m).padStart(2,'0')} → ${String(ult).padStart(2,'0')}/${String(m).padStart(2,'0')}/${String(y).slice(2)}`;
+  }
+  const mesIni = m === 1 ? 12 : m - 1;
+  const anoIni = m === 1 ? y - 1 : y;
   const diaFim = diaCiclo - 1;
-  const mesFim = m === 12 ? 1 : m + 1;
-  const anoFim = m === 12 ? y + 1 : y;
-  return `${String(diaCiclo).padStart(2,'0')}/${String(m).padStart(2,'0')} → ${String(diaFim).padStart(2,'0')}/${String(mesFim).padStart(2,'0')}/${String(anoFim).slice(2)}`;
+  return `${String(diaCiclo).padStart(2,'0')}/${String(mesIni).padStart(2,'0')} → ${String(diaFim).padStart(2,'0')}/${String(m).padStart(2,'0')}/${String(y).slice(2)}`;
 }
 
 function _bhMesLabel(ym){
@@ -4116,9 +4182,14 @@ function _bhFindReg(arr, nome){
   return (arr||[]).find(x => _bhNormNome(x.nome) === key);
 }
 
-function _bhSaldoFunc(nome){
-  return Object.values(_bhRegistros).reduce((sum, arr)=>{
-    const r = _bhFindReg(arr, nome);
+// O saldo é de UM ciclo, sempre. Antes somava _bhRegistros inteiro — com a virada
+// automática isso faria o ciclo novo nascer já carregando o saldo do ciclo que acabou de
+// fechar, exatamente o oposto de "fechar o ciclo". Quem chama passa os meses do ciclo que
+// está na tela; sem lista (chamada antiga/defensiva) cai no comportamento de somar tudo.
+function _bhSaldoFunc(nome, meses){
+  const chaves = (meses && meses.length) ? meses : Object.keys(_bhRegistros);
+  return chaves.reduce((sum, m)=>{
+    const r = _bhFindReg(_bhRegistros[m], nome);
     return sum + (r ? parseFloat(r.horas)||0 : 0);
   }, 0);
 }
@@ -4148,9 +4219,8 @@ function _bhTodosFuncionarios(){
 async function abrirModalBancoHoras(nome){
   _bhModalFunc = nome;
   document.getElementById('bh-modal-func').textContent = nome;
-  // Mês padrão = mês atual
-  const hoje = new Date();
-  const mesAtual = hoje.getFullYear()+'-'+String(hoje.getMonth()+1).padStart(2,'0');
+  // Mês padrão = último mês fechado do ciclo em vista (ver _bhMesPadraoModal)
+  const mesAtual = _bhMesPadraoModal();
   document.getElementById('bh-modal-mes').value = mesAtual;
   // Reset sinal para positivo
   _bhSinal = 1;
@@ -4171,9 +4241,13 @@ async function abrirModalBancoHoras(nome){
     btn.style.opacity = '';
     btn.textContent = btnTextoOriginal;
   }
+  // O mês padrão depende do ciclo, que depende de _bhConfig — e pelo atalho da aba Dados a
+  // config só chega agora. Por isso recalcula depois da carga, antes de preencher.
+  const mesFinal = _bhMesPadraoModal();
+  document.getElementById('bh-modal-mes').value = mesFinal;
   // Verificar se já existe registro para esse mês/funcionário — só depois que
   // _bhRegistros reflete de verdade o que está salvo na nuvem.
-  _bhPreencherExistente(mesAtual);
+  _bhPreencherExistente(mesFinal);
   setTimeout(()=>document.getElementById('bh-modal-horas').focus(), 100);
 }
 
@@ -4301,10 +4375,13 @@ async function carregarBancoHoras(forcar){
 /* ─── Salvar configuração ─── */
 async function salvarConfigBancoHoras(){
   const inicio = document.getElementById('bh-config-inicio').value;
-  const fim    = document.getElementById('bh-config-fim').value;
-  if(!inicio||!fim){ showToast('Preencha início e fim do período','error'); return; }
-  if(inicio>=fim){ showToast('Início deve ser anterior ao fim','error'); return; }
+  if(!inicio){ showToast('Preencha o início do ciclo','error'); return; }
+  // O fim não é mais digitado: ele É início + 6 meses − 1 dia. Digitar os dois foi como a
+  // Campo Grande ficou com um "ciclo" de um mês só (25/08 → 25/09) — agora não dá mais.
+  const fim = _bhFimDoCiclo(inicio);
   _bhConfig = {periodo_inicio:inicio, periodo_fim:fim, salariosSetor:_bhConfig?.salariosSetor||{}};
+  const ef = document.getElementById('bh-config-fim');
+  if(ef) ef.value = fim;
   try{
     const {error} = await sb.from('gn_banco_horas').upsert(
       {loja:LOJA, mes:'CONFIG', registros:_bhConfig, updated_at:new Date().toISOString()},
@@ -4332,18 +4409,21 @@ function _bhAtualizarBadge(){
 
 /* ─── Cálculo de alertas ─── */
 function _bhCalcularAlertas(){
-  if(!_bhConfig) return [];
-  const {periodo_inicio,periodo_fim} = _bhConfig;
-  if(!periodo_inicio||!periodo_fim) return [];
-  const meses = _bhMeses(periodo_inicio, periodo_fim);
+  // Mesma fonte do ciclo que a grade usa (_bhContexto), pra alerta e tela não discordarem
+  // depois da virada. Ciclo recém-aberto não tem mês decorrido → nenhum alerta, que é o
+  // certo: o saldo do ciclo que fechou não vai atrás.
+  const ctx = _bhContexto();
+  if(!ctx) return [];
+  if(!ctx.meses.length) return [];
   const LIMITE = 8;
   const hoje = hojeLocal();
   const hojeYM = hoje.slice(0,7);
 
-  // Meses já decorridos dentro do período
-  const mesesDecorridos = meses.filter(m=>m<=hojeYM);
-  const qtdDecorridos = mesesDecorridos.length;
-  const qtdTotal = meses.length;
+  // O saldo soma o legado pré-ciclo junto (mesma conta da coluna Saldo na grade); quantos
+  // meses já correram é contado só pelos meses do ciclo.
+  const mesesDecorridos = ctx.mesesSaldo.filter(m=>m<=hojeYM);
+  const qtdDecorridos = ctx.meses.filter(m=>m<=hojeYM).length;
+  const qtdTotal = ctx.meses.length;
 
   if(qtdDecorridos < 3) return []; // Alertas só começam após 3 meses
 
@@ -4596,6 +4676,81 @@ async function salvarSalariosSetor(){
   }
 }
 
+// Qual ciclo está na tela, e quais meses ele mostra. Um lugar só — a grade, o alerta de
+// saldo e o relatório do WhatsApp liam o período por conta própria e podiam discordar.
+let _bhCicloVisao = 'atual';   // 'atual' | 'anterior'
+function _bhContexto(){
+  if(!_bhConfig || !_bhConfig.periodo_inicio) return null;
+  const ancora = _bhConfig.periodo_inicio;
+  const hoje = hojeLocal();
+  const vig = _bhCicloVigente(ancora, hoje);
+  if(!vig) return null;
+  // A carência que o usuário escolheu é o fim do mês da virada. Mas a trava de pendência
+  // cobra sempre o MÊS ANTERIOR ao corrente, e em 01/10 ela cobra Set/26 — que é do ciclo que
+  // fechou. Se o seletor sumisse em 30/09, o app cobraria um mês que a aba não sabe mostrar.
+  // Então o ciclo anterior continua escolhível enquanto ainda for ele que está sendo cobrado.
+  const mesesAnt = vig.anterior ? _bhMesesDoCiclo(vig.anterior.inicio, vig.anterior.fim) : [];
+  const ymAnterior = (() => {
+    const [y, m] = hoje.slice(0,7).split('-').map(Number);
+    return m === 1 ? (y-1)+'-12' : y+'-'+String(m-1).padStart(2,'0');
+  })();
+  const cobrandoNoAnterior = mesesAnt.includes(ymAnterior);
+  const naCarencia = hoje <= vig.carenciaFim;
+  const podeVerAnterior = !!vig.anterior && (naCarencia || cobrandoNoAnterior);
+  const verAnterior = podeVerAnterior && _bhCicloVisao === 'anterior';
+  const alvo = verAnterior ? vig.anterior : { inicio: vig.inicio, fim: vig.fim };
+  const meses = _bhMesesDoCiclo(alvo.inicio, alvo.fim);
+  // Mês com lançamento ANTERIOR ao 1º mês do 1º ciclo: sobra da grade antiga, que mostrava
+  // uma coluna a mais na frente (Mar/26 tem 21 lançamentos na Bangu e 23 no Boulevard, e os
+  // dois foram digitados de uma vez, retroativos — não há como saber que período a loja quis
+  // dizer ali). Esse dado fica PRESO ao primeiro ciclo: continua na tela e no saldo dele,
+  // pra ninguém perder hora no fechamento que está acontecendo agora, e o ciclo novo nasce
+  // limpo. Em ciclo posterior essas colunas não aparecem — são história de outro ciclo.
+  const primeiroMes = _bhMesesDoCiclo(ancora, _bhFimDoCiclo(ancora))[0] || meses[0];
+  const legado = (alvo.inicio === ancora)
+    ? Object.keys(_bhRegistros || {})
+        .filter(m => /^\d{4}-\d{2}$/.test(m) && m < primeiroMes && (_bhRegistros[m] || []).length > 0)
+        .sort()
+    : [];
+  return {
+    ...vig, alvo,
+    meses,                            // os 6 meses do ciclo — rótulo e contagem de fechamento
+    mesesLegado: legado,
+    mesesSaldo: legado.concat(meses),  // o que soma no Saldo e aparece como coluna
+    verAnterior, podeVerAnterior, naCarencia, cobrandoNoAnterior, ymAnterior,
+    diaCiclo: _bhCicloDia(ancora),
+    renovado: vig.inicio !== ancora,
+  };
+}
+
+// Troca entre o ciclo vigente e o que acabou de fechar (só enquanto a carência estiver
+// aberta). Grade, alertas, badge e resumo em R$ seguem todos essa mesma escolha.
+function _bhVerCiclo(v){
+  _bhCicloVisao = (v === 'anterior') ? 'anterior' : 'atual';
+  renderBancoHoras();
+  _bhAtualizarBadge();
+}
+
+// Mês que o modal do ⏱ já vem preenchido. O que a loja precisa lançar é sempre o último mês
+// FECHADO do ciclo que está na tela — no dia da virada isso é o mês do ciclo que encerrou
+// (26/09: Set/26), não Out/26, que só fecha em 25/10.
+function _bhMesPadraoModal(){
+  const ymHoje = hojeLocal().slice(0,7);
+  let ctx = null;
+  try { ctx = _bhContexto(); } catch(e){}
+  if(ctx && ctx.meses.length){
+    const decorridos = ctx.meses.filter(m => m <= ymHoje);
+    if(decorridos.length) return decorridos[decorridos.length - 1];
+    // Ciclo recém-aberto: nenhum mês dele fechou ainda — o pendente é o mês corrente,
+    // que é o último do ciclo anterior.
+    if(ctx.anterior){
+      const antes = _bhMesesDoCiclo(ctx.anterior.inicio, ctx.anterior.fim);
+      if(antes.length) return antes[antes.length - 1];
+    }
+  }
+  return ymHoje;
+}
+
 /* ─── Renderizar a aba ─── */
 function renderBancoHoras(){
   if(!_bhConfig || !_bhConfig.periodo_inicio){
@@ -4607,23 +4762,52 @@ function renderBancoHoras(){
     return;
   }
 
-  const {periodo_inicio, periodo_fim} = _bhConfig;
-  const meses = _bhMeses(periodo_inicio, periodo_fim);
+  const ctx = _bhContexto();
+  if(!ctx){ document.getElementById('bh-periodo-label').textContent='Sem período configurado'; return; }
+  // `mesesCiclo` são os 6 meses do ciclo (rótulo e cálculo de "1 mês pra fechar");
+  // `mesesSaldo` acrescenta na frente o legado pré-ciclo, que soma no saldo e aparece
+  // marcado como coluna (ver _bhContexto).
+  const mesesCiclo = ctx.meses;
+  const mesesSaldo = ctx.mesesSaldo;
+  const legadoSet = new Set(ctx.mesesLegado);
   const funcionarios = _bhTodosFuncionarios();
-  const diaCiclo = _bhCicloDia(periodo_inicio);
+  const diaCiclo = ctx.diaCiclo;
   const cicloNota = diaCiclo && diaCiclo > 1 ? ` · ciclo: dia ${diaCiclo} de cada mês` : '';
 
-  // Label do período
+  // Label do período — mostra o ciclo REAL na tela (derivado da âncora), não o que está
+  // digitado na configuração, que agora é só o ponto de partida do primeiro ciclo.
+  const br = s => s.split('-').reverse().join('/');
+  // O campo "fim" da configuração acompanha o ciclo VIGENTE (nunca o que está só em vista).
+  const efCfg = document.getElementById('bh-config-fim');
+  if(efCfg) efCfg.value = ctx.fim;
   const lbl = document.getElementById('bh-periodo-label');
-  if(lbl) lbl.textContent = _bhMesLabel(meses[0])+' → '+_bhMesLabel(meses[meses.length-1])+' ('+meses.length+' meses)'+cicloNota;
+  if(lbl) lbl.textContent = br(ctx.alvo.inicio)+' → '+br(ctx.alvo.fim)
+    +' ('+ctx.meses.length+' meses)'+cicloNota
+    +(ctx.verAnterior ? ' · CICLO ANTERIOR' : (ctx.renovado ? ' · renovado automaticamente' : ''));
+
+  // Seletor de ciclo, só enquanto a carência do ciclo que fechou estiver aberta.
+  const selEl = document.getElementById('bh-ciclo-sel');
+  if(selEl){
+    if(ctx.podeVerAnterior){
+      const a = ctx.anterior;
+      selEl.style.display='block';
+      selEl.innerHTML = `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;background:rgba(234,179,8,0.10);border:1px solid rgba(234,179,8,0.35);border-radius:10px;padding:8px 10px;margin-bottom:10px;">
+        <span style="font-size:11px;color:#1A1D23;font-weight:700;">${ctx.naCarencia
+          ? 'Ciclo anterior aberto para lançamento até '+br(ctx.carenciaFim)+':'
+          : 'Ciclo anterior — ainda falta lançar '+_bhMesLabel(ctx.ymAnterior)+':'}</span>
+        <button onclick="_bhVerCiclo('atual')" style="font-size:11px;font-weight:700;border-radius:8px;padding:4px 10px;cursor:pointer;border:1px solid rgba(0,0,0,.15);background:${ctx.verAnterior?'rgba(0,0,0,.05)':'#1A1D23'};color:${ctx.verAnterior?'#1A1D23':'#fff'};">Ciclo atual</button>
+        <button onclick="_bhVerCiclo('anterior')" style="font-size:11px;font-weight:700;border-radius:8px;padding:4px 10px;cursor:pointer;border:1px solid rgba(0,0,0,.15);background:${ctx.verAnterior?'#1A1D23':'rgba(0,0,0,.05)'};color:${ctx.verAnterior?'#fff':'#1A1D23'};">${br(a.inicio)} → ${br(a.fim)}</button>
+      </div>`;
+    } else { selEl.style.display='none'; selEl.innerHTML=''; }
+  }
 
   // ── Alertas ──
   const alertas = _bhCalcularAlertas();
   const alertasEl = document.getElementById('bh-alertas');
   if(alertas.length){
     const hoje = hojeLocal().slice(0,7);
-    const mesesDecorridos = meses.filter(m=>m<=hoje).length;
-    const ehPreclose = mesesDecorridos >= meses.length - 1;
+    const mesesDecorridos = mesesCiclo.filter(m=>m<=hoje).length;
+    const ehPreclose = mesesDecorridos >= mesesCiclo.length - 1;
     const titulo = ehPreclose
       ? '🚨 Alerta Final — 1 mês para fechar o banco'
       : '⚠️ Alerta — 3 meses decorridos';
@@ -4655,24 +4839,31 @@ function renderBancoHoras(){
   const hoje = hojeLocal().slice(0,7);
 
   // Cabeçalhos dos meses (com tooltip de ciclo quando dia ≠ 1)
-  const thMeses = meses.map(m=>{
+  const thMeses = mesesSaldo.map(m=>{
     const ciclo = _bhCicloLabel(m, diaCiclo);
-    const title = ciclo ? ` title="${ciclo}"` : '';
-    const sub = ciclo && diaCiclo>1 ? `<div style="font-size:10px;color:#3a3a3a;font-weight:400;">${ciclo.split(' → ')[1]}</div>` : '';
-    return `<th style="font-size:11px;color:#555;font-weight:700;text-align:center;padding:5px 4px;white-space:nowrap;"${title}>${_bhMesLabel(m)}${sub}</th>`;
+    const legado = legadoSet.has(m);
+    const title = legado
+      ? ` title="Lançamento anterior ao início do 1º ciclo — mantido neste ciclo e somado no Saldo"`
+      : (ciclo ? ` title="${ciclo}"` : '');
+    const sub = !legado && ciclo && diaCiclo>1 ? `<div style="font-size:10px;color:#3a3a3a;font-weight:400;">${ciclo.split(' → ')[1]}</div>` : '';
+    const estilo = legado
+      ? 'font-size:11px;color:#8a6d1f;font-weight:700;text-align:center;padding:5px 4px;white-space:nowrap;background:rgba(234,179,8,0.10);'
+      : 'font-size:11px;color:#555;font-weight:700;text-align:center;padding:5px 4px;white-space:nowrap;';
+    return `<th style="${estilo}"${title}>${legado?'↩ ':''}${_bhMesLabel(m)}${sub}</th>`;
   }).join('');
 
   const temSalarios = _bhConfig?.salariosSetor && Object.keys(_bhConfig.salariosSetor).length>0;
 
   // Linhas por funcionário
   const linhas = funcionarios.map(nome=>{
-    const saldoTotal = _bhSaldoFunc(nome);
-    const tdMeses = meses.map(m=>{
+    const saldoTotal = _bhSaldoFunc(nome, mesesSaldo);
+    const tdMeses = mesesSaldo.map(m=>{
+      const bgFora = legadoSet.has(m) ? 'background:rgba(234,179,8,0.07);' : '';
       const r = _bhFindReg(_bhRegistros[m], nome);
-      if(!r) return `<td style="text-align:center;font-size:10px;color:#333;padding:4px 2px;">—</td>`;
+      if(!r) return `<td style="text-align:center;font-size:10px;color:#333;padding:4px 2px;${bgFora}">—</td>`;
       const h = parseFloat(r.horas)||0;
       const cor = h>0?'#4ade80':h<0?'#f87171':'#888';
-      return `<td style="text-align:center;font-size:10px;font-weight:700;font-family:'JetBrains Mono',monospace;color:${cor};padding:4px 2px;" title="${r.obs||''}">${_bhFmtH(h)}</td>`;
+      return `<td style="text-align:center;font-size:10px;font-weight:700;font-family:'JetBrains Mono',monospace;color:${cor};padding:4px 2px;${bgFora}" title="${r.obs||''}">${_bhFmtH(h)}</td>`;
     }).join('');
     const saldoCor = saldoTotal>0?'#4ade80':saldoTotal<0?'#f87171':'#888';
     const saldoAbs = Math.abs(saldoTotal);
@@ -4700,6 +4891,13 @@ function renderBancoHoras(){
 
   const thValor = temSalarios ? `<th style="font-size:11px;color:#1A1D23;font-weight:700;text-align:center;padding:5px 4px;white-space:nowrap;" title="Saldo positivo já com o adicional de 50% de hora extra">Valor R$ <span style="font-weight:400;">*+50%</span></th>` : '';
 
+  const legendaFora = ctx.mesesLegado.length ? `
+      <div style="font-size:10px;color:#8a6d1f;padding:8px 10px;border-top:1px solid rgba(0,0,0,.07);background:rgba(234,179,8,0.06);">
+        ↩ ${ctx.mesesLegado.map(_bhMesLabel).join(', ')} —
+        ${ctx.mesesLegado.length===1?'lançamento anterior':'lançamentos anteriores'} ao início do 1º ciclo (${br(ctx.alvo.inicio)}).
+        Continua${ctx.mesesLegado.length===1?'':'m'} somando no Saldo deste ciclo; o próximo ciclo começa sem ${ctx.mesesLegado.length===1?'ele':'eles'}.
+      </div>` : '';
+
   document.getElementById('bh-tabela').innerHTML=`
     <div class="card" style="padding:0;overflow:hidden;">
       <div style="overflow-x:auto;">
@@ -4715,13 +4913,14 @@ function renderBancoHoras(){
           <tbody>${linhas}</tbody>
         </table>
       </div>
+      ${legendaFora}
     </div>`;
 
-  // ── Resumo monetário ──
-  _bhRenderResumoMonetario(meses, funcionarios, hoje);
+  // ── Resumo monetário ── soma o mesmo que o Saldo; o "1 mês pra fechar" conta o ciclo
+  _bhRenderResumoMonetario(mesesSaldo, funcionarios, hoje, mesesCiclo);
 }
 
-function _bhRenderResumoMonetario(meses, funcionarios, hoje){
+function _bhRenderResumoMonetario(meses, funcionarios, hoje, mesesCiclo){
   const el = document.getElementById('bh-resumo-monetario');
   if(!el) return;
   const temSalarios = _bhConfig?.salariosSetor && Object.keys(_bhConfig.salariosSetor).length>0;
@@ -4734,8 +4933,11 @@ function _bhRenderResumoMonetario(meses, funcionarios, hoje){
     return meses.includes(ma) ? ma : null;
   })();
 
-  const mesesDecorridos = meses.filter(m=>m<=hoje).length;
-  const periodoEncerrando = mesesDecorridos >= meses.length - 1 && meses.length > 0;
+  // "Está encerrando" se conta pelos meses DO CICLO — o legado pré-ciclo soma no valor, mas
+  // não muda quanto falta pro ciclo fechar.
+  const doCiclo = (mesesCiclo && mesesCiclo.length) ? mesesCiclo : meses;
+  const mesesDecorridos = doCiclo.filter(m=>m<=hoje).length;
+  const periodoEncerrando = mesesDecorridos >= doCiclo.length - 1 && doCiclo.length > 0;
 
   // Acumular totais por período e por fechamento do mês
   let posGeral=0, negGeral=0;
@@ -4744,7 +4946,7 @@ function _bhRenderResumoMonetario(meses, funcionarios, hoje){
   funcionarios.forEach(nome=>{
     const vh = _bhValorHoraFunc(nome);
     if(vh<=0) return;
-    const saldoGeral = _bhSaldoFunc(nome);
+    const saldoGeral = _bhSaldoFunc(nome, meses);
     if(saldoGeral>0) posGeral += _bhValorHoras(saldoGeral,vh);
     else if(saldoGeral<0) negGeral += _bhValorHoras(saldoGeral,vh);
 
@@ -4816,19 +5018,24 @@ function _bhRenderResumoMonetario(meses, funcionarios, hoje){
 /* ─── Relatório em texto ─── */
 function abrirRelatorioBancoHoras(){
   if(!_bhConfig){ showToast('Configure o período primeiro','error'); return; }
-  const {periodo_inicio,periodo_fim} = _bhConfig;
-  const meses = _bhMeses(periodo_inicio, periodo_fim);
+  // Mesmo ciclo da tela (_bhContexto): o relatório não pode somar um período diferente do
+  // que a loja está vendo, nem arrastar o saldo do ciclo que já fechou.
+  const ctx = _bhContexto();
+  if(!ctx){ showToast('Configure o período primeiro','error'); return; }
+  const meses = ctx.mesesSaldo;   // mesma soma da coluna Saldo (inclui o legado pré-ciclo)
   const funcionarios = _bhTodosFuncionarios();
   const LIMITE=8;
   const temSal = _bhConfig?.salariosSetor && Object.keys(_bhConfig.salariosSetor).length>0;
   const hoje = hojeLocal().slice(0,7);
+  const br = s => s.split('-').reverse().join('/');
 
   let txt = `⏱ BANCO DE HORAS — ${lojaDisp(LOJA)}\n`;
+  txt += `Ciclo: ${br(ctx.alvo.inicio)} → ${br(ctx.alvo.fim)}${ctx.verAnterior?' (CICLO ANTERIOR)':''}\n`;
   txt += `Período: ${_bhMesLabel(meses[0])} → ${_bhMesLabel(meses[meses.length-1])}\n`;
   txt += `Gerado em: ${new Date().toLocaleDateString('pt-BR')}\n\n`;
 
   funcionarios.forEach(nome=>{
-    const saldo = _bhSaldoFunc(nome);
+    const saldo = _bhSaldoFunc(nome, meses);
     const vh = _bhValorHoraFunc(nome);
     const func = comissoesWD?.funcs?.find(f=>_bhNormNome(f.nome)===_bhNormNome(nome));
     if(func?.setor) txt += `👤 ${nome} (${func.setor})\n`;
@@ -4853,7 +5060,7 @@ function abrirRelatorioBancoHoras(){
     let posGeral=0, negGeral=0;
     funcionarios.forEach(nome=>{
       const vh=_bhValorHoraFunc(nome); if(vh<=0) return;
-      const s=_bhSaldoFunc(nome);
+      const s=_bhSaldoFunc(nome, meses);
       if(s>0) posGeral+=_bhValorHoras(s,vh); else if(s<0) negGeral+=_bhValorHoras(s,vh);
     });
     const liquido=posGeral-negGeral;
@@ -4879,8 +5086,8 @@ function abrirRelatorioBancoHoras(){
       txt += `  Extras (+50%): ${posMes>0?_bhFmtR(posMes):'—'}\n`;
       txt += `  Negativos:     ${negMes>0?_bhFmtR(negMes):'—'}\n`;
     }
-    const mesesDecorridos=meses.filter(m=>m<=hoje).length;
-    if(mesesDecorridos>=meses.length-1 && meses.length>0){
+    const mesesDecorridos=ctx.meses.filter(m=>m<=hoje).length;
+    if(mesesDecorridos>=ctx.meses.length-1 && ctx.meses.length>0){
       txt += `\n⚠️ ALERTA PRÓXIMO PERÍODO\n`;
       txt += `Neste período: ${_bhFmtR(negGeral)} em negativos e ${_bhFmtR(posGeral)} em extras.\n`;
     }
@@ -12047,9 +12254,14 @@ function buildRelatorioBanco(cab){
   if(!_bhConfig || !_bhConfig.periodo_inicio){
     return txt + 'Período não configurado.\n\n_GN Operações_';
   }
-  const {periodo_inicio, periodo_fim} = _bhConfig;
-  const meses = _bhMeses(periodo_inicio, periodo_fim);
+  const ctx = _bhContexto();
+  if(!ctx || !ctx.meses.length){
+    return txt + 'Período não configurado.\n\n_GN Operações_';
+  }
+  const meses = ctx.mesesSaldo;   // mesma soma da coluna Saldo (inclui o legado pré-ciclo)
   const hoje = hojeLocal().slice(0,7);
+  const brD = s => s.split('-').reverse().join('/');
+  txt += `Ciclo: ${brD(ctx.alvo.inicio)} → ${brD(ctx.alvo.fim)}${ctx.verAnterior?' (CICLO ANTERIOR)':''}\n`;
   txt += `Período: ${_bhMesLabel(meses[0])} → ${_bhMesLabel(meses[meses.length-1])}\n`;
   txt += `Gerado em: ${new Date().toLocaleDateString('pt-BR')}\n\n`;
   const funcs = _bhTodosFuncionarios();
@@ -12057,7 +12269,7 @@ function buildRelatorioBanco(cab){
   if(!funcs.length){ txt += 'Nenhum funcionário cadastrado.\n'; }
   else {
     funcs.forEach(nome=>{
-      const saldo = _bhSaldoFunc(nome);
+      const saldo = _bhSaldoFunc(nome, meses);
       const abs = Math.abs(saldo);
       const icone = abs > 8 ? (saldo < 0 ? '❌' : '⚠️') : '✅';
       const vh = _bhValorHoraFunc(nome);
@@ -12081,7 +12293,7 @@ function buildRelatorioBanco(cab){
       funcs.forEach(nome=>{
         const vh=_bhValorHoraFunc(nome);
         if(vh<=0) return;
-        const s=_bhSaldoFunc(nome);
+        const s=_bhSaldoFunc(nome, meses);
         if(s>0) posGeral+=_bhValorHoras(s,vh);
         else if(s<0) negGeral+=_bhValorHoras(s,vh);
       });
@@ -12110,8 +12322,8 @@ function buildRelatorioBanco(cab){
         txt += `  Negativos:     ${negMes>0?_bhFmtR(negMes):'—'}\n`;
       }
       // Alerta próximo período
-      const mesesDecorridos=meses.filter(m=>m<=hoje).length;
-      if(mesesDecorridos>=meses.length-1 && meses.length>0){
+      const mesesDecorridos=ctx.meses.filter(m=>m<=hoje).length;
+      if(mesesDecorridos>=ctx.meses.length-1 && ctx.meses.length>0){
         txt += `\n⚠️ ALERTA PRÓXIMO PERÍODO\n`;
         txt += `Neste período: ${_bhFmtR(negGeral)} em negativos e ${_bhFmtR(posGeral)} em extras.\n`;
         txt += `Ajuste o planejamento da escala para o próximo período.\n`;
