@@ -2370,24 +2370,63 @@ function _plantaoStatusFunc(f, diaIdx, agoraHM) {
   return { folga: false, emPlantao: false, horario: null };
 }
 
+// Mesmo problema que o card "Escala de Hoje" tinha: SEIS saídas em branco iguais por fora
+// (loja fora da lista, dia sem semana, sem escala, ninguém lançado, ninguém com função de
+// Gerente/Sub-Gerente) mais a falha de rede e a exceção silenciosa. Como este é uma linha
+// discreta embaixo do nome da loja, e não um card, o aviso também é uma linha — mesmo
+// tamanho, mesma bolinha cinza dos papéis fora de plantão.
+let _plantaoUltimoArg = null;
+function _plantaoAviso(el, texto, comRetry) {
+  el.innerHTML = `<div style="display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:#1A1D23;margin-top:2px">
+    <span style="display:inline-flex;align-items:center;gap:4px;opacity:.7">
+      <span style="width:6px;height:6px;border-radius:50%;background:#94a3b8;flex-shrink:0"></span>
+      <span>${texto}</span>
+      ${comRetry ? `<button onclick="_plantaoTentarDeNovo()" style="font-size:10px;font-weight:700;background:rgba(0,0,0,.06);border:1px solid rgba(0,0,0,.12);border-radius:6px;padding:1px 6px;margin-left:2px;cursor:pointer;color:#1A1D23">↻</button>` : ''}
+    </span>
+  </div>`;
+}
+window._plantaoTentarDeNovo = function () {
+  const a = _plantaoUltimoArg;
+  if (a) _renderPlantaoHome(a.mostrar, a.sess, a.isMasterAtivo);
+};
+
 async function _renderPlantaoHome(mostrar, sess, isMasterAtivo) {
   const el = document.getElementById('hero-plantao');
   if (!el) return;
   if (!mostrar || !sess) { el.innerHTML = ''; return; }
+  _plantaoUltimoArg = { mostrar, sess, isMasterAtivo };
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
   const loja = (isMasterAtivo && masterLoja) ? masterLoja : sess.loja;
-  if (!LOJAS_LISTA.includes(loja)) { el.innerHTML = ''; return; }
+  if (!loja) { _plantaoAviso(el, 'Escolha uma loja pra ver quem está de plantão.'); return; }
+  if (!LOJAS_LISTA.includes(loja)) {
+    _plantaoAviso(el, `A loja ${esc(loja)} não está na sua lista de lojas.`);
+    return;
+  }
   const comKey = LOJA_COM_KEY[loja] || loja;
   const hojeISO = (d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'))(new Date());
   const idx = _escalaHomeSemIdx(hojeISO);
-  if (idx == null) { el.innerHTML = ''; return; }
+  if (idx == null) {
+    _plantaoAviso(el, `Hoje (${esc(hojeISO.split('-').reverse().join('/'))}) não tem semana no calendário do app.`);
+    return;
+  }
   const diaIdx = _escalaHomeDiaIdx(hojeISO);
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
-  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'plantaoHome:rows', []);
+  // Sentinela `null` (e não `[]`) pra separar "a busca falhou" de "a loja não tem escala" —
+  // com o mesmo `[]` nos dois, a linha sumia igual e não dava pra saber qual era.
+  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'plantaoHome:rows', null);
+  if (rows === null) { _plantaoAviso(el, 'Não consegui carregar o plantão agora.', true); return; }
+  if (!rows.length) { _plantaoAviso(el, `A loja ${esc(loja)} ainda não tem escala cadastrada.`); return; }
   const allData = (rows[0] && rows[0].all_data) || {};
-  const funcs = _escalaHomeFuncsAtual(allData, idx);
-  if (!funcs.length) { el.innerHTML = ''; return; }
+  let funcs;
+  try {
+    funcs = _escalaHomeFuncsAtual(allData, idx);
+  } catch (e) {
+    if (window.gnLogError) window.gnLogError('plantaoHome:montar', e);
+    _plantaoAviso(el, 'Não consegui montar o plantão de hoje.', true);
+    return;
+  }
+  if (!funcs.length) { _plantaoAviso(el, 'Ninguém lançado na escala desta semana.'); return; }
 
-  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
   const agoraHM = _horaAgoraHM();
 
   // Uma linha por PESSOA (não por papel) — com 2 Sub-Gerentes no mesmo dia, juntar os
@@ -2410,7 +2449,13 @@ async function _renderPlantaoHome(mostrar, sess, isMasterAtivo) {
     });
 
   const linhas = [...linhasPapel('Gerente', '👔', 'Gerente'), ...linhasPapel('Sub-Gerente', '🧑‍💼', 'Sub Gerente')];
-  if (!linhas.length) { el.innerHTML = ''; return; }
+  // Caso que só existe aqui: a escala tem gente, mas ninguém com a FUNÇÃO de Gerente ou
+  // Sub-Gerente. Some diferente de "sem escala" — e é acionável: falta preencher a função
+  // no cadastro do Check-list. Sumindo calado, a loja nunca ficava sabendo.
+  if (!linhas.length) {
+    _plantaoAviso(el, 'Ninguém com função de Gerente ou Sub-Gerente na escala desta semana.');
+    return;
+  }
   el.innerHTML = `<div style="display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:#1A1D23;margin-top:2px">${linhas.join('')}</div>`;
 }
 
