@@ -2752,6 +2752,9 @@ async function loadComissoesData(){
     comissoesWD = getComissoesWD(allData, idx);
     comissoesVisibleSlots = {};
     comissoesWD.funcs.forEach((f,i)=>{ if(f.nome && f.nome.trim()) comissoesVisibleSlots[i]=true; });
+    // Estado da admissão de cada um (documentação/registro), pro bloco no card. Em paralelo
+    // seria melhor, mas o await aqui é o que garante que o primeiro render já mostre o bloco.
+    await _carregarAdmissoesLoja();
   }catch(e){
     comissoesLoadErr = true;
     comissoesWD = null;
@@ -4367,6 +4370,80 @@ function _bhValorHoras(horas, vh){
 /* ─── Valor da hora extra (com adicional) ─── */
 function _bhValorHoraExtra(vh){ return (parseFloat(vh)||0)*(1+BH_ADICIONAL_EXTRA); }
 
+/* ─── Admissão: todo funcionário novo tem que chegar ao RH ─── */
+// Fluxo de dois lados, como combinado: a LOJA marca aqui que enviou a documentação pro
+// registro, e o RH confirma o recebimento e depois o registro, na aba Admissões do app RH.
+// A lista do RH não depende desta gravação (ele também varre o cadastro e cria o que faltar),
+// mas gravar no momento do cadastro faz a admissão chegar lá na hora, em vez de só quando
+// alguém do RH abrir a aba.
+let _admissoesLoja = {};   // nome_norm -> linha de gn_admissoes
+function _admNormNomeChk(n){
+  return (n||'').trim().toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g,'')
+    .replace(/[\s\-]+/g,'');
+}
+async function _carregarAdmissoesLoja(){
+  try{
+    const {data,error} = await sb.from('gn_admissoes').select('*').eq('loja', comissoesLojaKey());
+    if(error) throw error;
+    const m = {};
+    (data||[]).forEach(a=>{ if(a && a.nome_norm) m[a.nome_norm]=a; });
+    // Só substitui num sucesso: cachear {} numa falha de rede esconderia o bloco inteiro e
+    // a loja acharia que não tem nada pendente (mesma armadilha do cache vazio de sempre).
+    _admissoesLoja = m;
+  }catch(e){ /* sem isto o card só não mostra o bloco — nada quebra */ }
+}
+async function _registrarAdmissao(nome, f){
+  const norm = _admNormNomeChk(nome);
+  if(!norm || _admissoesLoja[norm]) return;
+  try{
+    await sb.from('gn_admissoes').upsert([{
+      loja: comissoesLojaKey(), nome: String(nome).trim(), nome_norm: norm,
+      setor: (f&&f.setor)||null, tipo: (f&&f.tipo)||null,
+      cadastro_em: hojeLocal(), inicio_contrato: (f&&f.inicio_contrato)||null,
+      origem: 'checklist',
+    }], {onConflict:'loja,nome_norm', ignoreDuplicates:true});
+    await _carregarAdmissoesLoja();
+    renderComissoesFuncs();
+  }catch(e){ /* o RH ainda pega essa admissão pela varredura do lado dele */ }
+}
+function _admissaoDocHtml(f){
+  const a = _admissoesLoja[_admNormNomeChk(f&&f.nome)];
+  if(!a) return '';
+  const d = ts => fmtBR(String(ts).slice(0,10));
+  const caixa = (bg,brd,txt) => `<div style="margin-top:8px;background:${bg};border:1px solid ${brd};border-radius:8px;padding:7px 9px;font-size:10px;color:#1A1D23;line-height:1.45;">${txt}</div>`;
+  if(a.registro_em)
+    return caixa('rgba(16,185,129,.1)','rgba(16,185,129,.3)',
+      '✅ <b>Registro concluído</b> pelo RH em '+d(a.registro_em)+'.');
+  if(a.doc_recebida_em)
+    return caixa('rgba(59,130,246,.1)','rgba(59,130,246,.3)',
+      '📥 O RH confirmou o recebimento da documentação em '+d(a.doc_recebida_em)+' — registro em andamento.');
+  if(a.doc_enviada_em)
+    return caixa('rgba(245,158,11,.1)','rgba(245,158,11,.35)',
+      '📄 Documentação marcada como enviada em '+d(a.doc_enviada_em)
+      +(a.doc_enviada_por?' por '+escHtml(a.doc_enviada_por):'')+' — aguardando o RH confirmar.');
+  return `<div style="margin-top:8px;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.35);border-radius:8px;padding:7px 9px;">
+    <div style="font-size:10px;color:#1A1D23;line-height:1.45;">📄 <b>Admissão nova</b> — o RH está aguardando a documentação para o registro.</div>
+    <button onclick="marcarDocEnviada('${a.id}')"
+      style="margin-top:6px;background:#f59e0b;color:#000;border:none;border-radius:7px;padding:5px 12px;font-size:10px;font-weight:700;cursor:pointer;">
+      Marcar documentação como enviada</button>
+  </div>`;
+}
+async function marcarDocEnviada(id){
+  if(!confirm('Confirmar que a documentação deste funcionário já foi enviada para o registro?\n\nO RH vê essa marcação com a data e quem marcou.')) return;
+  try{
+    const {error} = await sb.from('gn_admissoes').update({
+      doc_enviada_em: new Date().toISOString(),
+      doc_enviada_por: (typeof usuarioLogado!=='undefined' && usuarioLogado && usuarioLogado.nome) || '',
+      atualizado_em: new Date().toISOString(),
+    }).eq('id', id);
+    if(error) throw error;
+    showToast('📄 Documentação marcada como enviada — já aparece pro RH.');
+    await _carregarAdmissoesLoja();
+    renderComissoesFuncs();
+  }catch(e){ showToast('Não salvou: '+(e.message||e),'error'); }
+}
+
 /* ─── Achar o funcionário do cadastro a partir do nome do lançamento ─── */
 // O lançamento do Banco de Horas guarda o nome que estava valendo NA ÉPOCA. Quando a loja
 // renomeia alguém no cadastro, o lançamento antigo deixa de casar e a coluna Valor zera —
@@ -5847,6 +5924,7 @@ function renderComissoesFuncs(){
               onchange="updComissoesFimContrato(${i},this.value)" style="font-size:11px;">
           </div>
         </div>
+        ${_admissaoDocHtml(f)}
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;">
           <div>
             <label class="field-label">🏖 Início férias / afastamento</label>
@@ -6088,6 +6166,8 @@ function updComissoesNome(i,v,semRender){
   comissoesWD=mutator(comissoesWD);
   if(v && v.trim()) comissoesVisibleSlots[i]=true;
   scheduleComissoesOp(mutator);
+  // Vaga vazia que ganhou nome = admissão. Manda pro RH na hora (app RH, aba Admissões).
+  if(virouCadastro && v && v.trim()) _registrarAdmissao(v, comissoesWD.funcs[i]);
   // Avisa na hora, sem recusar o que foi digitado: quem está no meio do cadastro não pode
   // perder o que já escreveu — a cobrança de verdade vem do card de aviso e, no fim do
   // prazo, do bloqueio.
