@@ -982,6 +982,9 @@ function updBruto(d,v) {
   const wd={...getWD(state.semIdx)};
   wd.brutos=[...wd.brutos]; wd.brutos[d]=val;
   setWD(state.semIdx,wd);
+  // Sem esta marca o merge devolveria o valor do servidor e o número recém-digitado sumiria
+  // da tela no próximo sync (ver mergeBrutos).
+  marcarBrutoDirty(String(state.semIdx),d);
   // Atualizar só os valores calculados, sem re-renderizar toda a tela
   const saldo=getSaldoAntes(state.semIdx);
   const calc=calcSemana(wd,saldo);
@@ -1918,11 +1921,48 @@ window.addEventListener('blur',()=>{ if(syncPendente){ clearTimeout(syncTimer); 
 window.addEventListener('online',()=>{ if(LOJA&&syncPendente){ clearTimeout(syncTimer); _syncNow(); } });
 window.addEventListener('offline',()=>{ syncStatus='err'; window._lastSyncErr='Sem conexão (offline)'; atualizarSyncUI(); });
 
-function mergeWD(local,remoto){
+// Dias de bruto digitados NESTE aparelho e ainda não confirmados no servidor. É a peça que
+// faz o merge de brutos ser por DIA em vez de tudo-ou-nada — ver mergeBrutos abaixo.
+// Persistido porque um recarregamento no meio de uma edição não sincronizada faria o dia
+// digitado voltar pro valor do servidor.
+let brutosDirty = new Set(ld('brutosDirty',[]));
+const _brutoKey = (semIdx,d) => semIdx+':'+d;
+function marcarBrutoDirty(semIdx,d){
+  brutosDirty.add(_brutoKey(semIdx,d));
+  sv('brutosDirty',[...brutosDirty]);
+}
+
+// O repique de cada dia nasce no app CAIXA, que grava direto em brutos[dia] pela RPC
+// gn_sync_repique_comissoes — e essa RPC não mexe em _lastEdit. Este app guarda a cópia dele
+// em localStorage, então o array local, carregado antes do caixa fechar, ganhava o
+// comparativo de _lastEdit e o merge trocava o array INTEIRO pelo local, apagando o repique
+// que o Caixa tinha acabado de gravar.
+// Casos reais de 25/09: Caxias (R$ 647,04), Itaquera (R$ 593,87) e Rancho (R$ 896,23)
+// zerados no rateio; e São Gonçalo em 13/09 com metade (R$ 5.998,50 → R$ 2.999,25), porque
+// o dia teve dois caixas e a cópia local tinha só o primeiro. Em todas, o updated_by da
+// linha era o nome de uma pessoa, nunca 'GN Caixa' — a última escrita foi deste app.
+// A proteção que existia (`some(v => v !== undefined)`) nunca disparava: o array é
+// [0,0,0,...] e 0 !== undefined é verdadeiro.
+//
+// Regra combinada: o Caixa manda no repique. Então cada dia vem do SERVIDOR, e o valor local
+// só vence no dia que foi digitado aqui e ainda não subiu — senão o app apagaria o número na
+// cara de quem acabou de digitar. Na próxima sincronização do Caixa aquele dia volta a vir
+// de lá, que é o que "o Caixa vence" quer dizer.
+function mergeBrutos(local,remoto,semIdx){
+  const L=Array.isArray(local)?local:[], R=Array.isArray(remoto)?remoto:[];
+  const out=[];
+  for(let d=0;d<7;d++){
+    if(brutosDirty.has(_brutoKey(semIdx,d))) out.push(L[d]);
+    else out.push(R[d]!==undefined?R[d]:L[d]);
+  }
+  return out;
+}
+
+function mergeWD(local,remoto,semIdx){
   if(!remoto) return local; if(!local) return remoto;
   const tsL=local._lastEdit||0, tsR=remoto._lastEdit||0;
   const rec=tsL>tsR?local:remoto, ant=tsL>tsR?remoto:local;
-  const brutos=(rec.brutos&&rec.brutos.some(v=>v!==undefined))?rec.brutos:ant.brutos;
+  const brutos=mergeBrutos(local.brutos,remoto.brutos,semIdx);
   const maxLen=Math.max((local.funcs||[]).length,(remoto.funcs||[]).length);
   const funcs=[];
   for(let i=0;i<maxLen;i++){
@@ -1946,7 +1986,7 @@ function mergeWD(local,remoto){
 // do servidor, sem passar pelo merge.
 function mergeAllData(local,remoto){
   const merged={...remoto};
-  Object.keys(local).forEach(k=>{ if(/^\d+$/.test(k)) merged[k]=mergeWD(local[k],remoto[k]); });
+  Object.keys(local).forEach(k=>{ if(/^\d+$/.test(k)) merged[k]=mergeWD(local[k],remoto[k],k); });
   return merged;
 }
 async function _syncNow(){
@@ -1985,6 +2025,10 @@ async function _syncNow(){
       body:JSON.stringify({all_data:state.allData,updated_at:new Date().toISOString(),updated_by:usuarioAtual})
     });
     if(!res.ok) throw new Error('HTTP '+res.status);
+    // Subiu: os dias digitados aqui já estão no servidor, então param de vencer o Caixa.
+    // Só limpa depois do PATCH dar certo — numa falha de rede eles têm que continuar
+    // marcados, senão a próxima mesclagem apagaria o que ainda não subiu.
+    brutosDirty = new Set(); sv('brutosDirty',[]);
     syncStatus='ok'; sv('lastSync',new Date().toISOString()); window._lastSyncErr=null; syncPendente=false;
     render();
   }catch(e){
