@@ -3005,6 +3005,20 @@ let escalaAllData = null; // cache do all_data para visão mensal
 // cadastrado incompleto tem um mês de prazo (combinado com o usuário) antes de travar.
 const CADASTRO_FUNC_REGRA_DESDE = '2026-09-23'; // cadastro feito daqui pra frente já nasce obrigado
 const CADASTRO_FUNC_TRAVA_DESDE = '2026-10-23'; // prazo pra quem já estava cadastrado sem os dados
+// Cada exigência tem o SEU par de datas. Sem isso, acrescentar uma obrigação nova cobraria
+// dela o prazo já vencido das antigas e travaria a rede de uma vez. No dia em que o início
+// de contrato passou a ser obrigatório, 4 lojas (Bangu, Boulevard, Caxias e Rancho) tinham
+// ZERO de 119 funcionários com a data preenchida, e a rede inteira tinha só ~60 de 335.
+const CADASTRO_ITENS = [
+  { chave:'sobrenome',          regra:CADASTRO_FUNC_REGRA_DESDE, trava:CADASTRO_FUNC_TRAVA_DESDE,
+    falta: f => !_nomeTemSobrenome(f.nome) },
+  { chave:'função',             regra:CADASTRO_FUNC_REGRA_DESDE, trava:CADASTRO_FUNC_TRAVA_DESDE,
+    falta: f => !(f.setor && String(f.setor).trim()) },
+  // Sem a data de admissão o RH não sabe se a pessoa está no período de experiência, e as
+  // avaliações de 45 e 90 dias do app nunca disparam — elas são contadas a partir dela.
+  { chave:'início de contrato', regra:'2026-09-26', trava:'2026-10-26',
+    falta: f => !(f.inicio_contrato && String(f.inicio_contrato).trim()) },
+];
 // Partículas de nome não contam como sobrenome — "Ana de" não pode passar por nome completo.
 const CADASTRO_NOME_PARTICULAS = ['de','da','do','das','dos','e','di','del','della','van','von','y','la','le'];
 const BANDA_CONSUMO_FRANQUIA = 150.00; // renderAll() -> renderBandaDia() -> _calcBanda() já lê no boot
@@ -5628,18 +5642,32 @@ function _nomeTemSobrenome(nome){
 // vaga vazia e lápide de funcionário removido (nome '') nunca são cobradas.
 function _cadastroFuncFaltando(f){
   if(!f || !f.nome || !f.nome.trim() || f.arquivado) return [];
-  const falta=[];
-  if(!_nomeTemSobrenome(f.nome)) falta.push('sobrenome');
-  if(!(f.setor && f.setor.trim())) falta.push('função');
-  return falta;
+  return CADASTRO_ITENS.filter(it => it.falta(f)).map(it => it.chave);
+}
+// O que já pode BLOQUEAR hoje. Cada item entra na trava por um de dois caminhos: o prazo
+// dele venceu, ou o cadastro foi feito depois de ele passar a valer (aí não há prazo a
+// cumprir, já nasceu obrigado). Separado de _cadastroFuncFaltando de propósito: o aviso no
+// card mostra tudo que falta desde o primeiro dia, e só a trava respeita os prazos.
+function _cadastroFuncFaltandoParaTrava(f){
+  if(!f || !f.nome || !f.nome.trim() || f.arquivado) return [];
+  const hoje = hojeLocal();
+  const cad = f.cadastro_em || '';
+  return CADASTRO_ITENS
+    .filter(it => it.falta(f) && (hoje >= it.trava || cad >= it.regra))
+    .map(it => it.chave);
 }
 function _cadastroFuncIncompletos(funcs){
   return (funcs||[]).map((f,i)=>({f,i,falta:_cadastroFuncFaltando(f)})).filter(x=>x.falta.length);
 }
-// Dias que faltam pro prazo acabar (negativo = já venceu).
-function _cadastroDiasDePrazo(){
+// Dias até o prazo MAIS PRÓXIMO entre os itens que de fato estão faltando (negativo = já
+// venceu). Com prazos diferentes por item, usar um só seria mentira na tela: se só falta o
+// início de contrato, o prazo que vale é o dele.
+function _cadastroDiasDePrazo(incompletos){
+  const faltas = new Set((incompletos||[]).flatMap(x => x.falta));
+  const alvos = CADASTRO_ITENS.filter(it => faltas.size === 0 || faltas.has(it.chave)).map(it => it.trava);
+  const fimISO = alvos.length ? alvos.sort()[0] : CADASTRO_FUNC_TRAVA_DESDE;
   const hoje=new Date(hojeLocal()+'T12:00:00');
-  const fim=new Date(CADASTRO_FUNC_TRAVA_DESDE+'T12:00:00');
+  const fim=new Date(fimISO+'T12:00:00');
   return Math.round((fim-hoje)/86400000);
 }
 
@@ -5653,7 +5681,7 @@ function _renderCadastroIncompletoCard(){
   if(LOJA==='Maglia'||!comissoesWD||comissoesWeekIdx==null){ el.innerHTML=''; return; }
   const incompletos=_cadastroFuncIncompletos(comissoesWD.funcs);
   if(!incompletos.length){ el.innerHTML=''; return; }
-  const dias=_cadastroDiasDePrazo();
+  const dias=_cadastroDiasDePrazo(incompletos);
   const vencido=dias<0;
   const prazoTxt=vencido
     ? '⛔ Prazo encerrado — o app fica bloqueado até completar.'
@@ -13029,25 +13057,23 @@ async function _checarCadastroFuncIncompleto() {
     const allData = await fetchComissoesAllData(comissoesLojaKey());
     funcs = getComissoesWD(allData, idxHoje).funcs || [];
   } catch (e) { return null; } // falha de rede nunca trava
-  const incompletos = _cadastroFuncIncompletos(funcs);
-  if (!incompletos.length) return null;
-  const prazoVencido = hojeLocal() >= CADASTRO_FUNC_TRAVA_DESDE;
-  const cobrados = prazoVencido
-    ? incompletos
-    : incompletos.filter(({ f }) => (f.cadastro_em || '') >= CADASTRO_FUNC_REGRA_DESDE);
+  // Por ITEM: cada exigência tem seu próprio prazo, então o mesmo funcionário pode já ser
+  // cobrado pelo sobrenome e ainda estar no prazo do início de contrato.
+  const cobrados = (funcs || [])
+    .map((f, i) => ({ f, i, falta: _cadastroFuncFaltandoParaTrava(f) }))
+    .filter(x => x.falta.length);
   if (!cobrados.length) return null;
   const nomes = cobrados.map(({ f }) => f.nome).join(', ');
+  const itensCobrados = [...new Set(cobrados.flatMap(x => x.falta))];
   return {
     chave: 'cadastro',
     titulo: '👤 Cadastro de funcionário incompleto',
-    mensagem: prazoVencido
-      ? 'O prazo pra completar o cadastro acabou. Falta nome completo e/ou função de: ' + nomes + '.'
-      : 'Cadastro feito sem nome completo e/ou função: ' + nomes + '.',
+    mensagem: 'Falta ' + itensCobrados.join(' / ') + ' de: ' + nomes + '.',
     tabAlvo: 'dados',
     hard: true,
     idxHoje,
     // Só o necessário pro formulário inline — o resto é relido de comissoesWD na hora.
-    cobrados: cobrados.map(({ f, i, falta }) => ({ i, nome: f.nome, setor: f.setor || '', falta })),
+    cobrados: cobrados.map(({ f, i, falta }) => ({ i, nome: f.nome, setor: f.setor || '', inicio: f.inicio_contrato || '', falta })),
     acaoExtra: async () => {
       switchTab('dados', document.querySelector('.tab-btn'));
       cobrados.forEach(({ i }) => { comissoesExpanded[i] = true; });
@@ -13490,10 +13516,13 @@ async function _renderInlineHardCadastro(containerId, p) {
     const setorAtual = f.setor || c.setor || '';
     const opts = COMISSOES_SETORES.map(s =>
       `<option value="${_esc(s)}"${s === setorAtual ? ' selected' : ''}>${s || '— Escolha a função —'}</option>`).join('');
+    const inicioAtual = f.inicio_contrato || c.inicio || '';
     return `<div style="margin-bottom:10px">
       <div style="font-size:11px;color:#64748b;margin-bottom:3px">${_esc(c.nome)} — falta ${c.falta.join(' e ')}</div>
       <input type="text" data-cadastro-hard-nome="${c.i}" value="${_esc(nomeAtual)}" placeholder="Nome e sobrenome" style="${campoCss}">
       <select data-cadastro-hard-setor="${c.i}" style="${campoCss};margin-top:5px">${opts}</select>
+      <label style="display:block;font-size:10px;color:#64748b;margin-top:5px">📅 Início de contrato</label>
+      <input type="date" data-cadastro-hard-inicio="${c.i}" value="${_esc(inicioAtual)}" max="${hojeLocal()}" style="${campoCss}">
     </div>`;
   }).join('');
   el.innerHTML = linhas + `<button onclick="_salvarInlineHardCadastro()" style="width:100%;margin-top:4px;background:#E8580A;border:none;border-radius:8px;color:#fff;padding:9px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">💾 Salvar cadastro</button>`;
@@ -13505,18 +13534,25 @@ async function _salvarInlineHardCadastro() {
   inputs.forEach(inp => {
     const i = parseInt(inp.dataset.cadastroHardNome, 10);
     const sel = document.querySelector('[data-cadastro-hard-setor="' + i + '"]');
+    const dt = document.querySelector('[data-cadastro-hard-inicio="' + i + '"]');
     const nome = (inp.value || '').trim();
     const setor = sel ? (sel.value || '').trim() : '';
+    const inicio = dt ? (dt.value || '').trim() : '';
     if (!_nomeTemSobrenome(nome)) { erro = erro || 'Preencha nome e sobrenome de todos.'; return; }
     if (!setor) { erro = erro || 'Escolha a função de todos.'; return; }
-    alteracoes.push({ i, nome, setor });
+    if (!inicio) { erro = erro || 'Preencha o início de contrato de todos.'; return; }
+    // Data futura aqui viraria período de experiência negativo e avaliação de 45/90 dias que
+    // nunca chega. O `max` do input já barra no teclado do celular; isto pega o resto.
+    if (inicio > hojeLocal()) { erro = erro || 'O início de contrato não pode ser uma data futura.'; return; }
+    alteracoes.push({ i, nome, setor, inicio });
   });
   if (erro || !alteracoes.length) { showToast('⚠️ ' + (erro || 'Nada pra salvar.'), 'error'); return; }
   // semRender=true: renderComissoesFuncs() a cada nome redesenharia a lista inteira N vezes
   // por baixo do overlay, à toa.
-  alteracoes.forEach(({ i, nome, setor }) => {
+  alteracoes.forEach(({ i, nome, setor, inicio }) => {
     updComissoesNome(i, nome, true);
     updComissoeSetor(i, setor);
+    updComissoesInicioContrato(i, inicio);
   });
   await flushComissoesOps();
   renderComissoesFuncs();
