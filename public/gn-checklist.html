@@ -2323,11 +2323,13 @@ function comissoesLojaKey(){
   return COMISSOES_LOJA_KEY[dbLoja] || dbLoja;
 }
 // Encontra o índice de semana (idx) no calendário do app de Gorjetas a partir de uma data ISO.
+// Casa pelo ANO também: com 2026 e 2027 no mesmo calendário, dia+mês aparece duas vezes e
+// sem o ano a data cairia na semana do outro ano.
 function comissoesSemIdx(dataISO){
   if(!dataISO) return null;
   const dt = new Date(dataISO+'T12:00:00');
-  const d = dt.getDate(), m = dt.getMonth()+1;
-  const idx = COMISSOES_CAL.findIndex(w=>w.days.some(x=>x.d===d && x.m===m));
+  const d = dt.getDate(), m = dt.getMonth()+1, y = dt.getFullYear();
+  const idx = COMISSOES_CAL.findIndex(w=>w.days.some(x=>x.d===d && x.m===m && x.y===y));
   return idx>=0 ? idx : null;
 }
 // Índice do dia dentro da semana no padrão do app de Gorjetas: Seg=0 ... Dom=6.
@@ -2376,9 +2378,8 @@ function _comissoesHerdarFunc(f, semAlvo){
     if(MANTER_SEM.has(s)) return s;
     if(s==='FÉRIAS' && feriasIni && feriasFim && semAlvo){
       const day=semAlvo.days[di];
-      const iniY=feriasIni.getFullYear();
-      let dt=new Date(`${iniY}-${String(day.m).padStart(2,'0')}-${String(day.d).padStart(2,'0')}T12:00:00`);
-      if(dt<feriasIni) dt=new Date(`${iniY+1}-${String(day.m).padStart(2,'0')}-${String(day.d).padStart(2,'0')}T12:00:00`);
+      // O dia do calendário traz o ano, então a data é exata.
+      const dt=new Date(day.y, day.m-1, day.d, 12, 0, 0);
       if(dt>=feriasIni && dt<=feriasFim) return 'FÉRIAS';
     }
     return 'PRESENTE';
@@ -2517,17 +2518,14 @@ function _comissoesCorrigirFeriasVencidas(funcs, idx){
     const ini = new Date(f.ferias_ini+'T12:00:00');
     const fim = new Date(f.ferias_fim+'T12:00:00');
     if(isNaN(ini) || isNaN(fim)) return f;
-    const iniY = ini.getFullYear();
     let mudou = false;
     const dias = (f.dias||[]).map((s, di) => {
       if(s !== 'FÉRIAS') return s;
       const day = sem.days[di];
       if(!day) return s;
-      const mm = String(day.m).padStart(2,'0'), dd = String(day.d).padStart(2,'0');
-      // O calendário guarda só dia/mês; o ano sai do período de férias (mesma conta de
-      // _comissoesHerdarFunc), com o +1 pra virada de ano.
-      let dt = new Date(`${iniY}-${mm}-${dd}T12:00:00`);
-      if(dt < ini) dt = new Date(`${iniY+1}-${mm}-${dd}T12:00:00`);
+      // O dia do calendário traz o ano (`y`), então a data é exata. Antes o ano saía do
+      // período de férias, com um +1 pra virada — chute que errava na semana do réveillon.
+      const dt = new Date(day.y, day.m-1, day.d, 12, 0, 0);
       if(dt >= ini && dt <= fim) return s;
       mudou = true;
       return 'PRESENTE';
@@ -6511,7 +6509,9 @@ function _renderEscalaSemanal(){
     return;
   }
   const sem = COMISSOES_CAL[comissoesWeekIdx];
-  if(labelEl)  labelEl.textContent  = sem.header;
+  // O ano entra no rótulo porque o calendário tem 2026 e 2027: "21/09 — 27/09" sozinho
+  // apareceria igual em dois anos diferentes.
+  if(labelEl)  labelEl.textContent  = `${sem.header} · ${sem.ano}`;
   if(tituloEl) tituloEl.textContent = '📅 Escala Semanal';
 
   let funcs = _escalaFuncsAtivos(comissoesWD.funcs);
@@ -6737,9 +6737,10 @@ async function _renderEscalaMensal(){
   // Determinar mês do índice de semana atual
   const semAtual = COMISSOES_CAL[comissoesWeekIdx];
   const mesAlvo  = semAtual.month;
+  const anoAlvo  = semAtual.ano;
   const mesNome  = semAtual.mesNome;
-  if(tituloEl) tituloEl.textContent = `📅 Escala Mensal — ${mesNome}`;
-  if(labelEl)  labelEl.textContent  = `Todas as semanas de ${mesNome}`;
+  if(tituloEl) tituloEl.textContent = `📅 Escala Mensal — ${mesNome}/${anoAlvo}`;
+  if(labelEl)  labelEl.textContent  = `Todas as semanas de ${mesNome} de ${anoAlvo}`;
 
   // Buscar all_data uma só vez (cache)
   if(!escalaAllData){
@@ -6751,15 +6752,16 @@ async function _renderEscalaMensal(){
     }
   }
 
-  // Semanas que contêm dias do mês alvo
-  const semsDoMes = COMISSOES_CAL.map((w,idx)=>({w,idx})).filter(({w})=>w.days.some(d=>d.m===mesAlvo));
+  // Semanas que contêm dias do mês alvo. O ano entra no filtro porque o calendário tem mais
+  // de um ano: sem ele, outubro de 2026 e de 2027 cairiam no mesmo quadro.
+  const semsDoMes = COMISSOES_CAL.map((w,idx)=>({w,idx})).filter(({w})=>w.days.some(d=>d.m===mesAlvo && d.y===anoAlvo));
 
   // Coletar todos os dias do mês em ordem
   const diasDoMes = [];
   const diasSet   = new Set();
   semsDoMes.forEach(({w})=>{
     w.days.forEach(d=>{
-      if(d.m!==mesAlvo) return;
+      if(d.m!==mesAlvo || d.y!==anoAlvo) return;
       const key=`${d.m}-${d.d}`;
       if(!diasSet.has(key)){ diasSet.add(key); diasDoMes.push(d); }
     });
@@ -6778,7 +6780,7 @@ async function _renderEscalaMensal(){
       if(!empMap[nome].turno && f.turno) empMap[nome].turno=f.turno;
       if(!empMap[nome].horario && f.horario) empMap[nome].horario=f.horario;
       w.days.forEach((d,di)=>{
-        if(d.m!==mesAlvo) return;
+        if(d.m!==mesAlvo || d.y!==anoAlvo) return;
         const key=`${d.m}-${d.d}`;
         empMap[nome].dias[key]=(f.dias||[])[di]||'PRESENTE';
       });
@@ -6852,13 +6854,11 @@ function updComissoesDia(i,d,sel){
     if(f&&f.ferias_ini&&f.ferias_fim&&sem){
       const ini=new Date(f.ferias_ini+'T12:00:00');
       const fim=new Date(f.ferias_fim+'T12:00:00');
-      const iniY=ini.getFullYear();
       const novos=[...f.dias];
       let diaEscolhidoDentro=false;
       sem.days.forEach((day,di)=>{
-        const mm=String(day.m).padStart(2,'0'),dd2=String(day.d).padStart(2,'0');
-        let dt=new Date(`${iniY}-${mm}-${dd2}T12:00:00`);
-        if(dt<ini) dt=new Date(`${iniY+1}-${mm}-${dd2}T12:00:00`);
+        // O dia do calendário traz o ano, então a data é exata (antes era chutada).
+        const dt=new Date(day.y, day.m-1, day.d, 12, 0, 0);
         const dentro = dt>=ini&&dt<=fim;
         if(di===d) diaEscolhidoDentro=dentro;
         if(dentro) novos[di]=v;
@@ -6980,7 +6980,7 @@ let _feriasAllDataCache = null; // allData completo (todas as semanas) — reusa
 
 function _semanaIdxDeData(dataISO){
   const dt=new Date(dataISO+'T12:00:00');
-  return COMISSOES_CAL.findIndex(w=>w.days.some(x=>x.d===dt.getDate() && x.m===(dt.getMonth()+1)));
+  return COMISSOES_CAL.findIndex(w=>w.days.some(x=>x.d===dt.getDate() && x.m===(dt.getMonth()+1) && x.y===dt.getFullYear()));
 }
 
 // Marca (ou desmarca) FÉRIAS/AFASTAMENTO na Escala em todas as semanas cobertas pelo
@@ -6994,7 +6994,6 @@ function _aplicarFeriasNaEscala(allData, nomeAlvo, inicioISO, fimISO, marcar, ti
   if(fim<ini) return;
   const posIni=_semanaIdxDeData(inicioISO), posFim=_semanaIdxDeData(fimISO);
   if(posIni===-1||posFim===-1) return;
-  const iniY=ini.getFullYear();
   let pos=posIni, guard=0;
   while(guard++<COMISSOES_CAL.length){
     const sem=COMISSOES_CAL[pos];
@@ -7004,9 +7003,10 @@ function _aplicarFeriasNaEscala(allData, nomeAlvo, inicioISO, fimISO, marcar, ti
       const func={...wd.funcs[fi]};
       const novos=[...func.dias];
       sem.days.forEach((day,di)=>{
-        const mm=String(day.m).padStart(2,'0'), dd=String(day.d).padStart(2,'0');
-        let dt=new Date(`${iniY}-${mm}-${dd}T12:00:00`);
-        if(dt<ini) dt=new Date(`${iniY+1}-${mm}-${dd}T12:00:00`);
+        // O dia do calendário traz o ano, então a data é exata. Antes era montada com o ano
+        // do início do período e empurrada um ano pra frente quando caía antes dele — chute
+        // que errava justamente na semana do réveillon.
+        const dt=new Date(day.y, day.m-1, day.d, 12, 0, 0);
         if(dt>=ini && dt<=fim){
           if(marcar) novos[di]=status;
           else if(novos[di]===status) novos[di]='PRESENTE';
@@ -7086,7 +7086,6 @@ function _contarFaltasAquisitivoChk(allData, nomeAlvo, iniISO, fimISO){
   if(!nomeNorm || !iniISO || !fimISO) return 0;
   const ini=new Date(iniISO+'T12:00:00'), fim=new Date(fimISO+'T12:00:00');
   if(fim<ini) return 0;
-  const iniY=ini.getFullYear();
   let count=0;
   COMISSOES_CAL.forEach((sem,pos)=>{
     const wd=allData[String(pos)];
@@ -7094,9 +7093,8 @@ function _contarFaltasAquisitivoChk(allData, nomeAlvo, iniISO, fimISO){
     const f=wd.funcs.find(x=>(x.nome||'').trim().toLowerCase()===nomeNorm);
     if(!f || !f.dias) return;
     sem.days.forEach((day,di)=>{
-      const mm=String(day.m).padStart(2,'0'), dd=String(day.d).padStart(2,'0');
-      let dt=new Date(`${iniY}-${mm}-${dd}T12:00:00`);
-      if(dt<ini) dt=new Date(`${iniY+1}-${mm}-${dd}T12:00:00`);
+      // Data exata pelo ano do próprio dia (antes era chutada pelo ano do início do período).
+      const dt=new Date(day.y, day.m-1, day.d, 12, 0, 0);
       if(dt>=ini && dt<=fim && f.dias[di]==='FALTA') count++;
     });
   });
@@ -12201,11 +12199,12 @@ function _buildEscalaMensalRel(cab){
   if(comissoesWeekIdx==null) return txt+'Semana não selecionada.\n\n_GN Operações_';
   if(!escalaAllData) return txt+'⚠️ Dados mensais não carregados.\nAcesse a aba Escala → Mensal primeiro.\n\n_GN Operações_';
   const semAtual=COMISSOES_CAL[comissoesWeekIdx];
-  const mesAlvo=semAtual.month, mesNome=semAtual.mesNome;
-  txt+=`Mês: ${mesNome}\n\n`;
-  const semsDoMes=COMISSOES_CAL.map((w,idx)=>({w,idx})).filter(({w})=>w.days.some(d=>d.m===mesAlvo));
+  const mesAlvo=semAtual.month, anoAlvo=semAtual.ano, mesNome=semAtual.mesNome;
+  txt+=`Mês: ${mesNome}/${anoAlvo}\n\n`;
+  // O ano entra no filtro porque o calendário tem mais de um ano (ver render da Mensal).
+  const semsDoMes=COMISSOES_CAL.map((w,idx)=>({w,idx})).filter(({w})=>w.days.some(d=>d.m===mesAlvo && d.y===anoAlvo));
   const diasDoMes=[], diasSet=new Set();
-  semsDoMes.forEach(({w})=>{ w.days.forEach(d=>{ if(d.m!==mesAlvo) return; const k=`${d.m}-${d.d}`; if(!diasSet.has(k)){diasSet.add(k);diasDoMes.push(d);} }); });
+  semsDoMes.forEach(({w})=>{ w.days.forEach(d=>{ if(d.m!==mesAlvo || d.y!==anoAlvo) return; const k=`${d.m}-${d.d}`; if(!diasSet.has(k)){diasSet.add(k);diasDoMes.push(d);} }); });
   diasDoMes.sort((a,b)=>a.d-b.d);
   const empMap={};
   semsDoMes.forEach(({w,idx})=>{
@@ -12215,7 +12214,7 @@ function _buildEscalaMensalRel(cab){
       if(!empMap[nome]) empMap[nome]={setor:f.setor||'',turno:f.turno||'',dias:{}};
       if(!empMap[nome].setor&&f.setor) empMap[nome].setor=f.setor;
       if(!empMap[nome].turno&&f.turno) empMap[nome].turno=f.turno;
-      w.days.forEach((d,di)=>{ if(d.m!==mesAlvo) return; empMap[nome].dias[`${d.m}-${d.d}`]=(f.dias||[])[di]||'PRESENTE'; });
+      w.days.forEach((d,di)=>{ if(d.m!==mesAlvo || d.y!==anoAlvo) return; empMap[nome].dias[`${d.m}-${d.d}`]=(f.dias||[])[di]||'PRESENTE'; });
     });
   });
   const nomes=Object.keys(empMap).sort();

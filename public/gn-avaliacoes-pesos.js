@@ -177,9 +177,10 @@ window.gnAvalCorteTxt = function (av) {
 // Conta FALTA/SUSPENSÃO de um funcionário nos últimos `dias` antes de `ateISO`, lendo o
 // all_data de gn_comissoes (o mesmo que o app Gorjetas grava dia a dia).
 //
-// O calendário guarda só dia e mês, sem ano — a semana do fim de dezembro cairia no ano
-// errado quando a avaliação é de janeiro. Por isso a data de cada semana é montada com o
-// ano da avaliação e recuada um ano quando cai muito à frente dela.
+// O calendário passou a guardar o ANO de cada dia (`y`), então a data é exata. Antes era
+// montada com o ano da avaliação e recuada um ano quando caía mais de 180 dias à frente —
+// chute que errava na semana que atravessa o réveillon, justamente o caso que ele existia
+// pra cobrir.
 window.gnAvalContarFaltas = function (allData, nome, ateISO, dias) {
   var cal = window.COMISSOES_CAL;
   if (!allData || !nome || !ateISO || !cal) return null;
@@ -204,8 +205,7 @@ window.gnAvalContarFaltas = function (allData, nome, ateISO, dias) {
     if (!func || !func.dias) return;
     sem.days.forEach(function (d, i) {
       if (status.indexOf(func.dias[i]) < 0) return;
-      var dt = new Date(ate.getFullYear(), d.m - 1, d.d, 12, 0, 0);
-      if (dt - ate > 180 * 86400000) dt.setFullYear(dt.getFullYear() - 1);
+      var dt = new Date(d.y, d.m - 1, d.d, 12, 0, 0);
       if (dt >= de && dt <= ate) total++;
     });
   });
