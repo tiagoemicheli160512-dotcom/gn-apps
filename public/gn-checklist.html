@@ -2132,6 +2132,19 @@
         style="width:100%;background:linear-gradient(135deg,#166534,#14532d);border:none;border-radius:10px;padding:12px;color:#fff;font-weight:800;font-size:13px;cursor:pointer;">
         💾 Salvar Registro
       </button>
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(0,0,0,.08);">
+        <div style="font-size:10px;color:#555;margin-bottom:6px;">Não tem banco de horas neste mês?</div>
+        <div style="display:flex;gap:6px;">
+          <button onclick="marcarSemBancoHoras('FERIAS')"
+            style="flex:1;background:#EAF3FB;border:1px solid #3b82f6;border-radius:8px;padding:9px;color:#1e40af;font-weight:700;font-size:12px;cursor:pointer;">
+            🏖 Férias
+          </button>
+          <button onclick="marcarSemBancoHoras('AFASTAMENTO')"
+            style="flex:1;background:#FBF0EA;border:1px solid #d97706;border-radius:8px;padding:9px;color:#92400e;font-weight:700;font-size:12px;cursor:pointer;">
+            🏥 Afastamento
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -4195,10 +4208,42 @@ function _bhNormNome(n){
     .replace(/[\s\-]+/g,'');
 }
 
-function _bhFindReg(arr, nome){
-  // Busca registro no array comparando por nome normalizado
+// Os nomes que ESTA pessoa já teve no cadastro, e que mais ninguém reivindica. É a trilha
+// que o próprio app grava em _nomesAnteriores quando a loja renomeia alguém — não é chute.
+// Se duas pessoas já se chamaram "Juliana", o apelido não desempata e fica fora: atribuir o
+// lançamento a uma delas seria escolher no par ou ímpar.
+function _bhAliasesDe(nome, cadastro){
   const key = _bhNormNome(nome);
-  return (arr||[]).find(x => _bhNormNome(x.nome) === key);
+  if(!key) return [];
+  const cad = (cadastro || comissoesWD?.funcs || []).filter(f => f && f.nome && f.nome.trim());
+  const eu = cad.find(f => _bhNormNome(f.nome) === key);
+  if(!eu) return [];
+  return (eu._nomesAnteriores || []).filter(a => {
+    const k = _bhNormNome(a);
+    if(!k || k === key) return false;
+    // ninguém mais pode estar usando esse nome hoje, nem reivindicá-lo como anterior
+    const outros = cad.filter(f => _bhNormNome(f.nome) !== key &&
+      (_bhNormNome(f.nome) === k || (f._nomesAnteriores||[]).some(n => _bhNormNome(n) === k)));
+    return outros.length === 0;
+  });
+}
+
+// Acha o lançamento da pessoa. O nome EXATO tem precedência; só depois vale um nome que ela
+// já teve. Sem isso, a São Gonçalo (que lançou Mai/Jun/Jul só com o primeiro nome e em Set
+// passou a usar nome e sobrenome) aparecia com a lista inteira duplicada: "Carol" numa linha
+// e "Carol Marinho" em outra, cada uma com um pedaço do saldo.
+function _bhFindReg(arr, nome, aliases){
+  const key = _bhNormNome(nome);
+  const lista = arr || [];
+  const exato = lista.find(x => _bhNormNome(x.nome) === key);
+  if(exato) return exato;
+  const alts = aliases || _bhAliasesDe(nome);
+  for(const a of alts){
+    const k = _bhNormNome(a);
+    const achou = lista.find(x => _bhNormNome(x.nome) === k);
+    if(achou) return achou;
+  }
+  return null;
 }
 
 // O saldo é de UM ciclo, sempre. Antes somava _bhRegistros inteiro — com a virada
@@ -4218,11 +4263,18 @@ function _bhTodosFuncionarios(){
   // Usa Map com chave normalizada para deduplicar nomes com variações de acento/espaço
   // A versão das gorjetas tem precedência como nome canônico
   const map = new Map();
-  if(comissoesWD) comissoesWD.funcs.forEach(f=>{
-    if(f.nome&&f.nome.trim()) map.set(_bhNormNome(f.nome), f.nome.trim());
-  });
+  const cad = (comissoesWD?.funcs || []).filter(f => f && f.nome && f.nome.trim());
+  cad.forEach(f => map.set(_bhNormNome(f.nome), f.nome.trim()));
+  // Um lançamento feito com o nome ANTIGO da pessoa não abre linha nova: ele pertence a quem
+  // hoje se chama de outro jeito. Sem isto a loja que renomeou o cadastro via a lista inteira
+  // duplicada — "Carol" e "Carol Marinho" em linhas separadas, o saldo partido no meio.
+  const apelidos = new Map();          // nome antigo (norm) → nome atual
+  cad.forEach(f => _bhAliasesDe(f.nome, cad).forEach(a => apelidos.set(_bhNormNome(a), f.nome.trim())));
   Object.values(_bhRegistros).forEach(arr=>(arr||[]).forEach(r=>{
-    if(r.nome){ const k = _bhNormNome(r.nome); if(!map.has(k)) map.set(k, r.nome); }
+    if(!r.nome) return;
+    const k = _bhNormNome(r.nome);
+    if(map.has(k) || apelidos.has(k)) return;
+    map.set(k, r.nome);
   }));
   return [...map.values()].sort((a,b)=>a.localeCompare(b,'pt-BR'));
 }
@@ -4315,11 +4367,15 @@ function fecharModalBancoHoras(){
 // Grava um lançamento de banco de horas — usada tanto pelo modal (salvarRegistroBancoHoras)
 // quanto pelo formulário inline do bloqueio ESCALADO (_salvarInlineHardBanco), pra não
 // duplicar a lógica de upsert em _bhRegistros/Supabase.
-async function _salvarBancoHorasFunc(nome, mes, horas, obs){
+// `semBanco` marca quem não tem banco de horas naquele mês (férias, afastamento). Fica
+// gravado como um lançamento de 0h com o motivo: a pessoa deixa de aparecer como pendente,
+// o saldo não muda, e a grade mostra o motivo em vez de um "0,0h" que ninguém entenderia.
+async function _salvarBancoHorasFunc(nome, mes, horas, obs, semBanco){
   if(!_bhRegistros[mes]) _bhRegistros[mes] = [];
+  const reg = semBanco ? {nome, horas: 0, obs: obs||'', semBanco} : {nome, horas, obs};
   const idx = _bhRegistros[mes].findIndex(x=>_bhNormNome(x.nome)===_bhNormNome(nome));
-  if(idx>=0) _bhRegistros[mes][idx] = {nome, horas, obs};
-  else _bhRegistros[mes].push({nome, horas, obs});
+  if(idx>=0) _bhRegistros[mes][idx] = reg;
+  else _bhRegistros[mes].push(reg);
   try{
     const {error} = await sb.from('gn_banco_horas').upsert(
       {loja:LOJA, mes, registros:_bhRegistros[mes], updated_at:new Date().toISOString()},
@@ -4330,6 +4386,26 @@ async function _salvarBancoHorasFunc(nome, mes, horas, obs){
   }catch(e){
     return false;
   }
+}
+
+// "Tem pessoas que não entram no banco, como no caso de férias ou afastamento; nesses casos
+// não tem como informar nada." Agora tem: o mês fica registrado com o motivo, a trava para de
+// cobrar e ninguém precisa inventar um número de horas pra se livrar dela.
+const BH_SEM_BANCO_MOTIVOS = { FERIAS: '🏖 Férias', AFASTAMENTO: '🏥 Afastamento' };
+
+async function marcarSemBancoHoras(motivo){
+  if(!_bhModalFunc){ showToast('Nenhum funcionário selecionado','error'); return; }
+  const mes = document.getElementById('bh-modal-mes').value;
+  if(!mes){ showToast('Selecione o mês','error'); return; }
+  const label = BH_SEM_BANCO_MOTIVOS[motivo] || motivo;
+  const ok = await _salvarBancoHorasFunc(_bhModalFunc, mes, 0, '', motivo);
+  showToast(ok ? '✓ '+label+' registrado em '+_bhMesLabel(mes)
+               : '⚠️ Salvo localmente — erro no servidor', ok ? 'success' : 'error');
+  fecharModalBancoHoras();
+  const tabEl = document.getElementById('tab-banco');
+  if(tabEl && tabEl.classList.contains('active')) renderBancoHoras();
+  _bhAtualizarBadge();
+  if(_pendenciasEssenciaisAtivas.some(p=>p.chave==='banco')) _atualizarPendenciasEssenciais();
 }
 
 async function salvarRegistroBancoHoras(){
@@ -4880,6 +4956,12 @@ function renderBancoHoras(){
       const bgFora = legadoSet.has(m) ? 'background:rgba(234,179,8,0.07);' : '';
       const r = _bhFindReg(_bhRegistros[m], nome);
       if(!r) return `<td style="text-align:center;font-size:10px;color:#333;padding:4px 2px;${bgFora}">—</td>`;
+      // Mês marcado como férias/afastamento: mostra o motivo, não um "0,0h" que ninguém
+      // saberia diferenciar de "trabalhou e fechou zerado".
+      if(r.semBanco){
+        const lbl = (BH_SEM_BANCO_MOTIVOS[r.semBanco]||r.semBanco).replace(/^\S+\s/,'');
+        return `<td style="text-align:center;font-size:9px;font-weight:700;color:#1e40af;padding:4px 2px;${bgFora}" title="Sem banco de horas neste mês: ${_esc(lbl)}">${_esc(lbl)}</td>`;
+      }
       const h = parseFloat(r.horas)||0;
       const cor = h>0?'#4ade80':h<0?'#f87171':'#888';
       return `<td style="text-align:center;font-size:10px;font-weight:700;font-family:'JetBrains Mono',monospace;color:${cor};padding:4px 2px;${bgFora}" title="${r.obs||''}">${_bhFmtH(h)}</td>`;
@@ -13025,6 +13107,10 @@ const ESCALA_HARD_TRAVA_DESDE = '2026-09-07';
 // regra de não-retroatividade do resto da feature; se esses meses tiverem que ser cobrados,
 // é decisão de mudar este corte, não do código.
 const BANCO_HORAS_TRAVA_DESDE_MES = '2026-09';
+// Cargos que não fazem banco de horas. A função já está no cadastro (aba Dados >
+// Funcionários), então a trava não precisa ficar pedindo lançamento pra eles todo mês.
+// Continuam aparecendo na grade — se a loja quiser lançar, lança; só não é cobrado.
+const BH_SETORES_SEM_BANCO = new Set(['Gerente', 'Sub Gerente']);
 const SALARIO_MIN_SETORES = 5;
 // Prazo do próprio dia pros check-lists de abertura e operacional — as lojas simplesmente
 // não estavam fazendo. Mesma forma da trava de carne: passou da hora sem o check-list
@@ -13327,9 +13413,21 @@ async function _checarBancoHorasPendente() {
   // Sem ciclo cadastrado não há período pra cobrar — a exigência de cadastrar o ciclo é outra
   // pendência (Salário/CONFIG), não esta.
   if (!cfg || !cfg.periodo_inicio) return null;
+  // Gerente e Sub-Gerente não fazem banco de horas — o cargo já está no cadastro, então não
+  // faz sentido a trava ficar cobrando lançamento deles todo mês.
   const nomes = new Map();
-  funcs.forEach(f => { if (f.nome && f.nome.trim() && !f.arquivado) nomes.set(_bhNormNome(f.nome), f.nome.trim()); });
+  funcs.forEach(f => {
+    if (!f.nome || !f.nome.trim() || f.arquivado) return;
+    if (BH_SETORES_SEM_BANCO.has((f.setor||'').trim())) return;
+    nomes.set(_bhNormNome(f.nome), f.nome.trim());
+  });
   if (!nomes.size) return null;
+  // Aliases saem da escala que ESTE check acabou de buscar, não do comissoesWD global (que
+  // pode estar em outra semana ou nem ter carregado). Sem isso a trava cobraria de novo um
+  // mês que a loja lançou com o nome antigo da pessoa.
+  const cadastro = funcs.filter(f => f && f.nome && f.nome.trim());
+  const aliasesPorNome = new Map();
+  cadastro.forEach(f => aliasesPorNome.set(f.nome.trim(), _bhAliasesDe(f.nome, cadastro)));
 
   const diaCiclo = _bhCicloDia(cfg.periodo_inicio) || 1;
   // Nunca cobra mês anterior ao corte global nem anterior ao 1º mês do ciclo DA LOJA — a
@@ -13340,7 +13438,7 @@ async function _checarBancoHorasPendente() {
   for (let guard = 0; guard < 60; guard++) {
     const fimPeriodo = _bhFimDoMesCiclo(ym, diaCiclo);
     if (fimPeriodo >= hojeISO) break;   // período ainda não fechou — no último dia ainda dá pra lançar
-    const faltando = [...nomes.values()].filter(nome => !_bhFindReg(porMes[ym], nome));
+    const faltando = [...nomes.values()].filter(nome => !_bhFindReg(porMes[ym], nome, aliasesPorNome.get(nome)));
     if (faltando.length) emAberto.push({ ym, fimPeriodo, faltando });
     ym = _bhProximoYM(ym);
   }
@@ -13932,7 +14030,7 @@ async function _renderInlineHardBanco(containerId, p) {
   _bancoHardFaltandoNomes = p.faltandoNomes;
   _bancoHardMes = p.mes;
   const linhas = p.faltandoNomes.map((nome, i) => `
-    <div style="margin-bottom:8px">
+    <div style="margin-bottom:8px" data-banco-hard-linha="${i}">
       <div style="font-size:11px;font-weight:700;color:#1A1D23;margin-bottom:4px">${_esc(nome)}</div>
       <div style="display:flex;gap:8px">
         <input type="number" step="0.5" placeholder="Horas (+/-)" data-banco-hard-horas="${i}"
@@ -13940,15 +14038,38 @@ async function _renderInlineHardBanco(containerId, p) {
         <input type="text" placeholder="Obs (opcional)" data-banco-hard-obs="${i}"
           style="flex:1;padding:6px 8px;border-radius:8px;border:1px solid rgba(0,0,0,.15);font-size:12px;font-family:inherit;box-sizing:border-box">
       </div>
+      <div style="display:flex;gap:6px;margin-top:4px">
+        <button onclick="_semBancoInlineHard(${i},'FERIAS')" data-banco-hard-ferias="${i}"
+          style="flex:1;background:#EAF3FB;border:1px solid #3b82f6;border-radius:6px;padding:4px;color:#1e40af;font-size:10px;font-weight:700;cursor:pointer;font-family:inherit">🏖 Férias</button>
+        <button onclick="_semBancoInlineHard(${i},'AFASTAMENTO')" data-banco-hard-afast="${i}"
+          style="flex:1;background:#FBF0EA;border:1px solid #d97706;border-radius:6px;padding:4px;color:#92400e;font-size:10px;font-weight:700;cursor:pointer;font-family:inherit">🏥 Afastamento</button>
+      </div>
     </div>`).join('');
   el.innerHTML = linhas + `<button onclick="_salvarInlineHardBanco()" style="width:100%;margin-top:4px;background:#E8580A;border:none;border-radius:8px;color:#fff;padding:9px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">💾 Salvar banco de horas</button>`;
 }
+// Quem está de férias ou afastado não tem horas pra lançar — sem isto a loja travada teria
+// que inventar um número pra conseguir sair do bloqueio.
+const _bancoHardSemBanco = {};
+async function _semBancoInlineHard(i, motivo) {
+  const nome = _bancoHardFaltandoNomes[i];
+  if (!nome) return;
+  const ok = await _salvarBancoHorasFunc(nome, _bancoHardMes, 0, '', motivo);
+  if (!ok) { showToast('⚠️ Não consegui salvar — tente de novo', 'error'); return; }
+  _bancoHardSemBanco[i] = motivo;
+  const linha = document.querySelector('[data-banco-hard-linha="' + i + '"]');
+  if (linha) linha.innerHTML = `<div style="font-size:11px;font-weight:700;color:#1e40af;padding:4px 0">
+    ${_esc(nome)} — ${BH_SEM_BANCO_MOTIVOS[motivo] || motivo} registrado</div>`;
+  _bhAtualizarBadge();
+  _atualizarPendenciasEssenciais();
+}
+
 async function _salvarInlineHardBanco() {
   const inputsH = document.querySelectorAll('[data-banco-hard-horas]');
   let algumVazio = false;
   const pares = [];
   inputsH.forEach(inpH => {
     const i = inpH.dataset.bancoHardHoras;
+    if (_bancoHardSemBanco[i]) return;            // já resolvido como férias/afastamento
     const inpO = document.querySelector('[data-banco-hard-obs="' + i + '"]');
     const rawH = parseFloat(inpH.value);
     if (inpH.value === '' || isNaN(rawH)) { algumVazio = true; return; }
