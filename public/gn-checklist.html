@@ -5550,6 +5550,7 @@ async function saveAll(){
     const hh=String(agora.getHours()).padStart(2,'0')+':'+String(agora.getMinutes()).padStart(2,'0');
     setSyncStatus('online','Salvo ✓ '+hh);
     showToast('✓ Salvo no servidor!','success');
+    _limparFalhaSalvar();
     try{
       localStorage.setItem('gn_cl_last_save_'+LOJA,'✓ Salvo às '+hh);
       localStorage.setItem('gn_cl_last_save_dia_'+LOJA, hojeLocal());
@@ -5557,12 +5558,26 @@ async function saveAll(){
     _updateLastSaveIndicator();
     if(_pendenciasEssenciaisAtivas.some(p=>p.chave==='carnes')) _recheckCarnesPendenciaEVoltarSemana();
   }catch(e){
-    setSyncStatus('offline','Falha');
     const _emsg = e?.message||e?.code||e?.details||JSON.stringify(e||'?');
+    _registrarFalhaSalvar(_emsg);
     showToast('⚠️ Erro: '+_emsg,'error');
   }
   // Sempre empurra vendas para gn_lojas (garantia de sync entre dispositivos)
   if(Object.keys(state.vendas||{}).length) _vendaSyncNow();
+}
+
+// "Falha" sozinho não diz nada: a loja liga avisando que está com falha e ninguém sabe de
+// quê, porque o motivo ia só num toast que some em 3 segundos. Agora o motivo fica GRAVADO e
+// aparece no cabeçalho até o próximo salvamento dar certo — dá pra ler pelo telefone.
+function _registrarFalhaSalvar(msg){
+  const quando = new Date();
+  const hh = String(quando.getHours()).padStart(2,'0')+':'+String(quando.getMinutes()).padStart(2,'0');
+  try{ localStorage.setItem('gn_cl_last_err_'+LOJA, hh+' · '+String(msg||'?').slice(0,160)); }catch(_){}
+  setSyncStatus('offline','Falha');
+  _updateLastSaveIndicator();
+}
+function _limparFalhaSalvar(){
+  try{ localStorage.removeItem('gn_cl_last_err_'+LOJA); }catch(_){}
 }
 
 function _updateLastSaveIndicator(){
@@ -5571,10 +5586,20 @@ function _updateLastSaveIndicator(){
   try{
     const txt=localStorage.getItem('gn_cl_last_save_'+LOJA);
     const dia=localStorage.getItem('gn_cl_last_save_dia_'+LOJA);
+    const err=localStorage.getItem('gn_cl_last_err_'+LOJA);
     // Só a hora enquanto o salvamento é de hoje — é o que a loja quer saber ("salvou?").
     // Se o último salvamento foi em outro dia, aí sim o dia importa e vai junto.
-    el.textContent = txt ? (dia && dia!==hojeLocal() ? txt+' ('+fmtBR(dia)+')' : txt) : '';
-    el.style.display=txt?'block':'none';
+    const base = txt ? (dia && dia!==hojeLocal() ? txt+' ('+fmtBR(dia)+')' : txt) : '';
+    if(err){
+      // Vermelho e por extenso: enquanto isto estiver na tela, o dia NÃO está no servidor.
+      el.style.color='#b91c1c';
+      el.textContent = '⚠️ Não salvou (' + err + ')' + (base ? ' · último OK: '+base : '');
+      el.style.display='block';
+      return;
+    }
+    el.style.color='#15803d';
+    el.textContent = base;
+    el.style.display=base?'block':'none';
   }catch(_){}
 }
 
@@ -5724,11 +5749,37 @@ function _captureSupervisaoCozinhaDOM(){
   if(ob && ob.value) state.supervisaoCozinha.obs          = ob.value;
 }
 
+// O localStorage é o único lugar onde o dia fica seguro enquanto o servidor não confirma —
+// e `setItem` ESTOURA quando a cota enche. Sem este try/catch, a exceção subia por todo
+// mundo que chama autoSave (cada item marcado, cada campo digitado) e derrubava o fluxo no
+// meio, sem dizer nada. A Nova América é o caso extremo: carrega 93 KB de fotos de
+// manutenção em base64 dentro do estado do dia, todo dia.
+let _autoSaveFalhou = '';
 function autoSave(){
   _captureSupervisaoDOM();
   _captureSupervisaoCozinhaDOM();
-  localStorage.setItem(getLocalKey(),      JSON.stringify(state));
-  localStorage.setItem(getLocalKeyWeek(), JSON.stringify(stateWeek));
+  try{
+    localStorage.setItem(getLocalKey(),      JSON.stringify(state));
+    localStorage.setItem(getLocalKeyWeek(), JSON.stringify(stateWeek));
+    _autoSaveFalhou = '';
+  }catch(e){
+    // Cota cheia: tenta de novo sem as fotos em base64, que é o que pesa. O dado que importa
+    // (itens marcados, valores, faltas) cabe com folga — perder a cópia local da foto é bem
+    // menos grave do que perder o dia inteiro.
+    try{
+      const enxuto = JSON.parse(JSON.stringify(state));
+      (enxuto.manutencao||[]).forEach(m=>{ if(m) m.fotoBase64=''; });
+      ['checklist','abertura','fechamento'].forEach(k=>{
+        Object.values(enxuto[k]||{}).forEach(setor=>Object.values(setor||{}).forEach(it=>{ if(it) it.fotoBase64=''; }));
+      });
+      localStorage.setItem(getLocalKey(), JSON.stringify(enxuto));
+      localStorage.setItem(getLocalKeyWeek(), JSON.stringify(stateWeek));
+      _autoSaveFalhou = 'sem espaço no aparelho — a cópia local está sem as fotos';
+    }catch(e2){
+      _autoSaveFalhou = 'sem espaço no aparelho pra guardar o dia (' + (e2?.name||'erro') + ')';
+    }
+    if(typeof _registrarFalhaSalvar === 'function') _registrarFalhaSalvar(_autoSaveFalhou);
+  }
 }
 
 // O `max` do input segura o clique no calendário, mas não segura data digitada, data vinda
