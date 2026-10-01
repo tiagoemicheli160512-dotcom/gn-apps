@@ -1242,6 +1242,10 @@ async function carregarPedidoAtual() {
     // acesso a Ver Provisões/Reverter).
     const rascunhos = data.filter(p => p.status === 'RASCUNHO');
     S.pedidoAtual = rascunhos.length ? rascunhos[rascunhos.length - 1] : data[0];
+    // 2ª rodada escopada (lojas_escopo): depois de um reload a loja aberta pode estar fora do
+    // escopo, e a aba dela não existe mais na tela. Cai na primeira loja da rodada.
+    const _esc = _pedidoEscopoLojas();
+    if (_esc && !_esc.includes(S.lojaAtiva)) S.lojaAtiva = _esc[0];
   } else if (ehSemAtual) {
     // Semana atual sem pedido → cria rascunho
     const { data: novo } = await db.from('gn_pedidos')
@@ -2684,34 +2688,39 @@ function abrirModalNovoPedidoLojas() {
   if (!lojas.length) { toast('Nenhuma loja nesta região.', 'err'); return; }
   const itensDaLoja = (slug) =>
     Object.values(S.pedidoItens).filter(l => l[slug] && l[slug].qtd > 0).length;
-  // Pedido CONFIRMADO fica fora: a provisão de entrega já existe e o fornecedor já recebeu.
-  // O "Novo (todas)" nesse estado abre um rascunho novo SEM tocar no confirmado; tirar itens
-  // de dentro dele, como o caminho por loja faria, apagaria um pedido real já colocado. Quem
-  // precisa mexer num confirmado reverte primeiro — fluxo que já existe.
-  if (S.pedidoAtual.status === 'CONFIRMADO' || S.pedidoAtual.status === 'ENVIADO') {
-    abrirModal(`
-      <div style="font-size:15px;font-weight:800;margin-bottom:6px">🔒 Pedido já ${S.pedidoAtual.status === 'ENVIADO' ? 'enviado' : 'confirmado'}</div>
-      <div style="font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:12px">
-        Refazer por loja tiraria itens de um pedido que já virou provisão de entrega — o fornecedor
-        já recebeu. Pra mexer neste pedido, use <b>Reverter</b> no fornecedor que precisa mudar, ou
-        <b>Novo (todas)</b>, que abre um rascunho novo sem cancelar o que já foi confirmado.
-      </div>
-      <button class="btn-sm btn-outline" onclick="fecharModal()" style="width:100%">Entendi</button>`);
-    return;
-  }
+  // Dois modos, decididos pelo estado do pedido da semana — sem perguntar nada a mais:
+  //
+  // CONFIRMADO/ENVIADO → 2ª RODADA. Abre um pedido novo que vale SÓ pras lojas marcadas, pra
+  //   acrescentar o que faltou. O confirmado não é tocado: nenhum item sai dele, nenhuma
+  //   provisão é cancelada. É o caso de "o pedido já saiu e 2 lojas precisam pedir mais" — e o
+  //   "Novo (todas)" resolvia abrindo rascunho pra todas as 11, misturando quem não tem nada a
+  //   acrescentar.
+  // RASCUNHO → REFAZER. Zera as lojas marcadas pra lançarem de novo, sem mexer nas outras.
+  const rodada = (S.pedidoAtual.status === 'CONFIRMADO' || S.pedidoAtual.status === 'ENVIADO');
+  const jaPedidoDaLoja = (slug) =>
+    Object.values(S.pedidosConfirmados || {}).filter(l => (l[slug] || 0) > 0).length;
   const linhas = lojas.map(l => {
-    const n = itensDaLoja(l.slug_pedido);
+    const n = rodada ? jaPedidoDaLoja(l.slug_pedido) : itensDaLoja(l.slug_pedido);
+    const txt = rodada
+      ? (n ? n + ' item(ns) já comprado(s)' : 'não pediu nada')
+      : (n ? n + ' item(ns) lançado(s)' : 'nada lançado');
     return `<label style="display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:9px;background:var(--card2);margin-bottom:4px;cursor:pointer">
       <input type="checkbox" class="np-loja" value="${l.slug_pedido}" style="width:16px;height:16px;flex-shrink:0">
       <span style="flex:1;font-size:12.5px;font-weight:700">${esc(l.nome_display)}</span>
-      <span style="font-size:11px;color:${n?'var(--muted)':'#94a3b8'}">${n ? n + ' item(ns) lançado(s)' : 'nada lançado'}</span>
+      <span style="font-size:11px;color:${n?'var(--muted)':'#94a3b8'}">${txt}</span>
     </label>`;
   }).join('');
   abrirModal(`
-    <div style="font-size:15px;font-weight:800;margin-bottom:3px">🔄 Refazer o pedido de quais lojas?</div>
+    <div style="font-size:15px;font-weight:800;margin-bottom:3px">${rodada
+      ? '🔄 2ª rodada pra quais lojas?'
+      : '🔄 Refazer o pedido de quais lojas?'}</div>
     <div style="font-size:11.5px;color:var(--muted);line-height:1.45;margin-bottom:10px">
-      Só as lojas marcadas são zeradas pra lançar de novo. As outras continuam com tudo que já
-      lançaram, e o pedido da semana não é cancelado.
+      ${rodada
+        ? `O pedido desta semana já está ${S.pedidoAtual.status === 'ENVIADO' ? 'enviado' : 'confirmado'} e <b>não vai ser alterado</b>.
+           Isto abre um pedido novo só pras lojas marcadas, pra acrescentar o que faltou — as outras
+           não aparecem na tela e não entram nesta rodada.`
+        : `Só as lojas marcadas são zeradas pra lançar de novo. As outras continuam com tudo que já
+           lançaram, e o pedido da semana não é cancelado.`}
     </div>
     <div style="max-height:46vh;overflow-y:auto;margin-bottom:10px">${linhas}</div>
     <div style="display:flex;gap:6px;margin-bottom:10px">
@@ -2720,7 +2729,7 @@ function abrirModalNovoPedidoLojas() {
     </div>
     <div style="display:flex;gap:7px">
       <button class="btn-sm btn-outline" onclick="fecharModal()" style="flex:1">Cancelar</button>
-      <button class="btn-sm" onclick="_confirmarNovoPedidoLojas()" style="flex:1;background:#b45309;color:#fff;border:none;font-weight:800">Refazer as marcadas</button>
+      <button class="btn-sm" onclick="_confirmarNovoPedidoLojas()" style="flex:1;background:#b45309;color:#fff;border:none;font-weight:800">${rodada ? 'Abrir a rodada' : 'Refazer as marcadas'}</button>
     </div>`);
 }
 
@@ -2728,6 +2737,9 @@ async function _confirmarNovoPedidoLojas() {
   const slugs = [...document.querySelectorAll('.np-loja:checked')].map(c => c.value);
   if (!slugs.length) { toast('Marque ao menos uma loja.', 'err'); return; }
   const nomes = slugs.map(s => (S.lojas.find(l => l.slug_pedido === s) || {}).nome_display || s);
+  if (S.pedidoAtual && (S.pedidoAtual.status === 'CONFIRMADO' || S.pedidoAtual.status === 'ENVIADO')) {
+    return _abrirSegundaRodada(slugs, nomes);
+  }
   const totalItens = Object.values(S.pedidoItens)
     .reduce((n, l) => n + slugs.filter(s => l[s] && l[s].qtd > 0).length, 0);
   const aviso = totalItens > 0
@@ -2758,6 +2770,41 @@ async function _confirmarNovoPedidoLojas() {
     toast(`Pedido de ${nomes.join(', ')} liberado pra lançar de novo.`, 'ok');
   } catch (e) {
     toast('Erro ao refazer: ' + (e.message || e), 'err');
+  }
+}
+
+// 2ª rodada: pedido NOVO que vale só pras lojas marcadas. Não encosta no confirmado — nenhum
+// item sai dele, nenhuma provisão é cancelada. A rodada nasce vazia e o que já foi comprado
+// aparece como "Já pedido: N" na linha (ver _jaPedidoChip), pra não pedir em dobro.
+async function _abrirSegundaRodada(slugs, nomes) {
+  const msg = `Abrir 2ª rodada só para:\n• ${nomes.join('\n• ')}\n\n` +
+    `O pedido ${S.pedidoAtual.status === 'ENVIADO' ? 'enviado' : 'confirmado'} desta semana NÃO é alterado — ` +
+    `nada sai dele e nenhuma entrega é cancelada.\nA tela passa a mostrar só ${nomes.length > 1 ? 'essas lojas' : 'essa loja'}, ` +
+    `com o que já foi comprado à vista pra você lançar só o que falta.\n\nContinuar?`;
+  if (!confirm(msg)) return;
+  fecharModal();
+  try {
+    const semIso = S.semanaAtiva.toISOString().split('T')[0];
+    const { data, error } = await db.from('gn_pedidos')
+      .insert([{ data_pedido: hoje(), semana_inicio: semIso, status: 'RASCUNHO', regiao: S.regiao,
+                 lojas_escopo: slugs,
+                 observacao: '2ª rodada — ' + nomes.join(', ') }])
+      .select().single();
+    if (error) throw error;
+    _logAuditoria('ABRIR_2A_RODADA_LOJAS', { lojas: slugs },
+      { pedido_id: data.id, pedido_anterior: S.pedidoAtual.id });
+    S.pedidoAtual = data;
+    S.pedidoItens = {};
+    // A loja aberta pode não estar no escopo — sem isto a tela ficaria numa aba que não existe.
+    if (!slugs.includes(S.lojaAtiva)) S.lojaAtiva = slugs[0];
+    // Recarrega o "Já pedido": lê os CONFIRMADO/ENVIADO da semana, que continuam lá intactos.
+    await carregarConfirmadosSemana();
+    await carregarPedidoReferencia();
+    calcularTotais();
+    renderPedido();
+    toast(`2ª rodada aberta só para ${nomes.join(', ')}.`, 'ok');
+  } catch (e) {
+    toast('Erro ao abrir a rodada: ' + (e.message || e), 'err');
   }
 }
 
@@ -3600,6 +3647,10 @@ async function abrirPedidoDaSemana(id) {
   if (!alvo) { toast('Pedido não encontrado nesta semana.', 'err'); return; }
   S.pedidoAtual = alvo;
   S.pedidoItens = {};
+  // Trocar pra uma 2ª rodada escopada pode deixar a loja aberta fora do escopo — a aba dela
+  // não existe mais na tela, e sem isto ficaria numa loja invisível.
+  const escopo = _pedidoEscopoLojas();
+  if (escopo && !escopo.includes(S.lojaAtiva)) S.lojaAtiva = escopo[0];
   await carregarItensPedido();
   await carregarFornecedoresConfirmados();
   await carregarEstadoAuditoriaFornecedores();
@@ -3669,6 +3720,40 @@ const LOJA_USERKEY_BY_SLUG = Object.fromEntries((window.GN_LOJAS || []).map(l =>
 // específica (aba por loja, carnes, trios) — nunca no modo "TODOS".
 const LOJA_TESTE_PEDIDO = { slug_pedido: 'loja_teste', nome_display: 'Loja Teste' };
 function lojasComTeste() { return [...S.lojas, LOJA_TESTE_PEDIDO]; }
+
+// ── 2ª RODADA ESCOPADA ────────────────────────────────────────────────────
+// Pedido com lojas_escopo preenchido vale só pras lojas de dentro dele: é a rodada aberta pra
+// quem precisa acrescentar depois do pedido da semana já ter sido confirmado. O confirmado
+// continua intocado — esta é uma linha gn_pedidos separada, com itens só dessas lojas.
+//
+// O escopo filtra APENAS o que a aba Pedido mostra (abas de loja e a visão "todas"). Nada mais
+// precisa saber dele: provisão, totais e confirmação por fornecedor são dirigidos pelos ITENS
+// que existem, e só as lojas da rodada têm item. Filtrar S.lojas globalmente, em vez disso,
+// mexeria no painel de envio, nos totais e na geração de provisão de tabela inteira.
+function _pedidoEscopoLojas() {
+  const esc = S.pedidoAtual && S.pedidoAtual.lojas_escopo;
+  return (Array.isArray(esc) && esc.length) ? esc : null;
+}
+function _lojasDoPedido() {
+  const escopo = _pedidoEscopoLojas();
+  if (!escopo) return lojasComTeste();
+  return S.lojas.filter(l => escopo.includes(l.slug_pedido));
+}
+// Nome das lojas da rodada, pro aviso e pra confirmação.
+function _nomesEscopo() {
+  const escopo = _pedidoEscopoLojas() || [];
+  return escopo.map(s => (S.lojas.find(l => l.slug_pedido === s) || {}).nome_display || s);
+}
+function _avisoEscopoHtml() {
+  const escopo = _pedidoEscopoLojas();
+  if (!escopo) return '';
+  return `<div style="background:rgba(180,83,9,.12);border:1px solid rgba(180,83,9,.35);border-radius:10px;padding:9px 12px;margin-bottom:8px;font-size:11.5px;color:var(--fg);line-height:1.5">
+    🔄 <b>2ª rodada — só ${esc(_nomesEscopo().join(', '))}.</b>
+    As outras lojas não aparecem aqui porque não entram nesta rodada, e o
+    <b>pedido confirmado da semana não foi alterado</b>. Lance só o que falta: o número verde
+    <b style="color:#16a34a">Já pedido: N</b> na linha é o que já foi comprado.
+  </div>`;
+}
 
 // ── STATUS DO PEDIDO DA SEMANA, POR LOJA ──────────────────────────────────
 // Quem já mandou a urgência, quem já finalizou e quem não mandou nada. Sem isto o Compras
@@ -3947,7 +4032,7 @@ function renderPedido() {
     </div>`;
 
   // ── Store Tabs (só no modo POR LOJA) ──
-  const storeTabs = !S.todosModo ? lojasComTeste().map(l => {
+  const storeTabs = !S.todosModo ? _lojasDoPedido().map(l => {
     const n = contarItensLoja(l.slug_pedido);
     // Selo do envio da semana na própria aba da loja (ver _painelEnvioSemanaHtml): dá pra ver
     // de quem se está esperando sem sair da loja que está aberta. A Loja Teste não entra em
@@ -4121,7 +4206,7 @@ function renderPedido() {
           }, 0);
           const totalQtd = S.lojas.reduce((sum, l) => sum + (S.pedidoItens[prod.id]?.[l.slug_pedido]?.qtd || 0), 0);
 
-          const lojasHtml = S.lojas.map(loja => {
+          const lojasHtml = (_pedidoEscopoLojas() ? _lojasDoPedido() : S.lojas).map(loja => {
             const contagem = S.contagens[prod.id]?.[loja.slug_pedido];
             const itemLoja  = S.pedidoItens[prod.id]?.[loja.slug_pedido];
             const qtdL = itemLoja?.qtd ?? 0;
@@ -4314,6 +4399,7 @@ function renderPedido() {
     </div>` : ''}
 
     ${_painelEnvioSemanaHtml()}
+    ${_avisoEscopoHtml()}
     ${_avisoPedidoRefHtml()}
 
     <div class="filtros">

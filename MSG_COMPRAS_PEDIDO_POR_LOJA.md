@@ -19,8 +19,16 @@ Na prática, uma loja errada custava o trabalho das 11.
 
 Tem dois botões lado a lado:
 
-🔄 *Por loja* → escolhe quais lojas refazem. **Use este no dia a dia.**
+🔄 *Por loja* → escolhe quais lojas. **Use este no dia a dia.**
 *Novo (todas)* → o antigo, que cancela o pedido da semana inteiro. Só para começar a semana do zero.
+
+O *Por loja* faz **duas coisas diferentes**, e ele decide qual pelo estado do pedido da semana —
+você não precisa escolher nada a mais:
+
+| Estado do pedido da semana | O que o Por loja faz |
+| :--- | :--- |
+| *RASCUNHO* (ainda não confirmado) | **Zera** as lojas marcadas pra lançarem de novo |
+| *CONFIRMADO* ou *ENVIADO* | Abre uma **2ª rodada** só pras lojas marcadas, pra acrescentar o que faltou |
 
 ### Como usar o "Por loja"
 
@@ -52,25 +60,25 @@ Quando não houve nenhum pedido refeito na semana, o app mostra a referência da
 No topo da tela sempre aparece uma frase dizendo **de onde o número vem** — leia essa frase
 antes de comparar, porque o "Refeito" e o "Sem.ant" são coisas diferentes.
 
-### Uma coisa que o "Por loja" NÃO faz
-
-Se o pedido da semana já está **CONFIRMADO** (ou ENVIADO), o *Por loja* se recusa e explica o
-motivo: a provisão de entrega já existe e o fornecedor já recebeu o pedido. Tirar itens de
-dentro de um pedido confirmado apagaria um pedido real.
-
-*Ou seja: o Por loja nunca reabre nem zera um pedido confirmado.*
-
-Nesse caso o caminho é um destes dois:
-- *Reverter* no fornecedor específico que precisa mudar; ou
-- *Novo (todas)*, que abre um rascunho novo **sem** cancelar o que já foi confirmado.
-
 ### Acrescentar o que faltou num pedido já confirmado (2ª rodada)
 
-Esse é o caso de *"esqueci de pedir X"* depois de o pedido já ter saído. O caminho é o
-*Novo (todas)*: ele abre um rascunho em branco por cima, **sem** cancelar o confirmado.
+Esse é o caso de *"o pedido já saiu e duas lojas precisam pedir mais"*.
 
-Pra não pedir duas vezes a mesma coisa, agora cada item mostra em verde quanto *já foi
-comprado* nesta semana:
+Com o pedido da semana **CONFIRMADO**, toque em *🔄 Por loja* e marque só as lojas que vão
+acrescentar. O que acontece:
+
+- abre um **pedido novo**, separado, só com essas lojas;
+- o pedido confirmado **não é alterado em nada** — nenhum item sai dele, nenhuma entrega é
+  cancelada;
+- a tela passa a mostrar **só as lojas da rodada**, com um aviso laranja no topo dizendo isso.
+  As outras não aparecem porque não entram nesta rodada;
+- quando terminar, dá pra voltar pro pedido confirmado pelo botão *"Ver o pedido confirmado"*
+  que aparece no topo.
+
+*Importante: o Por loja nunca reabre nem apaga um pedido confirmado.*
+
+Pra não pedir duas vezes a mesma coisa, cada item mostra em verde quanto *já foi comprado*
+nesta semana:
 
 > *Já pedido: 12*  ← em verde
 
@@ -88,6 +96,15 @@ Resumindo os números que aparecem na linha:
 | *Já pedido: N* | verde | já foi comprado nesta semana — **não repita** |
 | *Refeito: N* | laranja | estava lançado antes de você zerar com o Por loja |
 | *Sem.ant: N* | cinza | foi pedido na semana passada |
+
+### Resumo dos caminhos
+
+| Preciso… | Caminho |
+| :--- | :--- |
+| Acrescentar item num pedido **ainda em rascunho** | Nenhum botão — só digitar no campo da loja |
+| Acrescentar depois do pedido **confirmado**, em algumas lojas | *🔄 Por loja* → 2ª rodada |
+| Uma loja lançou **errado** e precisa relançar | *🔄 Por loja* (com o pedido em rascunho) |
+| Começar a semana **inteira** do zero | *Novo (todas)* |
 
 ### Também arrumado
 
