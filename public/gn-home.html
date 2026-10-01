@@ -2022,15 +2022,25 @@ async function _renderCarnesDocsHome(mostrar, sess, isMasterAtivo) {
   const prevSunday = new Date(prevMonday); prevSunday.setDate(prevMonday.getDate() + 6);
   const fmtISO = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
   const prevMondayISO = fmtISO(prevMonday);
+  const prevSundayISO = fmtISO(prevSunday);
 
-  const [docsRows, carnesRows] = await Promise.all([
+  const [docsRows, carnesRows, fatRows] = await Promise.all([
     window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent('DOCS_' + comKey)}&select=all_data`, H, 'carnesDocsHome:docs', []),
     // Filtra por chkKey OU comKey — algumas lojas (herança de bug antigo já corrigido em
     // outras telas) ainda têm semanas gravadas com o comKey em vez do chkKey em
     // checklist_carnes.loja; sem os dois, o card mostraria "sem dados" mesmo quando a
     // loja já preencheu Carnes naquela semana.
     window.gnFetchJson(`${SB_URL}/rest/v1/checklist_carnes?loja=in.(${encodeURIComponent(chkKey)},${encodeURIComponent(comKey)})&semana_inicio=eq.${prevMondayISO}&select=carnes`, H, 'carnesDocsHome:carnes', []),
+    // Faturamento da MESMA semana das carnes: é com ele que se julga se a venda estimada
+    // em kg faz sentido. Sem o faturamento do lado, o número de kg não tem contra o que ser
+    // comparado — foi o que o dono pediu pra ficar no próprio card.
+    window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${prevMondayISO}&data_operacao=lte.${prevSundayISO}&select=data_operacao,venda_salao,venda_delivery`, H, 'carnesDocsHome:fat', []),
   ]);
+
+  const fatSemana = (fatRows || []).reduce((a, r) =>
+    a + (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0), 0);
+  const fatDias = (fatRows || []).filter(r =>
+    ((parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0)) > 0).length;
 
   const docs = (docsRows[0] && docsRows[0].all_data && docsRows[0].all_data.docs) || [];
   const docsAlerta = docs
@@ -2059,7 +2069,8 @@ async function _renderCarnesDocsHome(mostrar, sess, isMasterAtivo) {
   }).filter(Boolean);
 
   const nCarnesAtencao = carnesResumo.filter(c => c.faltando.length > 0).length;
-  _carnesDocsHomeData = { docsAlerta, carnesResumo, nCarnesAtencao, prevMonday, prevSunday };
+  _carnesDocsHomeData = { docsAlerta, carnesResumo, nCarnesAtencao, prevMonday, prevSunday,
+                          fatSemana, fatDias, lojaNome: loja };
   _renderCarnesDocsHomeBody();
 }
 
@@ -2102,6 +2113,15 @@ function _renderCarnesDocsHomeBody() {
     </div>`;
   }).join('') : `<div style="font-size:11px;color:rgba(0,0,0,.4)">Sem dados de carnes na semana anterior.</div>`;
 
+  // Faturamento da mesma semana, logo acima das carnes: é a referência pra julgar se a venda
+  // estimada em kg faz sentido. Avisa quando a semana está incompleta, senão um faturamento
+  // baixo por falta de lançamento passaria por queda de venda.
+  const fatBRL = (d.fatSemana || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fatHtml = `<div style="display:flex;justify-content:space-between;align-items:baseline;background:rgba(0,0,0,.04);border-radius:8px;padding:9px 10px;margin-top:6px">
+    <span style="font-size:11px;font-weight:700;color:#1A1D23">💰 Faturamento da semana</span>
+    <span style="font-size:13px;font-weight:800;color:#1A1D23;font-variant-numeric:tabular-nums">R$ ${fatBRL}</span>
+  </div>${(d.fatDias || 0) < 7 ? `<div style="font-size:9px;color:#b45309;margin-top:3px">⚠️ ${d.fatDias || 0} de 7 dias lançados — o total ainda não fecha a semana</div>` : ''}`;
+
   el.innerHTML = `<div style="background:${bg};border:1px solid ${bgB};border-left:3px solid ${cor};border-radius:14px;margin:0 16px 14px;overflow:hidden">
     <div onclick="_toggleCarnesDocsHome()" style="padding:14px 16px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:10px">
       <div style="min-width:0">
@@ -2114,9 +2134,57 @@ function _renderCarnesDocsHomeBody() {
       <div style="font-size:10px;font-weight:700;color:rgba(0,0,0,.45);text-transform:uppercase;letter-spacing:.3px;margin-bottom:6px">Documentos e Licenças</div>
       ${docsHtml}
       <div style="font-size:10px;font-weight:700;color:rgba(0,0,0,.45);text-transform:uppercase;letter-spacing:.3px;margin-top:14px;margin-bottom:2px">Carnes — semana ${fmtDDMM(d.prevMonday)} a ${fmtDDMM(d.prevSunday)}</div>
+      ${fatHtml}
       ${carnesHtml}
+      <button onclick="event.stopPropagation();_relatorioCarnesWhats()" style="width:100%;margin-top:10px;background:#25D366;border:none;border-radius:10px;padding:9px;color:#fff;font-weight:700;font-size:12px;cursor:pointer;font-family:inherit">📲 Relatório para WhatsApp</button>
     </div>` : ''}
   </div>`;
+}
+
+// Relatório das carnes da semana anterior, pronto pra colar no WhatsApp. Mesmos números do
+// card — faturamento, e por carne o Início, as compras, a contagem e a venda estimada.
+function _relatorioCarnesWhats() {
+  const d = _carnesDocsHomeData;
+  if (!d) return;
+  const dd = dt => String(dt.getDate()).padStart(2, '0') + '/' + String(dt.getMonth() + 1).padStart(2, '0');
+  const brl = v => 'R$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  let txt = `🥩 *Controle de Carnes*\n🏪 ${d.lojaNome}\n📅 Semana ${dd(d.prevMonday)} a ${dd(d.prevSunday)}\n\n`;
+  txt += `💰 Faturamento da semana: *${brl(d.fatSemana)}*`;
+  txt += d.fatDias < 7 ? ` _(${d.fatDias} de 7 dias lançados)_\n\n` : `\n\n`;
+  if (!d.carnesResumo.length) {
+    txt += '_Sem dados de carnes nesta semana._\n';
+  } else {
+    d.carnesResumo.forEach(c => {
+      txt += `${c.icon} *${c.label}*\n`;
+      txt += `   Início ${c.totIni.toFixed(1)} · +Compras ${c.totEnt.toFixed(1)} · −Contagem ${c.totFim.toFixed(1)}\n`;
+      txt += `   = Venda estimada *${Math.abs(c.venda).toFixed(1)} ${c.unit}*${c.venda < -0.05 ? ' ⚠️ NEGATIVO' : ''}\n`;
+      if (c.faltando.length) txt += `   ⚠️ falta lançar: ${c.faltando.join(' e ')}\n`;
+      txt += '\n';
+    });
+  }
+  if (d.docsAlerta.length) {
+    txt += `📄 *Documentos vencendo*\n`;
+    d.docsAlerta.forEach(doc => {
+      const q = doc.dias < 0 ? `VENCIDO há ${Math.abs(doc.dias)}d` : doc.dias === 0 ? 'VENCE HOJE' : `vence em ${doc.dias}d`;
+      txt += `   • ${doc.nome || '—'} — ${q}\n`;
+    });
+  }
+  _abrirWhats(txt);
+}
+
+// Abre o WhatsApp com o texto pronto. Se o aparelho bloquear a janela (o caso comum do
+// navegador embutido), cai pra área de transferência em vez de não fazer nada.
+function _abrirWhats(txt) {
+  const url = 'https://wa.me/?text=' + encodeURIComponent(txt);
+  const w = window.open(url, '_blank');
+  if (w) return;
+  try {
+    navigator.clipboard.writeText(txt);
+    if (window.showToast) window.showToast('Relatório copiado — é só colar no WhatsApp', 'success');
+    else alert('Relatório copiado — é só colar no WhatsApp.');
+  } catch (e) {
+    alert(txt);
+  }
 }
 
 function _renderDatasEspeciaisHome(mostrar, sess, isMaster) {
@@ -2465,9 +2533,58 @@ async function _renderEscalaDiaHome(mostrar, sess, isMasterAtivo) {
           ${ausente.length?`<span style="font-size:10px;background:rgba(239,68,68,.15);color:#1A1D23;padding:3px 8px;border-radius:8px;font-weight:700">⚠ ${ausente.length}</span>`:''}
         </div>
       </summary>
-      <div style="padding:0 16px 12px">${corpo}</div>
+      <div style="padding:0 16px 12px">${corpo}
+        <button onclick="event.stopPropagation();_relatorioEscalaWhats()" style="width:100%;margin-top:10px;background:#25D366;border:none;border-radius:10px;padding:9px;color:#fff;font-weight:700;font-size:12px;cursor:pointer;font-family:inherit">📲 Relatório para WhatsApp</button>
+      </div>
     </details>
   </div>`;
+
+  // Guarda o que o card já montou, pro relatório sair exatamente igual ao que está na tela —
+  // sem refazer consulta nem recalcular agrupamento.
+  _escalaDiaHomeRelatorio = { loja, data: hojeDate, diaIdx, gruposSetor, semSetor, folga, ausente,
+                              totalPresentes, todosSetores, sortTurno };
+}
+
+let _escalaDiaHomeRelatorio = null;
+// Escala do dia pronta pro WhatsApp, com os mesmos blocos do card: setores, folga e ausentes.
+function _relatorioEscalaWhats() {
+  const d = _escalaDiaHomeRelatorio;
+  if (!d) return;
+  const DSEM = ['Domingo','Segunda','Terça','Quarta','Quinta','Sexta','Sábado'];
+  const dd = String(d.data.getDate()).padStart(2,'0') + '/' + String(d.data.getMonth()+1).padStart(2,'0');
+  const linha = f => {
+    const hd = (f.horario_dias||[])[d.diaIdx];
+    const hor = (hd && hd.entrada && hd.saida) ? ` ${hd.entrada}–${hd.saida}` : (f.horario ? ' ' + f.horario : '');
+    const turno = f.turno ? ` (${f.turno})` : '';
+    const st = ESCALA_HOME_STATUS_LABEL[f.st] || f.st || '';
+    const marca = ESCALA_HOME_PRESENTE_SET.has(f.st) ? '' : ` — ${st}`;
+    return `   • ${f.nome}${turno}${hor}${marca}\n`;
+  };
+  let txt = `📅 *Escala de Hoje*\n🏪 ${d.loja}\n🗓 ${DSEM[d.data.getDay()]}, ${dd}\n\n`;
+  txt += `✅ Presentes: *${d.totalPresentes}*`;
+  if (d.folga.length) txt += ` · 🏖 ${d.folga.length}`;
+  if (d.ausente.length) txt += ` · ⚠️ ${d.ausente.length}`;
+  txt += '\n\n';
+  d.todosSetores.forEach(s => {
+    txt += `🏷 *${s}* (${d.gruposSetor[s].length})\n`;
+    d.sortTurno(d.gruposSetor[s]).forEach(f => { txt += linha(f); });
+    txt += '\n';
+  });
+  if (d.semSetor.length) {
+    txt += `👤 *Sem setor* (${d.semSetor.length})\n`;
+    d.sortTurno(d.semSetor).forEach(f => { txt += linha(f); });
+    txt += '\n';
+  }
+  if (d.folga.length) {
+    txt += `🏖 *Folga / Banco / Férias / Afastamento* (${d.folga.length})\n`;
+    d.folga.forEach(f => { txt += linha(f); });
+    txt += '\n';
+  }
+  if (d.ausente.length) {
+    txt += `⚠️ *Ausentes* (${d.ausente.length})\n`;
+    d.ausente.forEach(f => { txt += linha(f); });
+  }
+  _abrirWhats(txt);
 }
 
 // ── GERENTE / SUB-GERENTE DE PLANTÃO (hero da Home por loja) ──────────────
