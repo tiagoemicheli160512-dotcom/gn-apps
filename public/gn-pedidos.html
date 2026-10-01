@@ -708,6 +708,8 @@ let S = {
   pedidoItens: {},     // { catalogoId: { lojaSlug: { id, qtd } } }
   contagens:   {},     // { catalogoId: { lojaSlug: { atual, ul_estoque, ul_pedido } } }
   ultimoPedido:{},     // { catalogoId: { lojaSlug: qtd } } — semana anterior
+  pedidoRef:{},        // { catalogoId: { lojaSlug: qtd } } — referência mostrada ao lançar
+  pedidoRefOrigem:null,// 'zerado' (pedido desta semana que foi refeito) | 'semana_anterior'
   provisaoAnterior:{}, // { catalogoId: { lojaSlug: qtd } } — provisionado pelo Compras na semana anterior, independente de entrada de NF
   pedidosConfirmados:{},// { catalogoId: { lojaSlug: qtd } } — confirmados desta semana
   // Todos os pedidos vivos (não-cancelados) da semana ativa, do mais novo pro mais antigo.
@@ -926,7 +928,10 @@ function toast(msg, tipo='ok') {
 }
 
 function fecharModal(e) {
-  if (e.target === $('modal-bg')) $('modal-bg').classList.remove('ativo');
+  // Sem evento = fechamento programático (botão Cancelar dentro da caixa, ou depois de uma
+  // ação concluir). Com evento, só fecha se o clique foi no fundo: clique dentro da caixa
+  // borbulha até o modal-bg e não pode fechar o modal no meio do preenchimento.
+  if (!e || e.target === $('modal-bg')) $('modal-bg').classList.remove('ativo');
 }
 function abrirModal(html) {
   $('modal-box').innerHTML = html;
@@ -1272,6 +1277,9 @@ async function carregarPedidoAtual() {
 
   await carregarItensPedido();
   await carregarUltimoPedido();
+  // Depois do carregarUltimoPedido: é o fallback da referência quando não há pedido refeito
+  // nesta semana.
+  await carregarPedidoReferencia();
   await carregarConfirmadosSemana();
   await carregarFornecedoresConfirmados();
   await carregarEstadoAuditoriaFornecedores();
@@ -2661,6 +2669,179 @@ async function reverterConfirmacaoFornecedor(fornecedor) {
   }
 }
 
+// ── NOVO PEDIDO SÓ PRAS LOJAS ESCOLHIDAS ──────────────────────────────────
+// "Novo" era tudo ou nada: reabria as 11 lojas quando só 1 ou 2 precisavam refazer, e as
+// outras perdiam de vista o que já tinham lançado. Como gn_pedido_itens é por
+// (pedido_id, catalogo_id, loja_slug), dá pra refazer loja por loja — e isso é mais seguro
+// que o caminho de hoje, porque não cancela o pedido da semana inteiro.
+//
+// Os itens das lojas escolhidas NÃO são apagados: são transferidos pra uma linha CANCELADO
+// da mesma semana/região. Isso preserva o que foi pedido (é a referência que a tela passa a
+// mostrar ao lado do campo novo) e mantém o pedido ativo intacto pras outras lojas.
+function abrirModalNovoPedidoLojas() {
+  if (!S.pedidoAtual) { toast('Não há pedido nesta semana pra refazer.', 'err'); return; }
+  const lojas = S.lojas || [];
+  if (!lojas.length) { toast('Nenhuma loja nesta região.', 'err'); return; }
+  const itensDaLoja = (slug) =>
+    Object.values(S.pedidoItens).filter(l => l[slug] && l[slug].qtd > 0).length;
+  // Pedido CONFIRMADO fica fora: a provisão de entrega já existe e o fornecedor já recebeu.
+  // O "Novo (todas)" nesse estado abre um rascunho novo SEM tocar no confirmado; tirar itens
+  // de dentro dele, como o caminho por loja faria, apagaria um pedido real já colocado. Quem
+  // precisa mexer num confirmado reverte primeiro — fluxo que já existe.
+  if (S.pedidoAtual.status === 'CONFIRMADO' || S.pedidoAtual.status === 'ENVIADO') {
+    abrirModal(`
+      <div style="font-size:15px;font-weight:800;margin-bottom:6px">🔒 Pedido já ${S.pedidoAtual.status === 'ENVIADO' ? 'enviado' : 'confirmado'}</div>
+      <div style="font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:12px">
+        Refazer por loja tiraria itens de um pedido que já virou provisão de entrega — o fornecedor
+        já recebeu. Pra mexer neste pedido, use <b>Reverter</b> no fornecedor que precisa mudar, ou
+        <b>Novo (todas)</b>, que abre um rascunho novo sem cancelar o que já foi confirmado.
+      </div>
+      <button class="btn-sm btn-outline" onclick="fecharModal()" style="width:100%">Entendi</button>`);
+    return;
+  }
+  const linhas = lojas.map(l => {
+    const n = itensDaLoja(l.slug_pedido);
+    return `<label style="display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:9px;background:var(--card2);margin-bottom:4px;cursor:pointer">
+      <input type="checkbox" class="np-loja" value="${l.slug_pedido}" style="width:16px;height:16px;flex-shrink:0">
+      <span style="flex:1;font-size:12.5px;font-weight:700">${esc(l.nome_display)}</span>
+      <span style="font-size:11px;color:${n?'var(--muted)':'#94a3b8'}">${n ? n + ' item(ns) lançado(s)' : 'nada lançado'}</span>
+    </label>`;
+  }).join('');
+  abrirModal(`
+    <div style="font-size:15px;font-weight:800;margin-bottom:3px">🔄 Refazer o pedido de quais lojas?</div>
+    <div style="font-size:11.5px;color:var(--muted);line-height:1.45;margin-bottom:10px">
+      Só as lojas marcadas são zeradas pra lançar de novo. As outras continuam com tudo que já
+      lançaram, e o pedido da semana não é cancelado.
+    </div>
+    <div style="max-height:46vh;overflow-y:auto;margin-bottom:10px">${linhas}</div>
+    <div style="display:flex;gap:6px;margin-bottom:10px">
+      <button class="btn-sm btn-outline" onclick="document.querySelectorAll('.np-loja').forEach(c=>c.checked=true)" style="flex:1;font-size:11px">Marcar todas</button>
+      <button class="btn-sm btn-outline" onclick="document.querySelectorAll('.np-loja').forEach(c=>c.checked=false)" style="flex:1;font-size:11px">Desmarcar</button>
+    </div>
+    <div style="display:flex;gap:7px">
+      <button class="btn-sm btn-outline" onclick="fecharModal()" style="flex:1">Cancelar</button>
+      <button class="btn-sm" onclick="_confirmarNovoPedidoLojas()" style="flex:1;background:#b45309;color:#fff;border:none;font-weight:800">Refazer as marcadas</button>
+    </div>`);
+}
+
+async function _confirmarNovoPedidoLojas() {
+  const slugs = [...document.querySelectorAll('.np-loja:checked')].map(c => c.value);
+  if (!slugs.length) { toast('Marque ao menos uma loja.', 'err'); return; }
+  const nomes = slugs.map(s => (S.lojas.find(l => l.slug_pedido === s) || {}).nome_display || s);
+  const totalItens = Object.values(S.pedidoItens)
+    .reduce((n, l) => n + slugs.filter(s => l[s] && l[s].qtd > 0).length, 0);
+  const aviso = totalItens > 0
+    ? `\n\n${totalItens} item(ns) já lançado(s) por ${nomes.length > 1 ? 'essas lojas' : 'essa loja'} saem do pedido ativo.\nEles ficam guardados como referência na tela, pra conferir o que tinha sido pedido.`
+    : '';
+  if (!confirm(`Refazer o pedido de:\n• ${nomes.join('\n• ')}${aviso}\n\nAs outras lojas não são afetadas. Continuar?`)) return;
+  fecharModal();
+  try {
+    const parkId = await _pedidoParkCanceladoId();
+    // Transfere em vez de apagar: o que foi pedido continua existindo e alimenta a coluna de
+    // referência. Sem isto, "refazer" perdia pra sempre a quantidade que a loja tinha lançado.
+    const { error: errMov } = await db.from('gn_pedido_itens')
+      .update({ pedido_id: parkId })
+      .eq('pedido_id', S.pedidoAtual.id)
+      .in('loja_slug', slugs);
+    if (errMov) throw errMov;
+    // Provisão dessas lojas não pode ficar "aguardando entrega" de um item que saiu do
+    // pedido — foi o que gerou 286 provisões órfãs quando um pedido inteiro foi cancelado.
+    await db.from('gn_provisoes')
+      .update({ status: 'CANCELADO', atualizado_em: new Date().toISOString() })
+      .eq('pedido_id', S.pedidoAtual.id).eq('status', 'AGUARDANDO').in('loja_slug', slugs);
+    _logAuditoria('REFAZER_PEDIDO_LOJAS', { lojas: slugs, itens_movidos: totalItens },
+      { pedido_id: S.pedidoAtual.id });
+    await carregarItensPedido();
+    await carregarPedidoReferencia();
+    calcularTotais();
+    renderPedido();
+    toast(`Pedido de ${nomes.join(', ')} liberado pra lançar de novo.`, 'ok');
+  } catch (e) {
+    toast('Erro ao refazer: ' + (e.message || e), 'err');
+  }
+}
+
+// Linha CANCELADO da semana/região onde os itens refeitos ficam guardados. Reaproveita a
+// mais recente se já existir, pra não criar uma linha por clique.
+async function _pedidoParkCanceladoId() {
+  const semIso = S.semanaAtiva.toISOString().split('T')[0];
+  const { data: ja } = await db.from('gn_pedidos').select('id')
+    .eq('semana_inicio', semIso).eq('regiao', S.regiao).eq('status', 'CANCELADO')
+    .order('criado_em', { ascending: false }).limit(1);
+  if (ja && ja.length) return ja[0].id;
+  const { data, error } = await db.from('gn_pedidos')
+    .insert([{ data_pedido: hoje(), semana_inicio: semIso, status: 'CANCELADO', regiao: S.regiao,
+               observacao: 'Itens refeitos — guardados como referência' }])
+    .select().single();
+  if (error) throw error;
+  return data.id;
+}
+
+// Referência pro lançamento novo: o que JÁ tinha sido pedido. Primeiro a linha CANCELADO
+// desta semana (o pedido que foi zerado — é o que a pessoa está refazendo e precisa conferir);
+// se não houver, a semana anterior, que o app já carregava em S.ultimoPedido e nunca mostrava
+// em lugar nenhum.
+async function carregarPedidoReferencia() {
+  S.pedidoRef = {};
+  S.pedidoRefOrigem = null;
+  if (!S.semanaAtiva) return;
+  const semIso = S.semanaAtiva.toISOString().split('T')[0];
+  try {
+    const { data: canc } = await db.from('gn_pedidos').select('id')
+      .eq('semana_inicio', semIso).eq('regiao', S.regiao).eq('status', 'CANCELADO')
+      .order('criado_em', { ascending: false }).limit(1);
+    if (canc && canc.length) {
+      const itens = await _fetchTodasPaginas(() => db.from('gn_pedido_itens')
+        .select('catalogo_id,loja_slug,qtd_pedida').eq('pedido_id', canc[0].id).order('id'));
+      const mapa = {};
+      (itens || []).forEach(i => {
+        const q = parseFloat(i.qtd_pedida) || 0;
+        if (q <= 0) return;
+        if (!mapa[i.catalogo_id]) mapa[i.catalogo_id] = {};
+        // Mais de uma rodada parkeada no mesmo CANCELADO: vale a maior, que é a referência
+        // mais informativa pra quem está relançando.
+        mapa[i.catalogo_id][i.loja_slug] = Math.max(mapa[i.catalogo_id][i.loja_slug] || 0, q);
+      });
+      if (Object.keys(mapa).length) { S.pedidoRef = mapa; S.pedidoRefOrigem = 'zerado'; return; }
+    }
+  } catch (e) {}
+  if (S.ultimoPedido && Object.keys(S.ultimoPedido).length) {
+    S.pedidoRef = S.ultimoPedido;
+    S.pedidoRefOrigem = 'semana_anterior';
+  }
+}
+
+// Diz de onde vem o número de referência mostrado nas linhas. Sem essa frase, "Refeito: 12"
+// ao lado do campo é um número sem procedência — e comparar com o número errado é pior que
+// não ter comparação nenhuma.
+function _avisoPedidoRefHtml() {
+  if (!S.pedidoRefOrigem || !Object.keys(S.pedidoRef || {}).length) return '';
+  const zerado = S.pedidoRefOrigem === 'zerado';
+  return `<div style="background:${zerado?'rgba(180,83,9,.1)':'rgba(100,116,139,.08)'};border:1px solid ${zerado?'rgba(180,83,9,.3)':'rgba(100,116,139,.22)'};border-radius:10px;padding:8px 11px;margin-bottom:8px;font-size:11.5px;color:var(--fg);line-height:1.45">
+    ${zerado
+      ? '🔄 <b>Mostrando o que tinha no pedido refeito</b> — o número <b style="color:#b45309">Refeito: N</b> na linha é a quantidade que estava lançada antes de zerar. Use pra conferir antes de lançar de novo.'
+      : '📋 <b>Referência da semana anterior</b> — o número <b>Sem.ant: N</b> na linha é o que foi pedido na semana passada.'}
+  </div>`;
+}
+
+function _pedidoRefQtd(catalogoId, slug) {
+  const m = S.pedidoRef && S.pedidoRef[catalogoId];
+  const q = m && slug ? m[slug] : null;
+  return q > 0 ? q : null;
+}
+
+// Rótulo curto pra caber na linha do item, com a origem no title — "Ped.ant" sem dizer de
+// onde veio seria pior que não mostrar: a pessoa compararia com o número errado.
+function _pedidoRefChip(catalogoId, slug) {
+  const q = _pedidoRefQtd(catalogoId, slug);
+  if (q == null) return '';
+  const zerado = S.pedidoRefOrigem === 'zerado';
+  const tip = zerado ? 'Quantidade do pedido desta semana que foi refeito — confira antes de lançar de novo'
+                     : 'Quantidade pedida na semana anterior';
+  return `<span title="${tip}" style="font-size:10px;font-weight:700;color:${zerado?'#b45309':'#64748b'};white-space:nowrap">
+    ${zerado ? 'Refeito' : 'Sem.ant'}: ${q}</span>`;
+}
+
 async function novoPedido() {
   // Na aba Edu/Oseas, "Novo" não pode cancelar o rascunho inteiro — é compartilhado com
   // quem ainda está lançando na outra aba. Em vez disso, limpa só os itens dos
@@ -2700,6 +2881,8 @@ async function novoPedido() {
     .select().single();
   S.pedidoAtual = data;
   S.pedidoItens = {};
+  // A linha que acabou de ser cancelada é justamente a referência do que vai ser relançado.
+  await carregarPedidoReferencia();
   calcularTotais();
   renderPedido();
   toast('Novo pedido criado.', 'ok');
@@ -3860,6 +4043,7 @@ function renderPedido() {
                 <span class="prod-est">Est.ant: ${ulEstDisp}</span>
                 <span class="prod-prov" title="Provisionado pelo Compras na semana anterior, independente de entrada de nota">Prov.ant: ${provAntDisp}</span>
                 <span class="prod-vig">Est.vig: ${estVigDisp} ${contInfoBtn}${corrigirBtn}</span>
+                ${_pedidoRefChip(prod.id, lojaAtiva)}
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:0">
@@ -3969,6 +4153,7 @@ function renderPedido() {
               <span class="todos-loja-est">Est.ant:${ulEstV}</span>
               <span class="todos-loja-prov" title="Provisionado pelo Compras na semana anterior, independente de entrada de nota">Prov.ant:${provAntVL}</span>
               <span class="todos-loja-vig">Est.vig:${vigV}${contInfoBtnL}${corrigirBtnL}</span>
+              ${_pedidoRefChip(prod.id, loja.slug_pedido)}
               <div style="display:flex;align-items:center;gap:0">
                 ${qtyCtrlSmHtml}
                 <button class="diverg-btn${divL?' ativo':''}" style="width:22px;height:22px;font-size:10px" title="Marcar divergência" onclick="toggleDiverg('${prod.id}','${loja.slug_pedido}')">⚑</button>
@@ -4080,7 +4265,8 @@ function renderPedido() {
         <div style="font-size:11px;color:var(--muted);margin-top:2px">${S.todosModo ? 'Total geral' : lojaDisplay} : <span class="num" id="hdr-total">${S.todosModo ? `R$ ${fmt(totalGeral)}` : `R$ ${fmt(totalLoja)}`}</span> · <span style="color:var(--text)">${totalItensGeral} item${totalItensGeral!==1?'s':''}</span></div>
       </div>
       <div class="pedido-acoes">
-        <button class="btn-sm btn-outline" onclick="novoPedido()" title="${escopoAtivoBar?'Limpa só os itens desta aba — não afeta quem ainda está lançando':'Cancela o rascunho inteiro e começa do zero'}">${escopoAtivoBar?'Novo Pedido':'Novo'}</button>
+        <button class="btn-sm btn-outline" onclick="novoPedido()" title="${escopoAtivoBar?'Limpa só os itens desta aba — não afeta quem ainda está lançando':'Cancela o rascunho inteiro e começa do zero — TODAS as lojas'}">${escopoAtivoBar?'Novo Pedido':'Novo (todas)'}</button>
+        ${escopoAtivoBar ? '' : `<button class="btn-sm btn-outline" onclick="abrirModalNovoPedidoLojas()" title="Refazer o pedido só das lojas que você escolher — as outras continuam com o que lançaram">🔄 Por loja</button>`}
         <button class="btn-sm" onclick="flushPendingItems(true)" title="Forçar salvamento agora" style="background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.4);color:#1A1D23">💾 Salvar</button>
         <button class="btn-sm" onclick="gerarWppPedido()" style="background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);color:#1A1D23">📲</button>
         <button class="btn-sm" onclick="gerarPDFPedido()" style="background:rgba(192,57,43,.15);border:1px solid rgba(192,57,43,.4);color:#1A1D23">📄</button>
@@ -4106,6 +4292,7 @@ function renderPedido() {
     </div>` : ''}
 
     ${_painelEnvioSemanaHtml()}
+    ${_avisoPedidoRefHtml()}
 
     <div class="filtros">
       <input class="filtro-input" type="search" placeholder="🔍 Buscar produto..."
