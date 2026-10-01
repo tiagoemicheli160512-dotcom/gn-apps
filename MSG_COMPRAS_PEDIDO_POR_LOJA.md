@@ -58,9 +58,36 @@ Se o pedido da semana já está **CONFIRMADO** (ou ENVIADO), o *Por loja* se rec
 motivo: a provisão de entrega já existe e o fornecedor já recebeu o pedido. Tirar itens de
 dentro de um pedido confirmado apagaria um pedido real.
 
+*Ou seja: o Por loja nunca reabre nem zera um pedido confirmado.*
+
 Nesse caso o caminho é um destes dois:
 - *Reverter* no fornecedor específico que precisa mudar; ou
 - *Novo (todas)*, que abre um rascunho novo **sem** cancelar o que já foi confirmado.
+
+### Acrescentar o que faltou num pedido já confirmado (2ª rodada)
+
+Esse é o caso de *"esqueci de pedir X"* depois de o pedido já ter saído. O caminho é o
+*Novo (todas)*: ele abre um rascunho em branco por cima, **sem** cancelar o confirmado.
+
+Pra não pedir duas vezes a mesma coisa, agora cada item mostra em verde quanto *já foi
+comprado* nesta semana:
+
+> *Já pedido: 12*  ← em verde
+
+É a soma de todas as rodadas já confirmadas da semana. Antes a linha só ficava com o fundo
+verde, dizendo que a loja já tinha pedido aquele item — mas sem dizer quanto, o que não ajudava
+a decidir a quantidade nova.
+
+E no topo da tela aparece o aviso: *"Já existe pedido confirmado nesta semana — lance aqui só o
+que FALTA"*.
+
+Resumindo os números que aparecem na linha:
+
+| Número | Cor | O que é |
+|---|---|---|
+| *Já pedido: N* | verde | já foi comprado nesta semana — **não repita** |
+| *Refeito: N* | laranja | estava lançado antes de você zerar com o Por loja |
+| *Sem.ant: N* | cinza | foi pedido na semana passada |
 
 ### Também arrumado
 
