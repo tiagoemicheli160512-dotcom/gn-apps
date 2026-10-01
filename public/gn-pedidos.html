@@ -8343,7 +8343,11 @@ function renderFichas() {
 async function renderCarnesCtrl() {
   $('content').innerHTML = '<div class="empty"><div class="spin"></div></div>';
 
-  if (!S.carnesSemana) S.carnesSemana = getMondayOfWeek();
+  // Abre na SEMANA PASSADA, não na atual. É aqui que se confere divergência: a contagem da
+  // semana corrente ainda está sendo feita, então abrir nela mostrava tela vazia pra toda
+  // loja e dava a impressão de que o controle não existia. A seta › continua levando pra
+  // semana atual pra quem quiser acompanhar o que está em andamento.
+  if (!S.carnesSemana) S.carnesSemana = getMondayOfWeek(new Date(Date.now() - 7 * 864e5));
   if (!S.carnesLoja) S.carnesLoja = S.lojaAtiva || (S.lojas[0]?.slug_pedido);
 
   const sem = formatarSemana(S.carnesSemana);
@@ -8355,16 +8359,36 @@ async function renderCarnesCtrl() {
 
   let carnesData = null;
   try {
-    // checklist_carnes.loja stores the display name (e.g. "Bangu", "São Gonçalo")
-    // Try nome_display first, then loja field, then slug_pedido as last resort
-    const candidatos = [lojaObj?.nome_display, lojaObj?.loja, S.carnesLoja].filter(Boolean);
+    // Quem grava em checklist_carnes é o app Check-list, e ele usa o chkKey de GN_LOJAS —
+    // que nem sempre é o nome que aparece na tela. Nova Iguaçu grava "Rancho", e por isso a
+    // aba dela vinha vazia em TODAS as semanas, com 15 semanas de controle no banco.
+    //
+    // O chkKey vem primeiro justamente por ser a chave canônica. nome_display fica como
+    // reserva pras lojas que só existem em gn_lojas_pedido (Mandacaru, Loja Teste) e pro
+    // caso de alguma linha antiga ter sido gravada pelo nome de exibição.
+    // (`lojaObj?.loja` saiu da lista: gn_lojas_pedido não tem essa coluna, então esse
+    // candidato era sempre undefined e nunca chegou a testar nada.)
+    const candidatos = [...new Set([
+      LOJA_CHKKEY_BY_SLUG[S.carnesLoja], lojaObj?.nome_display, S.carnesLoja
+    ].filter(Boolean))];
+    // Busca pela SEMANA INTEIRA, não pela segunda exata. Sete linhas no banco foram gravadas
+    // com semana_inicio em outro dia (sábado, domingo, terça, sexta) — e em quatro delas essa
+    // é a única linha da semana, então a semana inteira ficava invisível aqui. Pegando o
+    // intervalo, elas aparecem; quando houver mais de uma, a da segunda ganha, e no empate a
+    // mais recente.
+    const semFimISO = new Date(S.carnesSemana.getTime() + 6 * 864e5).toISOString().slice(0, 10);
     for (const candidato of candidatos) {
       const { data } = await db.from('checklist_carnes')
-        .select('carnes,semana_fim')
-        .eq('semana_inicio', semIni)
+        .select('carnes,semana_inicio,semana_fim,updated_at')
         .eq('loja', candidato)
-        .maybeSingle();
-      if (data?.carnes) { carnesData = data.carnes; break; }
+        .gte('semana_inicio', semIni)
+        .lte('semana_inicio', semFimISO)
+        .order('updated_at', { ascending: false });
+      const linhas = (data || []).filter(r => r && r.carnes);
+      if (!linhas.length) continue;
+      const exata = linhas.find(r => r.semana_inicio === semIni);
+      carnesData = (exata || linhas[0]).carnes;
+      break;
     }
   } catch(e) {}
 
