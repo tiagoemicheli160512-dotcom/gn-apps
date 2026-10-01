@@ -885,7 +885,14 @@ let pedidoConfs  = {};  // lojaKey -> [{id,ts,usuario,cargo,itens:[{produto,forn
 let pedidoOficialAtual = {};
 let avariasAll   = {};  // loja -> [{id,ts,semana,insumo,qtd,custoUnit,valorTotal,status,loja_conf_por,loja_conf_ts,rh_conf_por,rh_conf_ts}]
 let devolucoesAll = {}; // loja -> [{id,ts,semana,fornecedor,insumo,qtd,motivo,obs,status,loja_conf_por,loja_conf_ts,pedidos_conf_por,pedidos_conf_ts}]
-let urgenciaTemplate = {}; // loja -> [item_id_string, ...] — só leitura: espelho do que o app Estoque e Pedido marcou como urgência
+let urgenciaTemplate = {}; // loja -> [item_id_string, ...] — legado: urgência marcada loja por loja
+// Lista ÚNICA de urgência da rede, em gn_lojas('URGENCIA_CONFIG').all_data.urgenciaGlobal.
+// Só leitura aqui: quem define é o Compras (Matheus) no app Estoque e Pedido, e o que ele
+// marca vale pra todas as lojas de uma vez. Antes era uma lista por loja, e as 11 tinham que
+// bater por sorte — não batiam: a Boulevard estava com 57 itens e a Nova América com 85, numa
+// rede onde os itens são os mesmos em toda loja. null = linha ainda não carregou/não existe,
+// e aí cai no urgenciaTemplate antigo pra não ficar sem urgência nenhuma no meio da migração.
+let urgenciaGlobal = null;
 let correcoesSetor = []; // últimas correções de Est.vig feitas pelo setor de Compras (app Estoque e Pedido)
 let fatoresConversao  = {}; // insumo -> numero (ex: {"AGUA TONICA CX C/ 12 UND": 12})
 
@@ -1310,6 +1317,20 @@ async function sbPull(silent) {
           if (d.devolucoesAll) Object.assign(devolucoesAll, d.devolucoesAll);
         }
         if (d.urgenciaTemplate) Object.assign(urgenciaTemplate, d.urgenciaTemplate);
+        // Lista única de urgência (ver urgenciaGlobal). Linha própria de propósito: o
+        // sbPushMasterConfig() daqui reescreve o all_data INTEIRO do MASTER_CONFIG, então
+        // guardar isso lá seria apagado sem aviso na próxima vez que um master salvasse
+        // fichas ou vínculos. Nenhum app escreve nesta linha em cima do que não é dele.
+        if (row.loja === 'URGENCIA_CONFIG' && Array.isArray(d.urgenciaGlobal)) {
+          const antes = urgenciaGlobal ? urgenciaGlobal.length : 0;
+          urgenciaGlobal = d.urgenciaGlobal.map(String);
+          // Loja que abriu o app sem urgência nenhuma e recebeu a lista depois: sem isto a
+          // restrição da aba Pedido só passaria a valer no próximo reload, porque a pendência
+          // é decidida uma vez (ver _checarUrgenciaPendencia).
+          if (!antes && urgenciaGlobal.length && !_urgPendente && typeof _checarUrgenciaPendencia === 'function') {
+            _checarUrgenciaPendencia();
+          }
+        }
         // Configurações globais: usa a versão mais recente (sobrescreve)
         if (d.fatoresConversao)  Object.assign(fatoresConversao,  d.fatoresConversao);
         if (d.mapeamentoPedido)  Object.assign(mapeamentoPedido,  d.mapeamentoPedido);
@@ -2327,7 +2348,12 @@ function _barrisSemVaziosLancados() {
 let _urgPendente = false;
 let _urgSemanaIni = null;
 let _urgCheckFalhou = false;
-function _urgItensLoja() { return urgenciaTemplate[loja] || []; }
+// A lista é a mesma pra toda a rede. O urgenciaTemplate por loja só serve de rede de
+// segurança enquanto a linha única não chega (ou se ela for apagada por engano).
+function _urgItensLoja() {
+  if (urgenciaGlobal) return urgenciaGlobal;
+  return urgenciaTemplate[loja] || [];
+}
 // Sem item marcado não há o que priorizar — a lista abre inteira, como sempre (é o caso de
 // Guarulhos e Itaquera hoje, que estão com a urgência zerada no Estoque e Pedido).
 function _urgAplicavel() { return _cargoContaBarris() && loja !== 'Maglia' && _urgItensLoja().length > 0; }
@@ -9070,7 +9096,7 @@ function render() {
     } else if (_pfiltro === 'preenchidos') {
       prodsFiltrados = prodsFiltrados.filter(p => _pedidoPreenchido(pedido[p.item] || {}));
     } else if (_pfiltro === 'urgencia') {
-      const _urg = urgenciaTemplate[loja] || [];
+      const _urg = _urgItensLoja();
       prodsFiltrados = prodsFiltrados.filter(p => _urg.includes(String(p.item)));
     }
 
@@ -9094,13 +9120,13 @@ function render() {
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
           <div class="count-badge">${preench}/${todosOrdenados.length}</div>
-          ${(urgenciaTemplate[loja]||[]).length > 0 ? (_urgTrava ? `
+          ${_urgItensLoja().length > 0 ? (_urgTrava ? `
           <span style="background:#b45309;border-radius:10px;padding:5px 10px;color:#fff;font-size:11px;font-weight:700">
             🔒 Urgência (${_urgItensLoja().length})
           </span>` : `
           <button onclick="window._pedidoFiltro=(window._pedidoFiltro==='urgencia'?'':'urgencia');if(window._pedidoFiltro==='urgencia')window._pedidoGrupo='__TODOS__';render();"
             style="background:${_pfiltro==='urgencia'?'#b45309':'rgba(0,0,0,.08)'};border:none;border-radius:10px;padding:5px 10px;color:${_pfiltro==='urgencia'?'#fff':'#475569'};font-size:11px;font-weight:700">
-            ⚡ Urg (${(urgenciaTemplate[loja]||[]).length})
+            ⚡ Urg (${_urgItensLoja().length})
           </button>`) : ''}
           ${_urgTrava ? '' : `
           <button onclick="window._pedidoFiltro=(window._pedidoFiltro==='vazios'?'':'vazios');render();"
@@ -9182,7 +9208,7 @@ function render() {
           const _pedAntLS = (pedidoAll[kAnterior] || {})[prod.item];
           const _pedAntCxLS = _pedAntLS != null ? parseFloat(_pedAntLS._cxConfirmado) : null;
           const isEstoqueBaixo = !temDiverg && _estVigLS != null && !isNaN(_estVigLS) && _pedAntCxLS > 0 && _estVigLS < _pedAntCxLS * 0.25;
-          const isUrgente = (urgenciaTemplate[loja]||[]).includes(String(prod.item));
+          const isUrgente = _urgItensLoja().includes(String(prod.item));
           return `<div class="row-item" data-search="${prod.produto} ${prod.fornecedor} ${prod.subgrupo} ${prod.grupo}" data-pid="${prod.item}"
               style="flex-direction:column;align-items:flex-start;gap:6px;${temDiverg?'border-left:3px solid #DC2626;background:rgba(239,68,68,.06)':isEstoqueBaixo?'border-left:3px solid #D97706;background:rgba(245,158,11,.05)':temDado?'background:rgba(245,158,11,.06)':''}${prod.isCustom&&!temDiverg?';border-left:3px solid #059669':''}">
             <div style="display:flex;width:100%;align-items:center;gap:6px">

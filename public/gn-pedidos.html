@@ -760,7 +760,8 @@ let S = {
   pedFiltro: '',    // '' | 'urgencia' | 'vazios' | 'preenchidos'
   relLojasFiltro: null,   // null = todas as lojas | [slug_pedido,...] — filtro dos relatórios pra fornecedor (todas as lojas)
   triosRelFiltro: null,   // null = todas as lojas | [slug_pedido,...] — filtro do relatório de Trios
-  urgenciaTemplate: {}, // userKey (mesma chave de gn_lojas.loja) -> [item_id_string, ...]
+  urgenciaTemplate: {}, // legado: userKey -> [item_id_string, ...] (só fallback, ver URGENCIA_LINHA)
+  urgenciaGlobal: null, // lista ÚNICA de urgência da rede — null = ainda não carregou
   gruposAbertos: new Set(['BEBIDAS','PROTEÍNA','PRODUÇÃO']),
   provGruposAbertos: new Set(), // loja/fornecedor abertos na aba Provisões — começam fechados
 
@@ -3464,7 +3465,26 @@ const LOJA_USERKEY_BY_SLUG = Object.fromEntries((window.GN_LOJAS || []).map(l =>
 const LOJA_TESTE_PEDIDO = { slug_pedido: 'loja_teste', nome_display: 'Loja Teste' };
 function lojasComTeste() { return [...S.lojas, LOJA_TESTE_PEDIDO]; }
 
+// A urgência é UMA lista só, válida pra toda a rede, em
+// gn_lojas('URGENCIA_CONFIG').all_data.urgenciaGlobal.
+//
+// Era uma lista por loja, marcada loja por loja — o que exigia 11 cliques por item pra dizer
+// a mesma coisa 11 vezes, e as listas desencontraram na prática: Boulevard com 57 itens,
+// Nova América com 85, numa rede onde os itens são os mesmos em toda loja. Agora um clique
+// vale pra todas, sem jeito de divergir. Semeada com os 85 da Nova América.
+//
+// Linha própria e não MASTER_CONFIG: o app Lojas tem um sbPushMasterConfig() que reescreve o
+// all_data INTEIRO daquela linha, então a lista seria apagada sem aviso na próxima vez que um
+// master salvasse fichas ou vínculos de lá.
+const URGENCIA_LINHA = 'URGENCIA_CONFIG';
+
 async function carregarUrgenciaTemplate() {
+  try {
+    const { data } = await db.from('gn_lojas').select('all_data').eq('loja', URGENCIA_LINHA);
+    const g = data && data[0] && data[0].all_data && data[0].all_data.urgenciaGlobal;
+    if (Array.isArray(g)) { S.urgenciaGlobal = g.map(String); return; }
+  } catch (e) {}
+  // Linha ainda não existe: cai na lista por loja antiga pra não ficar sem urgência nenhuma.
   const userKeys = [...new Set(Object.values(LOJA_USERKEY_BY_SLUG))];
   if (!userKeys.length) return;
   try {
@@ -3475,33 +3495,45 @@ async function carregarUrgenciaTemplate() {
   } catch (e) {}
 }
 
-// Marca/desmarca manualmente um item como urgência pra uma loja — grava direto na mesma
-// gn_lojas.all_data.urgenciaTemplate que o app Lojas lê, então aparece de lá também.
-async function toggleUrgenciaPedido(itemId, lojaSlug) {
-  const userKey = LOJA_USERKEY_BY_SLUG[lojaSlug];
-  if (!userKey) { toast('Esta loja não tem urgência configurada.', 'err'); return; }
+// Marca/desmarca um item como urgência pra TODA a rede — grava na linha única que o app Lojas
+// lê, então aparece em todas as lojas no próximo pull (até 20s) sem ninguém recarregar nada.
+async function toggleUrgenciaPedido(itemId) {
   const idStr = String(itemId);
-  const atual = S.urgenciaTemplate[userKey] ? [...S.urgenciaTemplate[userKey]] : [];
+  const antes = Array.isArray(S.urgenciaGlobal) ? [...S.urgenciaGlobal] : [];
+  const atual = [...antes];
   const idx = atual.indexOf(idStr);
   if (idx >= 0) atual.splice(idx, 1); else atual.push(idStr);
-  S.urgenciaTemplate[userKey] = atual;
+  S.urgenciaGlobal = atual;
   renderPedido();
+  // supabase-js NÃO lança em erro do PostgREST — devolve { data, error }. Checar o error é
+  // obrigatório aqui: sem isso o ⚡ ficava aceso na tela do Compras sem nada ter sido gravado,
+  // e ele seguiria achando que avisou a rede de um item que nenhuma loja vai ver.
+  let falhou = null;
   try {
-    const { data } = await db.from('gn_lojas').select('all_data').eq('loja', userKey);
+    const sel = await db.from('gn_lojas').select('all_data').eq('loja', URGENCIA_LINHA);
+    if (sel.error) throw sel.error;
+    const data = sel.data;
     const allData = (data && data[0] && data[0].all_data) || {};
-    allData.urgenciaTemplate = { [userKey]: atual };
-    if (data && data.length) {
-      await db.from('gn_lojas').update({ all_data: allData }).eq('loja', userKey);
-    } else {
-      await db.from('gn_lojas').insert({ loja: userKey, all_data: allData });
-    }
+    allData.urgenciaGlobal = atual;
+    const res = (data && data.length)
+      ? await db.from('gn_lojas').update({ all_data: allData }).eq('loja', URGENCIA_LINHA)
+      : await db.from('gn_lojas').insert({ loja: URGENCIA_LINHA, all_data: allData });
+    if (res && res.error) throw res.error;
   } catch (e) {
-    toast('Erro ao salvar urgência.', 'err');
+    falhou = e;
+  }
+  if (falhou) {
+    S.urgenciaGlobal = antes;
+    renderPedido();
+    toast('Erro ao salvar urgência — nada foi alterado. Tente de novo.', 'err');
   }
 }
 
+// lojaSlug não é mais usado: a urgência vale pra toda a rede. O parâmetro fica aceito pra não
+// quebrar chamada antiga que ainda passe a loja.
 function _pedidoItemUrgente(prod, lojaSlug) {
   const idStr = String(prod.item_id);
+  if (Array.isArray(S.urgenciaGlobal)) return S.urgenciaGlobal.includes(idStr);
   if (lojaSlug) {
     const uk = LOJA_USERKEY_BY_SLUG[lojaSlug];
     return !!uk && (S.urgenciaTemplate[uk] || []).includes(idStr);
@@ -3705,7 +3737,7 @@ function renderPedido() {
             <div style="display:flex;align-items:center;gap:0">
               ${qtyCtrlHtml}
               <button class="diverg-btn${divAtual?' ativo':''}" title="Marcar divergência na contagem" onclick="toggleDiverg('${prod.id}','${lojaAtiva}')">⚑</button>
-              <button class="urg-btn${isUrgente?' ativo':''}${isUrgente&&prodConfirmado?' finalizada':''}" title="${isUrgente?(prodConfirmado?'Urgência — fornecedor já confirmado':'Urgência — remover'):'Marcar como urgência'}" onclick="toggleUrgenciaPedido('${prod.item_id}','${lojaAtiva}')">⚡</button>
+              <button class="urg-btn${isUrgente?' ativo':''}${isUrgente&&prodConfirmado?' finalizada':''}" title="${isUrgente?(prodConfirmado?'Urgência em todas as lojas — fornecedor já confirmado':'Urgência em todas as lojas — remover de todas'):'Marcar como urgência em TODAS as lojas'}" onclick="toggleUrgenciaPedido('${prod.item_id}')">⚡</button>
               <button class="semana-btn${semanaAtual?' ativo':''}" title="${semanaAtual?'Entrega ainda essa semana — remover':'Forçar entrega ainda essa semana (sem avisar a loja como urgência)'}" onclick="toggleEntregaSemana('${prod.id}','${lojaAtiva}')">📅</button>
             </div>
           </div>`;
@@ -3812,7 +3844,7 @@ function renderPedido() {
               <div style="display:flex;align-items:center;gap:0">
                 ${qtyCtrlSmHtml}
                 <button class="diverg-btn${divL?' ativo':''}" style="width:22px;height:22px;font-size:10px" title="Marcar divergência" onclick="toggleDiverg('${prod.id}','${loja.slug_pedido}')">⚑</button>
-                <button class="urg-btn${isUrgenteL?' ativo':''}${isUrgenteL&&prodConfirmado?' finalizada':''}" style="width:22px;height:22px;font-size:10px" title="${isUrgenteL?(prodConfirmado?'Urgência — fornecedor já confirmado':'Urgência — remover'):'Marcar como urgência'}" onclick="toggleUrgenciaPedido('${prod.item_id}','${loja.slug_pedido}')">⚡</button>
+                <button class="urg-btn${isUrgenteL?' ativo':''}${isUrgenteL&&prodConfirmado?' finalizada':''}" style="width:22px;height:22px;font-size:10px" title="${isUrgenteL?(prodConfirmado?'Urgência em todas as lojas — fornecedor já confirmado':'Urgência em todas as lojas — remover de todas'):'Marcar como urgência em TODAS as lojas'}" onclick="toggleUrgenciaPedido('${prod.item_id}')">⚡</button>
                 <button class="semana-btn${semanaL?' ativo':''}" style="width:22px;height:22px;font-size:10px" title="${semanaL?'Entrega ainda essa semana — remover':'Forçar entrega ainda essa semana'}" onclick="toggleEntregaSemana('${prod.id}','${loja.slug_pedido}')">📅</button>
               </div>
               ${subT?`<span class="todos-loja-total">${subT}</span>`:''}
@@ -3881,9 +3913,13 @@ function renderPedido() {
   const _lojaFiltroUrg = S.todosModo ? null : lojaAtiva;
   const _idsEscopoAtivo = new Set(S.catalogo.filter(p=>_fornecedorNoEscopoAtivo(p.fornecedor, p.grupo)).map(p=>String(p.id)));
   const _urgEscopo = ids => (ids||[]).filter(id=>_idsEscopoAtivo.has(String(id))).length;
-  const urgTotal = _lojaFiltroUrg
-    ? _urgEscopo(S.urgenciaTemplate[LOJA_USERKEY_BY_SLUG[_lojaFiltroUrg]])
-    : S.lojas.reduce((sum,l)=>sum+_urgEscopo(S.urgenciaTemplate[LOJA_USERKEY_BY_SLUG[l.slug_pedido]]),0);
+  // Lista única: o total é o mesmo com uma loja selecionada ou em "todas". Somar por loja
+  // como antes multiplicaria o número por 11 no modo TODOS.
+  const urgTotal = Array.isArray(S.urgenciaGlobal)
+    ? _urgEscopo(S.urgenciaGlobal)
+    : _lojaFiltroUrg
+      ? _urgEscopo(S.urgenciaTemplate[LOJA_USERKEY_BY_SLUG[_lojaFiltroUrg]])
+      : S.lojas.reduce((sum,l)=>sum+_urgEscopo(S.urgenciaTemplate[LOJA_USERKEY_BY_SLUG[l.slug_pedido]]),0);
 
   // Na aba Edu/Oseas/Matheus, o botão "Confirmar" só considera (e mostra pendência de)
   // fornecedores dessa aba — evita confirmar por engano os do outro comprador.
