@@ -2348,6 +2348,11 @@ function _barrisSemVaziosLancados() {
 let _urgPendente = false;
 let _urgSemanaIni = null;
 let _urgCheckFalhou = false;
+// Envio desta semana (gn_pedido_envio_semana): {urgencia_em, urgencia_por, urgencia_itens,
+// final_em, final_por, final_itens}. Alimenta a faixa de confirmação no topo da aba Pedido —
+// a loja perguntava "finalizei mesmo?" e a única resposta era um toast que já tinha passado.
+let _envioSemana = {};
+let _envioSemanaFalhou = false;
 // A lista é a mesma pra toda a rede. O urgenciaTemplate por loja só serve de rede de
 // segurança enquanto a linha única não chega (ou se ela for apagada por engano).
 function _urgItensLoja() {
@@ -2360,45 +2365,128 @@ function _urgAplicavel() { return _cargoContaBarris() && loja !== 'Maglia' && _u
 
 async function _checarUrgenciaPendencia() {
   _urgSemanaIni = wkKey(getMonday(new Date()));
-  if (!_urgAplicavel()) { _urgPendente = false; return; }
   const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+  // Uma consulta só serve às duas coisas: a faixa de confirmação (que vale pra toda loja, com
+  // ou sem urgência marcada — ela precisa saber se finalizou) e a pendência da urgência.
+  let respondeu = false;
   try {
-    const rows = await sbRequest(
-      'gn_pedido_urgencia_confirmacao?loja_slug=eq.' + slug + '&semana_inicio=eq.' + _urgSemanaIni + '&select=loja_slug',
+    const envio = await sbRequest(
+      'gn_pedido_envio_semana?loja_slug=eq.' + slug + '&semana_inicio=eq.' + _urgSemanaIni + '&select=*',
       { method: 'GET' }
     );
-    _urgPendente = !(rows && rows.length);
+    _envioSemana = (envio && envio[0]) || {};
+    respondeu = true;
     _urgCheckFalhou = false;
   } catch (e) {
-    // Aqui falha de rede NÃO trava: diferente dos barris, o custo de errar pro lado da trava
+    // Falha de rede NÃO trava aqui: diferente dos barris, o custo de errar pro lado da trava
     // seria a loja sem conseguir contar o estoque todo, e o pedido da semana é o que mantém a
-    // operação de pé. Sem resposta, a lista abre inteira.
-    _urgPendente = false;
+    // operação de pé. Sem resposta, a lista abre inteira e a faixa guarda o que já tinha, em
+    // vez de afirmar que a loja não enviou nada.
     _urgCheckFalhou = true;
   }
+  _urgPendente = _urgAplicavel() && respondeu && !_envioSemana.urgencia_em;
   if (tab === 'pedido') render();
 }
 
 // Registra que a urgência da semana saiu. Chamado depois de confirmarPedido('urgencia') ter
 // gravado o pedido — nunca antes, pra não liberar a lista por um envio que não completou.
 async function _registrarUrgenciaEnviada(qtdItens) {
+  _urgPendente = false;
+  // Sem internet a liberação vale pra esta sessão (o estado local já está false) e a linha
+  // entra na próxima vez que a loja enviar urgência — melhor que re-trancar quem já contou.
+  await _registrarEnvioSemana({
+    urgencia_em: new Date().toISOString(),
+    urgencia_por: usuarioAtual ? usuarioAtual.nome : null,
+    urgencia_itens: qtdItens || 0,
+  });
+}
+
+// Registra que a loja FINALIZOU o pedido da semana. É o que faz a loja aparecer como "pedido
+// feito" no painel do app Estoque e Pedido, e o que dá à própria loja a confirmação de que
+// finalizou — a dúvida "mandei mesmo?" era resolvida só por um toast que já passou.
+//
+// gn_alertas_compras não serve pra isso: lá a linha só é inserida quando há item pra
+// sincronizar, e o painel precisa saber com certeza quem NÃO enviou. Além disso ela acumula
+// uma linha por clique (Campo Grande aparece 4× na mesma segunda), enquanto aqui é 1 linha por
+// loja/semana, com a última confirmação por cima.
+async function _registrarPedidoFinalizado(qtdItens) {
+  await _registrarEnvioSemana({
+    final_em: new Date().toISOString(),
+    final_por: usuarioAtual ? usuarioAtual.nome : null,
+    final_itens: qtdItens || 0,
+  });
+}
+
+// Upsert na linha da semana. merge-duplicates só atualiza as colunas enviadas, então gravar a
+// finalização não apaga a urgência que já estava lá (nem o contrário).
+// Chave é a segunda do CALENDÁRIO: confirmar chama avancarSemana(), e usar a `semana` do app
+// gravaria o envio na semana seguinte.
+async function _registrarEnvioSemana(campos) {
   const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
   const semana = _urgSemanaIni || wkKey(getMonday(new Date()));
-  _urgPendente = false;
+  const linha = Object.assign({ loja_slug: slug, semana_inicio: semana, loja: loja }, campos);
+  // Atualiza o estado local na hora: a faixa de confirmação na tela da loja não deve esperar
+  // o próximo pull pra dizer que finalizou.
+  _envioSemana = Object.assign({}, _envioSemana, campos);
   try {
-    await sbRequest('gn_pedido_urgencia_confirmacao?on_conflict=loja_slug,semana_inicio', {
+    await sbRequest('gn_pedido_envio_semana?on_conflict=loja_slug,semana_inicio', {
       method: 'POST',
       headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
-      body: JSON.stringify({
-        loja_slug: slug, semana_inicio: semana, loja: loja,
-        qtd_itens: qtdItens || 0,
-        confirmado_por: usuarioAtual ? usuarioAtual.nome : null,
-      }),
+      body: JSON.stringify(linha),
     });
+    _envioSemanaFalhou = false;
   } catch (e) {
-    // Sem internet a liberação vale pra esta sessão (o estado local já está false) e a linha
-    // entra na próxima vez que a loja enviar urgência — melhor que re-trancar quem já contou.
+    // A loja precisa saber que a confirmação não subiu — senão ela acha que o Compras já viu.
+    _envioSemanaFalhou = true;
   }
+}
+
+// Faixa de confirmação no topo da aba Pedido: o que a loja JÁ enviou nesta semana e o que
+// falta. A loja não tinha como saber se tinha finalizado — a única confirmação era um toast
+// que desaparecia, e quem ficava na dúvida reenviava ou simplesmente não enviava. Aqui fica
+// escrito, com hora e nome de quem mandou.
+// urgTrava vem por parâmetro: é const do bloco de render da aba Pedido, invisível aqui dentro.
+function _faixaEnvioSemanaHtml(urgTrava) {
+  const e = _envioSemana || {};
+  const temUrg = !!e.urgencia_em;
+  const temFinal = !!e.final_em;
+  const hora = (iso) => {
+    try {
+      const d = new Date(iso);
+      return ('0' + d.getDate()).slice(-2) + '/' + ('0' + (d.getMonth() + 1)).slice(-2) +
+             ' às ' + ('0' + d.getHours()).slice(-2) + 'h' + ('0' + d.getMinutes()).slice(-2);
+    } catch (x) { return ''; }
+  };
+  const quem = (n) => n ? ' · ' + n : '';
+  const linha = (icone, cor, titulo, detalhe) =>
+    '<div style="display:flex;align-items:flex-start;gap:7px;margin-top:4px">' +
+    '<span style="flex-shrink:0">' + icone + '</span>' +
+    '<span><b style="color:' + cor + '">' + titulo + '</b>' +
+    (detalhe ? '<span style="color:#64748b"> ' + detalhe + '</span>' : '') + '</span></div>';
+
+  // Finalizado é o estado final: verde, sem cobrar mais nada.
+  if (temFinal) {
+    return '<div style="background:rgba(5,150,105,.08);border:1px solid rgba(5,150,105,.3);border-left:3px solid #059669;border-radius:10px;padding:10px 12px;margin-top:8px;font-size:11.5px;line-height:1.45">' +
+      '<div style="font-weight:800;color:#065f46;margin-bottom:2px">✅ Pedido desta semana FINALIZADO</div>' +
+      (temUrg ? linha('⚡', '#065f46', 'Urgência enviada', hora(e.urgencia_em) + quem(e.urgencia_por) + (e.urgencia_itens ? ' · ' + e.urgencia_itens + ' itens' : '')) : '') +
+      linha('📦', '#065f46', 'Pedido finalizado', hora(e.final_em) + quem(e.final_por) + (e.final_itens ? ' · ' + e.final_itens + ' itens' : '')) +
+      (_envioSemanaFalhou ? '<div style="margin-top:6px;color:#92400e">⚠️ A confirmação pode não ter subido pra nuvem (internet instável). Abra esta aba de novo mais tarde pra conferir.</div>' : '') +
+      '</div>';
+  }
+  // Urgência enviada mas sem finalizar — é o caso que o Compras precisa cobrar.
+  if (temUrg) {
+    return '<div style="background:rgba(180,83,9,.1);border:1px solid rgba(180,83,9,.35);border-left:3px solid #B45309;border-radius:10px;padding:10px 12px;margin-top:8px;font-size:11.5px;line-height:1.45">' +
+      '<div style="font-weight:800;color:#78350f;margin-bottom:2px">⚠️ FALTA FINALIZAR o pedido desta semana</div>' +
+      linha('⚡', '#78350f', 'Urgência enviada', hora(e.urgencia_em) + quem(e.urgencia_por) + (e.urgencia_itens ? ' · ' + e.urgencia_itens + ' itens' : '')) +
+      linha('📦', '#B45309', 'Pedido ainda não finalizado', '— termine a contagem e toque em ✅ Finalizar') +
+      '</div>';
+  }
+  // Nada enviado ainda. Não aparece enquanto a trava da urgência está na tela (ali o aviso
+  // laranja já diz o que fazer) nem pra quem não é da loja.
+  if (urgTrava || !_cargoContaBarris()) return '';
+  return '<div style="background:rgba(100,116,139,.08);border:1px solid rgba(100,116,139,.25);border-left:3px solid #64748b;border-radius:10px;padding:10px 12px;margin-top:8px;font-size:11.5px;color:#475569;line-height:1.45">' +
+    '<b>📋 Pedido desta semana ainda não enviado.</b> O Compras está vendo esta loja como pendente até você tocar em ✅ Finalizar.' +
+    '</div>';
 }
 
 // Quantos dos itens de urgência ainda estão sem contagem — é o que a barra de progresso e o
@@ -5996,6 +6084,10 @@ async function confirmarPedido(modo) {
   // destravaria.
   if (modo === 'urgencia' && _urgPendente) await _registrarUrgenciaEnviada(produtosParaSync.length);
 
+  // 5d. Finalização registrada por loja/semana — é o que marca a loja como "pedido feito" no
+  // painel do Compras e o que dá à própria loja a confirmação na tela de que finalizou.
+  if (modo === 'final') await _registrarPedidoFinalizado(atualizados);
+
   // 6. Avançar semana (estoque da próxima semana parte da contagem atual)
   avancarSemana();
 
@@ -9149,6 +9241,8 @@ function render() {
       <div style="background:rgba(217,119,6,.06);border:1px solid rgba(217,119,6,.22);border-left:3px solid #D97706;border-radius:10px;padding:9px 12px;margin-top:8px;font-size:11px;color:#78350f;line-height:1.4">
         ℹ️ <b>Contagem já usada no pedido e precisa de correção?</b> Não corrija o valor aqui — solicite o ajuste ao setor de Compras (Estoque e Pedido). Corrigir dos dois lados ao mesmo tempo pode duplicar o ajuste.
       </div>
+
+      ${_faixaEnvioSemanaHtml(_urgTrava)}
 
       ${_urgTrava ? `
       <div style="background:rgba(180,83,9,.1);border:1px solid rgba(180,83,9,.35);border-left:3px solid #B45309;border-radius:10px;padding:10px 12px;margin-top:8px;font-size:11.5px;color:#78350f;line-height:1.45">
