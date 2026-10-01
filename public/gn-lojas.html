@@ -776,11 +776,17 @@ const BARRIS_SEMANAL_STATUS = [
   { val: 'VAZIO', label: 'Vazio' },
 ];
 const BARRIS_SEMANAL_STATUS_LABEL = Object.fromEntries(BARRIS_SEMANAL_STATUS.map(s => [s.val, s.label]));
+// Teto do campo de quantidade — a maior contagem real até hoje foi 16 vazios (Bangu), então
+// 60 é folga larga e ao mesmo tempo pega dedo escorregado (digitar 160 em vez de 16).
+const BARRIS_SEMANAL_QTD_MAX = 60;
 let _barrisSemPendente = false;
 let _barrisSemSemanaIni = null; // wkKey (YYYY-MM-DD) da segunda-feira da semana atual
 let _barrisSemItens = { CLARO: [], VINHO: [] }; // {status, validade} adicionados nesta sessão, ainda não confirmados
 let _barrisSemComparativo = null; // {CLARO:n, VINHO:n} da semana passada, ou null se ainda não carregou
 let _barrisSemSalvando = false;
+let _barrisSemCheckFalhou = false; // última checagem no banco deu erro de rede (trava fail-closed)
+let _barrisSemRetryTimer = null;
+let _barrisSemSemVazios = false;   // loja declarou não ter NENHUM casco vazio nesta semana
 // Janela do Histórico de Recebimentos (aba Entrega), em dias — 14 é o padrão de sempre pra
 // qualquer usuário; o filtro Semana/Mês/Trimestre (só cargo mestre/compras, ver
 // _epHistFiltroVisivel) troca esse valor e reconsulta o banco com carregarEntregas().
@@ -1998,30 +2004,70 @@ function _renderTravaNotaFiscal(forcarExibicao) {
     </div>`;
 }
 
-// Quem responde pela contagem semanal de barris: estoquista E gerência (gerente e
-// sub-gerente). Era só o estoquista, e como cada loja tem exatamente um cadastrado,
-// bastava essa pessoa faltar/esquecer na segunda pra semana inteira passar em branco —
-// foi o que aconteceu com Guarulhos duas semanas seguidas. Com a gerência junto, toda
-// loja passa a ter mais de uma pessoa capaz de resolver (gerente+sub-gerente cobrem as
-// 11 lojas; Bangu e Nova Iguaçu só têm sub-gerente, Nova América só tem gerente).
-// Quem fizer primeiro resolve pra loja. Mestre/supervisor/compras nunca travam.
-const BARRIS_SEMANAL_CARGOS = ['estoquista', 'gerente', 'sub_gerente'];
-function _cargoContaBarris() { return !!(usuarioAtual && BARRIS_SEMANAL_CARGOS.includes(usuarioAtual.cargo)); }
+// Quem responde pela contagem semanal de barris: TODO MUNDO que trabalha numa loja.
+// Começou só no estoquista, depois entrou a gerência (gerente/sub-gerente) porque com um
+// estoquista só por loja bastava essa pessoa faltar na segunda pra semana passar em branco
+// (foi o caso de Guarulhos duas semanas seguidas). Mas lista de cargos permitidos é buraco
+// por construção: quem não estava nela entrava sem ver a trava — a Bangu tem caixa e garçom
+// ativos, e foi exatamente assim que relataram "entrei normal". Agora a regra é invertida:
+// trava quem está lotado numa loja, e só a gestão central (loja GERAL) passa livre. Cargo
+// novo cadastrado amanhã já nasce travando, em vez de nascer furando.
+const BARRIS_SEMANAL_CARGOS_LIVRES = ['mestre', 'supervisor', 'compras', 'administrador', 'rh', 'manutencao'];
+function _cargoContaBarris() {
+  if (!usuarioAtual) return false;
+  if (BARRIS_SEMANAL_CARGOS_LIVRES.includes(usuarioAtual.cargo)) return false;
+  return (usuarioAtual.loja || '') !== 'GERAL';
+}
+
+// Lembrete local de que a semana já foi confirmada. Serve só pra não re-travar a loja que
+// JÁ fez a contagem quando a rede cai depois (ver o fail-closed abaixo) — nunca pra liberar
+// semana não feita: só é gravado depois de o POST da confirmação voltar OK.
+const BARRIS_SEM_OK_KEY = 'gn_barris_semanal_ok';
+function _barrisSemOkLocal(slug, semana) {
+  try { return !!JSON.parse(localStorage.getItem(BARRIS_SEM_OK_KEY) || '{}')[slug + '|' + semana]; }
+  catch (e) { return false; }
+}
+function _barrisSemMarcarOkLocal(slug, semana) {
+  try {
+    const m = JSON.parse(localStorage.getItem(BARRIS_SEM_OK_KEY) || '{}');
+    m[slug + '|' + semana] = true;
+    localStorage.setItem(BARRIS_SEM_OK_KEY, JSON.stringify(m));
+  } catch (e) {}
+}
 
 // Confere se a loja já confirmou a contagem de barris desta semana. Maglia fica de fora
 // por padrão (CLAUDE.md — só entra se o pedido citar "Maglia" explicitamente, o que não
-// foi o caso aqui). Falha de rede não trava (mesmo princípio das outras pendências).
+// foi o caso aqui).
+//
+// Falha de rede agora trava (fail-closed). Antes o catch fazia `_barrisSemPendente = false`:
+// internet ruim = app liberado sem contagem nenhuma, e a Bangu é justamente a loja de rede
+// instável (ver a fila offline da aba Entrega). O risco oposto — travar quem já fez e perdeu
+// a rede — está coberto pelo lembrete local acima, e a tela mostra o aviso + "Tentar de novo"
+// em vez de só aparecer sem explicação.
 async function _checarBarrisSemanalPendencia() {
   _barrisSemSemanaIni = wkKey(getMonday(new Date()));
+  const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
   if (!_cargoContaBarris() || loja === 'Maglia') { _barrisSemPendente = false; _renderTravaBarrisSemanal(); return; }
+  if (_barrisSemOkLocal(slug, _barrisSemSemanaIni)) { _barrisSemPendente = false; _renderTravaBarrisSemanal(); return; }
   try {
-    const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
     const rows = await sbRequest(
       'gn_barris_semanal_confirmacao?loja_slug=eq.' + slug + '&semana_inicio=eq.' + _barrisSemSemanaIni + '&select=loja_slug',
       { method: 'GET' }
     );
     _barrisSemPendente = !(rows && rows.length);
-  } catch (e) { _barrisSemPendente = false; }
+    _barrisSemCheckFalhou = false;
+    if (!_barrisSemPendente) _barrisSemMarcarOkLocal(slug, _barrisSemSemanaIni);
+  } catch (e) {
+    _barrisSemPendente = true;
+    _barrisSemCheckFalhou = true;
+    // Rede voltando sozinha resolve sem a loja precisar fazer nada.
+    if (!_barrisSemRetryTimer) {
+      _barrisSemRetryTimer = setTimeout(function() {
+        _barrisSemRetryTimer = null;
+        if (_barrisSemPendente) _checarBarrisSemanalPendencia();
+      }, 20000);
+    }
+  }
   if (_barrisSemPendente && !_barrisSemComparativo) _carregarComparativoBarrisSemanal();
   _renderTravaBarrisSemanal();
 }
@@ -2073,16 +2119,29 @@ function _toggleBsemValidade(tipo) {
   if (vazio) validadeEl.value = '';
 }
 
+// Quantidade por lançamento. Vazio é o caso que pediu isso: loja com 16 cascos vazios tinha
+// que tocar "+ Adicionar" 16 vezes, e era parte do motivo de simplesmente não lançarem. O
+// campo serve pros outros status também (3 cheios do mesmo vencimento é um lançamento só) —
+// cada barril continua virando uma linha no banco, o que muda é quantos taps custa.
 function _addItemBarrisSemanal(tipo) {
   const statusEl = document.getElementById('bsem-status-' + tipo);
   const validadeEl = document.getElementById('bsem-validade-' + tipo);
+  const qtdEl = document.getElementById('bsem-qtd-' + tipo);
   const status = statusEl ? statusEl.value : '';
   const validade = validadeEl ? validadeEl.value : '';
+  const qtd = Math.floor(parseFloat(qtdEl ? qtdEl.value : 1) || 1);
   if (!status) { showToast('Selecione o status do barril.'); return; }
   // Barril vazio não tem chopp guardado — não faz sentido cobrar validade dele.
   if (status !== 'VAZIO' && !validade) { showToast('Informe a validade do barril.'); return; }
-  _barrisSemItens[tipo].push({ status: status, validade: status === 'VAZIO' ? null : validade });
+  if (qtd < 1) { showToast('A quantidade tem que ser pelo menos 1.'); return; }
+  if (qtd > BARRIS_SEMANAL_QTD_MAX) { showToast('Quantidade acima de ' + BARRIS_SEMANAL_QTD_MAX + ' — confira o número.'); return; }
+  for (let i = 0; i < qtd; i++) {
+    _barrisSemItens[tipo].push({ status: status, validade: status === 'VAZIO' ? null : validade });
+  }
   if (validadeEl) validadeEl.value = '';
+  if (qtdEl) qtdEl.value = '1';
+  // Lançou vazio de verdade: a declaração de "não tenho nenhum vazio" deixa de fazer sentido.
+  if (status === 'VAZIO') _barrisSemSemVazios = false;
   _renderTravaBarrisSemanal();
 }
 function _removerItemBarrisSemanal(tipo, idx) {
@@ -2098,7 +2157,15 @@ async function _confirmarContagemBarrisSemanal() {
   // pra ser (loja genuinamente sem chopp nenhum, nem vazio). Se não tem cheio/na linha
   // nenhum, tem que registrar ao menos o(s) vazio(s) pra confirmar.
   if (total === 0) { showToast('Registre ao menos 1 barril (pode ser Vazio) antes de confirmar.'); return; }
-  const msg = 'Confirmar a contagem desta semana com ' + total + ' barril' + (total === 1 ? '' : 'is') + '?';
+  // Vazio obrigatório — ou a declaração explícita de que não existe nenhum. Sem isso, a
+  // contagem saía sem o número que o distribuidor cobra na troca.
+  const vazios = _barrisSemVaziosLancados();
+  if (vazios === 0 && !_barrisSemSemVazios) {
+    showToast('🛢️ Lance os cascos vazios — ou marque "Não tenho nenhum casco vazio" se a loja realmente estiver sem nenhum.');
+    return;
+  }
+  const msg = 'Confirmar a contagem desta semana com ' + total + ' barril' + (total === 1 ? '' : 'is') +
+    (vazios > 0 ? ', sendo ' + vazios + ' vazio(s)' : ' e NENHUM casco vazio na loja') + '?';
   if (!confirm(msg)) return;
   _barrisSemSalvando = true;
   _renderTravaBarrisSemanal();
@@ -2118,11 +2185,17 @@ async function _confirmarContagemBarrisSemanal() {
     await sbRequest('gn_barris_semanal_confirmacao?on_conflict=loja_slug,semana_inicio', {
       method: 'POST',
       headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
-      body: JSON.stringify({ loja_slug: slug, semana_inicio: monday, loja: loja, confirmado_por: criadoPor })
+      body: JSON.stringify({ loja_slug: slug, semana_inicio: monday, loja: loja, confirmado_por: criadoPor,
+                             sem_vazios: _barrisSemVaziosLancados() === 0 })
     });
     _barrisSemPendente = false;
+    _barrisSemCheckFalhou = false;
+    // Só aqui, depois do POST voltar OK: é o que evita re-travar a loja que já fez a contagem
+    // se a rede cair antes do próximo reload (a checagem passou a ser fail-closed).
+    _barrisSemMarcarOkLocal(slug, monday);
     _barrisSemItens = { CLARO: [], VINHO: [] };
     _barrisSemComparativo = null;
+    _barrisSemSemVazios = false;
     showToast('✅ Contagem de barris confirmada!');
   } catch (e) {
     showToast('⚠️ Erro ao salvar: ' + (e.message || e));
@@ -2188,21 +2261,128 @@ function _renderTravaBarrisSemanal() {
       BARRIS_SEMANAL_STATUS.map(function(s) { return '<option value="' + s.val + '">' + s.label + '</option>'; }).join('') +
       '</select>' +
       '<input type="date" id="bsem-validade-' + t.val + '" style="background:#F5F6F8;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:7px 8px;font-size:12px;font-family:inherit"/>' +
+      '<input type="number" inputmode="numeric" id="bsem-qtd-' + t.val + '" value="1" min="1" max="' + BARRIS_SEMANAL_QTD_MAX + '" title="Quantidade de barris neste mesmo status" style="width:58px;background:#F5F6F8;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:7px 8px;font-size:12px;font-family:inherit;text-align:center;font-weight:700"/>' +
       '<button onclick="_addItemBarrisSemanal(\'' + t.val + '\')" style="background:#059669;border:none;border-radius:8px;color:#fff;padding:7px 12px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">+ Adicionar</button>' +
       '</div>' + listaHtml + '</div>';
   };
   const totalGeral = _barrisSemItens.CLARO.length + _barrisSemItens.VINHO.length;
-  const btnDesabilitado = _barrisSemSalvando || totalGeral === 0;
+  const totalVazios = _barrisSemVaziosLancados();
+  const faltamVazios = totalVazios === 0 && !_barrisSemSemVazios;
+  const btnDesabilitado = _barrisSemSalvando || totalGeral === 0 || faltamVazios;
+  // Checagem no banco não respondeu: a trava fica de pé (fail-closed), mas dizendo o motivo
+  // e com um botão de tentar de novo — senão a loja só vê uma tela que não deveria estar ali.
+  const redeHtml = _barrisSemCheckFalhou
+    ? '<div style="background:rgba(217,119,6,.1);border:1px solid rgba(217,119,6,.3);border-radius:10px;padding:8px 10px;margin-bottom:12px;font-size:11px;color:#92400e;line-height:1.45">' +
+      '⚠️ <b>Não deu pra confirmar com o servidor</b> se esta semana já foi lançada — internet instável. ' +
+      'Se você já lançou, toque em <b>Verificar de novo</b>; se não, faça a contagem abaixo.' +
+      '<button onclick="_checarBarrisSemanalPendencia()" style="display:block;width:100%;margin-top:7px;background:#B45309;border:none;border-radius:8px;color:#fff;padding:8px;font-size:11.5px;font-weight:800;cursor:pointer;font-family:inherit">🔄 Verificar de novo</button></div>'
+    : '';
+  // Casco vazio é o que a loja devolve pro distribuidor — era o dado mais importante e o
+  // menos lançado: na semana de 28/09, 6 das 11 lojas confirmaram com ZERO vazios, lançando
+  // 1 barril "Cheio" só pra sair da tela. Agora exige vazio, e a loja que realmente não tem
+  // nenhum declara isso explicitamente (fica gravado em gn_barris_semanal_confirmacao).
+  const vaziosHtml =
+    '<div style="background:' + (faltamVazios ? 'rgba(220,38,38,.07)' : 'rgba(5,150,105,.07)') + ';border:1px solid ' + (faltamVazios ? 'rgba(220,38,38,.28)' : 'rgba(5,150,105,.25)') + ';border-radius:10px;padding:9px 11px;margin-bottom:12px;font-size:11px;color:' + (faltamVazios ? '#991b1b' : '#065f46') + ';line-height:1.45">' +
+    (totalVazios > 0
+      ? '✅ <b>' + totalVazios + ' casco(s) vazio(s)</b> lançado(s) nesta contagem.'
+      : '🛢️ <b>Os cascos vazios são obrigatórios.</b> Lance quantos vazios a loja tem — use o campo de quantidade pra colocar o total de uma vez (ex.: Vazio + 16).') +
+    '<label style="display:flex;align-items:center;gap:7px;margin-top:8px;cursor:pointer;font-size:11px;font-weight:700">' +
+    '<input type="checkbox" ' + (_barrisSemSemVazios ? 'checked' : '') + ' ' + (totalVazios > 0 ? 'disabled' : '') +
+    ' onchange="_barrisSemSemVazios=this.checked;_renderTravaBarrisSemanal()" style="width:16px;height:16px;flex-shrink:0"/>' +
+    '<span style="opacity:' + (totalVazios > 0 ? '.45' : '1') + '">Não tenho nenhum casco vazio na loja esta semana</span></label></div>';
   el.innerHTML =
     '<div style="background:#FFFFFF;border-radius:18px;padding:22px 20px;width:100%;max-width:440px;margin:auto">' +
     '<div style="text-align:center;margin-bottom:6px;font-size:34px">🍺</div>' +
     '<div style="text-align:center;font-size:16px;font-weight:800;color:#1A1D23;margin-bottom:4px">Contagem semanal de barris</div>' +
-    '<div style="text-align:center;font-size:11px;color:#64748b;margin-bottom:14px">Semana de ' + semanaLbl + ' · registre a situação de cada barril de chopp (pelo menos os vazios) pra liberar o app</div>' +
+    '<div style="text-align:center;font-size:11px;color:#64748b;margin-bottom:14px">Semana de ' + semanaLbl + ' · registre a situação de cada barril de chopp (os vazios são obrigatórios) pra liberar o app</div>' +
+    redeHtml +
     compHtml +
     BARRIS_SEMANAL_TIPOS.map(secaoTipo).join('') +
+    vaziosHtml +
     '<button ' + (btnDesabilitado ? 'disabled' : '') + ' onclick="_confirmarContagemBarrisSemanal()" style="display:block;width:100%;background:' + (btnDesabilitado ? 'rgba(5,150,105,.5)' : '#059669') + ';border:none;border-radius:10px;color:#fff;padding:13px;font-size:14px;font-weight:800;cursor:' + (btnDesabilitado ? 'default' : 'pointer') + ';font-family:inherit">' +
-    (_barrisSemSalvando ? 'Salvando…' : totalGeral === 0 ? 'Adicione ao menos 1 barril' : '✅ Confirmar contagem (' + totalGeral + ')') +
+    (_barrisSemSalvando ? 'Salvando…'
+      : totalGeral === 0 ? 'Adicione ao menos 1 barril'
+      : faltamVazios ? 'Falta lançar os cascos vazios'
+      : '✅ Confirmar contagem (' + totalGeral + ')') +
     '</button></div>';
+}
+
+function _barrisSemVaziosLancados() {
+  return BARRIS_SEMANAL_TIPOS.reduce(function(tot, t) {
+    return tot + _barrisSemItens[t.val].filter(function(i) { return i.status === 'VAZIO'; }).length;
+  }, 0);
+}
+
+// ═══════════ URGÊNCIA ANTES DO RESTO DA CONTAGEM (aba Pedido) ═══════════
+// Mesmo princípio da contagem de barris, um nível mais brando: a contagem de barris abre
+// por cima de tudo, esta aqui não tranca o app — ela encolhe a lista do Pedido pros itens
+// que o Compras marcou como urgência (⚡ no app Estoque e Pedido, hoje ~80 dos 332 itens do
+// catálogo) e só devolve o catálogo inteiro depois que essa leva for contada e ENVIADA.
+// O motivo é operacional: a loja abria a lista inteira, contava na ordem das categorias e a
+// urgência — que é o que falta pra vender hoje — saía junto no fim do dia, quando o Compras
+// já não tinha o que fazer com ela.
+//
+// A chave é a segunda-feira do CALENDÁRIO (igual barris), não a `semana` do app: confirmar
+// urgência chama avancarSemana(), então usar `semana` liberaria sozinho na mesma hora.
+let _urgPendente = false;
+let _urgSemanaIni = null;
+let _urgCheckFalhou = false;
+function _urgItensLoja() { return urgenciaTemplate[loja] || []; }
+// Sem item marcado não há o que priorizar — a lista abre inteira, como sempre (é o caso de
+// Guarulhos e Itaquera hoje, que estão com a urgência zerada no Estoque e Pedido).
+function _urgAplicavel() { return _cargoContaBarris() && loja !== 'Maglia' && _urgItensLoja().length > 0; }
+
+async function _checarUrgenciaPendencia() {
+  _urgSemanaIni = wkKey(getMonday(new Date()));
+  if (!_urgAplicavel()) { _urgPendente = false; return; }
+  const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+  try {
+    const rows = await sbRequest(
+      'gn_pedido_urgencia_confirmacao?loja_slug=eq.' + slug + '&semana_inicio=eq.' + _urgSemanaIni + '&select=loja_slug',
+      { method: 'GET' }
+    );
+    _urgPendente = !(rows && rows.length);
+    _urgCheckFalhou = false;
+  } catch (e) {
+    // Aqui falha de rede NÃO trava: diferente dos barris, o custo de errar pro lado da trava
+    // seria a loja sem conseguir contar o estoque todo, e o pedido da semana é o que mantém a
+    // operação de pé. Sem resposta, a lista abre inteira.
+    _urgPendente = false;
+    _urgCheckFalhou = true;
+  }
+  if (tab === 'pedido') render();
+}
+
+// Registra que a urgência da semana saiu. Chamado depois de confirmarPedido('urgencia') ter
+// gravado o pedido — nunca antes, pra não liberar a lista por um envio que não completou.
+async function _registrarUrgenciaEnviada(qtdItens) {
+  const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+  const semana = _urgSemanaIni || wkKey(getMonday(new Date()));
+  _urgPendente = false;
+  try {
+    await sbRequest('gn_pedido_urgencia_confirmacao?on_conflict=loja_slug,semana_inicio', {
+      method: 'POST',
+      headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify({
+        loja_slug: slug, semana_inicio: semana, loja: loja,
+        qtd_itens: qtdItens || 0,
+        confirmado_por: usuarioAtual ? usuarioAtual.nome : null,
+      }),
+    });
+  } catch (e) {
+    // Sem internet a liberação vale pra esta sessão (o estado local já está false) e a linha
+    // entra na próxima vez que a loja enviar urgência — melhor que re-trancar quem já contou.
+  }
+}
+
+// Quantos dos itens de urgência ainda estão sem contagem — é o que a barra de progresso e o
+// bloqueio do "Finalizar" usam.
+function _urgFaltamContar() {
+  const p = getPedido();
+  const urg = _urgItensLoja();
+  return getProdutosPedidoOrdenados().filter(function(prod) {
+    return urg.includes(String(prod.item)) && !_pedidoPreenchido(p[prod.item] || {});
+  }).length;
 }
 
 function _podeCfgMinimos() {
@@ -3228,7 +3408,9 @@ function goTab(t) {
   const sl = document.querySelector(`.sidebar-link[data-sidebar-tab="${t}"]`);
   if (sl) sl.classList.add('active');
   busca = "";   // limpa busca ao trocar de aba
-  if (t === "pedido") { window._divergLojaSet = new Set(); carregarDivergencias().then(() => render()); carregarPedidoOficial(); _carregarEstAntHistorico(); }
+  if (t === "pedido") { window._divergLojaSet = new Set(); carregarDivergencias().then(() => render()); carregarPedidoOficial(); _carregarEstAntHistorico();
+    // Reconsulta a cada entrada na aba: a urgência pode ter sido enviada de outro aparelho.
+    if (_urgPendente) _checarUrgenciaPendencia(); }
   if (t === "vendas" && checklistFat === null) { loadChecklistFat(); } // só carrega se ainda não foi carregado (reset ocorre ao trocar loja/semana)
   if (t === "hortifruti") { carregarHortifruti(); }
   // Abas que deixam estoque SAIR precisam do saldo real antes de validar. Recarrega a cada
@@ -5781,6 +5963,12 @@ async function confirmarPedido(modo) {
       }),
     }).catch(() => {});
   }
+
+  // 5c. Urgência enviada → libera o resto do catálogo na aba Pedido (ver _urgPendente).
+  // O gatilho é o ENVIO, não "todo item de urgência preenchido": _pedidoPreenchido só conta
+  // valor > 0, então item que a loja está zerada nunca ficaria "preenchido" e a lista jamais
+  // destravaria.
+  if (modo === 'urgencia' && _urgPendente) await _registrarUrgenciaEnviada(produtosParaSync.length);
 
   // 6. Avançar semana (estoque da próxima semana parte da contagem atual)
   avancarSemana();
@@ -8858,7 +9046,12 @@ function render() {
     const pedido = getPedido();
     const preench = qtdPreenchidos();
     const grupos = [...new Set(PRODUTOS_PEDIDO.map(x=>x.grupo))].sort();
-    const grupoAtivo = window._pedidoGrupo || grupos[0];
+    // Urgência da semana ainda não enviada: a lista do Pedido fica restrita a esses itens
+    // (ver _checarUrgenciaPendencia). Força filtro e grupo em vez de só sugerir, porque o
+    // objetivo é a leva de urgência sair primeiro, não aparecer primeiro.
+    const _urgTrava = _urgPendente && _urgAplicavel();
+    const prodsTotaisCatalogo = PRODUTOS_PEDIDO.length;
+    const grupoAtivo = _urgTrava ? '__TODOS__' : (window._pedidoGrupo || grupos[0]);
     const todosOrdenados = getProdutosPedidoOrdenados();
     const k = lojaKey();
     const kAnterior = loja + "|" + wkKey(addDays(semana, -7));
@@ -8871,7 +9064,7 @@ function render() {
     const _headerH = (document.getElementById('header') || {}).offsetHeight || 56;
 
     // Filtro: vazios / preenchidos / urgencia
-    const _pfiltro = window._pedidoFiltro || '';
+    const _pfiltro = _urgTrava ? 'urgencia' : (window._pedidoFiltro || '');
     if (_pfiltro === 'vazios') {
       prodsFiltrados = prodsFiltrados.filter(p => !_pedidoPreenchido(pedido[p.item] || {}));
     } else if (_pfiltro === 'preenchidos') {
@@ -8901,11 +9094,15 @@ function render() {
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
           <div class="count-badge">${preench}/${todosOrdenados.length}</div>
-          ${(urgenciaTemplate[loja]||[]).length > 0 ? `
+          ${(urgenciaTemplate[loja]||[]).length > 0 ? (_urgTrava ? `
+          <span style="background:#b45309;border-radius:10px;padding:5px 10px;color:#fff;font-size:11px;font-weight:700">
+            🔒 Urgência (${_urgItensLoja().length})
+          </span>` : `
           <button onclick="window._pedidoFiltro=(window._pedidoFiltro==='urgencia'?'':'urgencia');if(window._pedidoFiltro==='urgencia')window._pedidoGrupo='__TODOS__';render();"
             style="background:${_pfiltro==='urgencia'?'#b45309':'rgba(0,0,0,.08)'};border:none;border-radius:10px;padding:5px 10px;color:${_pfiltro==='urgencia'?'#fff':'#475569'};font-size:11px;font-weight:700">
             ⚡ Urg (${(urgenciaTemplate[loja]||[]).length})
-          </button>` : ''}
+          </button>`) : ''}
+          ${_urgTrava ? '' : `
           <button onclick="window._pedidoFiltro=(window._pedidoFiltro==='vazios'?'':'vazios');render();"
             style="background:${_pfiltro==='vazios'?'#4338CA':'rgba(0,0,0,.08)'};border:none;border-radius:10px;padding:5px 10px;color:${_pfiltro==='vazios'?'#fff':'#475569'};font-size:11px;font-weight:700">
             ⬜ Vazios
@@ -8913,7 +9110,7 @@ function render() {
           <button onclick="window._pedidoFiltro=(window._pedidoFiltro==='preenchidos'?'':'preenchidos');render();"
             style="background:${_pfiltro==='preenchidos'?'#059669':'rgba(0,0,0,.08)'};border:none;border-radius:10px;padding:5px 10px;color:${_pfiltro==='preenchidos'?'#1e293b':'#475569'};font-size:11px;font-weight:700">
             ✓ Preench
-          </button>
+          </button>`}
           <button onclick="abrirModalNovoProdutoPedido()" style="background:rgba(16,185,129,.2);border:1px solid rgba(16,185,129,.4);border-radius:10px;padding:5px 10px;color:#059669;font-size:11px;font-weight:700">+ Novo</button>
           <button onclick="abrirConferenciaSync()" title="Conferir se os itens lançados já chegaram no app Estoque e Pedido" style="background:rgba(59,130,246,.2);border:1px solid rgba(59,130,246,.4);border-radius:10px;padding:5px 10px;color:#2563EB;font-size:11px;font-weight:700">🔒 Sincronização</button>
           <button onclick="_abrirRelatorioEstVig()" title="Gerar relatório da contagem do Est. em Vigor" style="background:rgba(124,58,237,.2);border:1px solid rgba(124,58,237,.4);border-radius:10px;padding:5px 10px;color:#7c3aed;font-size:11px;font-weight:700">📄 Relatório</button>
@@ -8927,6 +9124,13 @@ function render() {
         ℹ️ <b>Contagem já usada no pedido e precisa de correção?</b> Não corrija o valor aqui — solicite o ajuste ao setor de Compras (Estoque e Pedido). Corrigir dos dois lados ao mesmo tempo pode duplicar o ajuste.
       </div>
 
+      ${_urgTrava ? `
+      <div style="background:rgba(180,83,9,.1);border:1px solid rgba(180,83,9,.35);border-left:3px solid #B45309;border-radius:10px;padding:10px 12px;margin-top:8px;font-size:11.5px;color:#78350f;line-height:1.45">
+        ⚡ <b>Conte primeiro a urgência.</b> A lista está mostrando só os ${_urgItensLoja().length} itens
+        marcados como urgência pelo setor de Compras — <b>${_urgFaltamContar()}</b> ainda sem contagem lançada.
+        Depois de tocar em <b>⚡ Urgência</b> e enviar, o restante do estoque (${prodsTotaisCatalogo} itens) libera na hora.
+      </div>` : ''}
+
       <!-- Botões de ação + filtro de grupo — fixos juntos logo abaixo do cabeçalho, sempre
       visíveis. Antes ficavam grudados no fim da lista de produtos (perto da barra de
       navegação inferior), onde era fácil tocar sem querer rolando a tela rápido — agora
@@ -8939,13 +9143,18 @@ function render() {
             <span style="font-size:15px">⚡</span>
             <span>Urgência</span>
           </button>
-          <button onclick="_abrirPreviaConfirmar('final')" style="background:linear-gradient(135deg,#1d4ed8,#1e40af);border:none;border-radius:12px;padding:10px 8px;color:#fff;font-weight:900;font-size:13px;display:flex;align-items:center;justify-content:center;gap:7px;box-shadow:0 2px 8px rgba(30,64,175,.35)">
-            <span style="font-size:15px">✅</span>
+          <!-- Finalizar fecha a semana com o que está contado. Com a urgência pendente a lista
+          está restrita, então finalizar aqui fecharia a semana com 1/4 do catálogo contado. -->
+          <button onclick="${_urgTrava ? `showToast('⚡ Envie a urgência primeiro — o restante do estoque libera depois disso.', 'warn')` : `_abrirPreviaConfirmar('final')`}"
+            style="background:${_urgTrava ? '#94a3b8' : 'linear-gradient(135deg,#1d4ed8,#1e40af)'};border:none;border-radius:12px;padding:10px 8px;color:#fff;font-weight:900;font-size:13px;display:flex;align-items:center;justify-content:center;gap:7px;${_urgTrava ? 'opacity:.75' : 'box-shadow:0 2px 8px rgba(30,64,175,.35)'}">
+            <span style="font-size:15px">${_urgTrava ? '🔒' : '✅'}</span>
             <span>Finalizar</span>
           </button>
         </div>
 
-        <!-- Filtro de grupo -->
+        <!-- Filtro de grupo — some enquanto a urgência não sai: ali a lista é a urgência
+        inteira, de todas as categorias, e trocar de grupo só serviria pra fugir dela. -->
+        ${_urgTrava ? '' : `
         <div style="display:flex;gap:6px;overflow-x:auto;padding-top:8px;scrollbar-width:none">
           <button onclick="window._pedidoGrupo='__TODOS__';render();"
             style="flex-shrink:0;padding:6px 12px;border-radius:20px;font-size:11px;font-weight:700;border:none;cursor:pointer;
@@ -8958,7 +9167,7 @@ function render() {
                 ${g===grupoAtivo?'background:#D97706;color:#1e293b':'background:rgba(0,0,0,.08);color:#475569'}">
               ${g}
             </button>`).join('')}
-        </div>
+        </div>`}
       </div>
 
       <!-- Lista de produtos -->
@@ -11497,6 +11706,8 @@ sbPull(false).then(() => {
   loadChecklistFat();
   _atualizarTravaNotaFiscal();
   _checarBarrisSemanalPendencia();
+  // Depois do sbPull: urgenciaTemplate só existe a partir daí (vem de gn_lojas.all_data).
+  _checarUrgenciaPendencia();
 });
 // Atualiza a lista de itens/preços do Pedido a partir do Catálogo (gn_catalogo) assim que abrir,
 // e reexibe a tela se o Pedido já estiver na tela pra refletir os dados atualizados.
