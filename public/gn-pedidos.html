@@ -762,6 +762,8 @@ let S = {
   triosRelFiltro: null,   // null = todas as lojas | [slug_pedido,...] — filtro do relatório de Trios
   urgenciaTemplate: {}, // legado: userKey -> [item_id_string, ...] (só fallback, ver URGENCIA_LINHA)
   urgenciaGlobal: null, // lista ÚNICA de urgência da rede — null = ainda não carregou
+  envioSemana: {},      // slug_pedido -> linha de gn_pedido_envio_semana da semana atual
+  envioSemanaIni: null, // segunda-feira (YYYY-MM-DD) a que o envioSemana se refere
   gruposAbertos: new Set(['BEBIDAS','PROTEÍNA','PRODUÇÃO']),
   provGruposAbertos: new Set(), // loja/fornecedor abertos na aba Provisões — começam fechados
 
@@ -3465,6 +3467,123 @@ const LOJA_USERKEY_BY_SLUG = Object.fromEntries((window.GN_LOJAS || []).map(l =>
 const LOJA_TESTE_PEDIDO = { slug_pedido: 'loja_teste', nome_display: 'Loja Teste' };
 function lojasComTeste() { return [...S.lojas, LOJA_TESTE_PEDIDO]; }
 
+// ── STATUS DO PEDIDO DA SEMANA, POR LOJA ──────────────────────────────────
+// Quem já mandou a urgência, quem já finalizou e quem não mandou nada. Sem isto o Compras
+// não tinha como saber de quem estava esperando: o que existia era gn_alertas_compras, que
+// só grava quando há item pra sincronizar (então silêncio é ambíguo) e acumula uma linha por
+// clique — Campo Grande aparece 4× na mesma segunda. gn_pedido_envio_semana é 1 linha por
+// loja/semana, escrita pelo app Lojas ao enviar urgência e ao finalizar.
+function _segundaDaSemanaISO(d) {
+  const base = d ? new Date(d) : new Date();
+  const dia = base.getDay();                 // 0=dom
+  const diff = dia === 0 ? -6 : 1 - dia;     // volta pra segunda
+  base.setDate(base.getDate() + diff);
+  return base.getFullYear() + '-' + ('0' + (base.getMonth() + 1)).slice(-2) + '-' + ('0' + base.getDate()).slice(-2);
+}
+
+async function carregarEnvioSemana() {
+  const semana = _segundaDaSemanaISO();
+  try {
+    const { data, error } = await db.from('gn_pedido_envio_semana').select('*').eq('semana_inicio', semana);
+    if (error) throw error;
+    const porSlug = {};
+    (data || []).forEach(r => { porSlug[r.loja_slug] = r; });
+    const mudou = JSON.stringify(_envioAssinatura(porSlug)) !== JSON.stringify(_envioAssinatura(S.envioSemana));
+    S.envioSemana = porSlug;
+    S.envioSemanaIni = semana;
+    return mudou;
+  } catch (e) {
+    // Mantém o que já tinha: um painel vazio por falha de rede diria "nenhuma loja enviou",
+    // que é pior que não dizer nada.
+    return false;
+  }
+}
+
+// Só o que o painel mostra — usado pra decidir se vale redesenhar.
+function _envioAssinatura(mapa) {
+  return Object.keys(mapa || {}).sort().map(k => k + ':' + ((mapa[k].final_em ? 'F' : '') + (mapa[k].urgencia_em ? 'U' : '')));
+}
+
+// Lojas enviam ao longo da segunda inteira, e o Compras fica com a tela aberta esperando.
+// Redesenha só quando o status de alguma loja realmente mudou, e nunca com um campo em foco:
+// um render no meio da digitação apagaria o valor que o comprador está lançando.
+setInterval(async () => {
+  if (S.tab !== 'pedido') return;
+  const a = document.activeElement;
+  if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT')) return;
+  if ($('modal-bg')?.classList.contains('ativo')) return;
+  if (await carregarEnvioSemana()) renderPedido();
+}, 60000);
+
+// 'final' | 'urgencia' | 'nada' — o estado de uma loja nesta semana.
+function _envioStatusLoja(slug) {
+  const r = S.envioSemana && S.envioSemana[slug];
+  if (!r) return 'nada';
+  if (r.final_em) return 'final';
+  if (r.urgencia_em) return 'urgencia';
+  return 'nada';
+}
+
+const _ENVIO_VISUAL = {
+  final:    { icone: '✅', cor: '#34d399', rotulo: 'Pedido feito' },
+  urgencia: { icone: '⚡', cor: '#f59e0b', rotulo: 'Falta finalizar' },
+  nada:     { icone: '⏳', cor: '#94a3b8', rotulo: 'Não enviou' },
+};
+
+function _envioQuandoTxt(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    return ('0' + d.getDate()).slice(-2) + '/' + ('0' + (d.getMonth() + 1)).slice(-2) +
+           ' ' + ('0' + d.getHours()).slice(-2) + 'h' + ('0' + d.getMinutes()).slice(-2);
+  } catch (e) { return ''; }
+}
+
+// Painel do topo da aba Pedido. A ordem é a que o Compras precisa: quem não mandou nada
+// primeiro, depois quem parou na urgência, e as prontas por último — a lista é uma fila de
+// cobrança, não um placar.
+function _painelEnvioSemanaHtml() {
+  const lojas = S.lojas || [];
+  if (!lojas.length) return '';
+  const porStatus = { nada: [], urgencia: [], final: [] };
+  lojas.forEach(l => porStatus[_envioStatusLoja(l.slug_pedido)].push(l));
+  const feitas = porStatus.final.length;
+  const chip = (l, st) => {
+    const v = _ENVIO_VISUAL[st];
+    const r = (S.envioSemana || {})[l.slug_pedido] || {};
+    const quando = st === 'final' ? _envioQuandoTxt(r.final_em) : st === 'urgencia' ? _envioQuandoTxt(r.urgencia_em) : '';
+    const tip = st === 'final' ? 'Finalizou ' + quando + (r.final_por ? ' por ' + esc(r.final_por) : '')
+              : st === 'urgencia' ? 'Mandou só a urgência ' + quando + (r.urgencia_por ? ' por ' + esc(r.urgencia_por) : '') + ' — ainda não finalizou'
+              : 'Não enviou nem urgência nem pedido nesta semana';
+    return `<button title="${tip}" onclick="selecionarLoja('${l.slug_pedido}')"
+      style="display:inline-flex;align-items:center;gap:5px;background:var(--card2);border:1px solid ${v.cor}55;border-radius:999px;padding:4px 10px;font-size:11px;font-weight:700;color:var(--fg);cursor:pointer">
+      <span>${v.icone}</span><span>${esc(l.nome_display)}</span>${quando?`<span style="color:var(--muted);font-weight:500">${quando}</span>`:''}
+    </button>`;
+  };
+  const bloco = (st, titulo) => porStatus[st].length ? `
+    <div style="margin-top:7px">
+      <div style="font-size:10px;font-weight:800;color:${_ENVIO_VISUAL[st].cor};text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">
+        ${_ENVIO_VISUAL[st].icone} ${titulo} (${porStatus[st].length})
+      </div>
+      <div style="display:flex;gap:5px;flex-wrap:wrap">${porStatus[st].map(l=>chip(l,st)).join('')}</div>
+    </div>` : '';
+  const pendentes = porStatus.nada.length + porStatus.urgencia.length;
+  return `
+  <div style="background:var(--card);border:1px solid ${pendentes?'rgba(245,158,11,.35)':'rgba(52,211,153,.35)'};border-radius:12px;padding:10px 12px;margin-bottom:8px">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+      <div style="font-size:12px;font-weight:800;color:var(--fg)">
+        📦 Pedido da semana de ${_envioQuandoTxt(S.envioSemanaIni ? S.envioSemanaIni + 'T12:00:00' : null).split(' ')[0] || ''}
+        <span style="color:var(--muted);font-weight:600"> · ${feitas} de ${lojas.length} finalizaram</span>
+      </div>
+      <button onclick="carregarEnvioSemana().then(renderPedido)" title="Reconsultar o status das lojas"
+        style="background:var(--card2);border:none;border-radius:8px;padding:4px 9px;font-size:10.5px;font-weight:700;color:var(--muted);cursor:pointer">🔄 Atualizar</button>
+    </div>
+    ${bloco('nada', 'Não enviou nada')}
+    ${bloco('urgencia', 'Mandou só a urgência — falta finalizar')}
+    ${bloco('final', 'Pedido feito')}
+  </div>`;
+}
+
 // A urgência é UMA lista só, válida pra toda a rede, em
 // gn_lojas('URGENCIA_CONFIG').all_data.urgenciaGlobal.
 //
@@ -3589,7 +3708,10 @@ function renderPedido() {
   const semNavHtmlAtivo = S.hortifrutiAtivo ? _hortifrutiDiaNavHtml() : semNavHtml;
 
   if (!S.pedidoAtual) {
-    $('content').innerHTML = semNavHtmlAtivo + _datasEspeciaisCardHtml() + _hortifrutiBloqueioCardHtml() + _hortifrutiLiberacaoCardHtml() + _vendaSemanaAntCardHtml() + `
+    // O painel de status entra aqui também: "nenhum pedido nesta semana" é exatamente quando
+    // saber que nenhuma loja enviou nada importa mais, e sem isto a tela ficava muda.
+    $('content').innerHTML = semNavHtmlAtivo + _datasEspeciaisCardHtml() + _hortifrutiBloqueioCardHtml() + _hortifrutiLiberacaoCardHtml() + _vendaSemanaAntCardHtml() +
+      (S.hortifrutiAtivo ? '' : _painelEnvioSemanaHtml()) + `
       <div class="empty" style="margin-top:20px">
         <div class="empty-icon">📋</div>
         <div class="empty-texto">${S.hortifrutiAtivo ? 'Nenhum pedido de Hortifruti nesse dia' : 'Nenhum pedido nesta semana'}</div>
@@ -3624,9 +3746,15 @@ function renderPedido() {
   // ── Store Tabs (só no modo POR LOJA) ──
   const storeTabs = !S.todosModo ? lojasComTeste().map(l => {
     const n = contarItensLoja(l.slug_pedido);
+    // Selo do envio da semana na própria aba da loja (ver _painelEnvioSemanaHtml): dá pra ver
+    // de quem se está esperando sem sair da loja que está aberta. A Loja Teste não entra em
+    // S.lojas e por isso nunca tem linha de envio — fica sem selo em vez de "não enviou".
+    const temEnvio = (S.lojas || []).some(x => x.slug_pedido === l.slug_pedido);
+    const st = temEnvio ? _envioStatusLoja(l.slug_pedido) : null;
+    const selo = st ? `<span title="${_ENVIO_VISUAL[st].rotulo}" style="margin-left:3px">${_ENVIO_VISUAL[st].icone}</span>` : '';
     return `<button class="store-tab${lojaAtiva===l.slug_pedido?' ativo':''}"
       onclick="selecionarLoja('${l.slug_pedido}')">
-      ${l.nome_display}${n>0?`<span class="contagem">(${n})</span>`:''}
+      ${l.nome_display}${selo}${n>0?`<span class="contagem">(${n})</span>`:''}
     </button>`;
   }).join('') : '';
 
@@ -3976,6 +4104,8 @@ function renderPedido() {
       <div class="store-tabs" id="storeTabsPedido">${storeTabs}</div>
       <button class="store-tabs-arrow" onclick="_scrollStoreTabs('storeTabsPedido',1)" aria-label="Próximas lojas">›</button>
     </div>` : ''}
+
+    ${_painelEnvioSemanaHtml()}
 
     <div class="filtros">
       <input class="filtro-input" type="search" placeholder="🔍 Buscar produto..."
@@ -8044,6 +8174,7 @@ async function iniciarApp() {
     carregarContagens(),
     carregarMasterConfig(),
     carregarUrgenciaTemplate(),
+    carregarEnvioSemana(),
   ]);
   // Load devoluções after lojas (needs S.lojas for display names)
   carregarDevolucoesLojas().catch(() => {});
