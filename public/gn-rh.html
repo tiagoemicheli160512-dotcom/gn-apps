@@ -326,6 +326,8 @@ summary.loja-card-header::-webkit-details-marker{display:none}
 
 </style>
 <script src="gn-lojas-config.js"></script>
+<!-- Só leitura: traduz o índice de semana de gn_comissoes.all_data em data (ver CLAUDE.md). -->
+<script src="gn-comissoes-calendario.js"></script>
 <script src="gn-avaliacoes-setores.js"></script>
 <script src="gn-avaliacoes-pesos.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
@@ -348,6 +350,7 @@ summary.loja-card-header::-webkit-details-marker{display:none}
   <button class="sidebar-link" data-sidebar-tab="comparativo" onclick="setTab('comparativo')"><span class="sl-icon">🔍</span>Comparativo</button>
   <button class="sidebar-link" data-sidebar-tab="admissoes" onclick="setTab('admissoes')"><span class="sl-icon">🆕</span>Admissões<span id="sidebar-admissoes-badge" style="display:none;margin-left:5px;background:var(--red);color:#fff;font-size:9px;font-weight:800;padding:1px 5px;border-radius:8px;vertical-align:middle"></span></button>
   <button class="sidebar-link" data-sidebar-tab="avarias" onclick="setTab('avarias')"><span class="sl-icon">⚠️</span>Avarias<span id="sidebar-avarias-badge" style="display:none;margin-left:5px;background:var(--red);color:#fff;font-size:9px;font-weight:800;padding:1px 5px;border-radius:8px;vertical-align:middle"></span></button>
+  <button class="sidebar-link" data-sidebar-tab="documentos" onclick="setTab('documentos')"><span class="sl-icon">📎</span>Documentos</button>
   <button class="sidebar-link" data-sidebar-tab="dossie" onclick="setTab('dossie')"><span class="sl-icon">📋</span>Dossiê</button>
   <button class="sidebar-link" data-sidebar-tab="vencimentos" onclick="setTab('vencimentos')"><span class="sl-icon">📅</span>Boletos</button>
   <button class="sidebar-link" data-sidebar-tab="ferias" onclick="setTab('ferias')"><span class="sl-icon">🏖</span>Férias</button>
@@ -423,6 +426,10 @@ summary.loja-card-header::-webkit-details-marker{display:none}
       <span class="nav-icon">⚠️</span>
       <span class="nav-label">Avarias</span>
       <span id="avarias-badge" style="display:none;position:absolute;top:6px;right:14px;background:var(--red);color:#fff;border-radius:10px;font-size:9px;font-weight:800;padding:1px 5px;min-width:16px;text-align:center;line-height:14px"></span>
+    </button>
+    <button class="nav-btn" data-tab="documentos" onclick="setTab('documentos')">
+      <span class="nav-icon">📎</span>
+      <span class="nav-label">Documentos</span>
     </button>
     <button class="nav-btn" data-tab="dossie" onclick="setTab('dossie')">
       <span class="nav-icon">📋</span>
@@ -515,6 +522,12 @@ let S = {
   usuarios: [],          // [{nome, loja(userKey), cargo, ativo}]
   comissoesData: {},     // { comKey: allData }
   admissoes: [],         // gn_admissoes: funcionário novo do Check-list → conferência do RH
+  // Documentos (advertência/suspensão/atestado/demissão) achatados de
+  // gn_comissoes.all_data[semana].funcs[].docs — ver carregarDocumentos
+  documentos: [],
+  docTipo: '',           // filtro por tipo ('' = todos)
+  docLoja: '',           // filtro por loja ('' = todas)
+  docBusca: '',          // busca por nome
   opCaixa: [],           // caixa records for selected period
   opMode: 'dia',         // 'dia' | 'sem' | 'mes'
   opData: null,          // Date representing selected day / week Monday / month
@@ -2358,7 +2371,9 @@ function _rhAbaLiberada(tab) {
   if (tab === 'guia') return true;
   if (!S.abasPermitidas) return true;
   if (S.abasPermitidas.has(tab)) return true;
-  return tab === 'admissoes' && S.abasPermitidas.has('rh');
+  // Documentos é a mesma informação da aba RH, só organizada por pessoa em vez de por
+  // semana — quem enxerga RH enxerga os documentos.
+  return (tab === 'admissoes' || tab === 'documentos') && S.abasPermitidas.has('rh');
 }
 
 function setTab(tab) {
@@ -2371,6 +2386,192 @@ function setTab(tab) {
   if (sl) sl.classList.add('active');
   renderContent();
   if (tab === 'avarias') _rtSubscribeAvarias();
+}
+
+// ══════════════════════════════════════════════
+// DOCUMENTOS — advertência, suspensão, atestado e carta de demissão
+// ══════════════════════════════════════════════
+// Esses arquivos já existiam: a loja anexa no Check-list (Dados > Funcionários) e eles
+// ficam em gn_comissoes.all_data[semana].funcs[i].docs. O RH já os exibia — mas só como
+// miniatura de 24px ao lado do nome, na tabela de Escala, e SÓ na semana em que o
+// documento foi anexado. Quem precisava mandar um documento tinha que adivinhar a semana.
+// Esta aba é a mesma informação virada do avesso: por pessoa, com todas as semanas juntas.
+const RH_DOC_TIPOS = [
+  { tipo:'ADVERTENCIA', label:'Advertência',    cor:'#ef4444', icone:'📝' },
+  { tipo:'SUSPENSAO',   label:'Suspensão',      cor:'#f97316', icone:'⚠️' },
+  { tipo:'ATESTADO',    label:'Atestado',       cor:'#eab308', icone:'📋' },
+  { tipo:'DEMISSAO',    label:'Carta Demissão', cor:'#8b5cf6', icone:'📄' },
+];
+const RH_DOC_CFG = Object.fromEntries(RH_DOC_TIPOS.map(t => [t.tipo, t]));
+
+// Índice da semana → "29/09 a 05/10". O calendário é a mesma fonte do resto da rede; sem
+// ele o documento apareceria só com o número da semana, que não diz nada pra quem lê.
+function _rhDocPeriodo(semIdx) {
+  const sem = (typeof COMISSOES_CAL !== 'undefined') ? COMISSOES_CAL[semIdx] : null;
+  if (!sem) return 'Semana ' + semIdx;
+  return String(sem.header || '').replace('—', 'a') + (sem.ano ? '/' + String(sem.ano).slice(2) : '');
+}
+// Ordena por data real, não pelo número: o índice cresce com o tempo, então serve de chave.
+function _rhDocOrdem(d) { return d.semIdx; }
+
+async function carregarDocumentos() {
+  const { data, error } = await db.from('gn_comissoes')
+    .select('loja,all_data').in('loja', LOJAS.map(l => l.comKey));
+  if (error) throw error;
+  const porComKey = Object.fromEntries(LOJAS.map(l => [l.comKey, l.display]));
+  const docs = [];
+  (data || []).forEach(row => {
+    const lojaNome = porComKey[row.loja] || row.loja;
+    const all = row.all_data || {};
+    Object.keys(all).forEach(k => {
+      if (!/^\d+$/.test(k)) return;              // CONFIG e afins não são semana
+      const semIdx = parseInt(k, 10);
+      const funcs = Array.isArray(all[k] && all[k].funcs) ? all[k].funcs : [];
+      funcs.forEach(f => {
+        const d = f && f.docs;
+        if (!d || typeof d !== 'object') return;
+        RH_DOC_TIPOS.forEach(({ tipo }) => {
+          const arq = d[tipo];
+          if (!arq) return;
+          docs.push({ loja: lojaNome, comKey: row.loja, semIdx, tipo,
+                      nome: (f.nome || '').trim() || '(sem nome)',
+                      setor: (f.setor || '').trim(), arquivo: arq });
+        });
+      });
+    });
+  });
+  docs.sort((a, b) => _rhDocOrdem(b) - _rhDocOrdem(a) || a.nome.localeCompare(b.nome));
+  S.documentos = docs;
+}
+
+function _rhDocsFiltrados() {
+  const busca = (S.docBusca || '').trim().toLowerCase();
+  return (S.documentos || []).filter(d =>
+    (!S.docTipo || d.tipo === S.docTipo) &&
+    (!S.docLoja || d.loja === S.docLoja) &&
+    (!busca || d.nome.toLowerCase().includes(busca))
+  );
+}
+
+function renderDocumentos() {
+  const docs = _rhDocsFiltrados();
+  const todos = S.documentos || [];
+  const inputSt = 'background:var(--surf2);border:1px solid var(--border);border-radius:8px;padding:7px 10px;font-size:12px;color:var(--text);font-family:inherit';
+
+  const contagem = {};
+  todos.forEach(d => { contagem[d.tipo] = (contagem[d.tipo] || 0) + 1; });
+  const chips = RH_DOC_TIPOS.map(t => {
+    const ativo = S.docTipo === t.tipo;
+    return `<button onclick="S.docTipo='${ativo ? '' : t.tipo}';renderDocumentos()"
+      style="border:1px solid ${ativo ? t.cor : 'var(--border)'};background:${ativo ? t.cor + '22' : 'var(--surf2)'};color:var(--text);border-radius:999px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">
+      ${t.icone} ${t.label} <span style="color:var(--muted);font-weight:600">${contagem[t.tipo] || 0}</span></button>`;
+  }).join('');
+
+  const lojasComDoc = [...new Set(todos.map(d => d.loja))].sort();
+
+  // Agrupa por pessoa: o histórico dela é o que o RH precisa ver junto, e era justamente o
+  // que não existia — a mesma pessoa aparecia solta em semanas diferentes.
+  const porPessoa = new Map();
+  docs.forEach(d => {
+    const chave = d.loja + '|' + d.nome.toLowerCase();
+    if (!porPessoa.has(chave)) porPessoa.set(chave, { nome: d.nome, loja: d.loja, setor: d.setor, itens: [] });
+    porPessoa.get(chave).itens.push(d);
+  });
+  const pessoas = [...porPessoa.values()].sort((a, b) => _rhDocOrdem(b.itens[0]) - _rhDocOrdem(a.itens[0]));
+
+  const corpo = !docs.length
+    ? `<div class="empty"><div class="empty-icon">📎</div><div class="empty-text">${todos.length ? 'Nenhum documento com esses filtros.' : 'Nenhum documento anexado ainda. A loja anexa no Check-list, em Dados &gt; Funcionários.'}</div></div>`
+    : pessoas.map(p => {
+        const itens = p.itens.map(d => {
+          const cfg = RH_DOC_CFG[d.tipo];
+          const i = (S.documentos || []).indexOf(d);
+          return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--border)">
+            <img src="${d.arquivo}" onclick="_rhVerDoc(${i})" loading="lazy"
+              style="width:40px;height:40px;border-radius:6px;object-fit:cover;cursor:pointer;border:1px solid ${cfg.cor}55;flex-shrink:0;background:var(--surf2)">
+            <div style="flex:1;min-width:0">
+              <div style="font-size:12px;font-weight:700;color:${cfg.cor}">${cfg.icone} ${cfg.label}</div>
+              <div style="font-size:10px;color:var(--muted)">${_rhDocPeriodo(d.semIdx)}</div>
+            </div>
+            <button class="btn btn-sec btn-sm" onclick="_rhVerDoc(${i})" style="flex-shrink:0">Abrir</button>
+          </div>`;
+        }).join('');
+        return `<div class="card" style="padding:12px 14px;margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
+            <div style="min-width:0">
+              <div style="font-size:13px;font-weight:800;color:var(--text)">${esc(p.nome)}</div>
+              <div style="font-size:10px;color:var(--muted)">${esc(p.loja)}${p.setor ? ' · ' + esc(p.setor) : ''}</div>
+            </div>
+            <span class="badge" style="flex-shrink:0">${p.itens.length} doc${p.itens.length > 1 ? 's' : ''}</span>
+          </div>
+          ${itens}
+        </div>`;
+      }).join('');
+
+  $('content').innerHTML = `
+    <div class="card" style="padding:12px 14px;margin-bottom:12px">
+      <div style="font-size:13px;font-weight:800;margin-bottom:3px">📎 Documentos dos Funcionários</div>
+      <div style="font-size:10px;color:var(--muted);margin-bottom:10px;line-height:1.45">
+        Anexados pela loja no Check-list (Dados &gt; Funcionários). Agrupados por pessoa, com todas as semanas juntas.
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">${chips}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <input type="search" placeholder="Buscar por nome…" value="${esc(S.docBusca || '')}"
+          oninput="S.docBusca=this.value;renderDocumentos()" style="${inputSt};flex:1;min-width:150px">
+        <select onchange="S.docLoja=this.value;renderDocumentos()" style="${inputSt}">
+          <option value="">Todas as lojas</option>
+          ${lojasComDoc.map(l => `<option value="${esc(l)}" ${S.docLoja === l ? 'selected' : ''}>${esc(l)}</option>`).join('')}
+        </select>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-top:8px">${docs.length} de ${todos.length} documento(s) · ${pessoas.length} pessoa(s)</div>
+    </div>
+    ${corpo}`;
+}
+
+// Reusa o mesmo modal da tabela de Escala (WhatsApp e PDF inclusos) — por isso preenche
+// _rhDocModal do mesmo jeito, só acrescentando loja e período, que ali não existiam.
+function _rhVerDoc(i) {
+  const d = (S.documentos || [])[i];
+  if (!d) return;
+  const cfg = RH_DOC_CFG[d.tipo] || { label: d.tipo, cor: '#64748b' };
+  const periodo = _rhDocPeriodo(d.semIdx);
+  _rhDocModal = { nome: d.nome, tipo: d.tipo, foto: d.arquivo, tipoLabel: cfg.label, loja: d.loja, periodo };
+  abrirModal(`
+    <div class="modal-handle"></div>
+    <div class="modal-title" style="font-size:14px;gap:8px">
+      <div><span style="color:${cfg.cor};font-weight:800">${cfg.label}</span>
+        <span style="color:var(--muted);font-size:12px;font-weight:600;margin-left:6px">${esc(d.nome)}</span></div>
+      <button class="modal-close" onclick="fecharModal()">✕</button>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:8px">${esc(d.loja)} · ${periodo}</div>
+    <img src="${d.arquivo}" style="width:100%;border-radius:8px;max-height:55dvh;object-fit:contain;background:var(--surf2);display:block">
+    <div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end">
+      <button class="btn btn-sec btn-sm" onclick="_rhBaixarDoc()">⬇️ Baixar</button>
+      <button class="btn btn-sec btn-sm" onclick="_wppDocRH()">📲 WhatsApp</button>
+      <button class="btn btn-sec btn-sm" onclick="_pdfDocRH()">📄 PDF</button>
+    </div>
+  `);
+}
+
+// Baixar o arquivo como está. O nome sai legível (tipo, pessoa e período) porque o RH
+// costuma anexar isso em e-mail depois — "documento.jpg" não ajudaria ninguém.
+async function _rhBaixarDoc() {
+  if (!_rhDocModal) return;
+  const { foto, nome, tipoLabel, periodo } = _rhDocModal;
+  const limpo = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '-');
+  const arquivo = `${limpo(tipoLabel)}-${limpo(nome)}-${limpo(periodo).replace(/\//g, '')}.jpg`;
+  try {
+    const blob = /^https?:\/\//.test(foto)
+      ? await (await fetch(foto)).blob()
+      : await (await fetch(foto)).blob();   // data URI também é aceito pelo fetch
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = arquivo;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (e) {
+    // Sem permissão de download (navegador embutido) o arquivo ainda abre em aba nova.
+    window.open(foto, '_blank');
+  }
 }
 
 // ══════════════════════════════════════════════
@@ -2840,6 +3041,7 @@ function renderContent() {
       if (S.tab === 'admissoes')   { await carregarAdmissoes();   renderAdmissoes();    }
       if (S.tab === 'comparativo') { await carregarComparativo(); renderComparativo();  }
       if (S.tab === 'avarias')     { await carregarAvarias();     renderAvarias();      }
+      if (S.tab === 'documentos') { await carregarDocumentos(); renderDocumentos();   }
       if (S.tab === 'dossie')      { await carregarDossie();      renderDossie();       }
       if (S.tab === 'vencimentos'){ await carregarVencimentos(); renderVencimentos();  }
       if (S.tab === 'ferias')     { await carregarFerias();      renderFerias();       }
@@ -5610,8 +5812,11 @@ function verFotoDoc(funcIdx, tipo) {
 async function _wppDocRH() {
   if (!_rhDocModal) return;
   const { nome, foto, tipoLabel } = _rhDocModal;
-  const loja = S.rhLoja?.display || '';
-  const texto = `📎 ${tipoLabel} — ${nome}\n📍 ${loja}\n📅 ${new Date().toLocaleDateString('pt-BR')}`;
+  // A aba Documentos lista várias lojas de uma vez, então a loja vem no próprio documento.
+  // S.rhLoja só serve pro modal aberto a partir da tabela de Escala, que é de uma loja só.
+  const loja = _rhDocModal.loja || S.rhLoja?.display || '';
+  const quando = _rhDocModal.periodo ? ` (${_rhDocModal.periodo})` : '';
+  const texto = `📎 ${tipoLabel} — ${nome}\n📍 ${loja}${quando}\n📅 ${new Date().toLocaleDateString('pt-BR')}`;
   if (foto && navigator.share) {
     try {
       // Foto pode ser um data URI base64 (registros antigos) ou uma URL do Storage
