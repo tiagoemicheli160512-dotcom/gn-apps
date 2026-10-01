@@ -1240,6 +1240,35 @@ async function _renderVendaMesHome(mostrar, sess, isMasterAtivo) {
   }
 }
 
+let _mesAnteriorHomeData = null;
+// Fecha o mês num texto pronto pro WhatsApp: o comparativo, as avarias, as ocorrências e o
+// que foi pago de funcionário extra. Sai do que o card já calculou, pra não divergir dele.
+function _relatorioMesAnteriorWhats() {
+  const d = _mesAnteriorHomeData;
+  if (!d) return;
+  const brl = v => 'R$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const M = s => s.charAt(0).toUpperCase() + s.slice(1);
+  let txt = `📊 *Desempenho de ${M(d.mesNome)}*\n🏪 ${d.loja}\n\n`;
+  txt += `💰 *Faturamento*\n`;
+  txt += `   ${M(d.mesAnteriorNome)}: ${brl(d.faturamentoAnt)}\n`;
+  txt += `   ${M(d.mesNome)}: ${brl(d.faturamento)}\n`;
+  if (d.faturamentoAnt > 0) {
+    const subiu = d.diff >= 0;
+    txt += `   ${subiu ? '▲' : '▼'} *${subiu ? 'Acima' : 'Abaixo'} ${Math.abs(d.pct).toFixed(1).replace('.', ',')}%* `;
+    txt += `(${subiu ? '+' : '−'} ${brl(Math.abs(d.diff))})\n\n`;
+  } else {
+    txt += `   _Sem faturamento lançado em ${d.mesAnteriorNome} — sem comparativo._\n\n`;
+  }
+  txt += `⚠️ Avarias/Desperdício: ${d.avariasQtd} · ${brl(d.avariasValor)}\n\n`;
+  txt += `👥 *Ocorrências*\n`;
+  txt += `   📄 Atestados: ${d.ocor.ATESTADO}\n`;
+  txt += `   🚫 Faltas: ${d.ocor.FALTA}\n`;
+  txt += `   ⛔ Suspensões: ${d.ocor['SUSPENSÃO']}\n`;
+  txt += `   📝 Advertências: ${d.ocor.ADVERTENCIA}\n\n`;
+  txt += `👷 Funcionário extra: ${d.extraQtd} lançamento${d.extraQtd === 1 ? '' : 's'} · *${brl(d.extraValor)}*\n`;
+  _abrirWhats(txt);
+}
+
 // Card "Desempenho do mês anterior" — aparece só nos 3 primeiros dias de cada mês,
 // resumindo faturamento e avarias do mês que acabou de fechar pra loja em questão.
 // Fica de fora a margem: no sistema ela só existe por ciclo semanal (aba Produção do
@@ -1263,16 +1292,92 @@ async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
   const mesNome = MESES_PT_RESUMO[iniMesAnterior.getMonth()];
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
   try {
-    const [vendaRows, lojaRows] = await Promise.all([
+    // Mês retrasado, pro comparativo: agosto contra setembro. Sem ele o faturamento é um
+    // número solto — não dá pra saber se foi bom ou ruim.
+    const fimMesRetrasado = new Date(iniMesAnterior.getFullYear(), iniMesAnterior.getMonth(), 0);
+    const iniMesRetrasado = new Date(fimMesRetrasado.getFullYear(), fimMesRetrasado.getMonth(), 1);
+    const iniAntISO = iso(iniMesRetrasado), fimAntISO = iso(fimMesRetrasado);
+    const mesAnteriorNome = MESES_PT_RESUMO[iniMesRetrasado.getMonth()];
+
+    const [vendaRows, lojaRows, vendaAntRows, comissoesRows, caixaRows] = await Promise.all([
       window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${iniISO}&data_operacao=lte.${fimISO}&select=venda_salao,venda_delivery`, H, 'mesAnt:venda', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'mesAnt:lojas', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${iniAntISO}&data_operacao=lte.${fimAntISO}&select=venda_salao,venda_delivery`, H, 'mesAnt:vendaAnt', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'mesAnt:comissoes', []),
+      // Funcionário extra sai da despesa do Caixa; a data está no fechamento, não na despesa,
+      // por isso vem aninhada a partir dele.
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?loja=eq.${encodeURIComponent(loja)}&data=gte.${iniISO}&data=lte.${fimISO}&select=data,gn_caixa_despesa(categoria,valor)`, H, 'mesAnt:extra', []),
     ]);
-    const faturamento = (vendaRows || []).reduce((s, r) => s + (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0), 0);
+    const somaVenda = rows => (rows || []).reduce((s, r) => s + (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0), 0);
+    const faturamento = somaVenda(vendaRows);
+    const faturamentoAnt = somaVenda(vendaAntRows);
+    const diff = faturamento - faturamentoAnt;
+    const pct = faturamentoAnt > 0 ? (diff / faturamentoAnt) * 100 : null;
+
+    // Ocorrências do mês: faltas, atestados e suspensões saem do status de cada DIA na
+    // escala; advertência não é status, é documento anexado por semana (mesma leitura que o
+    // app RH faz), então conta uma vez por semana que toca o mês.
+    const ocor = { FALTA: 0, ATESTADO: 0, 'SUSPENSÃO': 0, ADVERTENCIA: 0 };
+    const allCom = (comissoesRows[0] && comissoesRows[0].all_data) || {};
+    const CAL = (typeof COMISSOES_CAL !== 'undefined') ? COMISSOES_CAL : [];
+    const noMes = dia => {
+      const d = dia.y + '-' + String(dia.m).padStart(2, '0') + '-' + String(dia.d).padStart(2, '0');
+      return d >= iniISO && d <= fimISO;
+    };
+    CAL.forEach((semana, idx) => {
+      const diasNoMes = (semana.days || []).map((dia, i) => noMes(dia) ? i : -1).filter(i => i >= 0);
+      if (!diasNoMes.length) return;
+      const funcs = (allCom[idx] && Array.isArray(allCom[idx].funcs)) ? allCom[idx].funcs : [];
+      funcs.forEach(f => {
+        diasNoMes.forEach(i => {
+          const st = (f.dias || [])[i];
+          if (ocor[st] !== undefined && st !== 'ADVERTENCIA') ocor[st]++;
+        });
+        if (f.docs && f.docs.ADVERTENCIA) ocor.ADVERTENCIA++;
+      });
+    });
+
+    let extraValor = 0, extraQtd = 0;
+    (caixaRows || []).forEach(fech => {
+      const desps = Array.isArray(fech.gn_caixa_despesa) ? fech.gn_caixa_despesa : (fech.gn_caixa_despesa ? [fech.gn_caixa_despesa] : []);
+      desps.forEach(d => {
+        if ((d && d.categoria) !== 'funcionario_extra') return;
+        extraValor += parseFloat(d.valor) || 0; extraQtd++;
+      });
+    });
     const avariasLoja = ((lojaRows[0] && lojaRows[0].all_data && lojaRows[0].all_data.avariasAll) || {})[comKey] || [];
     const avariasMes = avariasLoja.filter(a => a.status !== 'cancelado' && a.tipo !== 'transferencia_dinheiro' && a.tipo !== 'saida_terceiro'
       && a.ts && a.ts.slice(0, 10) >= iniISO && a.ts.slice(0, 10) <= fimISO);
     const avariasValor = avariasMes.reduce((s, a) => s + (parseFloat(a.valorTotal) || 0), 0);
     const fR = v => v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    _mesAnteriorHomeData = { loja, mesNome, mesAnteriorNome, faturamento, faturamentoAnt, diff, pct,
+                             avariasQtd: avariasMes.length, avariasValor, ocor, extraValor, extraQtd };
+
+    // Comparativo: sem o mês de trás o faturamento é um número solto. Quando o mês retrasado
+    // não tem lançamento nenhum, diz isso em vez de inventar uma variação.
+    const subiu = diff >= 0;
+    const corCmp = subiu ? '#15803d' : '#b91c1c';
+    const cmpHtml = faturamentoAnt > 0
+      ? `<div style="background:#fff;border-radius:10px;padding:10px 12px">
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:rgba(0,0,0,.55)">
+            <span>${mesAnteriorNome.charAt(0).toUpperCase() + mesAnteriorNome.slice(1)}</span>
+            <span style="font-variant-numeric:tabular-nums">R$ ${fR(faturamentoAnt)}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:rgba(0,0,0,.55);margin-top:3px">
+            <span>${mesNome.charAt(0).toUpperCase() + mesNome.slice(1)}</span>
+            <span style="font-variant-numeric:tabular-nums">R$ ${fR(faturamento)}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:7px;padding-top:7px;border-top:1px solid rgba(0,0,0,.07)">
+            <span style="font-size:11px;font-weight:700;color:${corCmp}">${subiu ? '▲ Acima' : '▼ Abaixo'} ${Math.abs(pct).toFixed(1).replace('.', ',')}%</span>
+            <span style="font-size:13px;font-weight:900;color:${corCmp};font-variant-numeric:tabular-nums">${subiu ? '+' : '−'} R$ ${fR(Math.abs(diff))}</span>
+          </div>
+        </div>`
+      : `<div style="background:#fff;border-radius:10px;padding:10px 12px;font-size:10px;color:rgba(0,0,0,.45)">Sem faturamento lançado em ${mesAnteriorNome} — não dá pra comparar.</div>`;
+
+    const linha = (rot, val) => `<div style="display:flex;justify-content:space-between;align-items:center;background:#fff;border-radius:10px;padding:10px 12px">
+      <span style="font-size:11px;color:rgba(0,0,0,.55)">${rot}</span>
+      <span style="font-size:14px;font-weight:900;color:#1A1D23">${val}</span></div>`;
+
     el.innerHTML = `<details style="background:rgba(79,70,229,.06);border:1px solid rgba(79,70,229,.2);border-left:3px solid #4F46E5;border-radius:14px;padding:0;margin:0 16px 14px;overflow:hidden">
       <summary style="list-style:none;cursor:pointer;padding:14px 16px;display:flex;align-items:center;gap:10px">
         <span style="font-size:18px;flex-shrink:0">📊</span>
@@ -1283,14 +1388,16 @@ async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
         <span style="font-size:12px;color:#4F46E5;flex-shrink:0">▾</span>
       </summary>
       <div style="padding:0 16px 16px;display:flex;flex-direction:column;gap:8px">
-        <div style="display:flex;justify-content:space-between;align-items:center;background:#fff;border-radius:10px;padding:10px 12px">
-          <span style="font-size:11px;color:rgba(0,0,0,.55)">💰 Faturamento</span>
-          <span style="font-size:14px;font-weight:900;color:#1A1D23">R$ ${fR(faturamento)}</span>
-        </div>
-        <div style="display:flex;justify-content:space-between;align-items:center;background:#fff;border-radius:10px;padding:10px 12px">
-          <span style="font-size:11px;color:rgba(0,0,0,.55)">⚠️ Avarias/Desperdício</span>
-          <span style="font-size:14px;font-weight:900;color:#1A1D23">${avariasMes.length} · R$ ${fR(avariasValor)}</span>
-        </div>
+        <div style="font-size:9px;font-weight:700;color:rgba(0,0,0,.4);text-transform:uppercase;letter-spacing:.3px">Faturamento — ${mesAnteriorNome} × ${mesNome}</div>
+        ${cmpHtml}
+        ${linha('⚠️ Avarias/Desperdício', `${avariasMes.length} · R$ ${fR(avariasValor)}`)}
+        <div style="font-size:9px;font-weight:700;color:rgba(0,0,0,.4);text-transform:uppercase;letter-spacing:.3px;margin-top:4px">Ocorrências de ${mesNome}</div>
+        ${linha('📄 Atestados', ocor.ATESTADO)}
+        ${linha('🚫 Faltas', ocor.FALTA)}
+        ${linha('⛔ Suspensões', ocor['SUSPENSÃO'])}
+        ${linha('📝 Advertências', ocor.ADVERTENCIA)}
+        ${linha('👷 Funcionário extra', `${extraQtd} · R$ ${fR(extraValor)}`)}
+        <button onclick="event.stopPropagation();_relatorioMesAnteriorWhats()" style="margin-top:4px;background:#25D366;border:none;border-radius:10px;padding:9px;color:#fff;font-weight:700;font-size:12px;cursor:pointer;font-family:inherit">📲 Relatório para WhatsApp</button>
         <div style="font-size:9px;color:rgba(0,0,0,.35)">Margem fica na aba Produção (app Lojas) — calculada por semana, ainda sem resumo mensal aqui.</div>
       </div>
     </details>`;
