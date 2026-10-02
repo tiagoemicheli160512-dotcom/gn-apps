@@ -1238,6 +1238,264 @@ function _renderAvisoEleicoesHome(mostrar, sess, isMasterAtivo) {
   </div>`;
 }
 
+/* ── Mini DRE do mês fechado ───────────────────────────────────────────────────────────
+   As contas e a % alvo de cada uma, pra ler o mês contra o balizador em vez de olhar só o
+   faturamento. A % de LUCRO não é cadastrada: é o que sobra de 100 menos as despesas — assim
+   não existe o estado em que as sete linhas somam 97% ou 104% e ninguém percebe.
+
+   Onde fica: linha própria 'DRE_CONFIG' em gn_lojas.all_data, mesmo padrão do URGENCIA_CONFIG
+   (e pelo mesmo motivo: o sbPushMasterConfig() do app Lojas reescreve o all_data INTEIRO do
+   MASTER_CONFIG, então guardar aqui dentro seria apagado sem aviso).
+     all_data = { pct:  { REDE: {cmv:29,...}, 'NORTE SHOPPING': {ocupacao:16} },
+                  real: { 'BANGU|2026-09': {cmv:98420,...} } }
+   A % da loja sobrescreve só a conta que ela declara; o resto segue o padrão da rede.
+
+   O realizado é digitado: CMV, folha, aluguel e impostos não existem em nenhuma outra tabela
+   do app — o Caixa só tem despesa miúda do dia (manutenção, descartável, alimentação). */
+const DRE_LINHA = 'DRE_CONFIG';
+const DRE_CONTAS = [
+  { k: 'cmv',        label: 'CMV',                 pct: 29, nota: 'Balizador do à la carte' },
+  { k: 'folha',      label: 'Folha de pagamento',  pct: 24, nota: 'Escala de praça de shopping (10h–22h)' },
+  { k: 'ocupacao',   label: 'Ocupação',            pct: 13, nota: 'Aluguel + condomínio (aluguel % sobre o bruto)' },
+  { k: 'utilidades', label: 'Utilidades',          pct: 4,  nota: 'Luz, gás, água e taxa de refrigeração' },
+  { k: 'impostos',   label: 'Impostos e taxas',    pct: 13, nota: 'Simples Nacional e cartões' },
+  { k: 'outros',     label: 'Outros operacionais', pct: 2,  nota: 'Sistemas, desperdício e FPP' },
+];
+const DRE_CARGOS_EDICAO = ['mestre', 'gerente', 'supervisor'];
+const DRE_CARGOS_REDE = ['mestre', 'supervisor'];   // quem pode mexer no padrão da rede
+
+let _dreAllData = null;      // cache do all_data da linha DRE_CONFIG
+let _dreCtx = null;          // { loja, comp, faturamento, mesNome } do card desenhado agora
+let _dreEditando = false;
+
+function _dreCompetencia(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+
+async function _dreCarregar(force) {
+  if (_dreAllData && !force) return _dreAllData;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  try {
+    const rows = await window.gnFetchJson(
+      `${SB_URL}/rest/v1/gn_lojas?loja=eq.${DRE_LINHA}&select=all_data`, H, 'dre:config', null);
+    // null = falha de rede. Não cacheia: cachear {} deixaria o card mostrando "nada lançado"
+    // pelo resto da sessão, sem dizer que foi a conexão.
+    if (rows === null) return null;
+    _dreAllData = (rows[0] && rows[0].all_data) || {};
+  } catch (e) { return null; }
+  return _dreAllData;
+}
+
+// % efetiva de uma conta naquela loja: o que a loja declarou, senão o padrão da rede, senão
+// o balizador embutido aqui.
+function _drePct(loja, conta) {
+  const d = _dreAllData || {};
+  const p = d.pct || {};
+  const daLoja = (p[loja] || {})[conta];
+  if (daLoja != null && daLoja !== '') return parseFloat(daLoja) || 0;
+  const daRede = (p.REDE || {})[conta];
+  if (daRede != null && daRede !== '') return parseFloat(daRede) || 0;
+  return (DRE_CONTAS.find(c => c.k === conta) || {}).pct || 0;
+}
+function _dreTemAjusteLoja(loja) {
+  const p = ((_dreAllData || {}).pct || {})[loja] || {};
+  return DRE_CONTAS.some(c => p[c.k] != null && p[c.k] !== '');
+}
+function _dreRealizado(loja, comp) {
+  return (((_dreAllData || {}).real || {})[loja + '|' + comp]) || {};
+}
+function _dreLucroPct(loja) {
+  return 100 - DRE_CONTAS.reduce((s, c) => s + _drePct(loja, c.k), 0);
+}
+
+function _dreBlocoHtml(loja, comp, faturamento, mesNome) {
+  const fR = v => (v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const real = _dreRealizado(loja, comp);
+  const temReal = DRE_CONTAS.some(c => real[c.k] != null && real[c.k] !== '');
+  if (!faturamento) {
+    return `<div style="font-size:10px;color:rgba(0,0,0,.45);background:#fff;border-radius:10px;padding:10px 12px">
+      Sem faturamento lançado em ${mesNome} — o mini DRE precisa dele pra calcular as metas.</div>`;
+  }
+  const linhas = DRE_CONTAS.map(c => {
+    const pct = _drePct(loja, c.k);
+    const meta = faturamento * pct / 100;
+    const r = real[c.k] != null && real[c.k] !== '' ? parseFloat(real[c.k]) || 0 : null;
+    const desvio = r === null ? null : r - meta;
+    // Despesa: acima da meta é ruim. Tolerância de 0,5% do faturamento pra não pintar de
+    // vermelho um desvio de centavos.
+    const tol = faturamento * 0.005;
+    const cor = desvio === null ? 'rgba(0,0,0,.3)' : desvio > tol ? '#dc2626' : desvio < -tol ? '#16a34a' : 'rgba(0,0,0,.45)';
+    const sinal = desvio === null ? '—' : (desvio > 0 ? '+' : desvio < 0 ? '−' : '') + 'R$ ' + fR(Math.abs(desvio));
+    return `<div style="display:grid;grid-template-columns:1fr auto auto;gap:6px;align-items:baseline;padding:5px 0;border-bottom:1px solid rgba(0,0,0,.05)">
+      <span style="font-size:11px;color:rgba(0,0,0,.65)">${c.label} <b style="color:rgba(0,0,0,.4)">${pct.toFixed(0)}%</b></span>
+      <span style="font-size:11px;color:rgba(0,0,0,.45);font-variant-numeric:tabular-nums;text-align:right">${r === null ? 'R$ ' + fR(meta) : 'R$ ' + fR(r)}</span>
+      <span style="font-size:10.5px;font-weight:700;color:${cor};font-variant-numeric:tabular-nums;text-align:right;min-width:86px">${sinal}</span>
+    </div>`;
+  }).join('');
+
+  const lucroPct = _dreLucroPct(loja);
+  const lucroMeta = faturamento * lucroPct / 100;
+  const gastoReal = DRE_CONTAS.reduce((s, c) => s + (parseFloat(real[c.k]) || 0), 0);
+  const lucroReal = temReal ? faturamento - gastoReal : null;
+  const lucroDesvio = lucroReal === null ? null : lucroReal - lucroMeta;
+  const corLucro = lucroDesvio === null ? '#1A1D23' : lucroDesvio >= 0 ? '#16a34a' : '#dc2626';
+
+  return `<div style="background:#fff;border-radius:10px;padding:11px 12px">
+    <div style="display:grid;grid-template-columns:1fr auto auto;gap:6px;padding-bottom:5px;border-bottom:1px solid rgba(0,0,0,.08)">
+      <span style="font-size:9px;font-weight:800;color:rgba(0,0,0,.4);text-transform:uppercase;letter-spacing:.3px">Conta</span>
+      <span style="font-size:9px;font-weight:800;color:rgba(0,0,0,.4);text-transform:uppercase;letter-spacing:.3px;text-align:right">${temReal ? 'Realizado' : 'Meta'}</span>
+      <span style="font-size:9px;font-weight:800;color:rgba(0,0,0,.4);text-transform:uppercase;letter-spacing:.3px;text-align:right;min-width:86px">Desvio</span>
+    </div>
+    ${linhas}
+    <div style="display:grid;grid-template-columns:1fr auto auto;gap:6px;align-items:baseline;padding:8px 0 0">
+      <span style="font-size:11.5px;font-weight:800;color:#1A1D23">Lucro líquido <b style="color:rgba(0,0,0,.4)">${lucroPct.toFixed(0)}%</b></span>
+      <span style="font-size:13px;font-weight:900;color:${corLucro};font-variant-numeric:tabular-nums;text-align:right">R$ ${fR(lucroReal === null ? lucroMeta : lucroReal)}</span>
+      <span style="font-size:10.5px;font-weight:700;color:${corLucro};font-variant-numeric:tabular-nums;text-align:right;min-width:86px">${lucroDesvio === null ? '—' : (lucroDesvio >= 0 ? '+' : '−') + 'R$ ' + fR(Math.abs(lucroDesvio))}</span>
+    </div>
+    <div style="font-size:9px;color:rgba(0,0,0,.4);margin-top:7px;line-height:1.45">
+      ${temReal
+        ? 'Realizado lançado pela gestão · desvio contra a meta do faturamento do mês.'
+        : 'Ainda sem realizado lançado — os valores acima são o <b>teto</b> de cada conta pro faturamento de ' + mesNome + '.'}
+      ${_dreTemAjusteLoja(loja) ? '<br>Esta loja tem % ajustada, diferente do padrão da rede.' : ''}
+    </div>
+  </div>`;
+}
+
+// Edição: % alvo e realizado do mês, atrás de usuário+senha de mestre, gerente ou supervisor.
+// A trava é por credencial e não pelo cargo da sessão de propósito — o celular da loja fica
+// logado o dia todo, e qualquer um que pegasse o aparelho mexeria no balizador da rede.
+function _dreToggleEdicao() {
+  _dreEditando = !_dreEditando;
+  const box = document.getElementById('dre-edit-box');
+  if (box) box.style.display = _dreEditando ? 'block' : 'none';
+}
+
+function _dreFormHtml(loja, comp) {
+  const real = _dreRealizado(loja, comp);
+  const podeRede = DRE_CARGOS_REDE.includes(((session && session.cargo) || '').toLowerCase());
+  const campos = DRE_CONTAS.map(c => `<div style="display:grid;grid-template-columns:1fr 58px 1fr;gap:6px;align-items:center;margin-bottom:6px">
+    <span style="font-size:10.5px;color:rgba(0,0,0,.6)">${c.label}</span>
+    <input id="dre-pct-${c.k}" type="number" step="0.5" min="0" max="100" value="${_drePct(loja, c.k)}" title="${c.nota}"
+      style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.15);border-radius:7px;padding:5px 6px;font-size:11px;font-family:inherit;text-align:right">
+    <input id="dre-real-${c.k}" type="number" step="0.01" min="0" placeholder="realizado R$" value="${real[c.k] != null ? real[c.k] : ''}"
+      style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.15);border-radius:7px;padding:5px 6px;font-size:11px;font-family:inherit;text-align:right">
+  </div>`).join('');
+  return `<div id="dre-edit-box" style="display:none;background:rgba(0,0,0,.03);border:1px solid rgba(0,0,0,.1);border-radius:10px;padding:11px 12px;margin-top:8px">
+    <div style="display:grid;grid-template-columns:1fr 58px 1fr;gap:6px;margin-bottom:6px">
+      <span style="font-size:9px;font-weight:800;color:rgba(0,0,0,.4);text-transform:uppercase">Conta</span>
+      <span style="font-size:9px;font-weight:800;color:rgba(0,0,0,.4);text-transform:uppercase;text-align:right">%</span>
+      <span style="font-size:9px;font-weight:800;color:rgba(0,0,0,.4);text-transform:uppercase;text-align:right">Gasto no mês</span>
+    </div>
+    ${campos}
+    <div id="dre-soma" style="font-size:10px;color:rgba(0,0,0,.5);margin:2px 0 8px"></div>
+    ${podeRede ? `<label style="display:flex;align-items:center;gap:7px;margin-bottom:8px;cursor:pointer">
+      <input type="checkbox" id="dre-aplicar-rede" style="margin:0;cursor:pointer">
+      <span style="font-size:10.5px;color:rgba(0,0,0,.6)">Salvar estas % como <b>padrão da rede</b> (vale pras lojas sem ajuste próprio)</span>
+    </label>` : ''}
+    <input id="dre-user" type="text" placeholder="Usuário (mestre, gerente ou supervisor)" autocomplete="off"
+      style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.15);border-radius:8px;padding:7px 9px;font-size:11px;font-family:inherit;margin-bottom:6px">
+    <input id="dre-pass" type="password" placeholder="Senha" autocomplete="off"
+      style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.15);border-radius:8px;padding:7px 9px;font-size:11px;font-family:inherit;margin-bottom:6px">
+    <div id="dre-err" style="font-size:10.5px;color:#dc2626;min-height:13px;margin-bottom:6px"></div>
+    <div style="display:flex;gap:6px">
+      <button id="dre-salvar-btn" onclick="event.stopPropagation();_dreSalvar()" style="flex:1;background:#4F46E5;border:none;border-radius:9px;padding:8px;color:#fff;font-weight:800;font-size:11.5px;cursor:pointer;font-family:inherit">Salvar</button>
+      <button onclick="event.stopPropagation();_dreToggleEdicao()" style="flex:1;background:rgba(0,0,0,.07);border:none;border-radius:9px;padding:8px;color:rgba(0,0,0,.6);font-weight:700;font-size:11.5px;cursor:pointer;font-family:inherit">Cancelar</button>
+    </div>
+  </div>`;
+}
+
+async function _dreSalvar() {
+  const errEl = document.getElementById('dre-err');
+  const btn = document.getElementById('dre-salvar-btn');
+  const setErr = m => { if (errEl) errEl.textContent = m; if (btn) btn.disabled = false; };
+  if (!_dreCtx) return;
+  const user = (document.getElementById('dre-user') || {}).value;
+  const pass = (document.getElementById('dre-pass') || {}).value;
+  if (errEl) errEl.textContent = '';
+  if (!user || !pass) { setErr('Preencha usuário e senha.'); return; }
+
+  const pct = {}, real = {};
+  for (const c of DRE_CONTAS) {
+    const p = parseFloat((document.getElementById('dre-pct-' + c.k) || {}).value);
+    if (!isFinite(p) || p < 0 || p > 100) { setErr('A % de ' + c.label + ' tem que ficar entre 0 e 100.'); return; }
+    pct[c.k] = p;
+    const vRaw = ((document.getElementById('dre-real-' + c.k) || {}).value || '').trim();
+    if (vRaw !== '') {
+      const v = parseFloat(vRaw);
+      if (!isFinite(v) || v < 0) { setErr('O valor de ' + c.label + ' não pode ser negativo.'); return; }
+      real[c.k] = v;
+    }
+  }
+  // Soma das despesas acima de 100 não deixa sobra nenhuma pro lucro — é erro de digitação,
+  // não uma meta possível.
+  const soma = DRE_CONTAS.reduce((s, c) => s + pct[c.k], 0);
+  if (soma >= 100) { setErr('As despesas somam ' + soma.toFixed(1).replace('.', ',') + '% — não sobra lucro. Revise as %.'); return; }
+  if (btn) btn.disabled = true;
+
+  const aplicarRede = !!(document.getElementById('dre-aplicar-rede') || {}).checked;
+  try {
+    const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+    const auth = await window.gnFetchJson(`${SB_URL}/rest/v1/rpc/verificar_login`, H, 'dre:auth', [],
+      { method: 'POST', body: JSON.stringify({ p_nome: user.trim(), p_senha: pass, p_app: 'gn-home:dre' }) });
+    const cargo = (auth[0] && auth[0].cargo || '').toLowerCase();
+    if (!auth.length || !DRE_CARGOS_EDICAO.includes(cargo)) {
+      setErr('Usuário/senha inválidos ou cargo sem permissão.'); return;
+    }
+    if (aplicarRede && !DRE_CARGOS_REDE.includes(cargo)) {
+      setErr('Só mestre ou supervisor pode mudar o padrão da rede.'); return;
+    }
+
+    // Relê antes de gravar: a linha é compartilhada por todas as lojas, e escrever o all_data
+    // que estava em memória apagaria o que outra loja lançou enquanto esta tela estava aberta.
+    const atual = await _dreCarregar(true);
+    if (atual === null) { setErr('Sem conexão com o banco. Tente de novo.'); return; }
+    const dados = JSON.parse(JSON.stringify(atual || {}));
+    dados.pct = dados.pct || {}; dados.real = dados.real || {};
+    if (aplicarRede) {
+      dados.pct.REDE = { ...pct };
+      // Com um padrão novo, o ajuste desta loja idêntico a ele vira ruído: limpa.
+      if (dados.pct[_dreCtx.loja]) delete dados.pct[_dreCtx.loja];
+    } else {
+      // Só guarda como ajuste da loja o que diferir do padrão da rede — senão toda loja que
+      // abrisse a tela e salvasse viraria uma exceção congelada, e mudar o padrão depois não
+      // alcançaria mais ninguém.
+      const rede = dados.pct.REDE || {};
+      const diff = {};
+      DRE_CONTAS.forEach(c => {
+        const padrao = rede[c.k] != null ? parseFloat(rede[c.k]) : c.pct;
+        if (pct[c.k] !== padrao) diff[c.k] = pct[c.k];
+      });
+      if (Object.keys(diff).length) dados.pct[_dreCtx.loja] = diff;
+      else delete dados.pct[_dreCtx.loja];
+    }
+    const chave = _dreCtx.loja + '|' + _dreCtx.comp;
+    if (Object.keys(real).length) {
+      dados.real[chave] = { ...real, _por: auth[0].nome || user.trim(), _em: new Date().toISOString() };
+    } else {
+      delete dados.real[chave];
+    }
+
+    const existe = await window.gnFetchJson(
+      `${SB_URL}/rest/v1/gn_lojas?loja=eq.${DRE_LINHA}&select=loja`, H, 'dre:existe', null);
+    if (existe === null) { setErr('Sem conexão com o banco. Tente de novo.'); return; }
+    const res = existe.length
+      ? await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${DRE_LINHA}`, { method: 'PATCH', headers: H, body: JSON.stringify({ all_data: dados }) })
+      : await fetch(`${SB_URL}/rest/v1/gn_lojas`, { method: 'POST', headers: H, body: JSON.stringify({ loja: DRE_LINHA, all_data: dados }) });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    _dreAllData = dados;
+  } catch (e) {
+    setErr('Erro ao salvar. Tente de novo.');
+    return;
+  }
+  _dreEditando = false;
+  // true e não _mostrarCards: aquele é const local de showHome, e usá-lo aqui estourava
+  // ReferenceError logo DEPOIS de gravar — salvava e quebrava a tela. Se estamos aqui, o card
+  // está aberto na frente de quem editou, então mostrar é o certo.
+  // Com await: o redesenho reescreve _dreCtx, e soltar sem esperar deixava a próxima edição
+  // apontando pro contexto antigo por uns milissegundos.
+  await _renderMesAnteriorHome(true, session, !!masterLoja);
+}
+
 const VENDA_MES_MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
 async function _renderVendaMesHome(mostrar, sess, isMasterAtivo) {
   const el = document.getElementById('venda-mes-home-card');
@@ -1339,7 +1597,40 @@ function _relatorioMesAnteriorWhats() {
   txt += `   ⛔ Suspensões: ${d.ocor['SUSPENSÃO']}\n`;
   txt += `   📝 Advertências: ${d.ocor.ADVERTENCIA}\n\n`;
   txt += `👷 Funcionário extra: ${d.extraQtd} lançamento${d.extraQtd === 1 ? '' : 's'} · *${brl(d.extraValor)}*\n`;
+  txt += _dreTextoWhats(d);
   _abrirWhats(txt);
+}
+
+// Mini DRE no relatório — sai dos mesmos números do card, pra texto e tela nunca divergirem.
+function _dreTextoWhats(d) {
+  if (!d || !d.faturamento || !_dreCtx) return '';
+  const brl = v => 'R$ ' + (v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const loja = _dreCtx.loja, comp = _dreCtx.comp, fat = d.faturamento;
+  const real = _dreRealizado(loja, comp);
+  const temReal = DRE_CONTAS.some(c => real[c.k] != null && real[c.k] !== '');
+  let t = `\n📉 *Mini DRE — ${temReal ? 'meta × realizado' : 'metas do mês'}*\n`;
+  DRE_CONTAS.forEach(c => {
+    const pct = _drePct(loja, c.k);
+    const meta = fat * pct / 100;
+    const r = real[c.k] != null && real[c.k] !== '' ? parseFloat(real[c.k]) || 0 : null;
+    t += `   ${c.label} ${pct.toFixed(0)}%: ${brl(meta)}`;
+    if (r !== null) {
+      const dv = r - meta;
+      t += ` → ${brl(r)} (${dv > 0 ? '+' : dv < 0 ? '−' : ''}${brl(Math.abs(dv))})`;
+    }
+    t += '\n';
+  });
+  const lucroPct = _dreLucroPct(loja);
+  const lucroMeta = fat * lucroPct / 100;
+  t += `   ━━━━━━━━━━━━━\n   *Lucro ${lucroPct.toFixed(0)}%: ${brl(lucroMeta)}*`;
+  if (temReal) {
+    const lucroReal = fat - DRE_CONTAS.reduce((s, c) => s + (parseFloat(real[c.k]) || 0), 0);
+    const dv = lucroReal - lucroMeta;
+    t += ` → *${brl(lucroReal)}* (${dv >= 0 ? '+' : '−'}${brl(Math.abs(dv))})`;
+  }
+  t += '\n';
+  if (!temReal) t += `   _Sem realizado lançado — os valores são o teto de cada conta._\n`;
+  return t;
 }
 
 // Card "Desempenho do mês anterior" — fica disponível o mês inteiro, resumindo o mês que
@@ -1454,6 +1745,12 @@ async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
       <span style="font-size:11px;color:rgba(0,0,0,.55)">${rot}</span>
       <span style="font-size:14px;font-weight:900;color:#1A1D23">${val}</span></div>`;
 
+    // Mini DRE do mês fechado — a competência é o mesmo mês do card (mesNome).
+    const dreComp = _dreCompetencia(fimMesAnterior);
+    await _dreCarregar();
+    _dreCtx = { loja, comp: dreComp, faturamento, mesNome };
+    _dreEditando = false;
+
     el.innerHTML = `<details style="background:rgba(79,70,229,.06);border:1px solid rgba(79,70,229,.2);border-left:3px solid #4F46E5;border-radius:14px;padding:0;margin:0 16px 14px;overflow:hidden">
       <summary style="list-style:none;cursor:pointer;padding:14px 16px;display:flex;align-items:center;gap:10px">
         <span style="font-size:18px;flex-shrink:0">📊</span>
@@ -1473,6 +1770,12 @@ async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
         ${linha('⛔ Suspensões', ocor['SUSPENSÃO'])}
         ${linha('📝 Advertências', ocor.ADVERTENCIA)}
         ${linha('👷 Funcionário extra', `${extraQtd} · R$ ${fR(extraValor)}`)}
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
+          <div style="font-size:9px;font-weight:700;color:rgba(0,0,0,.4);text-transform:uppercase;letter-spacing:.3px">Mini DRE — ${mesNome}</div>
+          <button onclick="event.stopPropagation();_dreToggleEdicao()" style="background:rgba(79,70,229,.12);border:1px solid rgba(79,70,229,.3);border-radius:8px;padding:4px 9px;color:#4F46E5;font-size:10px;font-weight:800;cursor:pointer;font-family:inherit">✏️ Editar</button>
+        </div>
+        ${_dreBlocoHtml(loja, dreComp, faturamento, mesNome)}
+        ${_dreFormHtml(loja, dreComp)}
         <button onclick="event.stopPropagation();_relatorioMesAnteriorWhats()" style="margin-top:4px;background:#25D366;border:none;border-radius:10px;padding:9px;color:#fff;font-weight:700;font-size:12px;cursor:pointer;font-family:inherit">📲 Relatório para WhatsApp</button>
         <div style="font-size:9px;color:rgba(0,0,0,.35)">Margem fica na aba Produção (app Lojas) — calculada por semana, ainda sem resumo mensal aqui.</div>
       </div>
