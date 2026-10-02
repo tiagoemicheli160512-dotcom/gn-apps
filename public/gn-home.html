@@ -2953,8 +2953,13 @@ async function _fecharAlertaSeTodosLeram(id, row) {
   ]);
   const alvo = ru.ok ? await ru.json() : [];
   const leram = rl.ok ? await rl.json() : [];
+  // Comparar por NOME, não por quantidade: quem não é do cargo alvo também pode confirmar a
+  // leitura, e contar essas linhas fechava o aviso com destinatário faltando — bastavam duas
+  // confirmações de fora pra "3 de 3" com o gerente nunca tendo visto.
+  const nomesLeram = new Set((leram || []).map(l => l.usuario));
+  const faltam = alvo.filter(u => !nomesLeram.has(u.nome));
   // Ninguém cadastrado nos cargos alvo: fecha, senão o alerta ficaria preso pra sempre.
-  if (!alvo.length || leram.length >= alvo.length) {
+  if (!alvo.length || !faltam.length) {
     await fetch(`${SB_URL}/rest/v1/gn_alertas_urgentes?id=eq.${id}`, {
       method: 'PATCH',
       headers: Object.assign({ 'Content-Type': 'application/json', Prefer: 'return=minimal' }, H),
@@ -6225,10 +6230,14 @@ async function _loadDashAll() {
     _dashVisitasHoje=_dashVisitasHoje||{};
     _dashAlertasUrgentes=_dashAlertasUrgentes||[];
     _dashPendenciasEssenciais=_dashPendenciasEssenciais||{};
-    // Quem já leu cada alerta ativo. Fora do Promise.all acima porque depende dos alertas
-    // já terem chegado (precisa dos ids pra consultar).
-    await _carregarLeiturasAlertas();
   } finally { _dashLoading=false; _dashLoadedAt=new Date(); }
+  // Quem já leu cada alerta ativo. Fora do Promise.all acima porque depende dos alertas já
+  // terem chegado (precisa dos ids pra consultar) — e FORA do catch: estava lá dentro, então
+  // só rodava quando o carregamento do painel falhava. No caminho normal o mapa de leituras
+  // ficava vazio e a linha "leu 1/2 · falta Fulano" simplesmente não aparecia, apesar de as
+  // leituras estarem gravadas. Só aparecia logo depois de disparar um alerta, porque aí quem
+  // recarrega é _recarregarAlertasUrgentes(), que sempre chamou isto.
+  await _carregarLeiturasAlertas();
   renderDashboard();
 }
 
@@ -6531,13 +6540,19 @@ function _buildAlertasUrgentesCard(){
     const alvo = _alertaDestinatarios(a);
     if (!alvo.length) return '';
     const leram = _dashAlertasLeituras[a.id] || [];
+    // Conta por NOME, não pelo tamanho da lista de leituras: quem não é destinatário também
+    // pode confirmar (e confirma — na Nova América o Edson leu sem ser do cargo alvo), e
+    // contar essas leituras faria "leu 4/4" com um gerente que nunca viu o aviso.
+    const jaViram = alvo.filter(u => leram.includes(u.nome));
     const faltam = alvo.filter(u => !leram.includes(u.nome));
     const cargosTxt = Array.isArray(a.cargos) && a.cargos.length
       ? a.cargos.map(c => (typeof ALERTA_CARGO_LABEL !== 'undefined' && ALERTA_CARGO_LABEL[c]) || c).join('/')
       : 'toda a loja';
     const cor = faltam.length ? '#b45309' : '#16a34a';
-    return `<div style="font-size:9.5px;color:${cor};font-weight:700;margin-top:3px">
-      ${faltam.length ? '👁️' : '✅'} leu ${leram.length}/${alvo.length} (${esc(cargosTxt)})${faltam.length ? ' · falta ' + esc(faltam.map(u => u.nome).join(', ')) : ''}
+    return `<div style="font-size:9.5px;color:${cor};font-weight:700;margin-top:3px;line-height:1.5">
+      ${faltam.length ? '👁️' : '✅'} leu ${jaViram.length}/${alvo.length} (${esc(cargosTxt)})
+      ${jaViram.length ? '<br>✅ já viu: ' + esc(jaViram.map(u => u.nome).join(', ')) : ''}
+      ${faltam.length ? '<br>⏳ falta: ' + esc(faltam.map(u => u.nome).join(', ')) : ''}
     </div>`;
   };
   const ativos = lista.filter(a=>!a.resolvido);
