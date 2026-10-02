@@ -4100,6 +4100,23 @@ function _ehNaoInsumo(prod) {
   return GRUPOS_NAO_INSUMO.has(g);
 }
 
+// Hortifruti fica FORA do valor do estoque, e precisa ficar fora dos dois caminhos.
+// Ele saiu do ciclo semanal em setembro: a loja pede direto na aba Hortifruti (segunda e
+// quinta, digitando a quantidade que QUER receber) e não conta estoque dele — sem contagem
+// não existe valor de estoque pra somar.
+// Os dois caminhos deixavam ele entrar por portas diferentes:
+//   • semana: PRODUTOS_PEDIDO só exclui hortifruti depois que a sincronização com o catálogo
+//     volta (`grupo=neq.HORTIFRUTI`); a lista embutida neste arquivo tem os 30 itens, então
+//     antes da sincronização — ou se ela falhar — o hortifruti entrava na conta;
+//   • mês/trimestre: gn_contagens_pedido guarda as contagens de julho e agosto, quando ele
+//     ainda era contado. Na semana de 24/08 da Bangu foram R$ 16.927 de R$ 76.785 (22%), e
+//     a partir de 07/09 zero — um trimestre jul–set mostraria uma queda de estoque que é só
+//     a mudança do que é contado.
+const GRUPO_HORTIFRUTI = 'HORTIFRUTI';
+function _ehHortifruti(prod) {
+  return String(prod && prod.grupo || '').trim().toUpperCase() === GRUPO_HORTIFRUTI;
+}
+
 // Valor contado de UMA loja na semana que está na tela.
 // Soma caixa × custo + unidade solta × (custo ÷ und_por_caixa) — o "estimado" do cabeçalho
 // ignorava a unidade solta, o que subestimava de 13 a 20 itens por loja.
@@ -4108,6 +4125,7 @@ function _valorEstoqueLoja(lojaNome) {
   const ped = pedidoAll[chave] || {};
   const r = { insumos: 0, utilidades: 0, total: 0, itens: 0, semCusto: [] };
   getProdutosPedidoOrdenados().forEach(prod => {
+    if (_ehHortifruti(prod)) return;   // ver _ehHortifruti: não tem contagem de estoque
     const e = ped[prod.item];
     if (!e) return;
     const cx = parseFloat(e.cx != null ? e.cx : e.atual) || 0;
@@ -4216,7 +4234,7 @@ function _fmtDiaMes(iso) {
 // mas a partir das linhas já gravadas em gn_contagens_pedido — é lá que mora o histórico das
 // semanas que não estão mais em memória.
 function _valorDeContagens(rows, prodPorCatalogo) {
-  const r = { insumos: 0, utilidades: 0, total: 0, itens: 0, semCusto: [], fora: 0 };
+  const r = { insumos: 0, utilidades: 0, total: 0, itens: 0, semCusto: [], fora: 0, horti: 0, hortiItens: 0 };
   (rows || []).forEach(row => {
     const prod = prodPorCatalogo[row.catalogo_id];
     if (!prod) { r.fora++; return; }
@@ -4226,6 +4244,9 @@ function _valorDeContagens(rows, prodPorCatalogo) {
     const custo = parseFloat(prod.custo) || 0;
     const fator = parseFloat(prod.und_por_caixa) || 0;
     const valor = cx * custo + (fator > 0 ? und * (custo / fator) : 0);
+    // Fora da conta, mas somado à parte: é o que avisa que as semanas de antes de setembro
+    // não são comparáveis com as de depois (ver _ehHortifruti).
+    if (_ehHortifruti(prod)) { r.horti += valor; r.hortiItens++; return; }
     r.itens++;
     if (custo <= 0) r.semCusto.push(prod.produto);
     if (_ehNaoInsumo(prod)) r.utilidades += valor; else r.insumos += valor;
@@ -4297,18 +4318,20 @@ async function _relValorCarregar() {
       const antes = itensSem[r.catalogo_id];
       if (!antes || r.data_contagem >= antes.data_contagem) itensSem[r.catalogo_id] = r;
     });
-    const porLoja = {}, semCusto = new Set();
-    let fora = 0;
+    const porLoja = {}, semCusto = new Set(), hortiSemanas = new Set();
+    let fora = 0, hortiValor = 0;
     Object.entries(porLojaSemana).forEach(([l, semanas]) => {
       const lista = Object.keys(semanas).sort().map(seg => {
         const v = _valorDeContagens(Object.values(semanas[seg]), prodPorCatalogo);
         v.semCusto.forEach(p => semCusto.add(p));
         fora += v.fora;
+        if (v.horti > 0) { hortiSemanas.add(seg); hortiValor += v.horti; }
         return { semana: seg, insumos: v.insumos, utilidades: v.utilidades, total: v.total, itens: v.itens };
       }).filter(x => x.itens > 0);
       if (lista.length) porLoja[l] = lista;
     });
-    _relValorHist = { chave, porLoja, semCusto: [...semCusto], fora };
+    _relValorHist = { chave, porLoja, semCusto: [...semCusto], fora,
+                      hortiSemanas: [...hortiSemanas].sort(), hortiValor };
   } catch (e) {
     // Não cacheia um resultado vazio numa falha de rede: com {} "válido" o relatório diria
     // "nenhuma contagem no período" pelo resto da sessão, sem dizer que foi a conexão.
@@ -4462,6 +4485,10 @@ function _relValorHtml(disponiveis) {
           ? '<div style="font-size:10.5px;color:#64748b;margin-top:8px;text-align:center;line-height:1.5">Média das ' + evolucao.length + ' contagens do período: <b>' + _fmtR$(mediaPer) + '</b>'
             + '<br>O valor do estoque é uma foto de cada contagem — as semanas não se somam.</div>'
           : '')
+      + (periodo && _relValorHist && (_relValorHist.hortiSemanas || []).length
+          ? '<div style="background:rgba(14,116,144,.08);border:1px solid rgba(14,116,144,.25);border-radius:10px;padding:8px 11px;font-size:10.5px;color:#155e75;line-height:1.45;margin-top:8px">ℹ️ <b>Hortifruti não entra neste valor.</b> Ele tem pedido próprio (segunda e quinta) e não tem contagem de estoque. '
+            + (_relValorHist.hortiSemanas.length) + ' semana(s) deste período ainda tinham hortifruti contado (R$ ' + _relValorHist.hortiValor.toLocaleString('pt-BR', { maximumFractionDigits: 0 }) + ' deixados de fora), então semanas antes e depois de setembro não são comparáveis.</div>'
+          : '')
       + (semCusto.length ? '<div style="background:rgba(217,119,6,.08);border:1px solid rgba(217,119,6,.25);border-radius:10px;padding:8px 11px;font-size:10.5px;color:#92400e;line-height:1.4;margin-top:8px">⚠️ ' + semCusto.length + ' item(ns) contado(s) estão <b>sem custo no Catálogo</b> e entram como R$ 0: ' + semCusto.slice(0, 4).join(', ') + (semCusto.length > 4 ? '…' : '') + '</div>' : '')
       + (dados.length > 1
           ? '<div style="margin-top:10px;max-height:20vh;overflow-y:auto">'
@@ -4523,8 +4550,12 @@ function _relValorBlocoTexto(d, completo) {
 }
 
 function _relValorRodape() {
+  const horti = (_relValorHist && (_relValorHist.hortiSemanas || []).length) || 0;
   return '\n_Preço unitário do Catálogo (app Estoque e Pedido)._'
-    + (_relValorPeriodo !== 'semana' ? '\n_O valor do estoque é a foto de cada contagem — as semanas não se somam._' : '');
+    + '\n_Hortifruti não entra: tem pedido próprio (segunda e quinta) e não tem contagem de estoque._'
+    + (_relValorPeriodo !== 'semana' ? '\n_O valor do estoque é a foto de cada contagem — as semanas não se somam._' : '')
+    + (_relValorPeriodo !== 'semana' && horti
+        ? '\n_' + horti + ' semana(s) deste período ainda tinham hortifruti contado — semanas antes e depois de setembro não são comparáveis._' : '');
 }
 
 // Relatório de UMA loja só, usado pelos botões de cada cartão no modo individual.
