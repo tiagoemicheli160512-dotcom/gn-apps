@@ -248,6 +248,16 @@ main{flex:1;padding:16px;padding-bottom:80px;max-width:600px;margin:0 auto;width
         <option value="LOJA TESTE">LOJA TESTE</option>
       </select>
     </div>
+    <!-- O vínculo com a escala é o que liga este login à pessoa no Check-list. Sem ele o
+         bloqueio de folga/férias não age sobre este usuário — de propósito: casar por nome
+         erraria (o login "Marquinhos" é o "Marcos VINICIUS - gerente" da escala). -->
+    <div class="field hidden" id="field-escala">
+      <label>Funcionário na escala
+        <span style="font-size:10px;color:#5B6472;font-weight:400">(usado pra bloquear o acesso na folga e nas férias)</span>
+      </label>
+      <select id="modal-escala"><option value="">— sem vínculo —</option></select>
+      <div id="modal-escala-dica" style="font-size:10.5px;color:#5B6472;margin-top:5px;line-height:1.45"></div>
+    </div>
     <div class="field hidden" id="field-lojas-supervisor">
       <label>Lojas da rota <span style="font-size:10px;color:#5B6472;font-weight:400">(o supervisor só abre estas lojas; Painel de Gestão mostra só o resumo delas)</span></label>
       <div class="abas-grid" id="modal-lojas-supervisor"></div>
@@ -270,6 +280,11 @@ main{flex:1;padding:16px;padding-bottom:80px;max-width:600px;margin:0 auto;width
 
 <div class="toast" id="toast"></div>
 
+<!-- gn-lojas-config.js traz gnLoja(), que resolve a chave da loja do login pra chave usada
+     em gn_comissoes (NORTE SHOPPING → NORTE, RANCHO → RANCHO...). gn-escala-acesso.js
+     traz o seletor de funcionários da escala usado no cadastro. -->
+<script src="gn-lojas-config.js"></script>
+<script src="gn-escala-acesso.js"></script>
 <script>
 const SB_URL = "https://ncxttwvpafajnilpjbol.supabase.co";
 const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5jeHR0d3ZwYWZham5pbHBqYm9sIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE4NDcyMDEsImV4cCI6MjA5NzQyMzIwMX0.MGDZNGY8GfSzBKAgdR7OhvOeR71i4fj9YseJRhoh5sE";
@@ -494,6 +509,17 @@ function renderizarUsuarios() {
       const diasSenha = u.senha_alterada_em ? Math.floor((Date.now() - new Date(u.senha_alterada_em).getTime()) / 86400000) : null;
       const senhaVencida = diasSenha === null || diasSenha >= 90;
       const senhaInfo = `<span style="color:${senhaVencida?'#DC2626':'rgba(0,0,0,.3)'}"> · senha ${diasSenha===null?'sem registro':'há '+diasSenha+' dia'+(diasSenha===1?'':'s')}${senhaVencida?' ⚠️':''}</span>`;
+      // Quem é de loja e não tem vínculo com a escala passa direto na folga e nas férias —
+      // o bloqueio simplesmente não alcança esse login. Fica visível na lista pra não virar
+      // um silêncio que ninguém descobre.
+      const vinc = (u.permissoes || {}).escala_nome;
+      const ehExcecao = (window.gnEscalaAcesso ? gnEscalaAcesso.EXCECOES_FIXAS : []).some(e => String(e.id) === String(u.id));
+      const escalaInfo = !u.loja || u.loja === "GERAL" ? ""
+        : ehExcecao
+          ? `<div style="font-size:11px;color:#047857;margin-top:2px">🏖 libera na folga e nas férias (exceção combinada)</div>`
+        : vinc
+          ? `<div style="font-size:11px;color:rgba(0,0,0,.35);margin-top:2px">🗓 escala: ${esc(vinc)}</div>`
+          : `<div style="font-size:11px;color:#DC2626;margin-top:2px">🗓 sem vínculo com a escala — folga e férias não bloqueiam</div>`;
       return `<div class="user-card${u.ativo ? '' : ' inactive'}">
         <div class="user-avatar" style="background:${cor};color:#fff">${esc(inicial)}</div>
         <div class="user-info">
@@ -502,6 +528,7 @@ function renderizarUsuarios() {
           <!-- A senha não vem mais nas listagens (Fase 2 do hardening de segurança revogou a
                leitura direta) — u.senha sempre undefined aqui, então sempre mostra "—". -->
           <div style="font-size:11px;color:rgba(0,0,0,.3);margin-top:2px">🔑 ${esc(u.senha)||'—'}${senhaInfo}</div>
+          ${escalaInfo}
         </div>
         <div class="user-actions">
           <button class="btn-sm btn-edit" onclick="abrirEdicao(${u.id})">Editar</button>
@@ -570,6 +597,63 @@ function atualizarVisibilidadeLojasSupervisor() {
   elFieldLojasSupervisor.classList.toggle("hidden", !["supervisor", "administrador"].includes(elModalCargo.value));
 }
 elModalCargo.addEventListener("change", atualizarVisibilidadeLojasSupervisor);
+
+// ── Vínculo com a escala ────────────────────────────────────────────────────
+// Só faz sentido pra quem é de uma loja: GERAL (supervisor, mestre, RH, compras,
+// administrador, manutenção) não tem escala, logo nunca é bloqueado por folga ou férias.
+const elFieldEscala = document.getElementById("field-escala");
+const elModalEscala = document.getElementById("modal-escala");
+const elModalEscalaDica = document.getElementById("modal-escala-dica");
+let _escalaCarregandoPara = null;
+
+function _escalaTemLoja(loja) { return !!loja && loja !== "GERAL"; }
+
+// `atual` é o nome já gravado; `nomeLogin` serve pra sugerir quando ainda não há nada.
+async function carregarEscalaDoModal(loja, atual, nomeLogin) {
+  elFieldEscala.classList.toggle("hidden", !_escalaTemLoja(loja));
+  if (!_escalaTemLoja(loja)) { elModalEscala.innerHTML = '<option value="">— sem vínculo —</option>'; return; }
+
+  const token = loja + "|" + Date.now();
+  _escalaCarregandoPara = token;
+  elModalEscala.innerHTML = '<option value="">Carregando a escala da loja...</option>';
+  elModalEscalaDica.textContent = "";
+
+  const lista = await window.gnEscalaAcesso.funcionariosDaLoja(loja);
+  if (_escalaCarregandoPara !== token) return;   // trocou de loja no meio do caminho
+
+  if (!lista.length) {
+    elModalEscala.innerHTML = '<option value="">— sem vínculo —</option>';
+    elModalEscalaDica.innerHTML = '<span style="color:#B45309">Esta loja ainda não tem ninguém na escala do Check-list, então não há o que vincular.</span>';
+    return;
+  }
+
+  // O nome gravado pode não estar mais na escala (funcionário renomeado ou desligado).
+  // Mantém a opção mesmo assim, pra edição não apagar o vínculo sem ninguém perceber.
+  const nomes = lista.map(f => f.nome);
+  if (atual && !nomes.some(n => n === atual)) nomes.unshift(atual);
+
+  const sugerido = atual ? null : window.gnEscalaAcesso.sugerirVinculo(lista, nomeLogin);
+  const escolhido = atual || sugerido || "";
+
+  elModalEscala.innerHTML = '<option value="">— sem vínculo (não bloqueia) —</option>' +
+    nomes.map(n => {
+      const f = lista.find(x => x.nome === n);
+      const rotulo = f && f.setor ? `${n} · ${f.setor}` : n;
+      return `<option value="${esc(n)}"${n === escolhido ? " selected" : ""}>${esc(rotulo)}</option>`;
+    }).join("");
+
+  if (sugerido) {
+    elModalEscalaDica.innerHTML = `<span style="color:#047857">Sugerido pelo primeiro nome — confira e salve pra valer.</span>`;
+  } else if (!atual) {
+    elModalEscalaDica.innerHTML = `<span style="color:#DC2626">Não deu pra adivinhar quem é na escala. Escolha na lista — enquanto ficar sem vínculo, folga e férias não bloqueiam este login.</span>`;
+  } else {
+    elModalEscalaDica.textContent = "";
+  }
+}
+
+elModalLoja.addEventListener("change", () => {
+  carregarEscalaDoModal(elModalLoja.value, "", elModalNome.value.trim());
+});
 
 const APP_KEYS = [
   ["lojas", "GN Lojas"],
@@ -710,6 +794,7 @@ function abrirModal(titulo, user = null) {
   renderizarPermissoes(user ? user.permissoes : null);
   renderizarLojasSupervisor(user && user.permissoes ? user.permissoes.lojas_supervisor : null);
   atualizarVisibilidadeLojasSupervisor();
+  carregarEscalaDoModal(user ? user.loja : "", (user && user.permissoes && user.permissoes.escala_nome) || "", user ? user.nome : "");
   elModalErr.classList.add("hidden");
   elOverlay.classList.remove("hidden");
   elModalNome.focus();
@@ -762,6 +847,16 @@ document.getElementById("modal-save").addEventListener("click", async () => {
       }
     }
     const permissoes = coletarPermissoes();
+    // coletarPermissoes() monta um objeto NOVO a partir dos campos da tela, então o que
+    // não estiver aqui some a cada salvamento. `dashboard_metas` é gravado pelo Painel de
+    // Gestão (app Home) e não tem campo nesta tela — sem este resgate, editar um usuário
+    // apagava as metas dele. `escala_nome` tem campo próprio logo abaixo.
+    {
+      const anterior = (todosUsuarios.find(u => String(u.id) === String(id)) || {}).permissoes || {};
+      if (anterior.dashboard_metas && !permissoes.dashboard_metas) permissoes.dashboard_metas = anterior.dashboard_metas;
+    }
+    if (_escalaTemLoja(loja) && elModalEscala.value) permissoes.escala_nome = elModalEscala.value;
+    else delete permissoes.escala_nome;
     if (cargo === "supervisor" || cargo === "administrador") {
       permissoes.lojas_supervisor = [...elModalLojasSupervisor.querySelectorAll(".chk-loja-supervisor:checked")].map(c => c.value);
     } else {
