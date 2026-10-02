@@ -7753,9 +7753,56 @@ async function renderHistorico() {
 // controle passa a valer de verdade a partir da semana seguinte em diante.
 const PRODUCAO_SAIDA_INICIO = '2026-08-10';
 
-async function _producaoDadosSemana(ids, semanaMonday) {
+/* A Produção é de rede, não de região. A cozinha é uma só e produz pras 12 lojas, mas o mesmo
+   produto tem uma linha de catálogo por região (MASSA DE AIPIM é o item 502 no RJ e o 1502 em
+   SP, uuids diferentes). Como S.catalogo vem filtrado por S.regiao, a aba somava só a demanda
+   da região selecionada: na semana de 28/09 isso era 1.242 unidades de 1.820 — Itaquera e
+   Guarulhos, 578 unidades (32%), ficavam de fora. E quem só tem acesso à aba Produção não tem
+   como trocar de região pra ver o resto.
+   Agora a aba junta as duas regiões: o par é feito pelo NOME do produto (os 20 ativos casam
+   exatamente), e o "dono" de cada par é a linha do RJ, que é onde mora o histórico de estoque
+   da cozinha (186 semanas contra 20 linhas zeradas de SP, criadas por engano pela semeadura
+   quando alguém abriu a aba com a região SP selecionada). */
+function _producaoChaveProduto(p) {
+  return String(p && p.produto || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/\s+/g, ' ').trim().toUpperCase();
+}
+
+let _producaoRedeCache = null;   // { produtos, donoPorId, idsTodos, lojas }
+
+async function _producaoCarregarRede(force) {
+  if (_producaoRedeCache && !force) return _producaoRedeCache;
+  const [cat, lj] = await Promise.all([
+    db.from('gn_catalogo').select('*').eq('fornecedor', 'PETISCOS').eq('ativo', true).order('item_id'),
+    db.from('gn_lojas_pedido').select('*').eq('ativo', true).order('ordem'),
+  ]);
+  if (cat.error) throw cat.error;
+  const porChave = new Map();
+  (cat.data || []).forEach(p => {
+    const k = _producaoChaveProduto(p);
+    if (!k) return;
+    const g = porChave.get(k) || [];
+    g.push(p);
+    porChave.set(k, g);
+  });
+  const produtos = [], donoPorId = {}, idsTodos = [];
+  [...porChave.values()].forEach(grupo => {
+    // Dono = a linha do RJ (onde está o histórico da cozinha); sem RJ, a de menor item_id,
+    // pra a escolha não depender da ordem em que o banco devolveu.
+    const dono = grupo.find(p => p.regiao === 'RJ')
+      || grupo.slice().sort((a, b) => (a.item_id || 0) - (b.item_id || 0))[0];
+    produtos.push(dono);
+    grupo.forEach(p => { donoPorId[p.id] = dono.id; idsTodos.push(p.id); });
+  });
+  produtos.sort((a, b) => (a.item_id || 0) - (b.item_id || 0));
+  _producaoRedeCache = { produtos, donoPorId, idsTodos, lojas: lj.data || [] };
+  return _producaoRedeCache;
+}
+
+async function _producaoDadosSemana(ids, semanaMonday, donoPorId, idsTodos) {
   const monday = semanaMonday.toISOString().split('T')[0];
   const sunday = getSundayOfWeek(semanaMonday).toISOString().split('T')[0];
+  const dono = id => (donoPorId && donoPorId[id]) || id;
   if (monday < PRODUCAO_SAIDA_INICIO) {
     const baseRes = await db.from('gn_producao_estoque').select('*').eq('semana_inicio', monday).in('catalogo_id', ids);
     if (baseRes.error) throw baseRes.error;
@@ -7768,7 +7815,8 @@ async function _producaoDadosSemana(ids, semanaMonday) {
     _fetchTodasPaginas(() => db.from('gn_provisoes').select('catalogo_id,qtd_prevista,loja_slug')
       .eq('fornecedor','PETISCOS').neq('status','CANCELADO')
       .gte('data_entrega', monday).lte('data_entrega', sunday)
-      .in('catalogo_id', ids)),
+      // Todos os uuids do produto, das duas regiões — é isto que faz a conta ser da rede.
+      .in('catalogo_id', (idsTodos && idsTodos.length) ? idsTodos : ids)),
   ]);
   if (baseRes.error) throw baseRes.error;
   const baseMap = {};
@@ -7779,9 +7827,10 @@ async function _producaoDadosSemana(ids, semanaMonday) {
   const saidaPorLoja = {};
   (saida||[]).forEach(p => {
     const qtd = parseFloat(p.qtd_prevista) || 0;
-    saidaMap[p.catalogo_id] = (saidaMap[p.catalogo_id]||0) + qtd;
-    if (!saidaPorLoja[p.catalogo_id]) saidaPorLoja[p.catalogo_id] = {};
-    saidaPorLoja[p.catalogo_id][p.loja_slug] = (saidaPorLoja[p.catalogo_id][p.loja_slug]||0) + qtd;
+    const d = dono(p.catalogo_id);   // a demanda de SP soma na linha do produto, não numa à parte
+    saidaMap[d] = (saidaMap[d]||0) + qtd;
+    if (!saidaPorLoja[d]) saidaPorLoja[d] = {};
+    saidaPorLoja[d][p.loja_slug] = (saidaPorLoja[d][p.loja_slug]||0) + qtd;
   });
   return { baseMap, saidaMap, saidaPorLoja };
 }
@@ -7799,8 +7848,16 @@ async function renderProducao(silent) {
   // scrollTop já sendo restaurado corretamente no fim.
   if (!silent) $('content').innerHTML = '<div class="empty"><div class="spin"></div></div>';
 
-  const produtos = S.catalogo.filter(p => p.ativo && p.fornecedor === 'PETISCOS')
-    .sort((a,b) => (a.item_id||0) - (b.item_id||0));
+  // Catálogo e lojas das DUAS regiões (ver _producaoCarregarRede) — e não S.catalogo/S.lojas,
+  // que vêm filtrados por S.regiao e deixavam Itaquera e Guarulhos fora da conta.
+  let _rede;
+  try { _rede = await _producaoCarregarRede(); }
+  catch (e) {
+    $('content').innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-texto">Erro ao carregar o catálogo da Produção</div></div>`;
+    return;
+  }
+  const produtos = _rede.produtos;
+  const lojasProducao = _rede.lojas;
 
   if (!produtos.length) {
     $('content').innerHTML = `<div class="empty"><div class="empty-icon">🏭</div><div class="empty-texto">Nenhum produto ativo do fornecedor PETISCOS no catálogo</div></div>`;
@@ -7816,8 +7873,8 @@ async function renderProducao(silent) {
   let baseMap = {}, saidaMap = {}, saidaPorLoja = {};
   try {
     const [atual, anterior] = await Promise.all([
-      _producaoDadosSemana(ids, semAtiva),
-      _producaoDadosSemana(ids, semAnterior),
+      _producaoDadosSemana(ids, semAtiva, _rede.donoPorId, _rede.idsTodos),
+      _producaoDadosSemana(ids, semAnterior, _rede.donoPorId, _rede.idsTodos),
     ]);
     baseMap = atual.baseMap; saidaMap = atual.saidaMap; saidaPorLoja = atual.saidaPorLoja;
 
@@ -7850,7 +7907,7 @@ async function renderProducao(silent) {
     return;
   }
 
-  const lojaTabs = [{ slug_pedido:'', nome_display:'Todas as lojas' }, ...S.lojas].map(l =>
+  const lojaTabs = [{ slug_pedido:'', nome_display:'Todas as lojas' }, ...lojasProducao].map(l =>
     `<button class="store-tab${S.producaoLoja===l.slug_pedido?' ativo':''}" onclick="S.producaoLoja='${l.slug_pedido}';renderProducao()">${l.nome_display}</button>`
   ).join('');
 
@@ -7865,7 +7922,7 @@ async function renderProducao(silent) {
       <button onclick="_navegarSemanaProducao(1)" style="background:rgba(0,0,0,.07);border:1px solid var(--border);border-radius:8px;padding:5px 12px;color:${_semFmt.ehAtual?'var(--muted)':'var(--text)'};font-size:16px;cursor:pointer;opacity:${_semFmt.ehAtual?'.35':'1'}" ${_semFmt.ehAtual?'disabled':''}>→</button>
     </div>`;
 
-  const lojaLabelAtual = S.producaoLoja ? (S.lojas.find(l=>l.slug_pedido===S.producaoLoja)?.nome_display||S.producaoLoja) : 'todas';
+  const lojaLabelAtual = S.producaoLoja ? (lojasProducao.find(l=>l.slug_pedido===S.producaoLoja)?.nome_display||S.producaoLoja) : 'todas';
 
   const rowsData = [];
   let linhasHtml;
