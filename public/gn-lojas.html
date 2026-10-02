@@ -4132,7 +4132,31 @@ function _lojasRelatorioValor() {
   return LOJAS.filter(l => (l !== 'MAGLIA' && l !== LOJA_TESTE) || l === loja);
 }
 
-let _relValorSel = null;   // Set de lojas marcadas no modal
+let _relValorSel = null;            // Set de lojas marcadas no modal
+let _relValorPeriodo = 'semana';    // 'semana' | 'mes' | 'trimestre'
+let _relValorModo = 'consolidado';  // 'consolidado' (junta as lojas) | 'individual' (uma a uma)
+let _relValorHist = null;           // { chave, porLoja:{loja:[{data,...}]}, semCusto:[], fora:n }
+let _relValorCarregando = false;
+let _relValorErro = null;
+let _relValorTimer = null;
+
+const _REL_VALOR_MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+
+// O período é sempre ancorado na semana que está na tela — trocar a semana e reabrir o
+// relatório muda o mês/trimestre junto, em vez de ter dois conceitos de "quando" na tela.
+function _relValorRange() {
+  const base = new Date(semana);
+  const y = base.getFullYear(), m = base.getMonth();
+  if (_relValorPeriodo === 'mes') {
+    return { de: new Date(y, m, 1), ate: new Date(y, m + 1, 0), label: _REL_VALOR_MESES[m] + ' de ' + y };
+  }
+  const t = Math.floor(m / 3);
+  return { de: new Date(y, t * 3, 1), ate: new Date(y, t * 3 + 3, 0), label: (t + 1) + 'º trimestre de ' + y };
+}
+function _relValorPeriodoLabel() {
+  return _relValorPeriodo === 'semana' ? 'Semana de ' + fmt(semana) : _relValorRange().label;
+}
+function _relValorLojaSlug(l) { return LOJA_SLUG[l] || l.toLowerCase().replace(/ /g, '_'); }
 
 function _abrirRelatorioValorEstoque() {
   const disponiveis = _lojasRelatorioValor();
@@ -4145,94 +4169,392 @@ function _abrirRelatorioValorEstoque() {
   el.innerHTML = _relValorHtml(disponiveis);
   el.addEventListener('click', e => { if (e.target === el) el.remove(); });
   document.body.appendChild(el);
+  if (_relValorPeriodo !== 'semana') _relValorCarregar();
+}
+
+function _relValorRender() {
+  const el = document.getElementById('_relValorModal');
+  if (el) el.innerHTML = _relValorHtml(_lojasRelatorioValor());
+}
+
+// Marcar várias lojas seguidas dispararia uma busca por clique; o debounce deixa só a
+// última valendo.
+function _relValorAgendarCarga() {
+  if (_relValorPeriodo === 'semana') return;
+  clearTimeout(_relValorTimer);
+  _relValorTimer = setTimeout(() => _relValorCarregar(), 400);
 }
 
 function _relValorToggleLoja(l) {
   if (!_relValorSel) _relValorSel = new Set();
   if (_relValorSel.has(l)) _relValorSel.delete(l); else _relValorSel.add(l);
-  const el = document.getElementById('_relValorModal');
-  if (el) el.innerHTML = _relValorHtml(_lojasRelatorioValor());
+  _relValorRender();
+  _relValorAgendarCarga();
+}
+function _relValorSetPeriodo(p) {
+  if (_relValorPeriodo === p) return;
+  _relValorPeriodo = p;
+  _relValorErro = null;
+  _relValorRender();
+  if (p !== 'semana') _relValorCarregar();
+}
+function _relValorSetModo(m) {
+  if (_relValorModo === m) return;
+  _relValorModo = m;
+  _relValorRender();
 }
 
 function _fmtR$(v) {
   return 'R$ ' + (v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
+function _fmtDiaMes(iso) {
+  const p = String(iso || '').split('-');
+  return p.length === 3 ? p[2] + '/' + p[1] : String(iso || '');
+}
+
+// Mesma conta de _valorEstoqueLoja (caixa × custo + unidade solta × custo ÷ und_por_caixa),
+// mas a partir das linhas já gravadas em gn_contagens_pedido — é lá que mora o histórico das
+// semanas que não estão mais em memória.
+function _valorDeContagens(rows, prodPorCatalogo) {
+  const r = { insumos: 0, utilidades: 0, total: 0, itens: 0, semCusto: [], fora: 0 };
+  (rows || []).forEach(row => {
+    const prod = prodPorCatalogo[row.catalogo_id];
+    if (!prod) { r.fora++; return; }
+    const cx = parseFloat(row.atual_cx != null ? row.atual_cx : row.atual) || 0;
+    const und = parseFloat(row.atual_und) || 0;
+    if (cx <= 0 && und <= 0) return;
+    const custo = parseFloat(prod.custo) || 0;
+    const fator = parseFloat(prod.und_por_caixa) || 0;
+    const valor = cx * custo + (fator > 0 ? und * (custo / fator) : 0);
+    r.itens++;
+    if (custo <= 0) r.semCusto.push(prod.produto);
+    if (_ehNaoInsumo(prod)) r.utilidades += valor; else r.insumos += valor;
+    r.total += valor;
+  });
+  return r;
+}
+
+async function _relValorPaginar(base) {
+  const out = [];
+  let offset = 0;
+  const pageSize = 1000;
+  while (true) {
+    const page = await sbRequest(base + '&limit=' + pageSize + '&offset=' + offset, { method: 'GET' });
+    out.push(...(page || []));
+    if (!page || page.length < pageSize) break;
+    offset += pageSize;
+  }
+  return out;
+}
+
+// Mês e trimestre não cabem em pedidoAll (que guarda a semana em memória): o histórico real
+// é gn_contagens_pedido, uma linha por item/loja/data de contagem.
+//
+// O preço vem de gn_catalogo buscado aqui, pela região de CADA loja escolhida, e não de
+// PRODUTOS_PEDIDO: aquela lista é só da região de quem está logado, então um gestor do Rio
+// veria Itaquera e Guarulhos zeradas — o tipo de zero silencioso que não aparece na tela.
+async function _relValorCarregar() {
+  const disponiveis = _lojasRelatorioValor();
+  const sel = [...(_relValorSel || [])].filter(l => disponiveis.includes(l));
+  const { de, ate } = _relValorRange();
+  const chave = _relValorPeriodo + '|' + wkKey(de) + '|' + sel.slice().sort().join(',');
+  if (_relValorHist && _relValorHist.chave === chave && !_relValorErro) return;
+  if (!sel.length) { _relValorHist = { chave, porLoja: {}, semCusto: [], fora: 0 }; _relValorRender(); return; }
+  _relValorCarregando = true; _relValorErro = null; _relValorRender();
+  try {
+    const slugs = sel.map(_relValorLojaSlug);
+    const regioes = [...new Set(sel.map(l => (window.gnRegiaoLoja ? window.gnRegiaoLoja(l) : null) || 'RJ'))];
+    // Busca a semana INTEIRA das pontas: a semana de 28/09 tem lançamento até 04/10, e cortar
+    // no dia 30 deixaria o último snapshot do mês pela metade.
+    const deBusca = getMonday(de);
+    const ateBusca = new Date(getMonday(ate)); ateBusca.setDate(ateBusca.getDate() + 6);
+    const [contagens, catalogo] = await Promise.all([
+      _relValorPaginar('gn_contagens_pedido?loja_slug=in.(' + slugs.map(encodeURIComponent).join(',') + ')'
+        + '&data_contagem=gte.' + wkKey(deBusca) + '&data_contagem=lte.' + wkKey(ateBusca)
+        + '&select=loja_slug,catalogo_id,atual,atual_cx,atual_und,data_contagem&order=data_contagem'),
+      _relValorPaginar('gn_catalogo?regiao=in.(' + regioes.join(',') + ')'
+        + '&select=id,produto,grupo,custo,und_por_caixa&order=id'),
+    ]);
+    const prodPorCatalogo = {};
+    (catalogo || []).forEach(c => { prodPorCatalogo[c.id] = c; });
+    const lojaPorSlug = {};
+    sel.forEach(l => { lojaPorSlug[_relValorLojaSlug(l)] = l; });
+    // Agrupa por loja + SEMANA, não por data crua. A contagem é semanal, mas gn_contagens_pedido
+    // também recebe acerto avulso em outros dias: no setembro da Bangu, além das contagens de
+    // ~210 itens, há dias com 2 a 6 itens. Por data, o "fechamento" do mês viraria o acerto de
+    // 29/09 (4 itens, R$ 2.510) em vez da contagem de 28/09 (222 itens, R$ 54.311).
+    // Dentro da semana vale o lançamento mais recente de cada item — é a mesma régua do resto
+    // do app, que indexa tudo pela segunda-feira da semana (wkKey/getMonday).
+    const porLojaSemana = {};
+    (contagens || []).forEach(r => {
+      const l = lojaPorSlug[r.loja_slug];
+      if (!l) return;
+      const seg = wkKey(getMonday(new Date(r.data_contagem + 'T12:00')));
+      // Semana cuja segunda caiu fora do período pertence ao mês/trimestre vizinho.
+      if (seg < wkKey(de) || seg > wkKey(ate)) return;
+      const porSem = porLojaSemana[l] = porLojaSemana[l] || {};
+      const itensSem = porSem[seg] = porSem[seg] || {};
+      const antes = itensSem[r.catalogo_id];
+      if (!antes || r.data_contagem >= antes.data_contagem) itensSem[r.catalogo_id] = r;
+    });
+    const porLoja = {}, semCusto = new Set();
+    let fora = 0;
+    Object.entries(porLojaSemana).forEach(([l, semanas]) => {
+      const lista = Object.keys(semanas).sort().map(seg => {
+        const v = _valorDeContagens(Object.values(semanas[seg]), prodPorCatalogo);
+        v.semCusto.forEach(p => semCusto.add(p));
+        fora += v.fora;
+        return { semana: seg, insumos: v.insumos, utilidades: v.utilidades, total: v.total, itens: v.itens };
+      }).filter(x => x.itens > 0);
+      if (lista.length) porLoja[l] = lista;
+    });
+    _relValorHist = { chave, porLoja, semCusto: [...semCusto], fora };
+  } catch (e) {
+    // Não cacheia um resultado vazio numa falha de rede: com {} "válido" o relatório diria
+    // "nenhuma contagem no período" pelo resto da sessão, sem dizer que foi a conexão.
+    _relValorHist = null;
+    _relValorErro = 'Não foi possível carregar o histórico do período. Verifique a conexão e tente de novo.';
+  }
+  _relValorCarregando = false;
+  _relValorRender();
+}
+
+// Valor de estoque é foto, não fluxo: somar as semanas de um mês daria quatro vezes o
+// estoque que existe. No período, cada loja é representada pela ÚLTIMA contagem (o
+// fechamento), com a média das contagens ao lado.
+function _relValorResumoLoja(lista) {
+  const n = lista.length;
+  const soma = lista.reduce((a, x) => ({
+    insumos: a.insumos + x.insumos, utilidades: a.utilidades + x.utilidades,
+    total: a.total + x.total, itens: a.itens + x.itens,
+  }), { insumos: 0, utilidades: 0, total: 0, itens: 0 });
+  return {
+    contagens: n,
+    media: { insumos: soma.insumos / n, utilidades: soma.utilidades / n, total: soma.total / n, itens: Math.round(soma.itens / n) },
+    ultimo: lista[n - 1],
+    maior: lista.reduce((a, x) => (x.total > a.total ? x : a), lista[0]),
+    menor: lista.reduce((a, x) => (x.total < a.total ? x : a), lista[0]),
+  };
+}
+
+// Uma linha por loja no formato que tela e texto usam, igual pros três períodos.
+function _relValorDados() {
+  const disponiveis = _lojasRelatorioValor();
+  const sel = [...(_relValorSel || [])].filter(l => disponiveis.includes(l));
+  if (_relValorPeriodo === 'semana') {
+    return sel.map(l => {
+      const v = _valorEstoqueLoja(l);
+      return { loja: l, insumos: v.insumos, utilidades: v.utilidades, total: v.total, itens: v.itens, semCusto: v.semCusto, resumo: null };
+    }).filter(d => d.itens > 0);
+  }
+  const h = _relValorHist;
+  if (!h) return [];
+  return sel.filter(l => h.porLoja[l]).map(l => {
+    const r = _relValorResumoLoja(h.porLoja[l]);
+    return { loja: l, insumos: r.ultimo.insumos, utilidades: r.ultimo.utilidades, total: r.ultimo.total,
+             itens: r.ultimo.itens, semCusto: [], resumo: r };
+  });
+}
+
+// Evolução do período: cada semana de contagem com a soma das lojas escolhidas. Vai com o
+// número de lojas de cada semana de propósito — sem isso, uma semana em que só 3 lojas
+// contaram pareceria uma queda de estoque da rede.
+function _relValorPorSemana() {
+  const h = _relValorHist;
+  if (!h) return [];
+  const sel = new Set([...(_relValorSel || [])]);
+  const semanas = {};
+  Object.entries(h.porLoja).forEach(([l, lista]) => {
+    if (!sel.has(l)) return;
+    lista.forEach(x => {
+      const d = semanas[x.semana] = semanas[x.semana] || { semana: x.semana, insumos: 0, utilidades: 0, total: 0, itens: 0, lojas: 0 };
+      d.insumos += x.insumos; d.utilidades += x.utilidades; d.total += x.total; d.itens += x.itens; d.lojas++;
+    });
+  });
+  return Object.values(semanas).sort((a, b) => a.semana.localeCompare(b.semana));
+}
+
+function _relValorChip(ativo, label, onclick, cor) {
+  const c = cor || '#7c3aed';
+  return '<button onclick="' + onclick + '" style="background:' + (ativo ? c : 'rgba(0,0,0,.06)') + ';border:1px solid '
+    + (ativo ? c : 'rgba(0,0,0,.12)') + ';border-radius:999px;padding:5px 11px;color:' + (ativo ? '#fff' : '#475569')
+    + ';font-size:11px;font-weight:700;cursor:pointer">' + label + '</button>';
+}
+
+// Os três números que o relatório existe pra mostrar: insumos, descartáveis/limpeza e total.
+function _relValorCardsHtml(v, itens, titulo) {
+  const pct = v.total > 0 ? (v.utilidades / v.total * 100) : 0;
+  return (titulo ? '<div style="font-size:10px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">' + titulo + '</div>' : '')
+    + '<div style="display:flex;flex-direction:column;gap:7px">'
+    + '<div style="background:rgba(5,150,105,.08);border:1px solid rgba(5,150,105,.25);border-radius:12px;padding:11px 13px;display:flex;justify-content:space-between;align-items:center">'
+    + '<span style="font-size:12px;font-weight:700;color:#065f46">🥘 Insumos</span>'
+    + '<span style="font-size:15px;font-weight:900;color:#059669;font-family:monospace">' + _fmtR$(v.insumos) + '</span></div>'
+    + '<div style="background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.25);border-radius:12px;padding:11px 13px;display:flex;justify-content:space-between;align-items:center">'
+    + '<span style="font-size:12px;font-weight:700;color:#3730a3">🧻 Descartáveis e limpeza</span>'
+    + '<span style="font-size:15px;font-weight:900;color:#4338CA;font-family:monospace">' + _fmtR$(v.utilidades) + '</span></div>'
+    + '<div style="background:rgba(0,0,0,.05);border-radius:12px;padding:11px 13px;display:flex;justify-content:space-between;align-items:center">'
+    + '<span style="font-size:12px;font-weight:800;color:#1A1D23">Total</span>'
+    + '<span style="font-size:16px;font-weight:900;color:#1A1D23;font-family:monospace">' + _fmtR$(v.total) + '</span></div>'
+    + '<div style="font-size:10.5px;color:#64748b;text-align:center">' + itens + ' item(ns) contado(s) · descartáveis/limpeza = ' + pct.toFixed(1).replace('.', ',') + '% do total</div>'
+    + '</div>';
+}
 
 function _relValorHtml(disponiveis) {
   const sel = [...(_relValorSel || [])].filter(l => disponiveis.includes(l));
-  const dados = sel.map(l => ({ loja: l, v: _valorEstoqueLoja(l) })).filter(d => d.v.itens > 0);
+  const dados = _relValorDados();
+  const periodo = _relValorPeriodo !== 'semana';
   const soma = dados.reduce((a, d) => ({
-    insumos: a.insumos + d.v.insumos, utilidades: a.utilidades + d.v.utilidades,
-    total: a.total + d.v.total, itens: a.itens + d.v.itens,
+    insumos: a.insumos + d.insumos, utilidades: a.utilidades + d.utilidades,
+    total: a.total + d.total, itens: a.itens + d.itens,
   }), { insumos: 0, utilidades: 0, total: 0, itens: 0 });
-  const semCusto = [...new Set(dados.flatMap(d => d.v.semCusto))];
+  const semCusto = periodo ? ((_relValorHist && _relValorHist.semCusto) || []) : [...new Set(dados.flatMap(d => d.semCusto))];
 
-  const chips = disponiveis.map(l => {
-    const on = sel.includes(l);
-    return `<button onclick="_relValorToggleLoja('${l.replace(/'/g, "\\'")}')"
-      style="background:${on ? '#7c3aed' : 'rgba(0,0,0,.06)'};border:1px solid ${on ? '#7c3aed' : 'rgba(0,0,0,.12)'};border-radius:999px;padding:5px 11px;color:${on ? '#fff' : '#475569'};font-size:11px;font-weight:700;cursor:pointer">${lojaDisp(l)}</button>`;
-  }).join('');
+  const chipsPeriodo = [['semana', 'Semana'], ['mes', 'Mês'], ['trimestre', 'Trimestre']]
+    .map(([v, lbl]) => _relValorChip(_relValorPeriodo === v, lbl, "_relValorSetPeriodo('" + v + "')", '#0f766e')).join('');
+  const chipsLoja = disponiveis.map(l =>
+    _relValorChip(sel.includes(l), lojaDisp(l), "_relValorToggleLoja('" + l.replace(/'/g, "\\'") + "')")).join('');
+  const chipsModo = [['consolidado', '🧮 Juntar as lojas'], ['individual', '📄 Uma por loja']]
+    .map(([v, lbl]) => _relValorChip(_relValorModo === v, lbl, "_relValorSetModo('" + v + "')", '#b45309')).join('');
 
-  const linhas = dados.length > 1 ? dados.map(d =>
-    `<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid rgba(0,0,0,.06)">
-      <span style="font-size:12px;color:#475569;font-weight:700">${lojaDisp(d.loja)}</span>
-      <span style="font-size:11px;color:#475569;white-space:nowrap">${_fmtR$(d.v.total)}</span>
-    </div>`).join('') : '';
+  // Evolução do período (consolidado) ou as contagens da própria loja (individual).
+  const evolucao = periodo ? _relValorPorSemana() : [];
+  const linhaEvol = x => '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid rgba(0,0,0,.06)">'
+    + '<span style="font-size:11.5px;color:#475569;font-weight:700">' + _fmtDiaMes(x.semana)
+    + (x.lojas ? '<span style="font-weight:400;color:#94a3b8"> · ' + x.lojas + ' loja' + (x.lojas > 1 ? 's' : '') + '</span>' : '')
+    + '</span><span style="font-size:11px;color:#475569;white-space:nowrap">' + _fmtR$(x.total) + '</span></div>';
 
-  const pct = soma.total > 0 ? (soma.utilidades / soma.total * 100) : 0;
-  return '<div style="background:#FFFFFF;border-radius:20px 20px 0 0;width:100%;max-width:480px;display:flex;flex-direction:column;padding-bottom:env(safe-area-inset-bottom,0px)">'
+  let corpo;
+  if (_relValorErro) {
+    corpo = '<div style="background:rgba(220,38,38,.08);border:1px solid rgba(220,38,38,.25);border-radius:12px;padding:12px;font-size:11.5px;color:#991b1b;line-height:1.45">⚠️ ' + _relValorErro
+      + '<div style="margin-top:8px"><button onclick="_relValorCarregar()" style="background:#dc2626;border:none;border-radius:9px;padding:7px 12px;color:#fff;font-size:11px;font-weight:800;cursor:pointer">Tentar de novo</button></div></div>';
+  } else if (periodo && _relValorCarregando) {
+    corpo = '<div style="font-size:12px;color:#64748b;text-align:center;padding:22px 0">⏳ Carregando as contagens de ' + _relValorPeriodoLabel().toLowerCase() + '...</div>';
+  } else if (!dados.length) {
+    corpo = '<div style="font-size:12px;color:#64748b;text-align:center;padding:16px 0">'
+      + (sel.length ? 'Nenhuma contagem com valor ' + (periodo ? 'neste período' : 'nesta semana') + ' nas lojas selecionadas.' : 'Escolha ao menos uma loja.')
+      + '</div>';
+  } else if (_relValorModo === 'individual') {
+    // Uma loja por cartão, cada uma com os próprios números — e o botão pra mandar só ela,
+    // que é o caso de uso real: o relatório de cada loja vai pro grupo daquela loja.
+    corpo = dados.map(d => '<div style="border:1px solid rgba(0,0,0,.1);border-radius:14px;padding:11px;margin-bottom:9px">'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'
+      + '<span style="font-size:13px;font-weight:800;color:#1A1D23">📍 ' + lojaDisp(d.loja) + '</span>'
+      + '<div style="display:flex;gap:5px">'
+      + '<button onclick="_relValorWppLoja(\'' + d.loja.replace(/'/g, "\\'") + '\')" title="Mandar só esta loja" style="background:#16a34a;border:none;border-radius:8px;padding:5px 9px;color:#fff;font-size:11px;font-weight:800;cursor:pointer">📲</button>'
+      + '<button onclick="_relValorPDFLoja(\'' + d.loja.replace(/'/g, "\\'") + '\')" title="PDF só desta loja" style="background:#1d4ed8;border:none;border-radius:8px;padding:5px 9px;color:#fff;font-size:11px;font-weight:800;cursor:pointer">🖨️</button>'
+      + '</div></div>'
+      + _relValorCardsHtml(d, d.itens, periodo ? 'Fechamento · semana de ' + _fmtDiaMes(d.resumo.ultimo.semana) : '')
+      + (d.resumo ? '<div style="font-size:10.5px;color:#64748b;margin-top:7px;line-height:1.5">'
+          + 'Média das ' + d.resumo.contagens + ' contagens: <b>' + _fmtR$(d.resumo.media.total) + '</b>'
+          + '<br>Maior: ' + _fmtR$(d.resumo.maior.total) + ' (' + _fmtDiaMes(d.resumo.maior.semana) + ')'
+          + ' · Menor: ' + _fmtR$(d.resumo.menor.total) + ' (' + _fmtDiaMes(d.resumo.menor.semana) + ')'
+          + '</div>'
+          + '<div style="margin-top:6px;max-height:16vh;overflow-y:auto">'
+          + (_relValorHist.porLoja[d.loja] || []).map(linhaEvol).join('') + '</div>' : '')
+      + '</div>').join('');
+  } else {
+    const ultima = evolucao.length ? evolucao[evolucao.length - 1] : null;
+    const mediaPer = evolucao.length
+      ? evolucao.reduce((a, x) => a + x.total, 0) / evolucao.length : 0;
+    corpo = _relValorCardsHtml(soma, soma.itens,
+        periodo && ultima ? 'Fechamento do período · semana de ' + _fmtDiaMes(ultima.semana) : '')
+      + (periodo && evolucao.length > 1
+          ? '<div style="font-size:10.5px;color:#64748b;margin-top:8px;text-align:center;line-height:1.5">Média das ' + evolucao.length + ' contagens do período: <b>' + _fmtR$(mediaPer) + '</b>'
+            + '<br>O valor do estoque é uma foto de cada contagem — as semanas não se somam.</div>'
+          : '')
+      + (semCusto.length ? '<div style="background:rgba(217,119,6,.08);border:1px solid rgba(217,119,6,.25);border-radius:10px;padding:8px 11px;font-size:10.5px;color:#92400e;line-height:1.4;margin-top:8px">⚠️ ' + semCusto.length + ' item(ns) contado(s) estão <b>sem custo no Catálogo</b> e entram como R$ 0: ' + semCusto.slice(0, 4).join(', ') + (semCusto.length > 4 ? '…' : '') + '</div>' : '')
+      + (dados.length > 1
+          ? '<div style="margin-top:10px;max-height:20vh;overflow-y:auto">'
+            + dados.map(d => '<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid rgba(0,0,0,.06)">'
+              + '<span style="font-size:12px;color:#475569;font-weight:700">' + lojaDisp(d.loja) + '</span>'
+              + '<span style="font-size:11px;color:#475569;white-space:nowrap">' + _fmtR$(d.total) + '</span></div>').join('')
+            + '</div>'
+          : '')
+      + (periodo && evolucao.length
+          ? '<div style="margin-top:10px"><div style="font-size:10px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Contagens do período (por semana)</div>'
+            + '<div style="max-height:20vh;overflow-y:auto">' + evolucao.map(linhaEvol).join('') + '</div></div>'
+          : '');
+  }
+
+  return '<div style="background:#FFFFFF;border-radius:20px 20px 0 0;width:100%;max-width:480px;max-height:92vh;display:flex;flex-direction:column;padding-bottom:env(safe-area-inset-bottom,0px)">'
     + '<div style="padding:16px 16px 12px;border-bottom:1px solid rgba(0,0,0,.08)">'
     + '<div style="width:36px;height:4px;background:rgba(0,0,0,.2);border-radius:2px;margin:0 auto 14px"></div>'
     + '<div style="font-size:14px;font-weight:800;color:#1A1D23;text-align:center">💰 Valor do estoque contado</div>'
-    + '<div style="font-size:11px;color:#64748b;text-align:center;margin-top:3px">Semana de ' + fmt(semana) + ' · preço do Catálogo</div>'
+    + '<div style="font-size:11px;color:#64748b;text-align:center;margin-top:3px">' + _relValorPeriodoLabel() + ' · preço do Catálogo</div>'
     + '</div>'
+    + '<div style="overflow-y:auto;flex:1">'
+    + '<div style="padding:10px 16px 4px"><div style="font-size:10px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Período</div>'
+    + '<div style="display:flex;gap:5px;flex-wrap:wrap">' + chipsPeriodo + '</div></div>'
     + (disponiveis.length > 1
         ? '<div style="padding:10px 16px 4px"><div style="font-size:10px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Lojas</div>'
-          + '<div style="display:flex;gap:5px;flex-wrap:wrap">' + chips + '</div></div>'
+          + '<div style="display:flex;gap:5px;flex-wrap:wrap">' + chipsLoja + '</div></div>'
         : '')
-    + '<div style="padding:12px 16px 4px">'
-    + (soma.itens === 0
-        ? '<div style="font-size:12px;color:#64748b;text-align:center;padding:14px 0">Nenhum item contado nas lojas selecionadas.</div>'
-        : '<div style="display:flex;flex-direction:column;gap:7px">'
-          + '<div style="background:rgba(5,150,105,.08);border:1px solid rgba(5,150,105,.25);border-radius:12px;padding:11px 13px;display:flex;justify-content:space-between;align-items:center">'
-          + '<span style="font-size:12px;font-weight:700;color:#065f46">🥘 Insumos</span>'
-          + '<span style="font-size:15px;font-weight:900;color:#059669;font-family:monospace">' + _fmtR$(soma.insumos) + '</span></div>'
-          + '<div style="background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.25);border-radius:12px;padding:11px 13px;display:flex;justify-content:space-between;align-items:center">'
-          + '<span style="font-size:12px;font-weight:700;color:#3730a3">🧻 Descartáveis e limpeza</span>'
-          + '<span style="font-size:15px;font-weight:900;color:#4338CA;font-family:monospace">' + _fmtR$(soma.utilidades) + '</span></div>'
-          + '<div style="background:rgba(0,0,0,.05);border-radius:12px;padding:11px 13px;display:flex;justify-content:space-between;align-items:center">'
-          + '<span style="font-size:12px;font-weight:800;color:#1A1D23">Total</span>'
-          + '<span style="font-size:16px;font-weight:900;color:#1A1D23;font-family:monospace">' + _fmtR$(soma.total) + '</span></div>'
-          + '<div style="font-size:10.5px;color:#64748b;text-align:center">' + soma.itens + ' item(ns) contado(s) · descartáveis/limpeza = ' + pct.toFixed(1).replace('.', ',') + '% do total</div>'
-          + (semCusto.length ? '<div style="background:rgba(217,119,6,.08);border:1px solid rgba(217,119,6,.25);border-radius:10px;padding:8px 11px;font-size:10.5px;color:#92400e;line-height:1.4">⚠️ ' + semCusto.length + ' item(ns) contado(s) estão <b>sem custo no Catálogo</b> e entram como R$ 0: ' + semCusto.slice(0, 4).join(', ') + (semCusto.length > 4 ? '…' : '') + '</div>' : '')
-          + '</div>')
-    + (linhas ? '<div style="margin-top:10px;max-height:24vh;overflow-y:auto">' + linhas + '</div>' : '')
+    + (sel.length > 1
+        ? '<div style="padding:10px 16px 4px"><div style="font-size:10px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Como gerar</div>'
+          + '<div style="display:flex;gap:5px;flex-wrap:wrap">' + chipsModo + '</div></div>'
+        : '')
+    + '<div style="padding:12px 16px 4px">' + corpo + '</div>'
     + '</div>'
-    + '<div style="padding:14px 16px;display:grid;grid-template-columns:1fr;gap:8px;border-top:1px solid rgba(0,0,0,.08);margin-top:8px">'
-    + '<button onclick="_relValorWpp()" style="background:linear-gradient(135deg,#16a34a,#15803d);border:none;border-radius:13px;padding:12px;color:#fff;font-weight:800;font-size:13px;cursor:pointer">📲 WhatsApp</button>'
+    + '<div style="padding:14px 16px;display:grid;grid-template-columns:1fr;gap:8px;border-top:1px solid rgba(0,0,0,.08)">'
+    + '<button onclick="_relValorWpp()" style="background:linear-gradient(135deg,#16a34a,#15803d);border:none;border-radius:13px;padding:12px;color:#fff;font-weight:800;font-size:13px;cursor:pointer">📲 WhatsApp'
+    + (_relValorModo === 'individual' && dados.length > 1 ? ' (' + dados.length + ' lojas)' : '') + '</button>'
     + '<button onclick="_relValorPDF()" style="background:linear-gradient(135deg,#1d4ed8,#1e40af);border:none;border-radius:13px;padding:12px;color:#fff;font-weight:800;font-size:13px;cursor:pointer">🖨️ PDF</button>'
     + '<button onclick="document.getElementById(\'_relValorModal\').remove()" style="background:rgba(0,0,0,.08);border:none;border-radius:13px;padding:12px;color:#475569;font-weight:700;font-size:13px;cursor:pointer">Fechar</button>'
     + '</div></div>';
 }
 
-function _relValorTexto() {
-  const disponiveis = _lojasRelatorioValor();
-  const sel = [...(_relValorSel || [])].filter(l => disponiveis.includes(l));
-  const dados = sel.map(l => ({ loja: l, v: _valorEstoqueLoja(l) })).filter(d => d.v.itens > 0);
-  if (!dados.length) return null;
-  const soma = dados.reduce((a, d) => ({
-    insumos: a.insumos + d.v.insumos, utilidades: a.utilidades + d.v.utilidades,
-    total: a.total + d.v.total, itens: a.itens + d.v.itens,
-  }), { insumos: 0, utilidades: 0, total: 0, itens: 0 });
-  const titulo = '💰 VALOR DO ESTOQUE CONTADO — semana de ' + fmt(semana);
-  let msg = titulo + '\n\n';
-  if (dados.length > 1) {
-    dados.forEach(d => {
-      msg += '📍 *' + lojaDisp(d.loja) + '*\n';
-      msg += '   Insumos: ' + _fmtR$(d.v.insumos) + '\n';
-      msg += '   Descartáveis/limpeza: ' + _fmtR$(d.v.utilidades) + '\n';
-      msg += '   Total: ' + _fmtR$(d.v.total) + '  (' + d.v.itens + ' itens)\n\n';
+// Bloco de uma loja — no modo individual é o relatório inteiro dela; no consolidado é a
+// linha que antecede o total da rede.
+function _relValorBlocoTexto(d, completo) {
+  let s = '📍 *' + lojaDisp(d.loja) + '*\n';
+  if (d.resumo) s += '   Fechamento: semana de ' + _fmtDiaMes(d.resumo.ultimo.semana) + '\n';
+  s += '   🥘 Insumos: ' + _fmtR$(d.insumos) + '\n';
+  s += '   🧻 Descartáveis/limpeza: ' + _fmtR$(d.utilidades) + '\n';
+  s += '   Total: ' + _fmtR$(d.total) + '  (' + d.itens + ' itens)\n';
+  if (completo && d.resumo) {
+    s += '   Média das ' + d.resumo.contagens + ' contagens: ' + _fmtR$(d.resumo.media.total) + '\n';
+    s += '   Maior: ' + _fmtR$(d.resumo.maior.total) + ' (' + _fmtDiaMes(d.resumo.maior.semana) + ')'
+       + ' · Menor: ' + _fmtR$(d.resumo.menor.total) + ' (' + _fmtDiaMes(d.resumo.menor.semana) + ')\n';
+    ((_relValorHist && _relValorHist.porLoja[d.loja]) || []).forEach(x => {
+      s += '     semana de ' + _fmtDiaMes(x.semana) + ': ' + _fmtR$(x.total) + '\n';
     });
+  }
+  return s;
+}
+
+function _relValorRodape() {
+  return '\n_Preço unitário do Catálogo (app Estoque e Pedido)._'
+    + (_relValorPeriodo !== 'semana' ? '\n_O valor do estoque é a foto de cada contagem — as semanas não se somam._' : '');
+}
+
+// Relatório de UMA loja só, usado pelos botões de cada cartão no modo individual.
+function _relValorTextoLoja(l) {
+  const d = _relValorDados().find(x => x.loja === l);
+  if (!d) return null;
+  const titulo = '💰 VALOR DO ESTOQUE — ' + lojaDisp(l) + ' — ' + _relValorPeriodoLabel();
+  return { msg: titulo + '\n\n' + _relValorBlocoTexto(d, true) + _relValorRodape(), titulo };
+}
+
+function _relValorTexto() {
+  const dados = _relValorDados();
+  if (!dados.length) return null;
+  const titulo = '💰 VALOR DO ESTOQUE CONTADO — ' + _relValorPeriodoLabel();
+  let msg = titulo + '\n\n';
+
+  // Individual: um relatório completo por loja, sem consolidado — foi pedido justamente pra
+  // não ter que juntar as lojas quando o que se quer é o número de cada uma.
+  if (_relValorModo === 'individual') {
+    msg += dados.map(d => _relValorBlocoTexto(d, true)).join('\n');
+    msg += _relValorRodape();
+    return { msg, titulo };
+  }
+
+  const soma = dados.reduce((a, d) => ({
+    insumos: a.insumos + d.insumos, utilidades: a.utilidades + d.utilidades,
+    total: a.total + d.total, itens: a.itens + d.itens,
+  }), { insumos: 0, utilidades: 0, total: 0, itens: 0 });
+  if (dados.length > 1) {
+    dados.forEach(d => { msg += _relValorBlocoTexto(d, false) + '\n'; });
     msg += '━━━━━━━━━━━━━━━\n*CONSOLIDADO (' + dados.length + ' lojas)*\n';
   } else {
     msg += '📍 *' + lojaDisp(dados[0].loja) + '*\n';
@@ -4241,21 +4563,47 @@ function _relValorTexto() {
   msg += '🧻 Descartáveis e limpeza: ' + _fmtR$(soma.utilidades) + '\n';
   msg += '━━━━━━━━━━━━━━━\n*TOTAL: ' + _fmtR$(soma.total) + '*\n';
   msg += soma.itens + ' item(ns) contado(s)\n';
-  msg += '\n_Preço unitário do Catálogo (app Estoque e Pedido)._';
+  const evol = _relValorPorSemana();
+  if (evol.length > 1) {
+    const media = evol.reduce((a, x) => a + x.total, 0) / evol.length;
+    msg += '\n📈 *Contagens do período (por semana)*\n';
+    evol.forEach(x => {
+      msg += '   semana de ' + _fmtDiaMes(x.semana) + ': ' + _fmtR$(x.total) + ' (' + x.lojas + ' loja' + (x.lojas > 1 ? 's' : '') + ')\n';
+    });
+    msg += '   Média: ' + _fmtR$(media) + '\n';
+  }
+  msg += _relValorRodape();
   return { msg, titulo };
+}
+
+function _relValorAviso() {
+  if (_relValorCarregando) { showToast('⏳ Ainda carregando o período, aguarde.', 'err'); return true; }
+  showToast('⚠️ Nenhuma contagem com valor no período/lojas selecionados.', 'err');
+  return true;
 }
 
 function _relValorWpp() {
   const r = _relValorTexto();
-  if (!r) { showToast('⚠️ Nenhum item contado nas lojas selecionadas.', 'err'); return; }
+  if (!r) { _relValorAviso(); return; }
   document.getElementById('_relValorModal')?.remove();
   window.open('https://wa.me/?text=' + encodeURIComponent(r.msg), '_blank');
   showToast('📲 Abrindo WhatsApp...');
 }
 function _relValorPDF() {
   const r = _relValorTexto();
-  if (!r) { showToast('⚠️ Nenhum item contado nas lojas selecionadas.', 'err'); return; }
+  if (!r) { _relValorAviso(); return; }
   document.getElementById('_relValorModal')?.remove();
+  gerarPDF(r.msg, r.titulo);
+}
+function _relValorWppLoja(l) {
+  const r = _relValorTextoLoja(l);
+  if (!r) { _relValorAviso(); return; }
+  window.open('https://wa.me/?text=' + encodeURIComponent(r.msg), '_blank');
+  showToast('📲 ' + lojaDisp(l) + ' — abrindo WhatsApp...');
+}
+function _relValorPDFLoja(l) {
+  const r = _relValorTextoLoja(l);
+  if (!r) { _relValorAviso(); return; }
   gerarPDF(r.msg, r.titulo);
 }
 
