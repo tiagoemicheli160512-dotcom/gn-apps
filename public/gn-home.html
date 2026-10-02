@@ -6530,6 +6530,50 @@ function _alertaDestinatarios(a) {
   return daLoja.filter(u => a.cargos.includes(u.cargo));
 }
 
+// Supervisor, compras, RH e afins são cadastrados na loja GERAL — não pertencem a nenhuma
+// loja, então nunca apareciam como destinatários de nenhum alerta, mesmo com o cargo marcado
+// no envio. Resultado: marcar "supervisor" não tinha efeito nenhum no contador, e a leitura
+// deles (o Edson leu o aviso da Nova América) não aparecia em lugar nenhum.
+// Eles leem a MENSAGEM uma vez, pela rede — não uma vez por loja. Por isso ficam numa linha
+// própria e fora da conta que fecha o aviso de cada loja, que continua sendo da gerência dela.
+function _alertaForaDaLoja(a) {
+  if (!Array.isArray(a.cargos) || !a.cargos.length) return [];
+  return _dashUsuariosAtivos.filter(u => u.loja === 'GERAL' && a.cargos.includes(u.cargo));
+}
+
+// Um envio em lote cria uma linha por loja com o mesmo texto: a leitura do supervisor em
+// qualquer uma delas é a leitura daquela mensagem. Agrupa por texto + autor pra não misturar
+// dois recados diferentes que estejam ativos ao mesmo tempo.
+function _alertasForaDaLojaHtml(ativos) {
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  const grupos = new Map();
+  (ativos || []).forEach(a => {
+    const fora = _alertaForaDaLoja(a);
+    if (!fora.length) return;
+    const k = (a.motivo || '') + '|' + (a.criado_por || '');
+    const g = grupos.get(k) || { pessoas: new Map(), leram: new Set(), lojas: 0 };
+    fora.forEach(u => g.pessoas.set(u.nome, u));
+    (_dashAlertasLeituras[a.id] || []).forEach(n => g.leram.add(n));
+    g.lojas++;
+    grupos.set(k, g);
+  });
+  if (!grupos.size) return '';
+  return [...grupos.values()].map(g => {
+    const pessoas = [...g.pessoas.values()];
+    const jaViram = pessoas.filter(u => g.leram.has(u.nome));
+    const faltam = pessoas.filter(u => !g.leram.has(u.nome));
+    const cargosTxt = [...new Set(pessoas.map(u => ALERTA_CARGO_LABEL[u.cargo] || u.cargo))].join('/');
+    const cor = faltam.length ? '#b45309' : '#16a34a';
+    return `<div style="padding:6px 0 0;border-top:1px dashed rgba(0,0,0,.12);margin-top:4px">
+      <div style="font-size:9.5px;color:${cor};font-weight:700;line-height:1.5">
+        ${faltam.length ? '👔' : '✅'} ${esc(cargosTxt)} (fora da loja): leu ${jaViram.length}/${pessoas.length} · 1 leitura vale pelas ${g.lojas} loja${g.lojas > 1 ? 's' : ''}
+        ${jaViram.length ? '<br>✅ já viu: ' + esc(jaViram.map(u => u.nome).join(', ')) : ''}
+        ${faltam.length ? '<br>⏳ falta: ' + esc(faltam.map(u => u.nome).join(', ')) : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
 function _buildAlertasUrgentesCard(){
   const lista = _dashAlertasUrgentes || [];
   const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
@@ -6579,6 +6623,7 @@ function _buildAlertasUrgentesCard(){
       <button onclick="abrirModalAlertaLojas()" style="background:#ef4444;border:none;border-radius:7px;color:#fff;font-size:11px;font-weight:700;cursor:pointer;padding:5px 10px;white-space:nowrap;flex-shrink:0">🚨 Alertar lojas</button>
     </div>
     ${ativos.map(linhaAtivo).join('')}
+    ${_alertasForaDaLojaHtml(ativos)}
     ${resolvidos.map(linhaResolvido).join('')}
   </div>`;
 }
