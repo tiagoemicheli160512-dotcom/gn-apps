@@ -26,6 +26,7 @@
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="fichas-seed.js"></script>
+<script src="gn-armazenamento.js"></script>
 <script src="gn-lojas-config.js"></script>
 <script src="gn-escala-acesso.js"></script>
 <script src="gn-comissoes-calendario.js"></script>
@@ -5681,6 +5682,21 @@ function _limparFalhaSalvar(){
   try{ localStorage.removeItem('gn_cl_last_err_'+LOJA); }catch(_){}
 }
 
+// ── Cópia local ≠ servidor ───────────────────────────────────────────────────
+// Isto aqui era a MESMA mensagem da falha de servidor, e não é a mesma coisa nem de longe.
+// A cópia local é a rede de segurança pro caso de cair a conexão; o servidor é o que vale.
+// Quando só a cópia local tropeça, o dia ESTÁ salvo — mas a tela dizia "⚠️ Não salvou" em
+// vermelho e o app se declarava offline. Quem lia isso tinha dois motivos pra entender
+// errado: achar que perdeu o dia (e refazer o check-list inteiro) ou sair apagando foto do
+// celular, que não resolve nada porque a cota é do site, não do aparelho.
+function _registrarAvisoCopiaLocal(msg){
+  try{ localStorage.setItem('gn_cl_aviso_local_'+LOJA, String(msg||'').slice(0,160)); }catch(_){}
+  _updateLastSaveIndicator();
+}
+function _limparAvisoCopiaLocal(){
+  try{ localStorage.removeItem('gn_cl_aviso_local_'+LOJA); }catch(_){}
+}
+
 function _updateLastSaveIndicator(){
   const el=document.getElementById('last-save-indicator');
   if(!el||!LOJA) return;
@@ -5688,11 +5704,30 @@ function _updateLastSaveIndicator(){
     const txt=localStorage.getItem('gn_cl_last_save_'+LOJA);
     const dia=localStorage.getItem('gn_cl_last_save_dia_'+LOJA);
     const err=localStorage.getItem('gn_cl_last_err_'+LOJA);
+    const avisoLocal=localStorage.getItem('gn_cl_aviso_local_'+LOJA);
     // Só a hora enquanto o salvamento é de hoje — é o que a loja quer saber ("salvou?").
     // Se o último salvamento foi em outro dia, aí sim o dia importa e vai junto.
     const base = txt ? (dia && dia!==hojeLocal() ? txt+' ('+fmtBR(dia)+')' : txt) : '';
+    // O aviso da cópia local é resolvido ANTES de qualquer saída: quando isto ficava depois
+    // do `return` do erro vermelho, um aviso antigo ficava preso na tela embaixo da falha de
+    // servidor, já sem valer nada. Aqui ele acompanha o estado sempre.
+    // Cinza e miúdo de propósito: é recado de manutenção, não alarme.
+    let avisoEl=document.getElementById('aviso-copia-local');
+    if(avisoLocal){
+      if(!avisoEl){
+        avisoEl=document.createElement('div');
+        avisoEl.id='aviso-copia-local';
+        avisoEl.style.cssText='font-size:10px;line-height:1.4;color:var(--t3,#6b7280);margin-top:2px;font-weight:500';
+        el.parentNode.insertBefore(avisoEl, el.nextSibling);
+      }
+      avisoEl.textContent='ℹ️ '+avisoLocal;
+      avisoEl.style.display='block';
+    } else if(avisoEl){
+      avisoEl.style.display='none';
+    }
     if(err){
       // Vermelho e por extenso: enquanto isto estiver na tela, o dia NÃO está no servidor.
+      // Só falha de servidor chega aqui — tropeço da cópia local vai no aviso discreto.
       el.style.color='#b91c1c';
       el.textContent = '⚠️ Não salvou (' + err + ')' + (base ? ' · último OK: '+base : '');
       el.style.display='block';
@@ -5860,9 +5895,15 @@ function autoSave(){
   _captureSupervisaoDOM();
   _captureSupervisaoCozinhaDOM();
   try{
-    localStorage.setItem(getLocalKey(),      JSON.stringify(state));
-    localStorage.setItem(getLocalKeyWeek(), JSON.stringify(stateWeek));
+    // gnGuardar abre espaço sozinho antes de desistir (cache da Mestra, fotos de dias
+    // passados, fotos das cópias de outras lojas) — na maioria das vezes a cota enche por
+    // causa de loja que nem está aberta, e dá pra resolver sem o usuário saber de nada.
+    const r1 = gnGuardar(getLocalKey(), JSON.stringify(state), { lojaAtual: LOJA });
+    if(r1 !== 'ok' && r1 !== 'ok-apos-limpeza') throw new Error('cota');
+    gnGuardar(getLocalKeyWeek(), JSON.stringify(stateWeek), { lojaAtual: LOJA });
     _autoSaveFalhou = '';
+    _limparAvisoCopiaLocal();
+    _updateLastSaveIndicator();
   }catch(e){
     // Cota cheia: tenta de novo sem as fotos em base64, que é o que pesa. O dado que importa
     // (itens marcados, valores, faltas) cabe com folga — perder a cópia local da foto é bem
@@ -5873,13 +5914,15 @@ function autoSave(){
       ['checklist','abertura','fechamento'].forEach(k=>{
         Object.values(enxuto[k]||{}).forEach(setor=>Object.values(setor||{}).forEach(it=>{ if(it) it.fotoBase64=''; }));
       });
-      localStorage.setItem(getLocalKey(), JSON.stringify(enxuto));
-      localStorage.setItem(getLocalKeyWeek(), JSON.stringify(stateWeek));
-      _autoSaveFalhou = 'sem espaço no aparelho — a cópia local está sem as fotos';
+      gnGuardar(getLocalKey(), JSON.stringify(enxuto), { lojaAtual: LOJA });
+      gnGuardar(getLocalKeyWeek(), JSON.stringify(stateWeek), { lojaAtual: LOJA });
+      _autoSaveFalhou = 'Cópia de segurança deste aparelho ficou sem as fotos (memória do app cheia). O dia continua sendo salvo no servidor normalmente.';
     }catch(e2){
-      _autoSaveFalhou = 'sem espaço no aparelho pra guardar o dia (' + (e2?.name||'erro') + ')';
+      _autoSaveFalhou = 'Cópia de segurança deste aparelho não coube (memória do app cheia). O dia continua sendo salvo no servidor — só evite ficar sem internet agora.';
     }
-    if(typeof _registrarFalhaSalvar === 'function') _registrarFalhaSalvar(_autoSaveFalhou);
+    // Aviso discreto, NUNCA o vermelho de "não salvou" e nunca setSyncStatus('offline'):
+    // nada disso aqui diz qualquer coisa sobre o servidor, que é quem guarda o dia.
+    _registrarAvisoCopiaLocal(_autoSaveFalhou);
   }
 }
 
@@ -13000,10 +13043,14 @@ function setLojaAtiva(lojaDisplay, usuario){
     }
   }
 
-  // Salvar sessão com loja selecionada
-  localStorage.setItem('gn_chk_user_' + LOJA, JSON.stringify({
+  // Salvar sessão com loja selecionada.
+  // Via gnGuardar: esta linha estava sem try/catch, e é a PRIMEIRA coisa depois do login
+  // dar certo. Com a cota do site cheia, o setItem estourava aqui e levava junto tudo o que
+  // vem depois — gn_last_loja, gn_session_v1, o "bem-vindo" e a entrada no app. Resultado:
+  // nome e senha certos e a pessoa não entrava, sem nada na tela dizendo por quê.
+  gnGuardar('gn_chk_user_' + LOJA, JSON.stringify({
     id:usuario.id, nome:usuario.nome, cargo:usuario.cargo, loja:usuario.loja, lojaDisplay:LOJA
-  }));
+  }), { lojaAtual: LOJA });
   try{const lojaKey=LOJA_MAP[LOJA]||LOJA.toUpperCase();localStorage.setItem('gn_last_loja',JSON.stringify({loja:lojaKey,ts:Date.now()}));}catch(_){}
   try{localStorage.setItem('gn_session_v1',JSON.stringify({id:usuario.id,nome:usuario.nome,loja:usuario.loja,cargo:usuario.cargo,permissoes:usuario.permissoes||{},ts:Date.now()}));}catch(_){}
 
