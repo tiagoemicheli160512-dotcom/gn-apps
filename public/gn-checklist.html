@@ -616,6 +616,10 @@
   }
   .check-row:focus-within { border-color: var(--b2); }
   .check-row.done { opacity: 0.45; }
+  /* Item de validade com exigência em aberto: visível de relance num setor longo, sem
+     gritar como o vermelho do "não conforme" — não é defeito, é tarefa por fazer. */
+  .check-row.val-pendente { border-left: 3px solid #0EA5E9; }
+  .check-row.val-pendente.done { opacity: 1; }
 
   /* Ausência card */
   .ausencia-card {
@@ -2251,7 +2255,10 @@ const SETORES_CHECKLIST = {
     'Câmaras frias: geladeiras e freezers todos funcionando',
     'Datas de validade verificadas — itens vencidos/próximos separados',
     'Produtos de limpeza: verificados e trancados',
-    'Limpeza da coifa — registro atualizado'
+    'Limpeza da coifa — registro atualizado',
+    // Acrescentado NO FIM de propósito: os índices são a chave de state.checklist.estoque,
+    // e qualquer inserção no meio faria todo dia já salvo apontar pro item errado.
+    'Câmaras frias: validades conferidas — foto e lista de produtos'
   ]}
 };
 
@@ -3074,6 +3081,44 @@ const CARGOS_VISITAS = ['supervisor','mestre']; // só esses cargos dão entrada
 // que não pode ganhar 'mestre' porque o gn-home.html usa a ausência dele nessa lista pra decidir
 // que cargo mestre sempre vê todas as lojas (ver _computeLojasVisiveis em gn-home.html).
 const CARGOS_SUPERVISAO_CHK = [...CARGOS_SUPERVISAO, 'mestre'];
+
+// VALIDADE_* e _val* também precisam vir antes do init IIFE: renderAll() é chamado
+// sincronamente por ele e desce até renderCheckGroup(), que monta o painel de validades
+// de cada setor e lê VALIDADE_AREAS na primeira linha. Declarado lá embaixo, perto do
+// resto do código de validades, essa leitura caía no temporal dead zone e derrubava o
+// boot inteiro — o mesmo tombo que já tinha acontecido com os `let _dash*` do gn-home.
+const VALIDADE_AREAS_DEF = [
+  { area:'salao',   setor:'salao',   label:'Salão',         icone:'🪑', min:10,
+    texto:'Verificação de validade dos produtos expostos no salão' },
+  { area:'cozinha', setor:'cozinha', label:'Cozinha',       icone:'👨‍🍳', min:20,
+    texto:'Validade e etiqueta em todos os insumos manipulados' },
+  { area:'copa',    setor:'copa',    label:'Copa / Bar',    icone:'🍺', min:10,
+    texto:'Verificação de validade de bebidas, frutas e insumos do bar' },
+  { area:'estoque', setor:'estoque', label:'Estoque',       icone:'📦', min:10,
+    texto:'Datas de validade verificadas — itens vencidos/próximos separados' },
+  { area:'camaras', setor:'estoque', label:'Câmaras frias', icone:'❄️', min:20,
+    texto:'Câmaras frias: validades conferidas — foto e lista de produtos' },
+];
+const VALIDADE_DIAS_ALERTA = 3;   // "o que vai vencer nos próximos 3 dias"
+
+const VALIDADE_AREAS = (() => {
+  const out = [];
+  VALIDADE_AREAS_DEF.forEach(a => {
+    const itens = (SETORES_CHECKLIST[a.setor] || {}).items || [];
+    const idx = itens.indexOf(a.texto);
+    if (idx < 0) {
+      try { window.gnLogError && window.gnLogError('validades:item', new Error(
+        'Item de validade não encontrado em ' + a.setor + ': "' + a.texto + '"')); } catch(_) {}
+      return;
+    }
+    out.push(Object.assign({ idx }, a));
+  });
+  return out;
+})();
+
+let _valDados = {};        // area -> { itens:[...], carregado:bool }
+let _valCarregando = {};   // area -> bool
+let _valFormAberto = {};   // area -> bool
 
 // DATAS_ESPECIAIS_BASE também precisa vir antes do init IIFE: renderAll() (chamado
 // sincronamente por ele em alguns ramos) já popula o card de lembrete da aba Dados,
@@ -8209,10 +8254,360 @@ function renderSetorItems(stateKey, setor){
               </div>
             </div>`:''}
           </div>
+          ${_valPainelHtml(stateKey, setor, idx)}
         </div>
       </div>`;
     inner.appendChild(el);
   });
+}
+
+/* =============================================================================
+   VALIDADES — foto do setor e lista de produtos
+   =============================================================================
+   "Hoje marca e tá tudo certo, porém tenho achado muitos erros nessa parte."
+
+   O visto sozinho não prova nada: custa um toque, dê ou não dê trabalho conferir. Agora o
+   item de validade só fecha com três coisas do DIA: foto do setor, lista com o mínimo de
+   produtos e a confirmação de quem conferiu.
+
+   A LISTA FICA DE UM DIA PRO OUTRO (decisão do dono). Produto com validade de seis meses
+   não muda de data — redigitar todo dia não acrescentaria informação nenhuma, só custo, e
+   a saída previsível seria a equipe digitar qualquer coisa pra passar da trava. Com a lista
+   guardada, o primeiro dia é o trabalhoso; depois é conferir, corrigir o que mudou e
+   acrescentar o que entrou.
+
+   Por isso a lista NÃO mora no estado do dia: ela é uma linha própria em gn_lojas, por loja
+   e por área (VALIDADES_<loja>_<area>). Uma linha por ÁREA, não por loja: gerente e
+   sub-gerente conferindo setores diferentes ao mesmo tempo gravariam por cima um do outro
+   se fosse tudo num campo só.
+
+   Já a foto e a confirmação são do dia, e andam junto do próprio item em state.checklist —
+   que é jsonb, então os campos novos viajam sem precisar de coluna nova (migration segue
+   bloqueada).
+   ============================================================================= */
+
+// As áreas são encontradas pelo TEXTO do item, não por um índice fixo: índice escrito na
+// mão quebra calado no dia em que alguém reordenar a lista de um setor, e aí a exigência
+// passaria a valer pro item errado. Se o texto não bater, a área some e o check-list segue
+// funcionando como antes — nunca o contrário.
+// (As declarações das validades foram movidas pra cima do init IIFE — ver o bloco
+//  "Declarações globais usadas pelo init". renderAll() roda no boot e já lê VALIDADE_AREAS.)
+
+
+function _valDef(stateKey, setor, idx) {
+  if (stateKey !== 'checklist') return null;   // só a aba Check-list (decisão do dono)
+  return VALIDADE_AREAS.find(a => a.setor === setor && a.idx === idx) || null;
+}
+function _valLinha(area) { return 'VALIDADES_' + comissoesLojaKey() + '_' + area; }
+function _valItens(area) { return (_valDados[area] && _valDados[area].itens) || []; }
+
+function _valHojeISO() { return hojeLocal(); }
+function _valDiasAte(iso) {
+  if (!iso) return null;
+  const a = new Date(_valHojeISO() + 'T12:00:00');
+  const b = new Date(iso + 'T12:00:00');
+  if (isNaN(b)) return null;
+  return Math.round((b - a) / 86400000);
+}
+function _valStatus(it) {
+  const d = _valDiasAte(it && it.validade);
+  if (d === null) return 'sem-data';
+  if (d < 0) return 'vencido';
+  if (d <= VALIDADE_DIAS_ALERTA) return 'vencendo';
+  return 'ok';
+}
+function _valResumo(area) {
+  const itens = _valItens(area);
+  let vencidos = 0, vencendo = 0;
+  itens.forEach(it => {
+    const s = _valStatus(it);
+    if (s === 'vencido') vencidos++;
+    else if (s === 'vencendo') vencendo++;
+  });
+  return { total: itens.length, vencidos, vencendo };
+}
+
+async function _valCarregar(area, forcar) {
+  if (_valCarregando[area]) return;
+  if (_valDados[area] && _valDados[area].carregado && !forcar) return;
+  _valCarregando[area] = true;
+  try {
+    const res = await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(_valLinha(area))}&select=all_data`,
+      { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } });
+    // `fetch` só rejeita quando a rede some: 500, 401 e companhia voltam resolvidos. Sem
+    // este throw, erro do servidor virava "a lista está vazia" com carregado:true — e a
+    // trava passaria a cobrar 20 produtos de uma loja que JÁ TEM a lista, trancando o dia
+    // por causa de uma falha que não é dela. Erro de servidor é falha de carga, não lista
+    // vazia; lista de verdade vazia vem como 200 com [].
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const rows = await res.json();
+    const dados = (rows && rows[0] && rows[0].all_data) || {};
+    _valDados[area] = { itens: Array.isArray(dados.itens) ? dados.itens : [], carregado: true };
+  } catch (e) {
+    try { window.gnLogError && window.gnLogError('validades:carregar', e); } catch(_) {}
+    // Sem a lista carregada a exigência não pode ser cobrada — senão uma falha de rede
+    // trancaria o check-list do dia inteiro. carregado:false mantém a trava desligada.
+    _valDados[area] = { itens: [], carregado: false };
+  } finally {
+    _valCarregando[area] = false;
+  }
+}
+function _valCarregarTodas(forcar) {
+  return Promise.all(VALIDADE_AREAS.map(a => _valCarregar(a.area, forcar)));
+}
+
+async function _valGravar(area) {
+  const linha = _valLinha(area);
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+  const corpo = { all_data: { loja: comissoesLojaKey(), area, itens: _valItens(area) },
+                  updated_by: (usuarioLogado && usuarioLogado.nome) || '' };
+  try {
+    const existe = await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(linha)}&select=loja`,
+      { headers: H });
+    const rows = existe.ok ? await existe.json() : [];
+    const tem = Array.isArray(rows) && rows.length;
+    const res = await fetch(tem ? `${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(linha)}` : `${SB_URL}/rest/v1/gn_lojas`, {
+      method: tem ? 'PATCH' : 'POST',
+      headers: Object.assign({ Prefer: 'return=minimal' }, H),
+      body: JSON.stringify(tem ? corpo : Object.assign({ loja: linha }, corpo))
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return true;
+  } catch (e) {
+    try { window.gnLogError && window.gnLogError('validades:gravar', e); } catch(_) {}
+    showToast('⚠️ Não consegui salvar a lista agora. Confere a internet — o que você digitou continua na tela.', 'error');
+    return false;
+  }
+}
+
+// ── A trava ────────────────────────────────────────────────────────────────
+// Devolve o que ainda falta. Lista vazia = pode marcar. Enquanto a lista não tiver sido
+// carregada do banco, não cobra nada: falha de rede não pode trancar o dia.
+function _valFalta(stateKey, setor, idx, def) {
+  const d = _itemChk(stateKey, setor, idx);
+  const dados = _valDados[def.area];
+  if (!dados || !dados.carregado) return [];
+  const falta = [];
+  // A foto tem que ser DO DIA. Só conferir se existe deixaria a foto de ontem valer pra
+  // sempre — e aí a exigência não provaria nada, que é exatamente o problema do visto solto.
+  if (!d.valFoto) falta.push('a foto do setor');
+  else if (d.valFotoEm !== state.data) falta.push('a foto do setor de hoje (a salva é de outro dia)');
+  const n = _valItens(def.area).length;
+  if (n < def.min) falta.push(`${def.min - n} produto${def.min - n === 1 ? '' : 's'} na lista (tem ${n} de ${def.min})`);
+  if (!d.valConfEm || String(d.valConfEm).slice(0, 10) !== state.data) falta.push('a confirmação da conferência de hoje');
+  return falta;
+}
+
+function _valConfirmarDia(stateKey, setor, idx, area) {
+  const def = VALIDADE_AREAS.find(a => a.area === area);
+  if (!def) return;
+  const d = _itemChk(stateKey, setor, idx);
+  const n = _valItens(area).length;
+  if (n < def.min) {
+    showToast(`Faltam ${def.min - n} produto(s) pra confirmar ${def.label}.`, 'error');
+    return;
+  }
+  d.valConfEm = state.data + 'T' + new Date().toTimeString().slice(0, 8);
+  d.valConfPor = (usuarioLogado && usuarioLogado.nome) || '';
+  autoSave();
+  _valRedesenhar(area);
+  showToast(`✓ ${def.label}: conferência de hoje registrada.`, 'success');
+}
+
+async function _valFoto(stateKey, setor, idx, area, input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  showToast('Enviando foto...');
+  comprimirFoto(file, async (b64) => {
+    const url = await _uploadFotoChk(b64, 'validades');
+    if (!url) return;
+    const d = _itemChk(stateKey, setor, idx);
+    d.valFoto = url;
+    d.valFotoEm = state.data;
+    autoSave();
+    _valRedesenhar(area);
+    showToast('✓ Foto do setor salva.', 'success');
+  });
+}
+
+function _valApagarFoto(stateKey, setor, idx, area) {
+  const d = _itemChk(stateKey, setor, idx);
+  d.valFoto = ''; d.valFotoEm = '';
+  autoSave();
+  _valRedesenhar(area);
+}
+
+async function _valAdicionar(area) {
+  const nomeEl = document.getElementById('val-nome-' + area);
+  const dataEl = document.getElementById('val-data-' + area);
+  const nome = (nomeEl && nomeEl.value || '').trim();
+  const validade = (dataEl && dataEl.value || '').trim();
+  if (!nome) { showToast('Escreve o nome do produto.', 'error'); return; }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(validade)) { showToast('Preenche a data de validade.', 'error'); return; }
+  if (!_valDados[area]) _valDados[area] = { itens: [], carregado: true };
+  _valDados[area].itens.push({
+    id: Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+    nome, validade,
+    criado_em: new Date().toISOString(),
+    criado_por: (usuarioLogado && usuarioLogado.nome) || ''
+  });
+  if (nomeEl) nomeEl.value = '';
+  if (dataEl) dataEl.value = '';
+  _valRedesenhar(area);
+  await _valGravar(area);
+  if (nomeEl) nomeEl.focus();
+}
+
+async function _valRemover(area, id) {
+  const it = _valItens(area).find(x => x.id === id);
+  if (!it) return;
+  if (!confirm(`Tirar "${it.nome}" da lista?\n\nFaça isso quando o produto acabou, foi usado ou foi descartado.`)) return;
+  _valDados[area].itens = _valItens(area).filter(x => x.id !== id);
+  _valRedesenhar(area);
+  await _valGravar(area);
+}
+
+async function _valMudarData(area, id, valor) {
+  const it = _valItens(area).find(x => x.id === id);
+  if (!it || !/^\d{4}-\d{2}-\d{2}$/.test(valor)) return;
+  it.validade = valor;
+  it.atualizado_em = new Date().toISOString();
+  it.atualizado_por = (usuarioLogado && usuarioLogado.nome) || '';
+  _valRedesenhar(area);
+  await _valGravar(area);
+}
+
+function _valToggleForm(area) {
+  _valFormAberto[area] = !_valFormAberto[area];
+  _valRedesenhar(area);
+  if (_valFormAberto[area]) {
+    const el = document.getElementById('val-nome-' + area);
+    if (el) el.focus();
+  }
+}
+
+// ── Desenho ────────────────────────────────────────────────────────────────
+function _valRedesenhar(area) {
+  const def = VALIDADE_AREAS.find(a => a.area === area);
+  if (!def) return;
+  const el = document.getElementById('valpainel-' + area);
+  if (!el) return;
+  el.innerHTML = _valPainelInner('checklist', def);
+  // A linha do item acompanha: marcada quando nada falta, destravada visualmente quando falta.
+  const row = document.getElementById(`row-checklist_${def.setor}-${def.idx}`);
+  if (row) row.classList.toggle('val-pendente', _valFalta('checklist', def.setor, def.idx, def).length > 0);
+}
+
+function _valLinhaItemHtml(def, it) {
+  const st = _valStatus(it);
+  const dias = _valDiasAte(it.validade);
+  const cor = st === 'vencido' ? '#DC2626' : st === 'vencendo' ? '#B45309' : 'rgba(0,0,0,.45)';
+  const etiqueta = st === 'vencido'
+      ? (dias === -1 ? 'venceu ontem' : `venceu há ${Math.abs(dias)} dias`)
+    : st === 'vencendo'
+      ? (dias === 0 ? 'vence HOJE' : dias === 1 ? 'vence amanhã' : `vence em ${dias} dias`)
+    : '';
+  const fundo = st === 'vencido' ? 'rgba(220,38,38,.07)' : st === 'vencendo' ? 'rgba(180,83,9,.07)' : 'transparent';
+  return `<div style="display:flex;align-items:center;gap:7px;padding:5px 6px;border-radius:7px;background:${fundo}">
+    <div style="flex:1;min-width:0">
+      <div style="font-size:11.5px;color:#1A1D23;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(it.nome)}</div>
+      ${etiqueta ? `<div style="font-size:10px;font-weight:800;color:${cor};margin-top:1px">${etiqueta}</div>` : ''}
+    </div>
+    <input type="date" value="${escHtml(it.validade || '')}"
+      onchange="_valMudarData('${def.area}','${it.id}',this.value)"
+      style="font-size:11px;padding:3px 5px;border:1px solid rgba(0,0,0,.14);border-radius:6px;color:${cor};font-family:inherit">
+    <button onclick="_valRemover('${def.area}','${it.id}')" title="Tirar da lista"
+      style="background:none;border:none;color:rgba(0,0,0,.3);font-size:14px;cursor:pointer;padding:2px 4px">🗑</button>
+  </div>`;
+}
+
+function _valPainelInner(stateKey, def) {
+  const d = _itemChk(stateKey, def.setor, def.idx);
+  const dados = _valDados[def.area];
+  if (!dados) return `<div style="font-size:11px;color:rgba(0,0,0,.4);padding:6px 0">Carregando a lista de ${escHtml(def.label)}...</div>`;
+  if (!dados.carregado) {
+    return `<div style="font-size:11px;color:#B45309;padding:7px 9px;background:rgba(180,83,9,.08);border-radius:8px;line-height:1.45">
+      ⚠️ Não consegui carregar a lista de validades agora. A exigência fica desligada até voltar —
+      o item segue podendo ser marcado normalmente.
+      <button onclick="_valTentarDeNovo('${def.area}')" style="display:block;margin-top:6px;font-size:10.5px;font-weight:700;background:rgba(0,0,0,.06);border:1px solid rgba(0,0,0,.12);border-radius:7px;padding:4px 9px;cursor:pointer;font-family:inherit">↻ Tentar de novo</button>
+    </div>`;
+  }
+
+  const itens = _valItens(def.area).slice().sort((a, b) => String(a.validade).localeCompare(String(b.validade)));
+  const r = _valResumo(def.area);
+  const falta = _valFalta(stateKey, def.setor, def.idx, def);
+  const confHoje = d.valConfEm && String(d.valConfEm).slice(0, 10) === state.data;
+
+  const chip = (txt, cor, fundo) => `<span style="font-size:10px;font-weight:800;color:${cor};background:${fundo};border-radius:20px;padding:2px 8px">${txt}</span>`;
+
+  return `
+  <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:7px">
+    ${chip(`${r.total} de ${def.min} produtos`, r.total >= def.min ? '#047857' : '#B45309',
+           r.total >= def.min ? 'rgba(5,150,105,.12)' : 'rgba(180,83,9,.12)')}
+    ${r.vencidos ? chip(`${r.vencidos} vencido${r.vencidos > 1 ? 's' : ''}`, '#DC2626', 'rgba(220,38,38,.12)') : ''}
+    ${r.vencendo ? chip(`${r.vencendo} vence${r.vencendo > 1 ? 'm' : ''} em até ${VALIDADE_DIAS_ALERTA} dias`, '#B45309', 'rgba(180,83,9,.12)') : ''}
+  </div>
+
+  <div style="margin-bottom:8px">
+    <label class="field-label" style="color:#333;margin-bottom:3px">📷 Foto do setor — hoje</label>
+    ${d.valFoto && d.valFotoEm === state.data
+      ? `<div style="display:flex;align-items:flex-start;gap:8px">
+           <img src="${escHtml(d.valFoto)}" class="foto-thumb">
+           <button class="btn-danger" style="font-size:10px;padding:3px 8px" onclick="_valApagarFoto('${stateKey}','${def.setor}',${def.idx},'${def.area}')">🗑 Trocar foto</button>
+         </div>`
+      : `<input type="file" accept="image/*" capture="environment" onchange="_valFoto('${stateKey}','${def.setor}',${def.idx},'${def.area}',this)">
+         ${d.valFoto ? `<div style="font-size:10px;color:#B45309;margin-top:3px">A foto que está salva é de outro dia — tire a de hoje.</div>` : ''}`}
+  </div>
+
+  <div style="max-height:260px;overflow-y:auto;border:1px solid rgba(0,0,0,.08);border-radius:9px;padding:4px;background:#fff">
+    ${itens.length ? itens.map(it => _valLinhaItemHtml(def, it)).join('')
+      : `<div style="font-size:11px;color:rgba(0,0,0,.4);padding:10px;text-align:center;line-height:1.5">
+           Lista vazia. O primeiro dia é o trabalhoso — depois ela fica guardada e você só confere.</div>`}
+  </div>
+
+  ${_valFormAberto[def.area] ? `
+    <div style="display:flex;gap:5px;margin-top:7px">
+      <input id="val-nome-${def.area}" type="text" placeholder="Nome do produto" autocomplete="off"
+        onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('val-data-${def.area}').focus();}"
+        style="flex:1;min-width:0;font-size:11.5px;padding:7px;border:1px solid rgba(0,0,0,.14);border-radius:8px;font-family:inherit">
+      <input id="val-data-${def.area}" type="date"
+        onkeydown="if(event.key==='Enter'){event.preventDefault();_valAdicionar('${def.area}');}"
+        style="font-size:11.5px;padding:7px;border:1px solid rgba(0,0,0,.14);border-radius:8px;font-family:inherit">
+    </div>
+    <div style="display:flex;gap:5px;margin-top:5px">
+      <button onclick="_valAdicionar('${def.area}')" style="flex:1;background:#1A1D23;border:none;border-radius:8px;padding:8px;color:#fff;font-size:11.5px;font-weight:800;cursor:pointer;font-family:inherit">+ Adicionar à lista</button>
+      <button onclick="_valToggleForm('${def.area}')" style="background:rgba(0,0,0,.05);border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:8px 12px;font-size:11.5px;font-weight:700;cursor:pointer;font-family:inherit;color:rgba(0,0,0,.6)">Fechar</button>
+    </div>`
+  : `<button onclick="_valToggleForm('${def.area}')" style="width:100%;margin-top:7px;background:rgba(0,0,0,.05);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:8px;font-size:11.5px;font-weight:700;cursor:pointer;font-family:inherit;color:#1A1D23">+ Adicionar produto</button>`}
+
+  <button onclick="_valConfirmarDia('${stateKey}','${def.setor}',${def.idx},'${def.area}')"
+    style="width:100%;margin-top:7px;background:${confHoje ? 'rgba(5,150,105,.12)' : '#059669'};
+    border:${confHoje ? '1px solid rgba(5,150,105,.35)' : 'none'};border-radius:8px;padding:9px;
+    color:${confHoje ? '#047857' : '#fff'};font-size:11.5px;font-weight:800;cursor:pointer;font-family:inherit">
+    ${confHoje ? `✓ Conferido hoje${d.valConfPor ? ' por ' + escHtml(d.valConfPor) : ''}` : 'Confirmar que conferi hoje'}</button>
+
+  ${falta.length ? `<div style="font-size:10.5px;color:#B45309;margin-top:6px;line-height:1.45">
+    Pra marcar este item falta: ${falta.map(escHtml).join(' · ')}.</div>` : ''}`;
+}
+
+function _valPainelHtml(stateKey, setor, idx) {
+  const def = _valDef(stateKey, setor, idx);
+  if (!def) return '';
+  return `<div class="val-painel" id="valpainel-${def.area}"
+    style="margin-top:8px;border:1px solid rgba(0,0,0,.1);border-left:3px solid #0EA5E9;border-radius:10px;padding:10px;background:rgba(14,165,233,.04)">
+    <div style="font-size:11px;font-weight:800;color:#1A1D23;margin-bottom:7px">${def.icone} Validades — ${escHtml(def.label)}</div>
+    ${_valPainelInner(stateKey, def)}
+  </div>`;
+}
+
+function _valTentarDeNovo(area) {
+  _valCarregar(area, true).then(() => _valRedesenhar(area));
+}
+
+// Carrega as listas e redesenha os painéis que já estiverem na tela.
+function _valIniciar() {
+  if (!LOJA || !VALIDADE_AREAS.length) return;
+  _valCarregarTodas(true).then(() => VALIDADE_AREAS.forEach(a => _valRedesenhar(a.area)));
 }
 
 // =============================================
@@ -8272,6 +8667,21 @@ function toggleNaoConforme(stateKey, setor, idx){
 
 function toggleCheck(stateKey, setor, idx, el){
   const d = _itemChk(stateKey, setor, idx);
+  // Validade só fecha com foto do dia, lista no mínimo e conferência confirmada. A trava
+  // vale só pra MARCAR: desmarcar e marcar "não conforme" seguem livres, senão um item de
+  // validade com problema real não teria como ser registrado.
+  const defVal = _valDef(stateKey, setor, idx);
+  if (defVal && el.checked) {
+    const falta = _valFalta(stateKey, setor, idx, defVal);
+    if (falta.length) {
+      el.checked = false;
+      d.checked = false;
+      showToast(`${defVal.label}: falta ${falta.join(' · ')}.`, 'error');
+      const painel = document.getElementById('valpainel-' + defVal.area);
+      if (painel) painel.scrollIntoView({ behavior:'smooth', block:'center' });
+      return;
+    }
+  }
   d.checked = el.checked;
   if(el.checked){
     d.naoConforme = false;                              // marcar conforme tira o não conforme
@@ -8282,7 +8692,9 @@ function toggleCheck(stateKey, setor, idx, el){
   }
 
   const row=document.getElementById(`row-${stateKey}_${setor}-${idx}`);
-  if(el.checked) row.classList.add('done'); else row.classList.remove('done');
+  // `if(row)` nas três: a linha de baixo já protegia, esta não — e sem a linha na tela
+  // (grupo ainda não desenhado) o toggle estourava e levava junto o autoSave do fim.
+  if(row) row.classList.toggle('done', !!el.checked);
   if(row) row.classList.toggle('naoconf', !!d.naoConforme);
   updateBadge(stateKey, setor);
   updateSummary();
@@ -9591,6 +10003,9 @@ function renderAll(){
   updateAberturaCount();
   updateFechamentoCount();
   updateFatSemanal();
+  // As listas de validade vêm do banco e não do estado do dia, então chegam depois do
+  // desenho — _valIniciar() busca e repinta só os painéis, sem redesenhar o check-list.
+  _valIniciar();
 }
 
 function restoreUI(){
