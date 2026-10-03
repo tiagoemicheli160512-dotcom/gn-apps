@@ -353,6 +353,10 @@
   <!-- Primeiro card da Home, logo abaixo do nome da loja e da gerência de plantão -->
   <div id="venda-mes-home-card"></div>
 
+  <!-- Desempenho do mês fechado — subiu pra cá (estava lá embaixo, depois das visitas).
+       A gerência tem que bater o olho nisso, e no fim da Home quase ninguém chegava. -->
+  <div id="mes-anterior-home-card"></div>
+
   <!-- Caixa de sugestões, aberta por uma semana. Fica DEPOIS do card de vendas de propósito:
        a primeira coisa que a loja abre o app pra ver é o número do dia. -->
   <div id="sugestoes-app-home-card"></div>
@@ -372,8 +376,6 @@
   <div id="pendencias-loja-home-card"></div>
 
   <div id="visita-supervisao-home-card"></div>
-
-  <div id="mes-anterior-home-card"></div>
 
   <div id="docs-rh-home-card"></div>
 
@@ -1519,6 +1521,139 @@ function _dreCompetencia(d) {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
 }
 
+/* ── Ciência do desempenho do mês fechado ──────────────────────────────────────────────
+   "Hoje não consigo medir se estão vendo de fato o resultado."
+
+   O card existia e ninguém sabia se era aberto. Agora a gerência confirma que viu, DENTRO
+   do card expandido — o botão não aparece no resumo fechado de propósito: confirmar sem
+   abrir não provaria nada, que é justamente o problema de hoje.
+
+   A confirmação pede a SENHA DO GERENTE (combinado com o dono). O app já usa esse padrão
+   onde importa quem foi — edição do Mini DRE, liberação de folga. Sem senha, qualquer um
+   com o celular na mão daria a ciência pela gerência, e a medição voltaria a não valer.
+
+   Guarda em gn_lojas, linha DESEMPENHO_CIENTE, no formato {competência: {loja: {...}}} —
+   mesma linha compartilhada do DRE_CONFIG. São 11 confirmações por mês, uma por loja, então
+   a disputa é desprezível; ainda assim relê antes de gravar, porque a linha é comum. */
+const CIENTE_LINHA  = 'DESEMPENHO_CIENTE';
+const CIENTE_CARGOS = ['gerente'];            // quem pode dar a ciência
+let _cienteAllData = null;
+let _cienteForm = null;                       // loja com o formulário de senha aberto
+let _cienteErro = '';
+let _cienteSalvando = false;
+
+async function _cienteCarregar(force) {
+  if (_cienteAllData && !force) return _cienteAllData;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const rows = await window.gnFetchJson(
+    `${SB_URL}/rest/v1/gn_lojas?loja=eq.${CIENTE_LINHA}&select=all_data`, H, 'ciente:carregar', null);
+  // null = falha de rede. Não cacheia {}: senão o card diria "ninguém confirmou" pelo resto
+  // da sessão, e o dono mediria errado justamente onde quer medir.
+  if (rows === null) return null;
+  _cienteAllData = (rows[0] && rows[0].all_data) || {};
+  return _cienteAllData;
+}
+
+function _cienteDe(comp, loja) {
+  const d = _cienteAllData || {};
+  return (d[comp] && d[comp][loja]) || null;
+}
+
+function _cienteAbrirForm(loja) {
+  _cienteForm = _cienteForm === loja ? null : loja;
+  _cienteErro = '';
+  _renderMesAnteriorHome(true, session, !!masterLoja);
+}
+
+async function _cienteConfirmar(loja, comp, mesNome) {
+  if (_cienteSalvando) return;
+  const u = document.getElementById('ciente-user');
+  const p = document.getElementById('ciente-senha');
+  const user = (u && u.value || '').trim();
+  const pass = (p && p.value || '');
+  if (!user || !pass) { _cienteErro = 'Preencha usuário e senha.'; _renderMesAnteriorHome(true, session, !!masterLoja); return; }
+  _cienteSalvando = true; _cienteErro = '';
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+  try {
+    const auth = await window.gnFetchJson(`${SB_URL}/rest/v1/rpc/verificar_login`, H, 'ciente:auth', [],
+      { method: 'POST', body: JSON.stringify({ p_nome: user, p_senha: pass, p_app: 'gn-home:ciente' }) });
+    const cargo = (auth[0] && auth[0].cargo || '').toLowerCase();
+    // verificar_login é genérico e não filtra cargo — a trava de cargo é aqui, explícita.
+    if (!auth.length) { _cienteErro = 'Usuário ou senha incorretos.'; return; }
+    if (!CIENTE_CARGOS.includes(cargo)) {
+      _cienteErro = `A ciência é da gerência. ${auth[0].nome} está como ${auth[0].cargo || 'sem cargo'}.`;
+      return;
+    }
+    // Relê antes de gravar: a linha é compartilhada por todas as lojas, e gravar o que estava
+    // em memória apagaria a ciência que outra loja deu enquanto esta tela estava aberta.
+    const atual = await _cienteCarregar(true);
+    if (atual === null) { _cienteErro = 'Sem conexão com o banco. Tente de novo.'; return; }
+    const dados = JSON.parse(JSON.stringify(atual));
+    dados[comp] = dados[comp] || {};
+    dados[comp][loja] = { nome: auth[0].nome, cargo, em: new Date().toISOString(), mes: mesNome };
+    const res = await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${CIENTE_LINHA}`, {
+      method: 'PATCH',
+      headers: Object.assign({ Prefer: 'return=minimal' }, H),
+      body: JSON.stringify({ all_data: dados, updated_by: auth[0].nome })
+    });
+    if (!res.ok) {
+      // A linha pode ainda não existir na primeira ciência da rede.
+      const cria = await fetch(`${SB_URL}/rest/v1/gn_lojas`, {
+        method: 'POST', headers: Object.assign({ Prefer: 'return=minimal' }, H),
+        body: JSON.stringify({ loja: CIENTE_LINHA, all_data: dados, updated_by: auth[0].nome })
+      });
+      if (!cria.ok) throw new Error('HTTP ' + res.status);
+    }
+    _cienteAllData = dados;
+    _cienteForm = null;
+  } catch (e) {
+    window.gnLogError && window.gnLogError('ciente:confirmar', e);
+    _cienteErro = 'Não consegui registrar agora. Confere a internet e tenta de novo.';
+  } finally {
+    _cienteSalvando = false;
+    await _renderMesAnteriorHome(true, session, !!masterLoja);
+  }
+}
+
+// O bloco que vai no FIM do card expandido.
+function _cienteBlocoHtml(loja, comp, mesNome) {
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  const j = _cienteDe(comp, loja);
+  if (j) {
+    const quando = j.em ? new Date(j.em) : null;
+    const dt = quando ? String(quando.getDate()).padStart(2,'0') + '/' + String(quando.getMonth()+1).padStart(2,'0') +
+                        ' às ' + String(quando.getHours()).padStart(2,'0') + ':' + String(quando.getMinutes()).padStart(2,'0') : '';
+    return `<div style="margin-top:6px;background:rgba(5,150,105,.1);border:1px solid rgba(5,150,105,.3);border-radius:10px;padding:9px 11px">
+      <div style="font-size:11.5px;font-weight:800;color:#047857">✓ Resultado visto pela gerência</div>
+      <div style="font-size:10.5px;color:rgba(0,0,0,.55);margin-top:2px">${esc(j.nome)} · ${esc(dt)}</div>
+    </div>`;
+  }
+  if (_cienteForm === loja) {
+    return `<div style="margin-top:6px;background:rgba(0,0,0,.03);border:1px solid rgba(0,0,0,.1);border-radius:10px;padding:11px">
+      <div style="font-size:10.5px;font-weight:800;color:rgba(0,0,0,.6);margin-bottom:7px">SENHA DA GERÊNCIA</div>
+      <input id="ciente-user" type="text" placeholder="Usuário" autocomplete="off"
+        style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.14);border-radius:8px;padding:9px;font-size:12px;margin-bottom:6px;font-family:inherit">
+      <input id="ciente-senha" type="password" placeholder="Senha" autocomplete="off"
+        onkeydown="if(event.key==='Enter')_cienteConfirmar('${esc(loja)}','${esc(comp)}','${esc(mesNome)}')"
+        style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.14);border-radius:8px;padding:9px;font-size:12px;font-family:inherit">
+      ${_cienteErro ? `<div style="font-size:11px;color:#b91c1c;margin-top:7px;line-height:1.4">${esc(_cienteErro)}</div>` : ''}
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button onclick="_cienteConfirmar('${esc(loja)}','${esc(comp)}','${esc(mesNome)}')" ${_cienteSalvando ? 'disabled' : ''}
+          style="flex:1;background:#059669;border:none;border-radius:9px;padding:10px;color:#fff;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit;opacity:${_cienteSalvando?'.6':'1'}">
+          ${_cienteSalvando ? 'Registrando...' : 'Confirmar que vi'}</button>
+        <button onclick="_cienteAbrirForm('${esc(loja)}')"
+          style="background:rgba(0,0,0,.05);border:1px solid rgba(0,0,0,.1);border-radius:9px;padding:10px 13px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;color:rgba(0,0,0,.6)">
+          Cancelar</button>
+      </div>
+    </div>`;
+  }
+  return `<button onclick="_cienteAbrirForm('${esc(loja)}')"
+    style="width:100%;margin-top:6px;background:#059669;border:none;border-radius:10px;padding:11px;color:#fff;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">
+    ✓ Confirmar que vi o resultado de ${esc(mesNome)}</button>
+  <div style="font-size:10px;color:rgba(0,0,0,.42);margin-top:5px;text-align:center;line-height:1.4">
+    Com a senha da gerência. Fica registrado quem confirmou e quando.</div>`;
+}
+
 async function _dreCarregar(force) {
   if (_dreAllData && !force) return _dreAllData;
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
@@ -1997,6 +2132,7 @@ async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
     // Mini DRE do mês fechado — a competência é o mesmo mês do card (mesNome).
     const dreComp = _dreCompetencia(fimMesAnterior);
     await _dreCarregar();
+    await _cienteCarregar();   // mesma competência do DRE: a ciência é do mês fechado
     _dreCtx = { loja, comp: dreComp, faturamento, mesNome };
     _dreEditando = false;
 
@@ -2005,7 +2141,10 @@ async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
         <span style="font-size:18px;flex-shrink:0">📊</span>
         <div style="flex:1;min-width:0">
           <div style="font-size:12px;font-weight:800;color:#1A1D23">Veja o desempenho de ${mesNome}</div>
-          <div style="font-size:10px;color:rgba(0,0,0,.45);margin-top:2px">Toque pra expandir o resumo do mês anterior</div>
+          <div style="font-size:10px;color:${_cienteDe(dreComp, loja) ? '#047857' : '#B45309'};margin-top:2px;font-weight:700">
+            ${_cienteDe(dreComp, loja)
+              ? '✓ Visto por ' + (window.escapeHtml ? window.escapeHtml(_cienteDe(dreComp, loja).nome) : _cienteDe(dreComp, loja).nome)
+              : 'Toque pra abrir — a gerência precisa confirmar que viu'}</div>
         </div>
         <span style="font-size:12px;color:#4F46E5;flex-shrink:0">▾</span>
       </summary>
@@ -2027,6 +2166,9 @@ async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
         ${_dreFormHtml(loja, dreComp)}
         <button onclick="event.stopPropagation();_relatorioMesAnteriorWhats()" style="margin-top:4px;background:#25D366;border:none;border-radius:10px;padding:9px;color:#fff;font-weight:700;font-size:12px;cursor:pointer;font-family:inherit">📲 Relatório para WhatsApp</button>
         <div style="font-size:9px;color:rgba(0,0,0,.35)">Margem fica na aba Produção (app Lojas) — calculada por semana, ainda sem resumo mensal aqui.</div>
+        <!-- Ciência no FIM do card, e só aqui dentro: pra chegar neste botão a gerência
+             precisou rolar o resumo inteiro. Confirmar sem abrir não provaria nada. -->
+        <div onclick="event.stopPropagation()">${_cienteBlocoHtml(loja, dreComp, mesNome)}</div>
       </div>
     </details>`;
   } catch (e) {
@@ -2580,6 +2722,50 @@ function _buildPendenciasEssenciaisCard(){
     <div style="font-size:12px;font-weight:800;color:#1A1D23;margin-bottom:2px">🔒 Pendências essenciais · ${lojas.length} loja${lojas.length>1?'s':''} · ${totalCasos} caso${totalCasos>1?'s':''}</div>
     <div style="font-size:10px;color:rgba(0,0,0,.45);margin-bottom:4px">Ranking de lojas travadas agora (Nota Fiscal, Carnes, Banda, Escala, Banco de Horas, Salário)</div>
     ${ranking.map(linha).join('')}
+  </div>`;
+}
+
+// ── Painel: quem já viu o resultado do mês fechado ────────────────────────────────────
+// O botão dentro do card registra a ciência loja por loja. Sem este cartão, pra "medir" o
+// dono teria que entrar nas 11 lojas uma a uma — ou seja, continuaria sem medir, que é a
+// queixa que originou tudo isto.
+// Maglia fora da conta (CLAUDE.md — não foi citada), e também porque ela não tem nenhum
+// usuário cadastrado: entraria como pendente pra sempre, sem ninguém que pudesse resolver.
+function _buildCienciaMesCard() {
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  if (!_cienteAllData) return '';
+  const hoje = new Date();
+  const fimMesAnterior = new Date(hoje.getFullYear(), hoje.getMonth(), 0);
+  const comp = _dreCompetencia(fimMesAnterior);
+  const MESES = ['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+  const mesNome = MESES[fimMesAnterior.getMonth()];
+  const lojas = _lojasFatConsolidado(LOJAS_TODAS);
+  if (!lojas.length) return '';
+  const vistas = lojas.filter(k => _cienteDe(comp, k));
+  const faltam = lojas.filter(k => !_cienteDe(comp, k));
+  const tudo = faltam.length === 0;
+
+  const chip = (k, ok) => {
+    const j = ok ? _cienteDe(comp, k) : null;
+    return `<span title="${ok ? esc(j.nome) : 'ainda não confirmou'}"
+      style="font-size:9.5px;font-weight:700;border-radius:999px;padding:3px 8px;white-space:nowrap;
+      color:${ok ? '#047857' : '#B45309'};background:${ok ? 'rgba(5,150,105,.12)' : 'rgba(180,83,9,.12)'};
+      border:1px solid ${ok ? 'rgba(5,150,105,.3)' : 'rgba(180,83,9,.3)'}">
+      ${ok ? '✓ ' : ''}${esc(LOJA_DISPLAY[k] || k)}</span>`;
+  };
+
+  return `<div style="background:${tudo ? 'rgba(5,150,105,.05)' : 'rgba(180,83,9,.05)'};
+    border:1px solid ${tudo ? 'rgba(5,150,105,.2)' : 'rgba(180,83,9,.2)'};
+    border-left:3px solid ${tudo ? '#059669' : '#B45309'};border-radius:14px;padding:14px 16px;margin:0 0 14px">
+    <div style="font-size:12px;font-weight:800;color:#1A1D23;margin-bottom:2px">
+      📊 Resultado de ${esc(mesNome)} · ${vistas.length} de ${lojas.length} lojas viram</div>
+    <div style="font-size:10px;color:rgba(0,0,0,.45);margin-bottom:8px">
+      ${tudo ? 'Todas as lojas confirmaram, com a senha da gerência.'
+             : 'A gerência confirma dentro do card de desempenho, na Home da loja.'}</div>
+    <div style="display:flex;flex-wrap:wrap;gap:5px">
+      ${faltam.map(k => chip(k, false)).join('')}
+      ${vistas.map(k => chip(k, true)).join('')}
+    </div>
   </div>`;
 }
 
@@ -6564,6 +6750,9 @@ async function _loadDashAll() {
   if (_dashLoading) return;
   _dashLoading = true;
   _dashLoadHadError = false;
+  // Ciência do mês fechado: sem await no fluxo principal pra não atrasar o painel. Quando
+  // chega, só o cartão dela precisa aparecer — por isso redesenha no fim.
+  _cienteCarregar(true).then(() => { if (!_dashLoading) renderDashboard(); }).catch(() => {});
   const range     = _dashPer==='sem' ? _weekRange(_dashWoff)   : _monthRange(_dashMoff);
   const prevRange = _dashPer==='sem' ? _weekRange(_dashWoff-1) : _monthRange(_dashMoff-1);
   const range2    = _dashPer==='sem' ? _weekRange(_dashWoff-2)  : _monthRange(_dashMoff-2);
@@ -9409,6 +9598,7 @@ function renderDashboard() {
       </div>
       ${_cardSeguro('alertas', _buildAlertasUrgentesCard)}
       ${_cardSeguro('pendencias', _buildPendenciasEssenciaisCard)}
+      ${_cardSeguro('cienciaMes', _buildCienciaMesCard)}
       ${_cardSeguro('ferias', _buildFeriasUmaSemanaCard)}
       <div id="visitas-hoje-card-holder">${_cardSeguro('visitasHoje', _buildVisitasHojeCard)}</div>
       <div class="dash-tabs">
