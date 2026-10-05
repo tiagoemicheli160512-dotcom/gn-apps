@@ -62,6 +62,40 @@ window.gnLojaPorChave = function (chave) {
     l.userKey === k || l.chkKey === k || l.comKey === k || l.lojaSlug === k || l.display === k) || null;
 };
 
+// ── Entrada de carne que na verdade é contagem ─────────────────────────────
+// Caso real (Norte Shopping, semana de 28/09): a loja contou o estoque na terça e lançou o
+// mesmo número em três campos — estoque inicial, contagem do dia e ENTRADA do dia. As quatro
+// carnes de uma vez. Resultado: 405 kg de entrada que nunca chegaram, e a venda estimada,
+// que existe justamente pra apontar perda, apontando 533 kg onde o certo eram 320.
+//
+// O sinal é simples e forte: entrada idêntica à contagem daquele dia, ou ao estoque inicial.
+// Entrega bate nesses números por coincidência quase nunca — ainda mais com casas decimais.
+// Entregas de verdade quase sempre chegam pela automação, que grava autoEnt_<dia> junto;
+// quando esse par existe e confere, o valor é da automação e não se questiona.
+//
+// Avisa, nunca bloqueia: quem está com a carne na mão sabe mais do que esta regra.
+// Devolve null quando não há suspeita, ou o motivo em texto quando há.
+window.gnEntradaCarneSuspeita = function (dadosCarne, dia) {
+  if (!dadosCarne || !dia) return null;
+  var num = function (v) {
+    if (v === undefined || v === null || v === '') return null;
+    var n = parseFloat(v);
+    return isNaN(n) ? null : n;
+  };
+  var ent = num(dadosCarne['ent_' + dia]);
+  if (ent === null || ent <= 0) return null;
+
+  // Valor que a automação escreveu naquele dia: se a entrada ainda é ele, veio de entrega
+  // conferida e não é digitação.
+  var auto = num(dadosCarne['autoEnt_' + dia]);
+  if (auto !== null && Math.abs(auto - ent) < 0.005) return null;
+
+  var igual = function (a, b) { return a !== null && b !== null && Math.abs(a - b) < 0.005; };
+  if (igual(ent, num(dadosCarne[dia])))      return 'igual à contagem deste dia';
+  if (igual(ent, num(dadosCarne.inicial)))   return 'igual ao estoque inicial da semana';
+  return null;
+};
+
 // ── Região de compra (RJ / SP) ─────────────────────────────────────────────
 // Itaquera e Guarulhos compram em São Paulo: preço e fornecedor do mesmo item são outros.
 // Por isso o catálogo do app Estoque e Pedido é separado por região (gn_catalogo.regiao),
