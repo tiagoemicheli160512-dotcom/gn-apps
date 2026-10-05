@@ -1751,6 +1751,89 @@ function _dreToggleEdicao() {
   _dreEditando = !_dreEditando;
   const box = document.getElementById('dre-edit-box');
   if (box) box.style.display = _dreEditando ? 'block' : 'none';
+  // Ao abrir, carrega a base do mês já selecionado — sem isso o rodapé do seletor fica mudo
+  // até alguém trocar de mês, e o % de conferência não aparece.
+  if (_dreEditando) _dreTrocarMes();
+}
+
+/* O realizado é lançado por MÊS, e o card é sempre do mês que fechou. Sem escolher o mês
+   aqui, só o último era alcançável: setembro dava pra lançar, agosto e os de trás não — e
+   "lançar o realizado dos meses" ficava impossível de fato.
+
+   A % de cada conta é da loja, não do mês: trocar o mês muda só a coluna do realizado. */
+const DRE_MESES_PT = ['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+const DRE_MESES_ATRAS = 15;
+const _dreFatCache = {};     // 'LOJA|AAAA-MM' -> faturamento (null = falhou a leitura)
+
+function _dreCompLabel(comp) {
+  const p = (comp || '').split('-');
+  const m = parseInt(p[1], 10);
+  return (DRE_MESES_PT[m - 1] || comp) + ' de ' + p[0];
+}
+
+// Faturamento do mês escolhido — a base contra a qual o valor lançado é conferido. Vem do
+// mesmo lugar que o card usa (checklist_diario), pra tela e conferência nunca divergirem.
+async function _dreFatDoMes(loja, comp) {
+  const k = loja + '|' + comp;
+  if (_dreFatCache[k] !== undefined) return _dreFatCache[k];
+  const chkKey = LOJA_DB_KEY[loja] || loja;
+  const p = comp.split('-'); const ano = +p[0], mes = +p[1];
+  const ult = new Date(ano, mes, 0).getDate();
+  const iniISO = comp + '-01';
+  const fimISO = comp + '-' + String(ult).padStart(2, '0');
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const rows = await window.gnFetchJson(
+    `${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${iniISO}&data_operacao=lte.${fimISO}&select=venda_salao,venda_delivery`,
+    H, 'dre:fatMes', null);
+  if (rows === null) return null;   // não cacheia falha de rede
+  const fat = rows.reduce((s, r) => s + (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0), 0);
+  _dreFatCache[k] = fat;
+  return fat;
+}
+
+function _dreMesEscolhido() {
+  const el = document.getElementById('dre-mes');
+  return (el && el.value) || (_dreCtx && _dreCtx.comp) || '';
+}
+
+// Trocar o mês recarrega só a coluna do realizado e a base de conferência — nunca mexe no
+// usuário e na senha já digitados, que é o que faria lançar 9 meses virar 9 logins.
+async function _dreTrocarMes() {
+  if (!_dreCtx) return;
+  const comp = _dreMesEscolhido();
+  const real = _dreRealizado(_dreCtx.loja, comp);
+  DRE_CONTAS.forEach(c => {
+    const inp = document.getElementById('dre-real-' + c.k);
+    if (inp) inp.value = real[c.k] != null ? real[c.k] : '';
+  });
+  const base = document.getElementById('dre-base');
+  if (base) base.textContent = 'Carregando o faturamento de ' + _dreCompLabel(comp) + '…';
+  const fat = await _dreFatDoMes(_dreCtx.loja, comp);
+  if (comp !== _dreMesEscolhido()) return;   // trocou de novo enquanto carregava
+  if (base) {
+    base.textContent = fat === null
+      ? 'Não consegui ler o faturamento de ' + _dreCompLabel(comp) + ' — o % ao lado de cada valor fica sem base.'
+      : fat > 0
+        ? 'Faturamento de ' + _dreCompLabel(comp) + ': R$ ' + fat.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+        : 'Sem faturamento lançado em ' + _dreCompLabel(comp) + '.';
+  }
+  _dreAtualizarPcts(fat);
+}
+
+// Mostra, ao lado de cada valor digitado, quanto ele representa do faturamento do mês. O
+// relatório da empresa vem em % (CMV 35,63%, por exemplo) e o campo é em R$ — sem essa
+// conferência, a conversão fica na cabeça de quem digita, nove meses seguidos.
+function _dreAtualizarPcts(fat) {
+  DRE_CONTAS.forEach(c => {
+    const el = document.getElementById('dre-hint-' + c.k);
+    if (!el) return;
+    const v = parseFloat((document.getElementById('dre-real-' + c.k) || {}).value);
+    el.textContent = (fat && isFinite(v) && v > 0) ? (v / fat * 100).toFixed(2).replace('.', ',') + '%' : '';
+  });
+}
+function _dreHintInput() {
+  const f = _dreFatCache[(_dreCtx ? _dreCtx.loja : '') + '|' + _dreMesEscolhido()];
+  _dreAtualizarPcts(f == null ? null : f);
 }
 
 function _dreFormHtml(loja, comp) {
@@ -1761,10 +1844,34 @@ function _dreFormHtml(loja, comp) {
       <span style="display:block;font-size:9px;color:rgba(0,0,0,.38);line-height:1.3">${c.nota}</span></span>
     <input id="dre-pct-${c.k}" type="number" step="0.5" min="0" max="100" value="${_drePct(loja, c.k)}" title="${c.nota}"
       style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.15);border-radius:7px;padding:5px 6px;font-size:11px;font-family:inherit;text-align:right">
-    <input id="dre-real-${c.k}" type="number" step="0.01" min="0" placeholder="realizado R$" value="${real[c.k] != null ? real[c.k] : ''}"
-      style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.15);border-radius:7px;padding:5px 6px;font-size:11px;font-family:inherit;text-align:right">
+    <div>
+      <input id="dre-real-${c.k}" type="number" step="0.01" min="0" placeholder="realizado R$" value="${real[c.k] != null ? real[c.k] : ''}"
+        oninput="_dreHintInput()"
+        style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.15);border-radius:7px;padding:5px 6px;font-size:11px;font-family:inherit;text-align:right">
+      <div id="dre-hint-${c.k}" style="font-size:9px;color:rgba(0,0,0,.42);text-align:right;margin-top:1px;min-height:11px;font-variant-numeric:tabular-nums"></div>
+    </div>
   </div>`).join('');
+  // Meses pra trás a partir do mês do card: é onde está o que ficou sem lançar.
+  const opcoes = (() => {
+    const p = comp.split('-'); let ano = +p[0], mes = +p[1];
+    const out = [];
+    for (let i = 0; i < DRE_MESES_ATRAS; i++) {
+      const cm = ano + '-' + String(mes).padStart(2, '0');
+      const temReal = Object.keys(_dreRealizado(loja, cm)).some(k => k !== '_por' && k !== '_em');
+      out.push(`<option value="${cm}"${cm === comp ? ' selected' : ''}>${_dreCompLabel(cm)}${temReal ? ' ✓' : ''}</option>`);
+      mes--; if (mes === 0) { mes = 12; ano--; }
+    }
+    return out.join('');
+  })();
   return `<div id="dre-edit-box" style="display:none;background:rgba(0,0,0,.03);border:1px solid rgba(0,0,0,.1);border-radius:10px;padding:11px 12px;margin-top:8px">
+    <div style="margin-bottom:9px">
+      <div style="font-size:9px;font-weight:800;color:rgba(0,0,0,.4);text-transform:uppercase;margin-bottom:3px">Mês do realizado</div>
+      <select id="dre-mes" onchange="_dreTrocarMes()"
+        style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.15);border-radius:8px;padding:7px 9px;font-size:11.5px;font-family:inherit;background:#fff">
+        ${opcoes}
+      </select>
+      <div id="dre-base" style="font-size:9.5px;color:rgba(0,0,0,.45);margin-top:4px;line-height:1.4"></div>
+    </div>
     <div style="display:grid;grid-template-columns:1fr 58px 1fr;gap:6px;margin-bottom:6px">
       <span style="font-size:9px;font-weight:800;color:rgba(0,0,0,.4);text-transform:uppercase">Conta</span>
       <span style="font-size:9px;font-weight:800;color:rgba(0,0,0,.4);text-transform:uppercase;text-align:right">%</span>
@@ -1791,12 +1898,14 @@ function _dreFormHtml(loja, comp) {
 async function _dreSalvar() {
   const errEl = document.getElementById('dre-err');
   const btn = document.getElementById('dre-salvar-btn');
-  const setErr = m => { if (errEl) errEl.textContent = m; if (btn) btn.disabled = false; };
+  const setErr = m => { if (errEl) { errEl.style.color = '#dc2626'; errEl.textContent = m; } if (btn) btn.disabled = false; };
   if (!_dreCtx) return;
   const user = (document.getElementById('dre-user') || {}).value;
   const pass = (document.getElementById('dre-pass') || {}).value;
   if (errEl) errEl.textContent = '';
   if (!user || !pass) { setErr('Preencha usuário e senha.'); return; }
+  const compAlvo = _dreMesEscolhido();
+  if (!compAlvo) { setErr('Escolha o mês do realizado.'); return; }
 
   const pct = {}, real = {};
   for (const c of DRE_CONTAS) {
@@ -1852,7 +1961,8 @@ async function _dreSalvar() {
       if (Object.keys(diff).length) dados.pct[_dreCtx.loja] = diff;
       else delete dados.pct[_dreCtx.loja];
     }
-    const chave = _dreCtx.loja + '|' + _dreCtx.comp;
+    // O mês do formulário, não o do card: é o que permite voltar e lançar os meses de trás.
+    const chave = _dreCtx.loja + '|' + compAlvo;
     if (Object.keys(real).length) {
       dados.real[chave] = { ...real, _por: auth[0].nome || user.trim(), _em: new Date().toISOString() };
     } else {
@@ -1869,6 +1979,19 @@ async function _dreSalvar() {
     _dreAllData = dados;
   } catch (e) {
     setErr('Erro ao salvar. Tente de novo.');
+    return;
+  }
+  // Mês de trás: o formulário FICA aberto, com usuário e senha onde estão. Fechar a cada
+  // gravação transformaria "lançar o ano" em um login por mês. E como o card continua sendo
+  // do mês fechado, sem esta mensagem não haveria sinal nenhum de que gravou.
+  if (compAlvo !== _dreCtx.comp) {
+    if (btn) btn.disabled = false;
+    if (errEl) {
+      errEl.style.color = '#15803d';
+      errEl.textContent = '✓ Realizado de ' + _dreCompLabel(compAlvo) + ' salvo. Escolha o próximo mês.';
+    }
+    const opt = document.querySelector('#dre-mes option[value="' + compAlvo + '"]');
+    if (opt && opt.textContent.indexOf('✓') < 0) opt.textContent += ' ✓';
     return;
   }
   _dreEditando = false;
