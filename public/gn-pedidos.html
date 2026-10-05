@@ -1026,13 +1026,17 @@ $('inp-senha').onkeydown = e => { if(e.key==='Enter') $('btn-entrar').click(); }
 // escondeu itens/contagens reais de várias lojas (pedido da semana passa de 1200
 // linhas, contagens já passam de 3500). queryFn deve retornar uma query do Supabase
 // ainda SEM .range() encadeado (ele é aplicado aqui, em cada página).
-async function _fetchTodasPaginas(queryFn, paginaSize) {
+// `status` é opcional: um objeto onde isto marca `erro: true` quando a paginação parou no
+// meio. Sem ele, a lista devolvida é indistinguível de uma lista completa — e quem TROCA
+// estado da tela por ela acabava zerando o que já estava certo por causa de uma falha de
+// rede. Quem só lê pode continuar ignorando.
+async function _fetchTodasPaginas(queryFn, paginaSize, status) {
   paginaSize = paginaSize || 1000;
   let offset = 0;
   let todas = [];
   while (true) {
     const { data, error } = await queryFn().range(offset, offset + paginaSize - 1);
-    if (error) { console.error('Erro paginando:', error.message); break; }
+    if (error) { console.error('Erro paginando:', error.message); if (status) status.erro = true; break; }
     if (!data || data.length === 0) break;
     todas = todas.concat(data);
     if (data.length < paginaSize) break;
@@ -1530,7 +1534,7 @@ async function carregarConfirmadosSemana() {
   } catch(_) {}
 }
 
-async function carregarContagens() {
+async function carregarContagens(status) {
   // Última contagem por produto por loja. A tabela já passa de 3500 linhas e cresce
   // todo dia — mesmo com paginação, sem limitar por data isso ficaria lento à toa.
   // Uma janela de 45 dias cobre folgado o "Est.ant" mais antigo que a tela realmente usa.
@@ -1542,7 +1546,12 @@ async function carregarContagens() {
     .select('catalogo_id,loja_slug,ul_estoque,ul_pedido,atual,atual_cx,atual_und,data_contagem,criado_por,criado_em')
     .gte('data_contagem', cutoffISO)
     .order('data_contagem', {ascending:false})
-    .order('id'));
+    .order('id'), null, status);
+
+  // Recarga em cima de uma tela que já tem dados (ver _recarregarDadosDasLojas): com a
+  // paginação interrompida, a lista é parcial e trocar o estado por ela apagaria o Est.vig
+  // de lojas inteiras que estavam certas. Mantém o que está na tela e avisa quem chamou.
+  if (status && status.erro) return;
 
   S.contagens = {};
   (data || []).forEach(c => {
@@ -3794,16 +3803,62 @@ function _envioAssinatura(mapa) {
   return Object.keys(mapa || {}).sort().map(k => k + ':' + ((mapa[k].final_em ? 'F' : '') + (mapa[k].urgencia_em ? 'U' : '')));
 }
 
+// Puxa de novo o que a loja acabou de mandar. O painel do topo sozinho não resolve: ele
+// dizia "Nova América mandou a urgência 09h42" enquanto a coluna da Nova América na tela
+// continuava a de antes — porque gn_contagens_pedido só era lido UMA vez, ao abrir o app, e
+// o Compras passa a segunda inteira com a tela aberta. Em 05/10 a loja contou 66 itens às
+// 09h42 (Água Tônica: 39) e a tela seguia mostrando Est.ant 28 (2CX+4UN) e Est.vig 0 — a
+// contagem do dia 28/09. Parecia pedido perdido; era tela velha.
+//
+// Os itens só entram quando não há nada na fila offline: aí tudo que o comprador digitou já
+// está no banco e reler é troca sem perda. Com fila pendente, só as contagens — que ninguém
+// digita aqui, então não há o que perder.
+async function _recarregarDadosDasLojas() {
+  const st = {};
+  try { await carregarContagens(st); } catch (e) { console.error('recarregar contagens:', e); }
+  if (S.pedidoAtual && _ppCount() === 0) {
+    try {
+      await carregarItensPedido();
+      // carregarItensPedido zera S.pedidosConfirmados; quem preenche é esta, logo depois —
+      // mesma ordem de carregarPedidoAtual().
+      await carregarConfirmadosSemana();
+    } catch (e) { console.error('recarregar itens:', e); }
+  }
+}
+
+// Campo em foco ou modal aberto: redesenhar agora apagaria o que o comprador está lançando.
+function _pedidoOcupado() {
+  const a = document.activeElement;
+  if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT')) return true;
+  return !!$('modal-bg')?.classList.contains('ativo');
+}
+
 // Lojas enviam ao longo da segunda inteira, e o Compras fica com a tela aberta esperando.
-// Redesenha só quando o status de alguma loja realmente mudou, e nunca com um campo em foco:
-// um render no meio da digitação apagaria o valor que o comprador está lançando.
+// Redesenha só quando o status de alguma loja realmente mudou.
+let _pedidoRenderAdiado = false;
 setInterval(async () => {
   if (S.tab !== 'pedido') return;
-  const a = document.activeElement;
-  if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT')) return;
-  if ($('modal-bg')?.classList.contains('ativo')) return;
-  if (await carregarEnvioSemana()) renderPedido();
+  if (_pedidoOcupado()) return;
+  if (!_pedidoRenderAdiado) {
+    if (!(await carregarEnvioSemana())) return;
+    await _recarregarDadosDasLojas();
+  }
+  // Entre a consulta e o desenho passam segundos de rede, e o comprador pode ter começado a
+  // digitar nesse meio-tempo. O dado novo já está no estado; o desenho fica pro próximo
+  // minuto. Sem este adiamento o dado entraria e nunca mais seria desenhado, porque o
+  // status já teria sido dado por "visto".
+  if (_pedidoOcupado()) { _pedidoRenderAdiado = true; return; }
+  _pedidoRenderAdiado = false;
+  renderPedido();
 }, 60000);
+
+// O 🔄 do painel. Mesma recarga, sem depender de ter mudado status nenhum — é o botão de
+// quem desconfia que a tela está velha.
+async function atualizarPainelEnvio() {
+  await carregarEnvioSemana();
+  await _recarregarDadosDasLojas();
+  renderPedido();
+}
 
 // 'final' | 'urgencia' | 'nada' — o estado de uma loja nesta semana.
 function _envioStatusLoja(slug) {
@@ -3865,7 +3920,7 @@ function _painelEnvioSemanaHtml() {
         📦 Pedido da semana de ${_envioQuandoTxt(S.envioSemanaIni ? S.envioSemanaIni + 'T12:00:00' : null).split(' ')[0] || ''}
         <span style="color:var(--muted);font-weight:600"> · ${feitas} de ${lojas.length} finalizaram</span>
       </div>
-      <button onclick="carregarEnvioSemana().then(renderPedido)" title="Reconsultar o status das lojas"
+      <button onclick="atualizarPainelEnvio()" title="Reconsultar o status das lojas e puxar as contagens que chegaram"
         style="background:var(--card2);border:none;border-radius:8px;padding:4px 9px;font-size:10.5px;font-weight:700;color:var(--muted);cursor:pointer">🔄 Atualizar</button>
     </div>
     ${bloco('nada', 'Não enviou nada')}
