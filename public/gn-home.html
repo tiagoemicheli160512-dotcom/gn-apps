@@ -1521,6 +1521,28 @@ function _dreCompetencia(d) {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
 }
 
+/* Grava uma linha de configuração em gn_lojas, criando-a se ainda não existir.
+
+   Existe porque o jeito "natural" está errado: um PATCH do PostgREST que não casa com
+   NENHUMA linha devolve 204 — ou seja, `ok`. O padrão "PATCH, e se falhar cria" nunca
+   disparava a criação: a tela dava o salvamento por feito, guardava o estado em memória e
+   a gravação simplesmente não existia. Foi o que fez a foto do relatório da empresa
+   aparecer bonitinha e sumir no recarregamento (nenhuma linha RELMES_ chegou ao banco), e
+   o mesmo valia pra ciência da gerência.
+
+   Upsert resolve numa requisição só, e sem a corrida que existe entre "consultar se existe"
+   e "gravar" — gn_lojas.loja é a chave primária. É o mesmo padrão que o app Lojas já usa em
+   gn_pedido_envio_semana. */
+async function _gnLojasUpsert(linha, allData, por) {
+  const r = await fetch(`${SB_URL}/rest/v1/gn_lojas?on_conflict=loja`, {
+    method: 'POST',
+    headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json',
+               Prefer: 'resolution=merge-duplicates,return=minimal' },
+    body: JSON.stringify({ loja: linha, all_data: allData, updated_by: por || null }),
+  });
+  if (!r.ok) throw new Error('HTTP ' + r.status + ' ao gravar ' + linha);
+}
+
 /* ── Ciência do desempenho do mês fechado ──────────────────────────────────────────────
    "Hoje não consigo medir se estão vendo de fato o resultado."
 
@@ -1591,19 +1613,10 @@ async function _cienteConfirmar(loja, comp, mesNome) {
     const dados = JSON.parse(JSON.stringify(atual));
     dados[comp] = dados[comp] || {};
     dados[comp][loja] = { nome: auth[0].nome, cargo, em: new Date().toISOString(), mes: mesNome };
-    const res = await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${CIENTE_LINHA}`, {
-      method: 'PATCH',
-      headers: Object.assign({ Prefer: 'return=minimal' }, H),
-      body: JSON.stringify({ all_data: dados, updated_by: auth[0].nome })
-    });
-    if (!res.ok) {
-      // A linha pode ainda não existir na primeira ciência da rede.
-      const cria = await fetch(`${SB_URL}/rest/v1/gn_lojas`, {
-        method: 'POST', headers: Object.assign({ Prefer: 'return=minimal' }, H),
-        body: JSON.stringify({ loja: CIENTE_LINHA, all_data: dados, updated_by: auth[0].nome })
-      });
-      if (!cria.ok) throw new Error('HTTP ' + res.status);
-    }
+    // Upsert, não PATCH: a linha ainda não existe até a primeira ciência da rede, e um PATCH
+    // sem linha casada devolve 204 — a ciência era dada por registrada sem nunca ter sido
+    // gravada (ver _gnLojasUpsert).
+    await _gnLojasUpsert(CIENTE_LINHA, dados, auth[0].nome);
     _cienteAllData = dados;
     _cienteForm = null;
   } catch (e) {
@@ -2248,19 +2261,10 @@ async function _relEmpEnviar(file, comKey, comp, mesNome) {
     const dados = JSON.parse(JSON.stringify(atual));
     const anterior = dados[comp];
     dados[comp] = { url, em: new Date().toISOString(), por: (session && session.nome) || '', mes: mesNome };
-    const linha = RELEMP_PREFIXO + comKey;
-    const res = await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(linha)}`, {
-      method: 'PATCH', headers: Object.assign({ Prefer: 'return=minimal' }, H),
-      body: JSON.stringify({ all_data: dados, updated_by: (session && session.nome) || null })
-    });
-    if (!res.ok) {
-      // A linha não existe no primeiro envio daquela loja.
-      const cria = await fetch(`${SB_URL}/rest/v1/gn_lojas`, {
-        method: 'POST', headers: Object.assign({ Prefer: 'return=minimal' }, H),
-        body: JSON.stringify({ loja: linha, all_data: dados, updated_by: (session && session.nome) || null })
-      });
-      if (!cria.ok) throw new Error('HTTP ' + res.status);
-    }
+    // Upsert, não PATCH: no primeiro envio de cada loja a linha não existe, e um PATCH sem
+    // linha casada devolve 204 — foi exatamente assim que as 11 fotos apareceram na tela e
+    // nenhuma chegou ao banco (ver _gnLojasUpsert).
+    await _gnLojasUpsert(RELEMP_PREFIXO + comKey, dados, (session && session.nome) || null);
     _relEmpData[comKey] = dados;
     // Só depois de a troca estar gravada: apagar antes deixaria a loja sem imagem nenhuma se
     // a gravação falhasse.
@@ -2289,11 +2293,7 @@ async function _relEmpRemover(comKey, comp, mesNome) {
     if (atual === null) { _relEmpErro = 'Sem conexão com o banco. Tente de novo.'; return; }
     const dados = JSON.parse(JSON.stringify(atual));
     delete dados[comp];
-    const res = await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(RELEMP_PREFIXO + comKey)}`, {
-      method: 'PATCH', headers: Object.assign({ Prefer: 'return=minimal' }, H),
-      body: JSON.stringify({ all_data: dados, updated_by: (session && session.nome) || null })
-    });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
+    await _gnLojasUpsert(RELEMP_PREFIXO + comKey, dados, (session && session.nome) || null);
     _relEmpData[comKey] = dados;
     if (atualItem.url && window.gnDeleteFotoStorage) window.gnDeleteFotoStorage(SB_URL, SB_KEY, atualItem.url);
   } catch (e) {
