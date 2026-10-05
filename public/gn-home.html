@@ -1751,6 +1751,89 @@ function _dreToggleEdicao() {
   _dreEditando = !_dreEditando;
   const box = document.getElementById('dre-edit-box');
   if (box) box.style.display = _dreEditando ? 'block' : 'none';
+  // Ao abrir, carrega a base do mês já selecionado — sem isso o rodapé do seletor fica mudo
+  // até alguém trocar de mês, e o % de conferência não aparece.
+  if (_dreEditando) _dreTrocarMes();
+}
+
+/* O realizado é lançado por MÊS, e o card é sempre do mês que fechou. Sem escolher o mês
+   aqui, só o último era alcançável: setembro dava pra lançar, agosto e os de trás não — e
+   "lançar o realizado dos meses" ficava impossível de fato.
+
+   A % de cada conta é da loja, não do mês: trocar o mês muda só a coluna do realizado. */
+const DRE_MESES_PT = ['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+const DRE_MESES_ATRAS = 15;
+const _dreFatCache = {};     // 'LOJA|AAAA-MM' -> faturamento (null = falhou a leitura)
+
+function _dreCompLabel(comp) {
+  const p = (comp || '').split('-');
+  const m = parseInt(p[1], 10);
+  return (DRE_MESES_PT[m - 1] || comp) + ' de ' + p[0];
+}
+
+// Faturamento do mês escolhido — a base contra a qual o valor lançado é conferido. Vem do
+// mesmo lugar que o card usa (checklist_diario), pra tela e conferência nunca divergirem.
+async function _dreFatDoMes(loja, comp) {
+  const k = loja + '|' + comp;
+  if (_dreFatCache[k] !== undefined) return _dreFatCache[k];
+  const chkKey = LOJA_DB_KEY[loja] || loja;
+  const p = comp.split('-'); const ano = +p[0], mes = +p[1];
+  const ult = new Date(ano, mes, 0).getDate();
+  const iniISO = comp + '-01';
+  const fimISO = comp + '-' + String(ult).padStart(2, '0');
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const rows = await window.gnFetchJson(
+    `${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${iniISO}&data_operacao=lte.${fimISO}&select=venda_salao,venda_delivery`,
+    H, 'dre:fatMes', null);
+  if (rows === null) return null;   // não cacheia falha de rede
+  const fat = rows.reduce((s, r) => s + (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0), 0);
+  _dreFatCache[k] = fat;
+  return fat;
+}
+
+function _dreMesEscolhido() {
+  const el = document.getElementById('dre-mes');
+  return (el && el.value) || (_dreCtx && _dreCtx.comp) || '';
+}
+
+// Trocar o mês recarrega só a coluna do realizado e a base de conferência — nunca mexe no
+// usuário e na senha já digitados, que é o que faria lançar 9 meses virar 9 logins.
+async function _dreTrocarMes() {
+  if (!_dreCtx) return;
+  const comp = _dreMesEscolhido();
+  const real = _dreRealizado(_dreCtx.loja, comp);
+  DRE_CONTAS.forEach(c => {
+    const inp = document.getElementById('dre-real-' + c.k);
+    if (inp) inp.value = real[c.k] != null ? real[c.k] : '';
+  });
+  const base = document.getElementById('dre-base');
+  if (base) base.textContent = 'Carregando o faturamento de ' + _dreCompLabel(comp) + '…';
+  const fat = await _dreFatDoMes(_dreCtx.loja, comp);
+  if (comp !== _dreMesEscolhido()) return;   // trocou de novo enquanto carregava
+  if (base) {
+    base.textContent = fat === null
+      ? 'Não consegui ler o faturamento de ' + _dreCompLabel(comp) + ' — o % ao lado de cada valor fica sem base.'
+      : fat > 0
+        ? 'Faturamento de ' + _dreCompLabel(comp) + ': R$ ' + fat.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+        : 'Sem faturamento lançado em ' + _dreCompLabel(comp) + '.';
+  }
+  _dreAtualizarPcts(fat);
+}
+
+// Mostra, ao lado de cada valor digitado, quanto ele representa do faturamento do mês. O
+// relatório da empresa vem em % (CMV 35,63%, por exemplo) e o campo é em R$ — sem essa
+// conferência, a conversão fica na cabeça de quem digita, nove meses seguidos.
+function _dreAtualizarPcts(fat) {
+  DRE_CONTAS.forEach(c => {
+    const el = document.getElementById('dre-hint-' + c.k);
+    if (!el) return;
+    const v = parseFloat((document.getElementById('dre-real-' + c.k) || {}).value);
+    el.textContent = (fat && isFinite(v) && v > 0) ? (v / fat * 100).toFixed(2).replace('.', ',') + '%' : '';
+  });
+}
+function _dreHintInput() {
+  const f = _dreFatCache[(_dreCtx ? _dreCtx.loja : '') + '|' + _dreMesEscolhido()];
+  _dreAtualizarPcts(f == null ? null : f);
 }
 
 function _dreFormHtml(loja, comp) {
@@ -1761,10 +1844,34 @@ function _dreFormHtml(loja, comp) {
       <span style="display:block;font-size:9px;color:rgba(0,0,0,.38);line-height:1.3">${c.nota}</span></span>
     <input id="dre-pct-${c.k}" type="number" step="0.5" min="0" max="100" value="${_drePct(loja, c.k)}" title="${c.nota}"
       style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.15);border-radius:7px;padding:5px 6px;font-size:11px;font-family:inherit;text-align:right">
-    <input id="dre-real-${c.k}" type="number" step="0.01" min="0" placeholder="realizado R$" value="${real[c.k] != null ? real[c.k] : ''}"
-      style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.15);border-radius:7px;padding:5px 6px;font-size:11px;font-family:inherit;text-align:right">
+    <div>
+      <input id="dre-real-${c.k}" type="number" step="0.01" min="0" placeholder="realizado R$" value="${real[c.k] != null ? real[c.k] : ''}"
+        oninput="_dreHintInput()"
+        style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.15);border-radius:7px;padding:5px 6px;font-size:11px;font-family:inherit;text-align:right">
+      <div id="dre-hint-${c.k}" style="font-size:9px;color:rgba(0,0,0,.42);text-align:right;margin-top:1px;min-height:11px;font-variant-numeric:tabular-nums"></div>
+    </div>
   </div>`).join('');
+  // Meses pra trás a partir do mês do card: é onde está o que ficou sem lançar.
+  const opcoes = (() => {
+    const p = comp.split('-'); let ano = +p[0], mes = +p[1];
+    const out = [];
+    for (let i = 0; i < DRE_MESES_ATRAS; i++) {
+      const cm = ano + '-' + String(mes).padStart(2, '0');
+      const temReal = Object.keys(_dreRealizado(loja, cm)).some(k => k !== '_por' && k !== '_em');
+      out.push(`<option value="${cm}"${cm === comp ? ' selected' : ''}>${_dreCompLabel(cm)}${temReal ? ' ✓' : ''}</option>`);
+      mes--; if (mes === 0) { mes = 12; ano--; }
+    }
+    return out.join('');
+  })();
   return `<div id="dre-edit-box" style="display:none;background:rgba(0,0,0,.03);border:1px solid rgba(0,0,0,.1);border-radius:10px;padding:11px 12px;margin-top:8px">
+    <div style="margin-bottom:9px">
+      <div style="font-size:9px;font-weight:800;color:rgba(0,0,0,.4);text-transform:uppercase;margin-bottom:3px">Mês do realizado</div>
+      <select id="dre-mes" onchange="_dreTrocarMes()"
+        style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.15);border-radius:8px;padding:7px 9px;font-size:11.5px;font-family:inherit;background:#fff">
+        ${opcoes}
+      </select>
+      <div id="dre-base" style="font-size:9.5px;color:rgba(0,0,0,.45);margin-top:4px;line-height:1.4"></div>
+    </div>
     <div style="display:grid;grid-template-columns:1fr 58px 1fr;gap:6px;margin-bottom:6px">
       <span style="font-size:9px;font-weight:800;color:rgba(0,0,0,.4);text-transform:uppercase">Conta</span>
       <span style="font-size:9px;font-weight:800;color:rgba(0,0,0,.4);text-transform:uppercase;text-align:right">%</span>
@@ -1791,12 +1898,14 @@ function _dreFormHtml(loja, comp) {
 async function _dreSalvar() {
   const errEl = document.getElementById('dre-err');
   const btn = document.getElementById('dre-salvar-btn');
-  const setErr = m => { if (errEl) errEl.textContent = m; if (btn) btn.disabled = false; };
+  const setErr = m => { if (errEl) { errEl.style.color = '#dc2626'; errEl.textContent = m; } if (btn) btn.disabled = false; };
   if (!_dreCtx) return;
   const user = (document.getElementById('dre-user') || {}).value;
   const pass = (document.getElementById('dre-pass') || {}).value;
   if (errEl) errEl.textContent = '';
   if (!user || !pass) { setErr('Preencha usuário e senha.'); return; }
+  const compAlvo = _dreMesEscolhido();
+  if (!compAlvo) { setErr('Escolha o mês do realizado.'); return; }
 
   const pct = {}, real = {};
   for (const c of DRE_CONTAS) {
@@ -1852,7 +1961,8 @@ async function _dreSalvar() {
       if (Object.keys(diff).length) dados.pct[_dreCtx.loja] = diff;
       else delete dados.pct[_dreCtx.loja];
     }
-    const chave = _dreCtx.loja + '|' + _dreCtx.comp;
+    // O mês do formulário, não o do card: é o que permite voltar e lançar os meses de trás.
+    const chave = _dreCtx.loja + '|' + compAlvo;
     if (Object.keys(real).length) {
       dados.real[chave] = { ...real, _por: auth[0].nome || user.trim(), _em: new Date().toISOString() };
     } else {
@@ -1869,6 +1979,19 @@ async function _dreSalvar() {
     _dreAllData = dados;
   } catch (e) {
     setErr('Erro ao salvar. Tente de novo.');
+    return;
+  }
+  // Mês de trás: o formulário FICA aberto, com usuário e senha onde estão. Fechar a cada
+  // gravação transformaria "lançar o ano" em um login por mês. E como o card continua sendo
+  // do mês fechado, sem esta mensagem não haveria sinal nenhum de que gravou.
+  if (compAlvo !== _dreCtx.comp) {
+    if (btn) btn.disabled = false;
+    if (errEl) {
+      errEl.style.color = '#15803d';
+      errEl.textContent = '✓ Realizado de ' + _dreCompLabel(compAlvo) + ' salvo. Escolha o próximo mês.';
+    }
+    const opt = document.querySelector('#dre-mes option[value="' + compAlvo + '"]');
+    if (opt && opt.textContent.indexOf('✓') < 0) opt.textContent += ' ✓';
     return;
   }
   _dreEditando = false;
@@ -2017,6 +2140,224 @@ function _dreTextoWhats(d) {
   return t;
 }
 
+/* ── Relatório mensal da empresa ───────────────────────────────────────────────────────
+   "Recebo mensalmente essa da empresa. É possível colocar pra loja ter a visão e ver seu
+   desempenho? Eu mandaria aqui e colocaria na loja."
+
+   Chega como PRINT — uma imagem só, do painel inteiro. Então não há o que filtrar dentro
+   dela: o recorte é por LOJA. Cada loja enxerga apenas o print que foi enviado pra ela, e
+   mestre nenhum precisa recortar nada antes de mandar.
+
+   Guarda por loja e competência em gn_lojas('RELMES_<comKey>'). Uma linha por loja de
+   propósito: a leitura da Home puxa só a da própria loja, e dois mestres enviando pra lojas
+   diferentes no mesmo minuto nunca se sobrescrevem.
+
+   A imagem vai pro Storage (gnUploadFotoStorage), nunca pro JSON — um print de painel tem
+   centenas de KB, e essa linha é lida toda vez que a Home abre.
+
+   Quem envia é o mestre. A loja só lê. */
+const RELEMP_PREFIXO = 'RELMES_';
+// Print de painel é texto fino: recomprimir em JPEG embaça justamente os números que a loja
+// precisa ler. Abaixo desse tamanho sobe o arquivo como veio.
+const RELEMP_LIMITE_ORIGINAL = 1.5 * 1024 * 1024;
+let _relEmpData = {};        // comKey -> { '<AAAA-MM>': {url, em, por} }  (null = falhou a leitura)
+let _relEmpOcupado = false;
+let _relEmpErro = '';
+
+async function _relEmpCarregar(comKey, force) {
+  if (_relEmpData[comKey] !== undefined && !force) return _relEmpData[comKey];
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const rows = await window.gnFetchJson(
+    `${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(RELEMP_PREFIXO + comKey)}&select=all_data`,
+    H, 'relEmpresa:carregar', null);
+  // null = falha de rede. Não cacheia {}: senão a loja ficaria sem o relatório pelo resto da
+  // sessão, e sem nada na tela dizendo que foi a conexão.
+  if (rows === null) return null;
+  _relEmpData[comKey] = (rows[0] && rows[0].all_data) || {};
+  return _relEmpData[comKey];
+}
+
+function _relEmpDe(comKey, comp) {
+  const d = _relEmpData[comKey];
+  return (d && d[comp]) || null;
+}
+
+// Input de arquivo criado na hora e fora do card: o card é redesenhado por innerHTML, e um
+// input que vive dentro dele é destruído no meio da escolha do arquivo.
+function _relEmpEscolher(comKey, comp, mesNome) {
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = 'image/*';
+  inp.style.display = 'none';
+  document.body.appendChild(inp);
+  inp.onchange = function () {
+    const f = inp.files && inp.files[0];
+    inp.remove();
+    if (f) _relEmpEnviar(f, comKey, comp, mesNome);
+  };
+  inp.click();
+}
+
+function _relEmpPreparar(file) {
+  if (file.size <= RELEMP_LIMITE_ORIGINAL) {
+    return new Promise(function (resolve, reject) {
+      const r = new FileReader();
+      r.onload = e => resolve(e.target.result);
+      r.onerror = reject;
+      r.readAsDataURL(file);
+    });
+  }
+  // Grande demais pra subir inteiro. 1800px preserva o painel legível ao ampliar; abaixo
+  // disso os números das tabelas começam a sumir.
+  return new Promise(function (resolve, reject) {
+    const r = new FileReader();
+    r.onload = function (e) {
+      const img = new Image();
+      img.onload = function () {
+        let w = img.width, h = img.height;
+        const max = 1800;
+        if (w > max || h > max) {
+          if (w > h) { h = Math.round(h * max / w); w = max; }
+          else { w = Math.round(w * max / h); h = max; }
+        }
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve(c.toDataURL('image/jpeg', 0.85));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
+async function _relEmpEnviar(file, comKey, comp, mesNome) {
+  if (_relEmpOcupado) return;
+  _relEmpOcupado = true; _relEmpErro = '';
+  await _renderMesAnteriorHome(true, session, !!masterLoja);
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+  try {
+    const b64 = await _relEmpPreparar(file);
+    const url = await window.gnUploadFotoStorage(SB_URL, SB_KEY, 'relatorio-empresa', b64);
+    // Relê antes de gravar: a linha guarda todos os meses da loja, e gravar o que estava em
+    // memória apagaria um mês enviado de outro aparelho.
+    const atual = await _relEmpCarregar(comKey, true);
+    if (atual === null) { _relEmpErro = 'Sem conexão com o banco. A imagem subiu, mas não consegui registrar — tente de novo.'; return; }
+    const dados = JSON.parse(JSON.stringify(atual));
+    const anterior = dados[comp];
+    dados[comp] = { url, em: new Date().toISOString(), por: (session && session.nome) || '', mes: mesNome };
+    const linha = RELEMP_PREFIXO + comKey;
+    const res = await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(linha)}`, {
+      method: 'PATCH', headers: Object.assign({ Prefer: 'return=minimal' }, H),
+      body: JSON.stringify({ all_data: dados, updated_by: (session && session.nome) || null })
+    });
+    if (!res.ok) {
+      // A linha não existe no primeiro envio daquela loja.
+      const cria = await fetch(`${SB_URL}/rest/v1/gn_lojas`, {
+        method: 'POST', headers: Object.assign({ Prefer: 'return=minimal' }, H),
+        body: JSON.stringify({ loja: linha, all_data: dados, updated_by: (session && session.nome) || null })
+      });
+      if (!cria.ok) throw new Error('HTTP ' + res.status);
+    }
+    _relEmpData[comKey] = dados;
+    // Só depois de a troca estar gravada: apagar antes deixaria a loja sem imagem nenhuma se
+    // a gravação falhasse.
+    if (anterior && anterior.url && window.gnDeleteFotoStorage) {
+      window.gnDeleteFotoStorage(SB_URL, SB_KEY, anterior.url);
+    }
+  } catch (e) {
+    window.gnLogError && window.gnLogError('relEmpresa:enviar', e);
+    _relEmpErro = 'Não consegui enviar agora. Confere a internet e tenta de novo.';
+  } finally {
+    _relEmpOcupado = false;
+    await _renderMesAnteriorHome(true, session, !!masterLoja);
+  }
+}
+
+async function _relEmpRemover(comKey, comp, mesNome) {
+  if (_relEmpOcupado) return;
+  const atualItem = _relEmpDe(comKey, comp);
+  if (!atualItem) return;
+  if (!confirm('Tirar o relatório de ' + mesNome + ' da tela da loja?')) return;
+  _relEmpOcupado = true; _relEmpErro = '';
+  await _renderMesAnteriorHome(true, session, !!masterLoja);
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+  try {
+    const atual = await _relEmpCarregar(comKey, true);
+    if (atual === null) { _relEmpErro = 'Sem conexão com o banco. Tente de novo.'; return; }
+    const dados = JSON.parse(JSON.stringify(atual));
+    delete dados[comp];
+    const res = await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(RELEMP_PREFIXO + comKey)}`, {
+      method: 'PATCH', headers: Object.assign({ Prefer: 'return=minimal' }, H),
+      body: JSON.stringify({ all_data: dados, updated_by: (session && session.nome) || null })
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    _relEmpData[comKey] = dados;
+    if (atualItem.url && window.gnDeleteFotoStorage) window.gnDeleteFotoStorage(SB_URL, SB_KEY, atualItem.url);
+  } catch (e) {
+    window.gnLogError && window.gnLogError('relEmpresa:remover', e);
+    _relEmpErro = 'Não consegui remover agora. Confere a internet e tenta de novo.';
+  } finally {
+    _relEmpOcupado = false;
+    await _renderMesAnteriorHome(true, session, !!masterLoja);
+  }
+}
+
+// Bloco no TOPO do card expandido: é a visão mais completa do mês que a loja tem.
+// Sem relatório enviado a loja não vê nada — um "ainda não chegou" todo mês seria ruído.
+// O mestre vê o convite de envio, que é onde ele precisa saber que o lugar existe.
+function _relEmpBlocoHtml(comKey, comp, mesNome, podeEnviar) {
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  const j = _relEmpDe(comKey, comp);
+  const falhou = _relEmpData[comKey] === undefined || _relEmpData[comKey] === null;
+  const arg = `'${esc(comKey)}','${esc(comp)}','${esc(mesNome)}'`;
+  const aviso = _relEmpErro
+    ? `<div style="font-size:11px;color:#b91c1c;margin-top:7px;line-height:1.4">${esc(_relEmpErro)}</div>` : '';
+
+  if (!j) {
+    if (!podeEnviar) return falhou && !_relEmpOcupado
+      ? `<div style="background:#fff;border-radius:10px;padding:10px 12px;font-size:10px;color:rgba(0,0,0,.45)">Não consegui carregar o relatório da empresa agora.</div>`
+      : '';
+    return `<div style="background:rgba(13,148,136,.07);border:1px dashed rgba(13,148,136,.45);border-radius:10px;padding:12px">
+      <div style="font-size:11.5px;font-weight:800;color:#0f766e">📈 Relatório da empresa — ${esc(mesNome)}</div>
+      <div style="font-size:10.5px;color:rgba(0,0,0,.55);margin-top:3px;line-height:1.45">
+        Envie o print que a empresa manda. Ele aparece aqui dentro, só pra esta loja.</div>
+      <button onclick="event.stopPropagation();_relEmpEscolher(${arg})" ${_relEmpOcupado ? 'disabled' : ''}
+        style="margin-top:9px;background:#0f766e;border:none;border-radius:9px;padding:9px 14px;color:#fff;font-size:11.5px;font-weight:800;cursor:pointer;font-family:inherit;${_relEmpOcupado ? 'opacity:.6' : ''}">
+        ${_relEmpOcupado ? 'Enviando…' : '📎 Enviar o relatório'}</button>
+      ${aviso}
+    </div>`;
+  }
+
+  const q = j.em ? new Date(j.em) : null;
+  const quando = q ? String(q.getDate()).padStart(2, '0') + '/' + String(q.getMonth() + 1).padStart(2, '0') : '';
+  return `<div style="background:#fff;border:1px solid rgba(13,148,136,.3);border-radius:10px;padding:10px 12px">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <span style="font-size:11.5px;font-weight:800;color:#0f766e;flex:1;min-width:0">📈 Relatório da empresa — ${esc(mesNome)}</span>
+      ${podeEnviar ? `
+      <button onclick="event.stopPropagation();_relEmpEscolher(${arg})" ${_relEmpOcupado ? 'disabled' : ''}
+        style="background:rgba(13,148,136,.12);border:1px solid rgba(13,148,136,.3);border-radius:8px;padding:4px 9px;color:#0f766e;font-size:10px;font-weight:800;cursor:pointer;font-family:inherit">
+        ${_relEmpOcupado ? '…' : 'Trocar'}</button>
+      <button onclick="event.stopPropagation();_relEmpRemover(${arg})" ${_relEmpOcupado ? 'disabled' : ''}
+        style="background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.28);border-radius:8px;padding:4px 9px;color:#b91c1c;font-size:10px;font-weight:800;cursor:pointer;font-family:inherit">Remover</button>` : ''}
+    </div>
+    <!-- Toque abre em tamanho real: o painel é largo e, encolhido na largura do celular,
+         os números das tabelas ficam ilegíveis. O navegador dá o zoom de graça. -->
+    <a href="${esc(j.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()"
+       style="display:block;margin-top:8px;border-radius:8px;overflow:hidden;cursor:zoom-in">
+      <img src="${esc(j.url)}" alt="Relatório de ${esc(mesNome)}" loading="lazy"
+           style="display:block;width:100%;height:auto;background:rgba(0,0,0,.04)">
+    </a>
+    <div style="display:flex;justify-content:space-between;gap:8px;margin-top:6px;font-size:9.5px;color:rgba(0,0,0,.45)">
+      <span>🔍 Toque na imagem pra ampliar</span>
+      <span>${esc(j.por ? 'enviado por ' + j.por : '')}${quando ? ' · ' + quando : ''}</span>
+    </div>
+    ${aviso}
+  </div>`;
+}
+
 // Card "Desempenho do mês anterior" — fica disponível o mês inteiro, resumindo o mês que
 // acabou de fechar pra loja em questão: faturamento comparado com o mês de trás, avarias,
 // ocorrências (atestado, falta, suspensão, advertência) e funcionário extra.
@@ -2133,6 +2474,10 @@ async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
     const dreComp = _dreCompetencia(fimMesAnterior);
     await _dreCarregar();
     await _cienteCarregar();   // mesma competência do DRE: a ciência é do mês fechado
+    await _relEmpCarregar(comKey);
+    // Quem envia o relatório da empresa é o mestre; a loja só lê. Vem da sessão, não de
+    // masterLoja: é sobre QUEM está olhando, não sobre qual loja está aberta.
+    const podeEnviarRel = sess.loja === 'GERAL' || !!(sess.permissoes || {}).master;
     _dreCtx = { loja, comp: dreComp, faturamento, mesNome };
     _dreEditando = false;
 
@@ -2140,7 +2485,11 @@ async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
       <summary style="list-style:none;cursor:pointer;padding:14px 16px;display:flex;align-items:center;gap:10px">
         <span style="font-size:18px;flex-shrink:0">📊</span>
         <div style="flex:1;min-width:0">
-          <div style="font-size:12px;font-weight:800;color:#1A1D23">Veja o desempenho de ${mesNome}</div>
+          <div style="font-size:12px;font-weight:800;color:#1A1D23">Veja o desempenho de ${mesNome}
+            <!-- Sem esta marca, um relatório novo da empresa chegaria dentro de um card
+                 fechado e ninguém saberia que chegou. -->
+            ${_relEmpDe(comKey, dreComp) ? `<span style="display:inline-block;vertical-align:1px;margin-left:5px;background:rgba(13,148,136,.14);border:1px solid rgba(13,148,136,.3);border-radius:6px;padding:1px 6px;font-size:9px;font-weight:800;color:#0f766e">📈 relatório da empresa</span>` : ''}
+          </div>
           <div style="font-size:10px;color:${_cienteDe(dreComp, loja) ? '#047857' : '#B45309'};margin-top:2px;font-weight:700">
             ${_cienteDe(dreComp, loja)
               ? '✓ Visto por ' + (window.escapeHtml ? window.escapeHtml(_cienteDe(dreComp, loja).nome) : _cienteDe(dreComp, loja).nome)
@@ -2149,6 +2498,9 @@ async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
         <span style="font-size:12px;color:#4F46E5;flex-shrink:0">▾</span>
       </summary>
       <div style="padding:0 16px 16px;display:flex;flex-direction:column;gap:8px">
+        <!-- O relatório da empresa vem primeiro: é a visão mais completa do mês que a loja
+             tem. O resumo que o app calcula fica abaixo dele. -->
+        ${_relEmpBlocoHtml(comKey, dreComp, mesNome, podeEnviarRel)}
         <div style="font-size:9px;font-weight:700;color:rgba(0,0,0,.4);text-transform:uppercase;letter-spacing:.3px">Faturamento — ${mesAnteriorNome} × ${mesNome}</div>
         ${cmpHtml}
         ${linha('⚠️ Avarias/Desperdício', `${avariasMes.length} · R$ ${fR(avariasValor)}`)}
