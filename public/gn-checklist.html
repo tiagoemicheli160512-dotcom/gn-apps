@@ -2546,6 +2546,76 @@ function _comissoesMesclarFuncsFaltantes(funcs, allData, idx){
   }
   return funcs;
 }
+
+/* ── Cadastro da pessoa não pode sumir ao virar a semana ───────────────────────────────
+   "Nova América já tinha preenchido o início de contrato e agora tá aparecendo que não."
+
+   O que aconteceu: a herança só roda quando a semana é CRIADA. Alguém tinha aberto a semana
+   39 lá atrás (dá pra navegar pra frente), e ela nasceu copiando a semana 36 — quando o
+   início de contrato ainda não tinha sido preenchido. Nas semanas 37 e 38 a loja preencheu
+   os 51, mas a semana 39 já existia e nunca mais foi revisitada. Na segunda-feira ela virou
+   a semana atual e apareceram 47 "faltando início de contrato".
+
+   Confirmado no banco: a semana 39 tinha exatamente as MESMAS duas pessoas com data que a
+   semana 36, e nenhuma com cadastro_em — a impressão digital da semana velha. Atingiu três
+   lojas (Bangu, Nova América e Nova Iguaçu); Norte Shopping escapou porque só abriu a
+   semana 39 agora, herdando da 38.
+
+   Os campos abaixo descrevem a PESSOA, não a semana: uma vez preenchidos, valem daí pra
+   frente. Então, ao montar a semana, o que estiver vazio é completado com o valor mais
+   recente achado pra trás. Só preenche vazio — nunca sobrescreve o que a semana já tem.
+
+   Isto é diferente de _comissoesMesclarFuncsFaltantes, que olha só UMA semana atrás de
+   propósito (pra não ressuscitar quem saiu da loja). Aqui o risco não existe: não entra
+   ninguém novo, só se completa o cadastro de quem JÁ está na semana. Por isso dá pra olhar
+   mais longe sem perigo. */
+const COMISSOES_CAMPOS_CADASTRO = ['inicio_contrato','fim_contrato','cadastro_em',
+  'aval_exp_45','aval_exp_90','horario_dias','setor','turno','horario'];
+const COMISSOES_CADASTRO_SEMANAS_ATRAS = 16;   // ~4 meses; além disso é histórico, não cadastro
+
+function _comissoesCampoVazio(v){ return v === undefined || v === null || v === ''; }
+
+function _comissoesCompletarCadastro(funcs, allData, idx){
+  const precisa = f => f && f.nome && f.nome.trim() && !f.arquivado
+    && COMISSOES_CAMPOS_CADASTRO.some(c => _comissoesCampoVazio(f[c]));
+  if(!Array.isArray(funcs) || !funcs.some(precisa)) return funcs;
+
+  // Varre de trás pra frente a partir da semana anterior: o PRIMEIRO valor encontrado é o
+  // mais recente, que é o que vale.
+  const achado = new Map();
+  const limite = Math.max(0, idx - COMISSOES_CADASTRO_SEMANAS_ATRAS);
+  for(let i = idx - 1; i >= limite; i--){
+    const wdAnt = allData[String(i)];
+    if(!wdAnt || !Array.isArray(wdAnt.funcs)) continue;
+    wdAnt.funcs.forEach(fa => {
+      if(!fa || !fa.nome || !fa.nome.trim()) return;
+      const chave = _comissoesNormNome(fa.nome);
+      const acc = achado.get(chave) || {};
+      COMISSOES_CAMPOS_CADASTRO.forEach(c => {
+        if(_comissoesCampoVazio(acc[c]) && !_comissoesCampoVazio(fa[c])) acc[c] = fa[c];
+      });
+      achado.set(chave, acc);
+    });
+  }
+  if(!achado.size) return funcs;
+
+  // Devolve objetos NOVOS pros que mudaram: wd é cópia rasa de allData[k], então mexer no
+  // func em si alteraria o dado em memória de todas as semanas que apontam pra ele.
+  return funcs.map(f => {
+    if(!precisa(f)) return f;
+    const acc = achado.get(_comissoesNormNome(f.nome));
+    if(!acc) return f;
+    let novo = null;
+    COMISSOES_CAMPOS_CADASTRO.forEach(c => {
+      if(_comissoesCampoVazio(f[c]) && !_comissoesCampoVazio(acc[c])){
+        novo = novo || {...f};
+        novo[c] = acc[c];
+      }
+    });
+    return novo || f;
+  });
+}
+
 // Autocorreção das férias vencidas. A checagem de data que existe em _comissoesHerdarFunc
 // só roda quando a semana é CRIADA — uma semana já salva com FÉRIAS nunca era revisitada,
 // então quando as férias acabavam o funcionário continuava marcado como "em férias" pra
@@ -2594,7 +2664,10 @@ function _comissoesCorrigirFeriasVencidas(funcs, idx){
 function getComissoesWD(allData, idx){
   const k = String(idx);
   if(!allData[k]){
-    return {brutos:Array(7).fill(0), funcs:getComissoesFuncsHerdados(allData,idx), dist:'SIM', vDist:0, saldoSaida:0, motivo:''};
+    // Completa também a semana que está nascendo: ela herda da anterior IMEDIATA, e se essa
+    // estiver com o cadastro furado (foi o caso da 39) o furo seria copiado adiante.
+    const novos = _comissoesCompletarCadastro(getComissoesFuncsHerdados(allData,idx), allData, idx);
+    return {brutos:Array(7).fill(0), funcs:novos, dist:'SIM', vDist:0, saldoSaida:0, motivo:''};
   }
   const wd = {...allData[k]};
   if(!wd.funcs || wd.funcs.length<COMISSOES_MAX_FUNC){
@@ -2603,6 +2676,8 @@ function getComissoesWD(allData, idx){
     wd.funcs=cur;
   }
   wd.funcs = _comissoesMesclarFuncsFaltantes(wd.funcs, allData, idx);
+  // Depois da fusão: quem acabou de entrar pela fusão também chega com o cadastro completo.
+  wd.funcs = _comissoesCompletarCadastro(wd.funcs, allData, idx);
   const fer = _comissoesCorrigirFeriasVencidas(wd.funcs, idx);
   wd.funcs = fer.funcs;
   if(fer.corrigidos.length) window._comissoesFeriasCorrigidas = fer.corrigidos;
