@@ -2017,6 +2017,224 @@ function _dreTextoWhats(d) {
   return t;
 }
 
+/* ── Relatório mensal da empresa ───────────────────────────────────────────────────────
+   "Recebo mensalmente essa da empresa. É possível colocar pra loja ter a visão e ver seu
+   desempenho? Eu mandaria aqui e colocaria na loja."
+
+   Chega como PRINT — uma imagem só, do painel inteiro. Então não há o que filtrar dentro
+   dela: o recorte é por LOJA. Cada loja enxerga apenas o print que foi enviado pra ela, e
+   mestre nenhum precisa recortar nada antes de mandar.
+
+   Guarda por loja e competência em gn_lojas('RELMES_<comKey>'). Uma linha por loja de
+   propósito: a leitura da Home puxa só a da própria loja, e dois mestres enviando pra lojas
+   diferentes no mesmo minuto nunca se sobrescrevem.
+
+   A imagem vai pro Storage (gnUploadFotoStorage), nunca pro JSON — um print de painel tem
+   centenas de KB, e essa linha é lida toda vez que a Home abre.
+
+   Quem envia é o mestre. A loja só lê. */
+const RELEMP_PREFIXO = 'RELMES_';
+// Print de painel é texto fino: recomprimir em JPEG embaça justamente os números que a loja
+// precisa ler. Abaixo desse tamanho sobe o arquivo como veio.
+const RELEMP_LIMITE_ORIGINAL = 1.5 * 1024 * 1024;
+let _relEmpData = {};        // comKey -> { '<AAAA-MM>': {url, em, por} }  (null = falhou a leitura)
+let _relEmpOcupado = false;
+let _relEmpErro = '';
+
+async function _relEmpCarregar(comKey, force) {
+  if (_relEmpData[comKey] !== undefined && !force) return _relEmpData[comKey];
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const rows = await window.gnFetchJson(
+    `${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(RELEMP_PREFIXO + comKey)}&select=all_data`,
+    H, 'relEmpresa:carregar', null);
+  // null = falha de rede. Não cacheia {}: senão a loja ficaria sem o relatório pelo resto da
+  // sessão, e sem nada na tela dizendo que foi a conexão.
+  if (rows === null) return null;
+  _relEmpData[comKey] = (rows[0] && rows[0].all_data) || {};
+  return _relEmpData[comKey];
+}
+
+function _relEmpDe(comKey, comp) {
+  const d = _relEmpData[comKey];
+  return (d && d[comp]) || null;
+}
+
+// Input de arquivo criado na hora e fora do card: o card é redesenhado por innerHTML, e um
+// input que vive dentro dele é destruído no meio da escolha do arquivo.
+function _relEmpEscolher(comKey, comp, mesNome) {
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = 'image/*';
+  inp.style.display = 'none';
+  document.body.appendChild(inp);
+  inp.onchange = function () {
+    const f = inp.files && inp.files[0];
+    inp.remove();
+    if (f) _relEmpEnviar(f, comKey, comp, mesNome);
+  };
+  inp.click();
+}
+
+function _relEmpPreparar(file) {
+  if (file.size <= RELEMP_LIMITE_ORIGINAL) {
+    return new Promise(function (resolve, reject) {
+      const r = new FileReader();
+      r.onload = e => resolve(e.target.result);
+      r.onerror = reject;
+      r.readAsDataURL(file);
+    });
+  }
+  // Grande demais pra subir inteiro. 1800px preserva o painel legível ao ampliar; abaixo
+  // disso os números das tabelas começam a sumir.
+  return new Promise(function (resolve, reject) {
+    const r = new FileReader();
+    r.onload = function (e) {
+      const img = new Image();
+      img.onload = function () {
+        let w = img.width, h = img.height;
+        const max = 1800;
+        if (w > max || h > max) {
+          if (w > h) { h = Math.round(h * max / w); w = max; }
+          else { w = Math.round(w * max / h); h = max; }
+        }
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve(c.toDataURL('image/jpeg', 0.85));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
+async function _relEmpEnviar(file, comKey, comp, mesNome) {
+  if (_relEmpOcupado) return;
+  _relEmpOcupado = true; _relEmpErro = '';
+  await _renderMesAnteriorHome(true, session, !!masterLoja);
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+  try {
+    const b64 = await _relEmpPreparar(file);
+    const url = await window.gnUploadFotoStorage(SB_URL, SB_KEY, 'relatorio-empresa', b64);
+    // Relê antes de gravar: a linha guarda todos os meses da loja, e gravar o que estava em
+    // memória apagaria um mês enviado de outro aparelho.
+    const atual = await _relEmpCarregar(comKey, true);
+    if (atual === null) { _relEmpErro = 'Sem conexão com o banco. A imagem subiu, mas não consegui registrar — tente de novo.'; return; }
+    const dados = JSON.parse(JSON.stringify(atual));
+    const anterior = dados[comp];
+    dados[comp] = { url, em: new Date().toISOString(), por: (session && session.nome) || '', mes: mesNome };
+    const linha = RELEMP_PREFIXO + comKey;
+    const res = await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(linha)}`, {
+      method: 'PATCH', headers: Object.assign({ Prefer: 'return=minimal' }, H),
+      body: JSON.stringify({ all_data: dados, updated_by: (session && session.nome) || null })
+    });
+    if (!res.ok) {
+      // A linha não existe no primeiro envio daquela loja.
+      const cria = await fetch(`${SB_URL}/rest/v1/gn_lojas`, {
+        method: 'POST', headers: Object.assign({ Prefer: 'return=minimal' }, H),
+        body: JSON.stringify({ loja: linha, all_data: dados, updated_by: (session && session.nome) || null })
+      });
+      if (!cria.ok) throw new Error('HTTP ' + res.status);
+    }
+    _relEmpData[comKey] = dados;
+    // Só depois de a troca estar gravada: apagar antes deixaria a loja sem imagem nenhuma se
+    // a gravação falhasse.
+    if (anterior && anterior.url && window.gnDeleteFotoStorage) {
+      window.gnDeleteFotoStorage(SB_URL, SB_KEY, anterior.url);
+    }
+  } catch (e) {
+    window.gnLogError && window.gnLogError('relEmpresa:enviar', e);
+    _relEmpErro = 'Não consegui enviar agora. Confere a internet e tenta de novo.';
+  } finally {
+    _relEmpOcupado = false;
+    await _renderMesAnteriorHome(true, session, !!masterLoja);
+  }
+}
+
+async function _relEmpRemover(comKey, comp, mesNome) {
+  if (_relEmpOcupado) return;
+  const atualItem = _relEmpDe(comKey, comp);
+  if (!atualItem) return;
+  if (!confirm('Tirar o relatório de ' + mesNome + ' da tela da loja?')) return;
+  _relEmpOcupado = true; _relEmpErro = '';
+  await _renderMesAnteriorHome(true, session, !!masterLoja);
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+  try {
+    const atual = await _relEmpCarregar(comKey, true);
+    if (atual === null) { _relEmpErro = 'Sem conexão com o banco. Tente de novo.'; return; }
+    const dados = JSON.parse(JSON.stringify(atual));
+    delete dados[comp];
+    const res = await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(RELEMP_PREFIXO + comKey)}`, {
+      method: 'PATCH', headers: Object.assign({ Prefer: 'return=minimal' }, H),
+      body: JSON.stringify({ all_data: dados, updated_by: (session && session.nome) || null })
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    _relEmpData[comKey] = dados;
+    if (atualItem.url && window.gnDeleteFotoStorage) window.gnDeleteFotoStorage(SB_URL, SB_KEY, atualItem.url);
+  } catch (e) {
+    window.gnLogError && window.gnLogError('relEmpresa:remover', e);
+    _relEmpErro = 'Não consegui remover agora. Confere a internet e tenta de novo.';
+  } finally {
+    _relEmpOcupado = false;
+    await _renderMesAnteriorHome(true, session, !!masterLoja);
+  }
+}
+
+// Bloco no TOPO do card expandido: é a visão mais completa do mês que a loja tem.
+// Sem relatório enviado a loja não vê nada — um "ainda não chegou" todo mês seria ruído.
+// O mestre vê o convite de envio, que é onde ele precisa saber que o lugar existe.
+function _relEmpBlocoHtml(comKey, comp, mesNome, podeEnviar) {
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  const j = _relEmpDe(comKey, comp);
+  const falhou = _relEmpData[comKey] === undefined || _relEmpData[comKey] === null;
+  const arg = `'${esc(comKey)}','${esc(comp)}','${esc(mesNome)}'`;
+  const aviso = _relEmpErro
+    ? `<div style="font-size:11px;color:#b91c1c;margin-top:7px;line-height:1.4">${esc(_relEmpErro)}</div>` : '';
+
+  if (!j) {
+    if (!podeEnviar) return falhou && !_relEmpOcupado
+      ? `<div style="background:#fff;border-radius:10px;padding:10px 12px;font-size:10px;color:rgba(0,0,0,.45)">Não consegui carregar o relatório da empresa agora.</div>`
+      : '';
+    return `<div style="background:rgba(13,148,136,.07);border:1px dashed rgba(13,148,136,.45);border-radius:10px;padding:12px">
+      <div style="font-size:11.5px;font-weight:800;color:#0f766e">📈 Relatório da empresa — ${esc(mesNome)}</div>
+      <div style="font-size:10.5px;color:rgba(0,0,0,.55);margin-top:3px;line-height:1.45">
+        Envie o print que a empresa manda. Ele aparece aqui dentro, só pra esta loja.</div>
+      <button onclick="event.stopPropagation();_relEmpEscolher(${arg})" ${_relEmpOcupado ? 'disabled' : ''}
+        style="margin-top:9px;background:#0f766e;border:none;border-radius:9px;padding:9px 14px;color:#fff;font-size:11.5px;font-weight:800;cursor:pointer;font-family:inherit;${_relEmpOcupado ? 'opacity:.6' : ''}">
+        ${_relEmpOcupado ? 'Enviando…' : '📎 Enviar o relatório'}</button>
+      ${aviso}
+    </div>`;
+  }
+
+  const q = j.em ? new Date(j.em) : null;
+  const quando = q ? String(q.getDate()).padStart(2, '0') + '/' + String(q.getMonth() + 1).padStart(2, '0') : '';
+  return `<div style="background:#fff;border:1px solid rgba(13,148,136,.3);border-radius:10px;padding:10px 12px">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <span style="font-size:11.5px;font-weight:800;color:#0f766e;flex:1;min-width:0">📈 Relatório da empresa — ${esc(mesNome)}</span>
+      ${podeEnviar ? `
+      <button onclick="event.stopPropagation();_relEmpEscolher(${arg})" ${_relEmpOcupado ? 'disabled' : ''}
+        style="background:rgba(13,148,136,.12);border:1px solid rgba(13,148,136,.3);border-radius:8px;padding:4px 9px;color:#0f766e;font-size:10px;font-weight:800;cursor:pointer;font-family:inherit">
+        ${_relEmpOcupado ? '…' : 'Trocar'}</button>
+      <button onclick="event.stopPropagation();_relEmpRemover(${arg})" ${_relEmpOcupado ? 'disabled' : ''}
+        style="background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.28);border-radius:8px;padding:4px 9px;color:#b91c1c;font-size:10px;font-weight:800;cursor:pointer;font-family:inherit">Remover</button>` : ''}
+    </div>
+    <!-- Toque abre em tamanho real: o painel é largo e, encolhido na largura do celular,
+         os números das tabelas ficam ilegíveis. O navegador dá o zoom de graça. -->
+    <a href="${esc(j.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()"
+       style="display:block;margin-top:8px;border-radius:8px;overflow:hidden;cursor:zoom-in">
+      <img src="${esc(j.url)}" alt="Relatório de ${esc(mesNome)}" loading="lazy"
+           style="display:block;width:100%;height:auto;background:rgba(0,0,0,.04)">
+    </a>
+    <div style="display:flex;justify-content:space-between;gap:8px;margin-top:6px;font-size:9.5px;color:rgba(0,0,0,.45)">
+      <span>🔍 Toque na imagem pra ampliar</span>
+      <span>${esc(j.por ? 'enviado por ' + j.por : '')}${quando ? ' · ' + quando : ''}</span>
+    </div>
+    ${aviso}
+  </div>`;
+}
+
 // Card "Desempenho do mês anterior" — fica disponível o mês inteiro, resumindo o mês que
 // acabou de fechar pra loja em questão: faturamento comparado com o mês de trás, avarias,
 // ocorrências (atestado, falta, suspensão, advertência) e funcionário extra.
@@ -2133,6 +2351,10 @@ async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
     const dreComp = _dreCompetencia(fimMesAnterior);
     await _dreCarregar();
     await _cienteCarregar();   // mesma competência do DRE: a ciência é do mês fechado
+    await _relEmpCarregar(comKey);
+    // Quem envia o relatório da empresa é o mestre; a loja só lê. Vem da sessão, não de
+    // masterLoja: é sobre QUEM está olhando, não sobre qual loja está aberta.
+    const podeEnviarRel = sess.loja === 'GERAL' || !!(sess.permissoes || {}).master;
     _dreCtx = { loja, comp: dreComp, faturamento, mesNome };
     _dreEditando = false;
 
@@ -2140,7 +2362,11 @@ async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
       <summary style="list-style:none;cursor:pointer;padding:14px 16px;display:flex;align-items:center;gap:10px">
         <span style="font-size:18px;flex-shrink:0">📊</span>
         <div style="flex:1;min-width:0">
-          <div style="font-size:12px;font-weight:800;color:#1A1D23">Veja o desempenho de ${mesNome}</div>
+          <div style="font-size:12px;font-weight:800;color:#1A1D23">Veja o desempenho de ${mesNome}
+            <!-- Sem esta marca, um relatório novo da empresa chegaria dentro de um card
+                 fechado e ninguém saberia que chegou. -->
+            ${_relEmpDe(comKey, dreComp) ? `<span style="display:inline-block;vertical-align:1px;margin-left:5px;background:rgba(13,148,136,.14);border:1px solid rgba(13,148,136,.3);border-radius:6px;padding:1px 6px;font-size:9px;font-weight:800;color:#0f766e">📈 relatório da empresa</span>` : ''}
+          </div>
           <div style="font-size:10px;color:${_cienteDe(dreComp, loja) ? '#047857' : '#B45309'};margin-top:2px;font-weight:700">
             ${_cienteDe(dreComp, loja)
               ? '✓ Visto por ' + (window.escapeHtml ? window.escapeHtml(_cienteDe(dreComp, loja).nome) : _cienteDe(dreComp, loja).nome)
@@ -2149,6 +2375,9 @@ async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
         <span style="font-size:12px;color:#4F46E5;flex-shrink:0">▾</span>
       </summary>
       <div style="padding:0 16px 16px;display:flex;flex-direction:column;gap:8px">
+        <!-- O relatório da empresa vem primeiro: é a visão mais completa do mês que a loja
+             tem. O resumo que o app calcula fica abaixo dele. -->
+        ${_relEmpBlocoHtml(comKey, dreComp, mesNome, podeEnviarRel)}
         <div style="font-size:9px;font-weight:700;color:rgba(0,0,0,.4);text-transform:uppercase;letter-spacing:.3px">Faturamento — ${mesAnteriorNome} × ${mesNome}</div>
         ${cmpHtml}
         ${linha('⚠️ Avarias/Desperdício', `${avariasMes.length} · R$ ${fR(avariasValor)}`)}
