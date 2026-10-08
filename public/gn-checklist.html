@@ -3191,6 +3191,29 @@ const CARGOS_VISITAS = ['supervisor','mestre']; // só esses cargos dão entrada
 // que cargo mestre sempre vê todas as lojas (ver _computeLojasVisiveis em gn-home.html).
 const CARGOS_SUPERVISAO_CHK = [...CARGOS_SUPERVISAO, 'mestre'];
 
+// ── ENTRADA DE CARNE É SÓ LEITURA PRA LOJA ───────────────────────────────────────
+// Combinado com o dono: a entrada vem sozinha do app Lojas (entrega confirmada em
+// "🚚 Entregas" ou nota de "📥 Entradas de Mercadoria"). A loja continuava lançando à
+// mão em cima disso, e a entrada dobrada infla a venda estimada da semana — era esse o
+// erro. Então a sub-aba Entrada passa a ser só leitura pra loja.
+//
+// Mestre/supervisão continuam podendo editar DE PROPÓSITO: se a automação puxar um número
+// errado, alguém tem que conseguir corrigir — senão o número errado fica pra sempre e não
+// sobra saída, o mesmo cuidado do bloqueio de validade.
+//
+// A loja continua VENDO a aba, inclusive o aviso de entrada suspeita — ela precisa
+// conferir se chegou o que o fornecedor diz que chegou. O que sai é a caneta, não a janela.
+const CARGOS_EDITA_ENTRADA_CARNE = CARGOS_SUPERVISAO_CHK;
+function _podeEditarEntradaCarne(){
+  const cargo = String((usuarioLogado||{}).cargo||'').toLowerCase();
+  return CARGOS_EDITA_ENTRADA_CARNE.map(c=>String(c).toLowerCase()).includes(cargo);
+}
+// Um campo de entrada é ent_<dia>; autoEnt_<dia> é o espelho da automação e nunca passa
+// por aqui (_carregarCarnesAutoLojas escreve direto no objeto, sem updateCarneCampo).
+function _ehCampoEntradaCarne(campoKey){
+  return /^ent_/.test(String(campoKey||''));
+}
+
 // VALIDADE_* e _val* também precisam vir antes do init IIFE: renderAll() é chamado
 // sincronamente por ele e desce até renderCheckGroup(), que monta o painel de validades
 // de cada setor e lê VALIDADE_AREAS na primeira linha. Declarado lá embaixo, perto do
@@ -9663,6 +9686,10 @@ function renderCarnes(){
       </button>`;
     }).join('');
     const diaKey = DIAS_SEMANA[diaAtivoIdx];
+    // Estado de edição que sobrou de uma sessão de supervisão (ou de uma troca de usuário
+    // sem recarregar) não pode deixar a loja com os campos abertos.
+    const _podeEditarEnt = _podeEditarEntradaCarne();
+    if(_carneEntradasEditando && !_podeEditarEnt) _carneEntradasEditando = false;
     if(_carneEntradasEditando){
       c.innerHTML=`<div style="background:rgba(232,88,10,.1);border:1px solid rgba(232,88,10,.3);border-radius:10px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
         <div style="font-size:11px;color:#1A1D23;">✏️ Modo edição — altere apenas se necessário</div>
@@ -9694,8 +9721,12 @@ function renderCarnes(){
       <div style="font-size:10px;color:#1A1D23;">Entra sozinho quando a loja confirma a entrega em "🚚 Entregas" (JBS/Nogmix e FAFS/Villa Pescados) — a quantidade é a que foi conferida no recebimento. Carne que chegou fora de entrega programada vem da nota de "📥 Entradas de Mercadoria". Não precisa lançar de novo aqui; edite só se necessário.</div>
       <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
         <button onclick="_carregarCarnesAutoLojas(true)" ${_carnesAutoCarregando?'disabled':''} style="background:#6bcb77;border:none;border-radius:7px;padding:6px 12px;color:#1A1D23;font-size:11px;font-weight:700;cursor:pointer;">${_carnesAutoCarregando?'⏳ Atualizando…':'🔄 Atualizar do Lojas'}</button>
-        <button onclick="_carneEntradasEditando=true;renderCarnes()" style="background:#EBEEF2;border:1px solid #555;border-radius:7px;padding:6px 12px;color:#1A1D23;font-size:11px;font-weight:700;cursor:pointer;">✏️ Editar</button>
+        ${_podeEditarEnt?`<button onclick="_carneEntradasEditando=true;renderCarnes()" style="background:#EBEEF2;border:1px solid #555;border-radius:7px;padding:6px 12px;color:#1A1D23;font-size:11px;font-weight:700;cursor:pointer;">✏️ Editar</button>`:''}
       </div>
+      ${_podeEditarEnt?'':`<div style="font-size:10.5px;color:#1A1D23;line-height:1.45;margin-top:8px;background:rgba(0,0,0,.05);border-radius:7px;padding:7px 9px;">
+        🔒 <b>Não precisa lançar entrada aqui.</b> Lançar de novo o que já entrou sozinho dobra
+        a entrada e infla a venda estimada da semana. Se o número estiver errado, ou chegou
+        carne que não aparece, fale com a supervisão — ela corrige por aqui.</div>`}
     </div>
     ${_carnesAutoErro?`<div style="background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:11px;color:#1A1D23;">⚠️ Não consegui buscar as entradas no app Lojas agora. Tente ↻ Atualizar de novo.</div>`:''}
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:12px;">${diasHtml2}</div>
@@ -9872,6 +9903,13 @@ function updateCarneDia(carneKey, campoKey, val){
 }
 
 function updateCarneCampo(carneKey, campoKey, val){
+  // Chokepoint: todo caminho manual de digitação passa por aqui (renderInputTab). A
+  // automação não passa — escreve direto no objeto em _carregarCarnesAutoLojas.
+  if(_ehCampoEntradaCarne(campoKey) && !_podeEditarEntradaCarne()){
+    showToast('Entrada de carne é automática — fale com a supervisão','info');
+    renderCarnes();
+    return;
+  }
   if(!stateWeek.carnes[carneKey]) stateWeek.carnes[carneKey]={};
   stateWeek.carnes[carneKey][campoKey]=val;
   autoSave();
@@ -15491,6 +15529,11 @@ let calcState = {
 };
 
 function openCalcCarne(){
+  // Avisa na hora de abrir, em vez de deixar somar as pesagens e recusar só no "usar total".
+  if(carneTabAtiva==='entradas' && !_podeEditarEntradaCarne()){
+    showToast('Entrada de carne é automática — a calculadora não lança aqui','info');
+    return;
+  }
   calcState.parcelas = [];
   const modal = document.getElementById('calc-carne-modal');
   modal.style.display = 'flex';
@@ -15594,6 +15637,15 @@ function calcUsarTotal(){
 
   if(!campo){
     showToast('Selecione uma aba de carnes antes','info');
+    closeCalcCarne();
+    return;
+  }
+
+  // A calculadora grava direto no stateWeek, sem passar por updateCarneCampo — é o segundo
+  // caminho de digitação da Entrada, e o mais fácil de usar sem perceber (o 🧮 fica no topo
+  // da aba Carnes, fora do modo edição). Sem esta guarda, "só leitura" não seria verdade.
+  if(_ehCampoEntradaCarne(campo) && !_podeEditarEntradaCarne()){
+    showToast('Entrada de carne é automática — fale com a supervisão','info');
     closeCalcCarne();
     return;
   }
