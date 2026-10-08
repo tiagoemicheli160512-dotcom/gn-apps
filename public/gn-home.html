@@ -265,6 +265,7 @@
 <script src="gn-armazenamento.js"></script>
 <script src="gn-lojas-config.js"></script>
 <script src="gn-escala-acesso.js"></script>
+<script src="gn-validade-acesso.js"></script>
 <script src="gn-avaliacoes-pesos.js"></script>
 <script src="gn-comissoes-calendario.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
@@ -346,6 +347,11 @@
       <div id="acessos-hoje" style="margin-top:8px;font-size:10.5px;color:rgba(0,0,0,.4);display:none"></div>
     </div>
   </div>
+
+  <!-- Validades: o que já venceu e o que vence nos próximos dias. Acima de tudo, inclusive
+       do número do dia: vencido fecha o app (ver gn-validade-acesso.js), e o que está pra
+       vencer é a única coisa aqui que ainda dá pra evitar se vista a tempo. -->
+  <div id="validades-home-card"></div>
 
   <!-- Aviso de eleição — acima do card de venda de propósito: é o primeiro recado do mês -->
   <div id="eleicoes-escala-home-card"></div>
@@ -2536,6 +2542,111 @@ async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
 // Maglia não entra no "X/N lojas" do índice — mesmo tratamento do consolidado de
 // faturamento (ver _lojasFatConsolidado) — só entra na lista de pendentes se for
 // a própria loja ativa vendo o aviso.
+/* ── Validades na Home ─────────────────────────────────────────────────────────────────
+   "Tem como buscar essa informação e colocar ela no app Home lojas, pra ficar registrado
+   sempre que entrar no alerta pra vencer."
+
+   Lê as mesmas linhas VALIDADES_<comKey>_<area> que o Check-list escreve — fonte única, sem
+   cadastro paralelo. Mostra o que JÁ VENCEU (que fecha o app, ver gn-validade-acesso.js) e
+   o que vence nos próximos 3 dias, que é o que ainda dá pra aproveitar se alguém vir a
+   tempo.
+
+   Some da tela quando não há nada vencido nem vencendo: um card verde todo dia vira
+   paisagem, e aí ninguém repara no dia em que ele fica vermelho.
+
+   Mestre vendo uma loja pelo seletor vê a daquela loja — mesma regra dos outros cards. */
+const VALIDADE_HOME_DIAS = 3;
+const VALIDADE_HOME_AREAS = { salao:'Salão', cozinha:'Cozinha', copa:'Copa / Bar',
+                              estoque:'Estoque', camaras:'Câmaras frias' };
+
+function _valHomeDias(iso, hojeISO) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(iso || ''))) return null;
+  const a = new Date(hojeISO + 'T12:00:00'), b = new Date(iso + 'T12:00:00');
+  if (isNaN(b)) return null;
+  return Math.round((b - a) / 86400000);
+}
+
+async function _renderValidadesHome(mostrar, sess, isMasterAtivo) {
+  const el = document.getElementById('validades-home-card');
+  if (!el) return;
+  if (!mostrar || !sess) { el.innerHTML = ''; return; }
+  const loja = (isMasterAtivo && masterLoja) ? masterLoja : sess.loja;
+  if (!loja || loja === 'GERAL' || !LOJAS_LISTA.includes(loja)) { el.innerHTML = ''; return; }
+  const comKey = LOJA_COM_KEY[loja] || loja;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const prefixo = 'VALIDADES_' + comKey + '_';
+  const rows = await window.gnFetchJson(
+    `${SB_URL}/rest/v1/gn_lojas?loja=like.${encodeURIComponent(prefixo + '*')}&select=loja,all_data`,
+    H, 'validadesHome', null);
+  // Falha de rede não pode virar "está tudo certo": sumir com o card diria exatamente isso.
+  if (rows === null) {
+    el.innerHTML = `<div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:14px;padding:11px 14px;margin:0 16px 14px;font-size:10.5px;color:rgba(0,0,0,.45)">
+      Não consegui carregar as validades agora.</div>`;
+    return;
+  }
+
+  // O `_` do LIKE casa qualquer caractere — confere o nome exato depois.
+  const re = new RegExp('^' + prefixo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[a-z_]+$');
+  const hojeISO = (() => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); })();
+  const vencidos = [], vencendo = [];
+  rows.forEach(row => {
+    if (!re.test(row.loja)) return;
+    const area = row.loja.slice(prefixo.length);
+    const itens = (row.all_data && row.all_data.itens) || [];
+    if (!Array.isArray(itens)) return;
+    itens.forEach(it => {
+      if (!it || !it.nome || !it.validade) return;
+      const d = _valHomeDias(it.validade, hojeISO);
+      if (d === null) return;
+      if (d < 0) vencidos.push({ area, nome: it.nome, validade: it.validade, dias: d });
+      else if (d <= VALIDADE_HOME_DIAS) vencendo.push({ area, nome: it.nome, validade: it.validade, dias: d });
+    });
+  });
+
+  if (!vencidos.length && !vencendo.length) { el.innerHTML = ''; return; }
+
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  const ordena = l => l.sort((a, b) => a.dias - b.dias || String(a.nome).localeCompare(String(b.nome)));
+  const quando = it => it.dias < 0
+    ? (it.dias === -1 ? 'venceu ontem' : `venceu há ${Math.abs(it.dias)} dias`)
+    : it.dias === 0 ? 'vence HOJE' : it.dias === 1 ? 'vence amanhã' : `vence em ${it.dias} dias`;
+  const linha = (it, cor) => `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;padding:4px 0;border-bottom:1px solid rgba(0,0,0,.05)">
+      <span style="flex:1;min-width:0;font-size:11.5px;color:#1A1D23;word-break:break-word">${esc(it.nome)}
+        <span style="display:block;font-size:9.5px;color:rgba(0,0,0,.4)">${esc(VALIDADE_HOME_AREAS[it.area] || it.area)}</span></span>
+      <span style="flex-shrink:0;font-size:10.5px;font-weight:800;color:${cor}">${esc(quando(it))}</span>
+    </div>`;
+  const bloco = (titulo, lista, cor, limite) => {
+    if (!lista.length) return '';
+    const vis = ordena(lista).slice(0, limite);
+    const resto = lista.length - vis.length;
+    return `<div style="margin-top:9px">
+      <div style="font-size:9px;font-weight:800;color:${cor};text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px">${titulo} (${lista.length})</div>
+      ${vis.map(it => linha(it, cor)).join('')}
+      ${resto > 0 ? `<div style="font-size:10px;color:rgba(0,0,0,.4);margin-top:4px">+ ${resto} no Check-list</div>` : ''}
+    </div>`;
+  };
+
+  const temVencido = vencidos.length > 0;
+  const borda = temVencido ? '#DC2626' : '#D97706';
+  const fundo = temVencido ? 'rgba(220,38,38,.07)' : 'rgba(217,119,6,.07)';
+  el.innerHTML = `<div style="background:${fundo};border:1px solid ${borda}55;border-left:3px solid ${borda};border-radius:14px;padding:12px 14px;margin:0 16px 14px">
+    <div style="display:flex;align-items:center;gap:8px">
+      <span style="font-size:17px;flex-shrink:0">${temVencido ? '⛔' : '⏳'}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12.5px;font-weight:800;color:#1A1D23">${temVencido ? 'Produto vencido na loja' : 'Produtos perto de vencer'}</div>
+        <div style="font-size:10px;color:${borda};font-weight:700;margin-top:1px">
+          ${temVencido
+            ? 'Os apps ficam fechados até resolver — só o Check-list abre'
+            : `Vencem nos próximos ${VALIDADE_HOME_DIAS} dias`}</div>
+      </div>
+    </div>
+    ${bloco('Vencidos', vencidos, '#DC2626', 8)}
+    ${bloco('Vence em breve', vencendo, '#B45309', 6)}
+    <a href="gn-checklist.html" style="display:block;text-align:center;margin-top:11px;background:${borda};color:#fff;border-radius:10px;padding:9px;font-size:12px;font-weight:800;text-decoration:none">
+      📋 Abrir o Check-list</a>
+  </div>`;
+}
+
 async function _renderAvaliacoesAvisoHome(mostrar, sess, isMasterAtivo) {
   const el = document.getElementById('avaliacoes-aviso-home-card');
   if (!el) return;
@@ -4664,6 +4775,7 @@ function _refreshPermUI(sess) {
   _renderBancoHorasFechaHome(_mostrarCards, sess, isMaster);
   _renderDatasEspeciaisHome(_mostrarCards, sess, isMaster);
   _renderXmlMesHome(_mostrarCards, sess, isMaster);
+  _renderValidadesHome(_mostrarCards, sess, isMaster);
   _renderAvaliacoesAvisoHome(_mostrarCards, sess, isMaster);
   _renderCarnesDocsHome(_mostrarCards, sess, isMaster);
   _renderOcorrenciasSemanaHome(_mostrarCards, sess, isMaster);
@@ -4908,6 +5020,7 @@ function showHome(sess) {
   _renderBancoHorasFechaHome(_mostrarCards, sess, isMaster);
   _renderDatasEspeciaisHome(_mostrarCards, sess, isMaster);
   _renderXmlMesHome(_mostrarCards, sess, isMaster);
+  _renderValidadesHome(_mostrarCards, sess, isMaster);
   _renderAvaliacoesAvisoHome(_mostrarCards, sess, isMaster);
   _renderCarnesDocsHome(_mostrarCards, sess, isMaster);
   _renderOcorrenciasSemanaHome(_mostrarCards, sess, isMaster);
