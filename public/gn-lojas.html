@@ -2524,6 +2524,51 @@ function _urgFaltamContar() {
   }).length;
 }
 
+// ── URGÊNCIA POR CATEGORIA ───────────────────────────────────────────────────────
+// Pedido do dono: poder contar a urgência categoria por categoria (Bebidas, Petiscos…)
+// em vez de uma lista corrida só. Com 80 itens marcados, metade em BEBIDAS, a lista
+// corrida obriga a loja a caçar o próximo item no meio de tudo.
+//
+// O filtro de grupo normal continua escondido durante a trava, mas por outro motivo que o
+// de antes: estas categorias são construídas A PARTIR da urgência desta loja, então trocar
+// de categoria nunca mostra item fora dela nem serve pra fugir da trava — o filtro
+// 'urgencia' segue aplicado por cima. O que libera continua sendo _urgFaltamContar() sobre
+// o conjunto INTEIRO, não sobre a categoria aberta.
+//
+// Item avulso criado pela loja (id começando com C, sem linha no catálogo e portanto sem
+// grupo) cai em OUTROS em vez de sumir da conta — hoje existe um.
+// A categoria de um item PARA EFEITO DA URGÊNCIA. Tem que ser a mesma função usada pra
+// montar os botões e pra filtrar a lista: enquanto o botão dizia OUTROS e o filtro comparava
+// com o grupo cru (''), escolher OUTROS devolvia lista vazia com a trava de pé.
+function _urgGrupoDe(prod) {
+  return ((prod && prod.grupo) || '').trim() || 'OUTROS';
+}
+function _urgGruposLoja() {
+  const urg = new Set(_urgItensLoja().map(String));
+  const p = getPedido();
+  const mapa = new Map();
+  getProdutosPedidoOrdenados().forEach(function (prod) {
+    if (!urg.has(String(prod.item))) return;
+    const g = _urgGrupoDe(prod);
+    const o = mapa.get(g) || { grupo: g, total: 0, faltam: 0 };
+    o.total++;
+    if (!_pedidoPreenchido(p[prod.item] || {})) o.faltam++;
+    mapa.set(g, o);
+  });
+  return Array.from(mapa.values()).sort(function (a, b) {
+    return a.grupo.localeCompare(b.grupo, 'pt-BR');
+  });
+}
+// Categoria aberta na trava. Valida contra as que existem: categoria que ficou escolhida e
+// depois saiu da urgência (o Compras reedita a lista toda semana) voltaria uma lista vazia
+// com a trava de pé, que é o pior estado possível — sem nada pra contar e sem liberar.
+function _urgGrupoAtivo() {
+  const gs = _urgGruposLoja();
+  const atual = window._urgGrupo;
+  const existe = gs.some(function (g) { return g.grupo === atual; });
+  return (atual && atual !== '__TODOS__' && existe) ? atual : '__TODOS__';
+}
+
 function _podeCfgMinimos() {
   try {
     const cargo = usuarioAtual ? usuarioAtual.cargo : null;
@@ -9803,7 +9848,11 @@ function render() {
     // prometia 88 itens numa lista que abria vazia.
     const _urgQtd = _urgItensPresentes().length;
     const prodsTotaisCatalogo = PRODUTOS_PEDIDO.length;
-    const grupoAtivo = _urgTrava ? '__TODOS__' : (window._pedidoGrupo || grupos[0]);
+    // Na trava, a categoria vem do seletor próprio da urgência (ver _urgGrupoAtivo) — o
+    // filtro 'urgencia' continua aplicado por cima, então a categoria recorta dentro da
+    // urgência, nunca pra fora dela.
+    const grupoAtivo = _urgTrava ? _urgGrupoAtivo() : (window._pedidoGrupo || grupos[0]);
+    const _urgGrupos = _urgTrava ? _urgGruposLoja() : [];
     const todosOrdenados = getProdutosPedidoOrdenados();
     const k = lojaKey();
     const kAnterior = loja + "|" + wkKey(addDays(semana, -7));
@@ -9814,7 +9863,9 @@ function render() {
     const totalCustoPedido = _valEst.total;
     let prodsFiltrados = grupoAtivo === "__TODOS__"
       ? todosOrdenados
-      : todosOrdenados.filter(p=>p.grupo===grupoAtivo);
+      // Na trava, compara pela MESMA normalização que montou os botões (ver _urgGrupoDe) —
+      // senão a categoria OUTROS, que é rótulo pro item sem grupo, abria vazia.
+      : todosOrdenados.filter(p => _urgTrava ? _urgGrupoDe(p) === grupoAtivo : p.grupo === grupoAtivo);
     // Altura real do cabeçalho fixo, pra grudar a barra de Urgência/Finalizar logo abaixo
     // dele — em vez de um valor fixo, que quebraria se o cabeçalho mudar de tamanho.
     const _headerH = (document.getElementById('header') || {}).offsetHeight || 56;
@@ -9887,6 +9938,8 @@ function render() {
       <div style="background:rgba(180,83,9,.1);border:1px solid rgba(180,83,9,.35);border-left:3px solid #B45309;border-radius:10px;padding:10px 12px;margin-top:8px;font-size:11.5px;color:#78350f;line-height:1.45">
         ⚡ <b>Conte primeiro a urgência.</b> A lista está mostrando só os ${_urgQtd} itens
         marcados como urgência pelo setor de Compras — <b>${_urgFaltamContar()}</b> ainda sem contagem lançada.
+        ${_urgGrupos.length > 1 ? `Dá pra ir por categoria nos botões abaixo (o número é quanto falta em cada uma);
+        o que libera é não sobrar nenhum item, em categoria nenhuma.` : ''}
         Depois de tocar em <b>⚡ Urgência</b> e enviar, o restante do estoque (${prodsTotaisCatalogo} itens) libera na hora.
       </div>` : ''}
 
@@ -9911,8 +9964,23 @@ function render() {
           </button>
         </div>
 
-        <!-- Filtro de grupo — some enquanto a urgência não sai: ali a lista é a urgência
-        inteira, de todas as categorias, e trocar de grupo só serviria pra fugir dela. -->
+        <!-- Na trava, o seletor é o das categorias DA URGÊNCIA (ver _urgGruposLoja): cada
+        uma mostra quanto ainda falta contar, e a que já fechou ganha ✓. O filtro de grupo
+        normal continua fora, porque ele abriria o catálogo inteiro. -->
+        ${!_urgTrava ? '' : `
+        <div style="display:flex;gap:6px;overflow-x:auto;padding-top:8px;scrollbar-width:none">
+          <button onclick="window._urgGrupo='__TODOS__';render();"
+            style="flex-shrink:0;padding:6px 12px;border-radius:20px;font-size:11px;font-weight:700;border:none;cursor:pointer;
+              ${'__TODOS__'===grupoAtivo?'background:#B45309;color:#fff':'background:rgba(180,83,9,.12);color:#78350f'}">
+            TODAS${_urgFaltamContar()>0?' ('+_urgFaltamContar()+')':' ✓'}
+          </button>
+          ${_urgGrupos.map(g => `
+            <button onclick="window._urgGrupo='${g.grupo.replace(/'/g,"\\'")}';render();"
+              style="flex-shrink:0;padding:6px 12px;border-radius:20px;font-size:11px;font-weight:700;border:none;cursor:pointer;
+                ${g.grupo===grupoAtivo?'background:#B45309;color:#fff':g.faltam===0?'background:rgba(5,150,105,.14);color:#047857':'background:rgba(180,83,9,.12);color:#78350f'}">
+              ${g.grupo} ${g.faltam===0?'✓':'('+g.faltam+')'}
+            </button>`).join('')}
+        </div>`}
         ${_urgTrava ? '' : `
         <div style="display:flex;gap:6px;overflow-x:auto;padding-top:8px;scrollbar-width:none">
           <button onclick="window._pedidoGrupo='__TODOS__';render();"
