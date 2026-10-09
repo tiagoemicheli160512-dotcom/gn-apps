@@ -2368,6 +2368,57 @@ function _urgItensLoja() {
   if (urgenciaGlobal) return urgenciaGlobal;
   return urgenciaTemplate[loja] || [];
 }
+
+// ── A URGÊNCIA VALE NAS DUAS REGIÕES ────────────────────────────────────────────
+// A lista de urgência é uma só pra rede, mas o item de São Paulo é OUTRA linha do catálogo,
+// com item_id próprio: o Rio vai de 0 a 512 e SP de 1004 a 1506, sem um id em comum.
+// origem_item_id é o que liga uma linha na outra — mesmo mecanismo já usado no mapa de
+// carnes (ver _mapearCarnesChk mais abaixo).
+//
+// O app do Compras tem chave de região (S.regiao) e grava o item_id do catálogo que está na
+// tela: marcar com SP selecionado grava id de SP, com RJ grava id do Rio. Sem traduzir, a
+// marcação de um lado nunca alcança o outro — era o que deixava Itaquera e Guarulhos fora da
+// trava, com 80 ids do Rio e zero de SP na lista.
+//
+// Espelhar os ids à mão no banco resolve por uma semana só: o app do Compras grava
+// urgenciaGlobal INTEIRO a cada toque, montado do catálogo de uma região só, então a próxima
+// reedição apaga os ids da outra. Foi o que aconteceu com os 84 itens de SP espelhados em
+// 06/10 — sumiram. Traduzir na leitura não tem essa volta: vale pra qualquer marcação, feita
+// de qualquer região, hoje e depois.
+let _urgTradPorId = null;   // id de uma região -> id equivalente na outra (nos dois sentidos)
+async function _carregarTraducaoUrgencia() {
+  if (_urgTradPorId) return _urgTradPorId;
+  try {
+    const rows = await sbRequest(
+      'gn_catalogo?regiao=eq.SP&origem_item_id=not.is.null&select=item_id,origem_item_id',
+      { method: 'GET' }
+    );
+    const m = {};
+    (rows || []).forEach(function (r) {
+      m[String(r.item_id)] = String(r.origem_item_id);
+      m[String(r.origem_item_id)] = String(r.item_id);
+    });
+    // Só assume o mapa se veio algo: objeto vazio marcaria como "carregado" e nunca mais
+    // tentaria, deixando SP sem urgência pelo resto da sessão por causa de um blip.
+    if (Object.keys(m).length) _urgTradPorId = m;
+  } catch (e) { /* sem o mapa vale só o id próprio — o Rio segue igual (ver _urgIdsDoItem) */ }
+  return _urgTradPorId;
+}
+// Os ids que representam ESTE item nas duas regiões. Sem mapa, só o próprio: por isso a
+// falha de rede não muda nada pro Rio, onde o id marcado já é o da loja.
+function _urgIdsDoItem(id) {
+  const s = String(id);
+  const eq = _urgTradPorId && _urgTradPorId[s];
+  return eq ? [s, eq] : [s];
+}
+// Predicado único de "este produto está marcado como urgência". Todo lugar que decidia isso
+// comparando só prod.item passa por aqui, pra não existir uma tela que acha urgente e outra
+// que não. `set` é opcional, pra quem está dentro de um laço sobre o catálogo.
+function _urgEhUrgente(prod, set) {
+  if (!prod) return false;
+  const s = set || new Set(_urgItensLoja().map(String));
+  return _urgIdsDoItem(prod.item).some(function (id) { return s.has(id); });
+}
 // Dos itens marcados, os que existem DE FATO na lista desta loja.
 //
 // A lista de urgência é uma só pra rede, mas os ids são por região: o catálogo do Rio vai de
@@ -2382,14 +2433,22 @@ function _urgItensLoja() {
 function _urgItensPresentes() {
   const urg = _urgItensLoja();
   if (!urg.length) return [];
-  const daLoja = new Set(getProdutosPedidoOrdenados().map(p => String(p.item)));
-  return urg.filter(id => daLoja.has(id));
+  // Devolve os ids DA LOJA que estão urgentes (não os ids marcados): entre regiões os dois
+  // não são o mesmo número, e é o id da loja que o resto da tela usa.
+  const set = new Set(urg.map(String));
+  return getProdutosPedidoOrdenados()
+    .filter(p => _urgEhUrgente(p, set))
+    .map(p => String(p.item));
 }
 // Sem item marcado nesta loja não há o que priorizar — a lista abre inteira, como sempre.
 function _urgAplicavel() { return _cargoContaBarris() && loja !== 'Maglia' && _urgItensPresentes().length > 0; }
 
 async function _checarUrgenciaPendencia() {
   _urgSemanaIni = wkKey(getMonday(new Date()));
+  // Antes de decidir se trava: sem o mapa de tradução, uma loja de SP não reconhece como
+  // urgente nenhum item marcado no Rio e _urgAplicavel() daria falso (era o estado de hoje).
+  // Carrega uma vez por sessão; a falha deixa o Rio intacto e SP como estava.
+  await _carregarTraducaoUrgencia();
   const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
   // Uma consulta só serve às duas coisas: a faixa de confirmação (que vale pra toda loja, com
   // ou sem urgência marcada — ela precisa saber se finalizou) e a pendência da urgência.
@@ -2519,8 +2578,9 @@ function _faixaEnvioSemanaHtml(urgTrava) {
 function _urgFaltamContar() {
   const p = getPedido();
   const urg = _urgItensLoja();
+  const set = new Set(urg.map(String));
   return getProdutosPedidoOrdenados().filter(function(prod) {
-    return urg.includes(String(prod.item)) && !_pedidoPreenchido(p[prod.item] || {});
+    return _urgEhUrgente(prod, set) && !_pedidoPreenchido(p[prod.item] || {});
   }).length;
 }
 
@@ -2548,7 +2608,7 @@ function _urgGruposLoja() {
   const p = getPedido();
   const mapa = new Map();
   getProdutosPedidoOrdenados().forEach(function (prod) {
-    if (!urg.has(String(prod.item))) return;
+    if (!_urgEhUrgente(prod, urg)) return;
     const g = _urgGrupoDe(prod);
     const o = mapa.get(g) || { grupo: g, total: 0, faltam: 0 };
     o.total++;
@@ -6103,7 +6163,7 @@ async function _sincronizarProdutosPedidoComCatalogo() {
   try {
     const rows = await sbRequest(
       'gn_catalogo?ativo=eq.true&grupo=neq.HORTIFRUTI&regiao=eq.' + _regiaoDaLoja()
-        + '&select=item_id,fornecedor,grupo,subgrupo,produto,und,custo,und_por_caixa&order=grupo,fornecedor,produto',
+        + '&select=item_id,origem_item_id,fornecedor,grupo,subgrupo,produto,und,custo,und_por_caixa&order=grupo,fornecedor,produto',
       { method: 'GET' }
     );
     const atualizados = (rows || [])
@@ -6117,6 +6177,9 @@ async function _sincronizarProdutosPedidoComCatalogo() {
         und: r.und,
         custo: Number(r.custo) || 0,
         und_por_caixa: r.und_por_caixa != null ? Number(r.und_por_caixa) : null,
+        // Liga este item na linha da outra região — é o que faz a urgência marcada no Rio
+        // valer em SP e vice-versa (ver _urgIdsDoItem).
+        origem_item_id: r.origem_item_id != null ? r.origem_item_id : null,
       }));
     if (atualizados.length) {
       PRODUTOS_PEDIDO.length = 0;
@@ -9877,8 +9940,8 @@ function render() {
     } else if (_pfiltro === 'preenchidos') {
       prodsFiltrados = prodsFiltrados.filter(p => _pedidoPreenchido(pedido[p.item] || {}));
     } else if (_pfiltro === 'urgencia') {
-      const _urg = _urgItensLoja();
-      prodsFiltrados = prodsFiltrados.filter(p => _urg.includes(String(p.item)));
+      const _urgSet = new Set(_urgItensLoja().map(String));
+      prodsFiltrados = prodsFiltrados.filter(p => _urgEhUrgente(p, _urgSet));
     }
 
     c.innerHTML = `
@@ -10009,7 +10072,7 @@ function render() {
           const _pedAntLS = (pedidoAll[kAnterior] || {})[prod.item];
           const _pedAntCxLS = _pedAntLS != null ? parseFloat(_pedAntLS._cxConfirmado) : null;
           const isEstoqueBaixo = !temDiverg && _estVigLS != null && !isNaN(_estVigLS) && _pedAntCxLS > 0 && _estVigLS < _pedAntCxLS * 0.25;
-          const isUrgente = _urgItensLoja().includes(String(prod.item));
+          const isUrgente = _urgEhUrgente(prod);
           return `<div class="row-item" data-search="${prod.produto} ${prod.fornecedor} ${prod.subgrupo} ${prod.grupo}" data-pid="${prod.item}"
               style="flex-direction:column;align-items:flex-start;gap:6px;${temDiverg?'border-left:3px solid #DC2626;background:rgba(239,68,68,.06)':isEstoqueBaixo?'border-left:3px solid #D97706;background:rgba(245,158,11,.05)':temDado?'background:rgba(245,158,11,.06)':''}${prod.isCustom&&!temDiverg?';border-left:3px solid #059669':''}">
             <div style="display:flex;width:100%;align-items:center;gap:6px">
