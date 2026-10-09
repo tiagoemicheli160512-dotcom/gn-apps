@@ -2368,6 +2368,57 @@ function _urgItensLoja() {
   if (urgenciaGlobal) return urgenciaGlobal;
   return urgenciaTemplate[loja] || [];
 }
+
+// ── A URGÊNCIA VALE NAS DUAS REGIÕES ────────────────────────────────────────────
+// A lista de urgência é uma só pra rede, mas o item de São Paulo é OUTRA linha do catálogo,
+// com item_id próprio: o Rio vai de 0 a 512 e SP de 1004 a 1506, sem um id em comum.
+// origem_item_id é o que liga uma linha na outra — mesmo mecanismo já usado no mapa de
+// carnes (ver _mapearCarnesChk mais abaixo).
+//
+// O app do Compras tem chave de região (S.regiao) e grava o item_id do catálogo que está na
+// tela: marcar com SP selecionado grava id de SP, com RJ grava id do Rio. Sem traduzir, a
+// marcação de um lado nunca alcança o outro — era o que deixava Itaquera e Guarulhos fora da
+// trava, com 80 ids do Rio e zero de SP na lista.
+//
+// Espelhar os ids à mão no banco resolve por uma semana só: o app do Compras grava
+// urgenciaGlobal INTEIRO a cada toque, montado do catálogo de uma região só, então a próxima
+// reedição apaga os ids da outra. Foi o que aconteceu com os 84 itens de SP espelhados em
+// 06/10 — sumiram. Traduzir na leitura não tem essa volta: vale pra qualquer marcação, feita
+// de qualquer região, hoje e depois.
+let _urgTradPorId = null;   // id de uma região -> id equivalente na outra (nos dois sentidos)
+async function _carregarTraducaoUrgencia() {
+  if (_urgTradPorId) return _urgTradPorId;
+  try {
+    const rows = await sbRequest(
+      'gn_catalogo?regiao=eq.SP&origem_item_id=not.is.null&select=item_id,origem_item_id',
+      { method: 'GET' }
+    );
+    const m = {};
+    (rows || []).forEach(function (r) {
+      m[String(r.item_id)] = String(r.origem_item_id);
+      m[String(r.origem_item_id)] = String(r.item_id);
+    });
+    // Só assume o mapa se veio algo: objeto vazio marcaria como "carregado" e nunca mais
+    // tentaria, deixando SP sem urgência pelo resto da sessão por causa de um blip.
+    if (Object.keys(m).length) _urgTradPorId = m;
+  } catch (e) { /* sem o mapa vale só o id próprio — o Rio segue igual (ver _urgIdsDoItem) */ }
+  return _urgTradPorId;
+}
+// Os ids que representam ESTE item nas duas regiões. Sem mapa, só o próprio: por isso a
+// falha de rede não muda nada pro Rio, onde o id marcado já é o da loja.
+function _urgIdsDoItem(id) {
+  const s = String(id);
+  const eq = _urgTradPorId && _urgTradPorId[s];
+  return eq ? [s, eq] : [s];
+}
+// Predicado único de "este produto está marcado como urgência". Todo lugar que decidia isso
+// comparando só prod.item passa por aqui, pra não existir uma tela que acha urgente e outra
+// que não. `set` é opcional, pra quem está dentro de um laço sobre o catálogo.
+function _urgEhUrgente(prod, set) {
+  if (!prod) return false;
+  const s = set || new Set(_urgItensLoja().map(String));
+  return _urgIdsDoItem(prod.item).some(function (id) { return s.has(id); });
+}
 // Dos itens marcados, os que existem DE FATO na lista desta loja.
 //
 // A lista de urgência é uma só pra rede, mas os ids são por região: o catálogo do Rio vai de
@@ -2382,14 +2433,22 @@ function _urgItensLoja() {
 function _urgItensPresentes() {
   const urg = _urgItensLoja();
   if (!urg.length) return [];
-  const daLoja = new Set(getProdutosPedidoOrdenados().map(p => String(p.item)));
-  return urg.filter(id => daLoja.has(id));
+  // Devolve os ids DA LOJA que estão urgentes (não os ids marcados): entre regiões os dois
+  // não são o mesmo número, e é o id da loja que o resto da tela usa.
+  const set = new Set(urg.map(String));
+  return getProdutosPedidoOrdenados()
+    .filter(p => _urgEhUrgente(p, set))
+    .map(p => String(p.item));
 }
 // Sem item marcado nesta loja não há o que priorizar — a lista abre inteira, como sempre.
 function _urgAplicavel() { return _cargoContaBarris() && loja !== 'Maglia' && _urgItensPresentes().length > 0; }
 
 async function _checarUrgenciaPendencia() {
   _urgSemanaIni = wkKey(getMonday(new Date()));
+  // Antes de decidir se trava: sem o mapa de tradução, uma loja de SP não reconhece como
+  // urgente nenhum item marcado no Rio e _urgAplicavel() daria falso (era o estado de hoje).
+  // Carrega uma vez por sessão; a falha deixa o Rio intacto e SP como estava.
+  await _carregarTraducaoUrgencia();
   const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
   // Uma consulta só serve às duas coisas: a faixa de confirmação (que vale pra toda loja, com
   // ou sem urgência marcada — ela precisa saber se finalizou) e a pendência da urgência.
@@ -2519,9 +2578,55 @@ function _faixaEnvioSemanaHtml(urgTrava) {
 function _urgFaltamContar() {
   const p = getPedido();
   const urg = _urgItensLoja();
+  const set = new Set(urg.map(String));
   return getProdutosPedidoOrdenados().filter(function(prod) {
-    return urg.includes(String(prod.item)) && !_pedidoPreenchido(p[prod.item] || {});
+    return _urgEhUrgente(prod, set) && !_pedidoPreenchido(p[prod.item] || {});
   }).length;
+}
+
+// ── URGÊNCIA POR CATEGORIA ───────────────────────────────────────────────────────
+// Pedido do dono: poder contar a urgência categoria por categoria (Bebidas, Petiscos…)
+// em vez de uma lista corrida só. Com 80 itens marcados, metade em BEBIDAS, a lista
+// corrida obriga a loja a caçar o próximo item no meio de tudo.
+//
+// O filtro de grupo normal continua escondido durante a trava, mas por outro motivo que o
+// de antes: estas categorias são construídas A PARTIR da urgência desta loja, então trocar
+// de categoria nunca mostra item fora dela nem serve pra fugir da trava — o filtro
+// 'urgencia' segue aplicado por cima. O que libera continua sendo _urgFaltamContar() sobre
+// o conjunto INTEIRO, não sobre a categoria aberta.
+//
+// Item avulso criado pela loja (id começando com C, sem linha no catálogo e portanto sem
+// grupo) cai em OUTROS em vez de sumir da conta — hoje existe um.
+// A categoria de um item PARA EFEITO DA URGÊNCIA. Tem que ser a mesma função usada pra
+// montar os botões e pra filtrar a lista: enquanto o botão dizia OUTROS e o filtro comparava
+// com o grupo cru (''), escolher OUTROS devolvia lista vazia com a trava de pé.
+function _urgGrupoDe(prod) {
+  return ((prod && prod.grupo) || '').trim() || 'OUTROS';
+}
+function _urgGruposLoja() {
+  const urg = new Set(_urgItensLoja().map(String));
+  const p = getPedido();
+  const mapa = new Map();
+  getProdutosPedidoOrdenados().forEach(function (prod) {
+    if (!_urgEhUrgente(prod, urg)) return;
+    const g = _urgGrupoDe(prod);
+    const o = mapa.get(g) || { grupo: g, total: 0, faltam: 0 };
+    o.total++;
+    if (!_pedidoPreenchido(p[prod.item] || {})) o.faltam++;
+    mapa.set(g, o);
+  });
+  return Array.from(mapa.values()).sort(function (a, b) {
+    return a.grupo.localeCompare(b.grupo, 'pt-BR');
+  });
+}
+// Categoria aberta na trava. Valida contra as que existem: categoria que ficou escolhida e
+// depois saiu da urgência (o Compras reedita a lista toda semana) voltaria uma lista vazia
+// com a trava de pé, que é o pior estado possível — sem nada pra contar e sem liberar.
+function _urgGrupoAtivo() {
+  const gs = _urgGruposLoja();
+  const atual = window._urgGrupo;
+  const existe = gs.some(function (g) { return g.grupo === atual; });
+  return (atual && atual !== '__TODOS__' && existe) ? atual : '__TODOS__';
 }
 
 function _podeCfgMinimos() {
@@ -6058,7 +6163,7 @@ async function _sincronizarProdutosPedidoComCatalogo() {
   try {
     const rows = await sbRequest(
       'gn_catalogo?ativo=eq.true&grupo=neq.HORTIFRUTI&regiao=eq.' + _regiaoDaLoja()
-        + '&select=item_id,fornecedor,grupo,subgrupo,produto,und,custo,und_por_caixa&order=grupo,fornecedor,produto',
+        + '&select=item_id,origem_item_id,fornecedor,grupo,subgrupo,produto,und,custo,und_por_caixa&order=grupo,fornecedor,produto',
       { method: 'GET' }
     );
     const atualizados = (rows || [])
@@ -6072,6 +6177,9 @@ async function _sincronizarProdutosPedidoComCatalogo() {
         und: r.und,
         custo: Number(r.custo) || 0,
         und_por_caixa: r.und_por_caixa != null ? Number(r.und_por_caixa) : null,
+        // Liga este item na linha da outra região — é o que faz a urgência marcada no Rio
+        // valer em SP e vice-versa (ver _urgIdsDoItem).
+        origem_item_id: r.origem_item_id != null ? r.origem_item_id : null,
       }));
     if (atualizados.length) {
       PRODUTOS_PEDIDO.length = 0;
@@ -9803,7 +9911,11 @@ function render() {
     // prometia 88 itens numa lista que abria vazia.
     const _urgQtd = _urgItensPresentes().length;
     const prodsTotaisCatalogo = PRODUTOS_PEDIDO.length;
-    const grupoAtivo = _urgTrava ? '__TODOS__' : (window._pedidoGrupo || grupos[0]);
+    // Na trava, a categoria vem do seletor próprio da urgência (ver _urgGrupoAtivo) — o
+    // filtro 'urgencia' continua aplicado por cima, então a categoria recorta dentro da
+    // urgência, nunca pra fora dela.
+    const grupoAtivo = _urgTrava ? _urgGrupoAtivo() : (window._pedidoGrupo || grupos[0]);
+    const _urgGrupos = _urgTrava ? _urgGruposLoja() : [];
     const todosOrdenados = getProdutosPedidoOrdenados();
     const k = lojaKey();
     const kAnterior = loja + "|" + wkKey(addDays(semana, -7));
@@ -9814,7 +9926,9 @@ function render() {
     const totalCustoPedido = _valEst.total;
     let prodsFiltrados = grupoAtivo === "__TODOS__"
       ? todosOrdenados
-      : todosOrdenados.filter(p=>p.grupo===grupoAtivo);
+      // Na trava, compara pela MESMA normalização que montou os botões (ver _urgGrupoDe) —
+      // senão a categoria OUTROS, que é rótulo pro item sem grupo, abria vazia.
+      : todosOrdenados.filter(p => _urgTrava ? _urgGrupoDe(p) === grupoAtivo : p.grupo === grupoAtivo);
     // Altura real do cabeçalho fixo, pra grudar a barra de Urgência/Finalizar logo abaixo
     // dele — em vez de um valor fixo, que quebraria se o cabeçalho mudar de tamanho.
     const _headerH = (document.getElementById('header') || {}).offsetHeight || 56;
@@ -9826,8 +9940,8 @@ function render() {
     } else if (_pfiltro === 'preenchidos') {
       prodsFiltrados = prodsFiltrados.filter(p => _pedidoPreenchido(pedido[p.item] || {}));
     } else if (_pfiltro === 'urgencia') {
-      const _urg = _urgItensLoja();
-      prodsFiltrados = prodsFiltrados.filter(p => _urg.includes(String(p.item)));
+      const _urgSet = new Set(_urgItensLoja().map(String));
+      prodsFiltrados = prodsFiltrados.filter(p => _urgEhUrgente(p, _urgSet));
     }
 
     c.innerHTML = `
@@ -9887,6 +10001,8 @@ function render() {
       <div style="background:rgba(180,83,9,.1);border:1px solid rgba(180,83,9,.35);border-left:3px solid #B45309;border-radius:10px;padding:10px 12px;margin-top:8px;font-size:11.5px;color:#78350f;line-height:1.45">
         ⚡ <b>Conte primeiro a urgência.</b> A lista está mostrando só os ${_urgQtd} itens
         marcados como urgência pelo setor de Compras — <b>${_urgFaltamContar()}</b> ainda sem contagem lançada.
+        ${_urgGrupos.length > 1 ? `Dá pra ir por categoria nos botões abaixo (o número é quanto falta em cada uma);
+        o que libera é não sobrar nenhum item, em categoria nenhuma.` : ''}
         Depois de tocar em <b>⚡ Urgência</b> e enviar, o restante do estoque (${prodsTotaisCatalogo} itens) libera na hora.
       </div>` : ''}
 
@@ -9911,8 +10027,23 @@ function render() {
           </button>
         </div>
 
-        <!-- Filtro de grupo — some enquanto a urgência não sai: ali a lista é a urgência
-        inteira, de todas as categorias, e trocar de grupo só serviria pra fugir dela. -->
+        <!-- Na trava, o seletor é o das categorias DA URGÊNCIA (ver _urgGruposLoja): cada
+        uma mostra quanto ainda falta contar, e a que já fechou ganha ✓. O filtro de grupo
+        normal continua fora, porque ele abriria o catálogo inteiro. -->
+        ${!_urgTrava ? '' : `
+        <div style="display:flex;gap:6px;overflow-x:auto;padding-top:8px;scrollbar-width:none">
+          <button onclick="window._urgGrupo='__TODOS__';render();"
+            style="flex-shrink:0;padding:6px 12px;border-radius:20px;font-size:11px;font-weight:700;border:none;cursor:pointer;
+              ${'__TODOS__'===grupoAtivo?'background:#B45309;color:#fff':'background:rgba(180,83,9,.12);color:#78350f'}">
+            TODAS${_urgFaltamContar()>0?' ('+_urgFaltamContar()+')':' ✓'}
+          </button>
+          ${_urgGrupos.map(g => `
+            <button onclick="window._urgGrupo='${g.grupo.replace(/'/g,"\\'")}';render();"
+              style="flex-shrink:0;padding:6px 12px;border-radius:20px;font-size:11px;font-weight:700;border:none;cursor:pointer;
+                ${g.grupo===grupoAtivo?'background:#B45309;color:#fff':g.faltam===0?'background:rgba(5,150,105,.14);color:#047857':'background:rgba(180,83,9,.12);color:#78350f'}">
+              ${g.grupo} ${g.faltam===0?'✓':'('+g.faltam+')'}
+            </button>`).join('')}
+        </div>`}
         ${_urgTrava ? '' : `
         <div style="display:flex;gap:6px;overflow-x:auto;padding-top:8px;scrollbar-width:none">
           <button onclick="window._pedidoGrupo='__TODOS__';render();"
@@ -9941,7 +10072,7 @@ function render() {
           const _pedAntLS = (pedidoAll[kAnterior] || {})[prod.item];
           const _pedAntCxLS = _pedAntLS != null ? parseFloat(_pedAntLS._cxConfirmado) : null;
           const isEstoqueBaixo = !temDiverg && _estVigLS != null && !isNaN(_estVigLS) && _pedAntCxLS > 0 && _estVigLS < _pedAntCxLS * 0.25;
-          const isUrgente = _urgItensLoja().includes(String(prod.item));
+          const isUrgente = _urgEhUrgente(prod);
           return `<div class="row-item" data-search="${prod.produto} ${prod.fornecedor} ${prod.subgrupo} ${prod.grupo}" data-pid="${prod.item}"
               style="flex-direction:column;align-items:flex-start;gap:6px;${temDiverg?'border-left:3px solid #DC2626;background:rgba(239,68,68,.06)':isEstoqueBaixo?'border-left:3px solid #D97706;background:rgba(245,158,11,.05)':temDado?'background:rgba(245,158,11,.06)':''}${prod.isCustom&&!temDiverg?';border-left:3px solid #059669':''}">
             <div style="display:flex;width:100%;align-items:center;gap:6px">
