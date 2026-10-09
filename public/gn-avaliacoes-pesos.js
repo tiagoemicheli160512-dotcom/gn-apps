@@ -35,6 +35,62 @@ window.GN_AVAL_PESOS_TOTAL = {
   'Estoquista': 195, 'Recepcionista': 205, 'Sub-Gerente': 225, 'Gerente': 225
 };
 
+// ── QUANTO VALE CADA RESPOSTA ────────────────────────────────────────────────────────
+//
+// Até 09/10/2026 a resposta valia o próprio número: nota 1 dava 1 ponto de 5, ou seja 20%
+// dos pontos da pergunta. Com 79% das notas dadas sendo 4 ou 5 (e só 3,3% sendo 1 ou 2),
+// isso espremia todo mundo na mesma faixa: 254 das 262 avaliações finalizadas caíam em
+// Ouro ou Dentro do Padrão, com desvio de 9,9 pontos.
+//
+// O peso por pergunta sozinho não resolvia isso, e está medido: entre a nota COM peso e a
+// nota sem peso nenhum, a diferença média nas 262 era de 0,66 ponto, e só 7 trocavam de
+// faixa. Nenhuma escolha de peso conserta uma escala em que tirar a pior nota ainda paga
+// 20% — por isso a escala virou um controle próprio.
+//
+// Definido pelo dono: 1 e 2 não pontuam, 3 vale 20, 4 vale 30 e 5 vale 50. O máximo por
+// pergunta passa a ser 50 em vez de 5, e a nota continua saindo em %.
+//
+// O que isso faz, medido nas 262 avaliações já finalizadas: a média cai de 79,4% pra
+// 64,4%, o desvio sobe de 9,9 pra 14,8 — que era o objetivo — e tirar 4 em TODAS as
+// perguntas passa a dar 60%, ou seja Alerta Amarelo. Quem quiser nota alta precisa de 5.
+window.GN_AVAL_ESCALA_ANTIGA = [1, 2, 3, 4, 5];   // índice 0 = nota 1
+window.GN_AVAL_ESCALA = [0, 0, 20, 30, 50];
+window.GN_AVAL_ESCALA_DESDE = '2026-10-10';
+
+// Mesma trava de data dos pesos, e pelo mesmo motivo: a avaliação de 02/10 que ainda está
+// em aberto pertence à regra de 02/10. Quem foi avaliado sob uma régua não muda de régua
+// porque a próxima mudou.
+window.gnAvalEscala = function (av) {
+  var data = (av && av.data) || '';
+  return data >= window.GN_AVAL_ESCALA_DESDE ? window.GN_AVAL_ESCALA : window.GN_AVAL_ESCALA_ANTIGA;
+};
+
+// Critério não respondido continua valendo 0, como sempre — não é o mesmo que tirar 1.
+window.gnAvalValorResposta = function (nota, escala) {
+  var n = Number(nota);
+  return (n >= 1 && n <= 5) ? escala[n - 1] : 0;
+};
+
+// ── ONDE CADA FAIXA COMEÇA ───────────────────────────────────────────────────────────
+//
+// Definido pelo dono junto com a escala: Ouro a partir de 80, Dentro do Padrão de 70 a 79,
+// Alerta Amarelo de 40 a 69, Alerta Vermelho abaixo de 40.
+//
+// Duas bordas foram fechadas aqui, porque o combinado tinha buraco e buraco de borda é o
+// tipo de coisa que só aparece no dia em que alguém cai nela:
+// · o combinado dizia "80 a 99,99 ouro" — 100% é nota cheia e entra no Ouro, senão quem
+//   acerta tudo cairia pra baixo da faixa máxima;
+// · dizia "69 pra baixo atenção" e "abaixo de 39 ruim" — 39 ficava nos dois. O vermelho
+//   começa abaixo de 40, então o amarelo é 40 a 69, sem sobra.
+window.GN_AVAL_CORTES_ANTIGOS = { ouro: 85, padrao: 60, amarelo: 40 };
+window.GN_AVAL_CORTES = { ouro: 80, padrao: 70, amarelo: 40 };
+window.GN_AVAL_CORTES_DESDE = window.GN_AVAL_ESCALA_DESDE;   // andam juntos, de propósito
+
+window.gnAvalCortes = function (av) {
+  var data = (av && av.data) || '';
+  return data >= window.GN_AVAL_CORTES_DESDE ? window.GN_AVAL_CORTES : window.GN_AVAL_CORTES_ANTIGOS;
+};
+
 // Avaliação com data ANTERIOR a esta continua valendo 60 pontos, sem peso.
 //
 // Não é cautela genérica: o app não guarda foto da nota, recalcula tudo na hora a partir
@@ -70,8 +126,8 @@ function _gnAvalRespostas(av) {
 }
 
 window.gnAvalNota = function (av) {
-  var w = window.gnAvalPesos(av), r = _gnAvalRespostas(av), s = 0;
-  for (var i = 0; i < 12; i++) s += (w[i] || 0) * r[i];
+  var w = window.gnAvalPesos(av), r = _gnAvalRespostas(av), e = window.gnAvalEscala(av), s = 0;
+  for (var i = 0; i < 12; i++) s += (w[i] || 0) * window.gnAvalValorResposta(r[i], e);
   return s;
 };
 
@@ -89,8 +145,11 @@ window.gnAvalMax = function (av) {
   var w = window.gnAvalPesos(av);
   var cargo = av && av.cargo;
   var temSetor = !!(cargo && ((window.SETORES && window.SETORES[cargo]) || window.GN_AVAL_PESOS[cargo]));
-  var s = (w[0] + w[1]) * 5;
-  if (temSetor) for (var i = 2; i < 12; i++) s += w[i] * 5;
+  // Topo da escala em vigor pra esta avaliação: 5 na régua antiga, 50 na nova. Fixar 5 aqui
+  // dividiria a nota nova pelo denominador velho e jogaria todo mundo pra ~1000%.
+  var topo = window.gnAvalEscala(av)[4];
+  var s = (w[0] + w[1]) * topo;
+  if (temSetor) for (var i = 2; i < 12; i++) s += w[i] * topo;
   return s;
 };
 
@@ -103,7 +162,10 @@ window.gnAvalPct = function (av) {
 // regime. Comparar uma de 60 pontos sem peso com uma de 220 com peso mede coisas
 // diferentes e inventaria uma queda ou uma alta que ninguém teve.
 window.gnAvalComparavel = function (a, b) {
-  return window.gnAvalPesado(a) === window.gnAvalPesado(b);
+  // Duas réguas agora: a dos pesos e a da escala de resposta. Basta uma diferir pra o
+  // "↑+3pp" medir coisas diferentes e inventar uma alta ou uma queda que ninguém teve.
+  return window.gnAvalPesado(a) === window.gnAvalPesado(b)
+      && window.gnAvalEscala(a)[4] === window.gnAvalEscala(b)[4];
 };
 
 // ── Corte de faixa por falta ───────────────────────────────────────────────────────────
@@ -126,8 +188,11 @@ window.GN_AVAL_FALTA_STATUS = ['FALTA', 'SUSPENSÃO'];
 
 window.GN_AVAL_FAIXAS = ['vermelho', 'amarelo', 'padrao', 'ouro'];
 
-window.gnAvalFaixaPorPct = function (p) {
-  return p >= 85 ? 'ouro' : p >= 60 ? 'padrao' : p >= 40 ? 'amarelo' : 'vermelho';
+// `av` é opcional só por compatibilidade: sem ela valem os cortes antigos, que é o lado
+// seguro — nenhuma chamada existente passa a reclassificar sozinha.
+window.gnAvalFaixaPorPct = function (p, av) {
+  var c = window.gnAvalCortes(av);
+  return p >= c.ouro ? 'ouro' : p >= c.padrao ? 'padrao' : p >= c.amarelo ? 'amarelo' : 'vermelho';
 };
 
 // Teto que o número de faltas impõe. `null`/`undefined` = não se sabe (avaliação antiga,
@@ -157,7 +222,7 @@ window.gnAvalFaltas = function (av) {
 // A faixa final da avaliação, já com o corte. É por aqui que os quatro apps devem passar.
 window.gnAvalFaixa = function (av) {
   return window.gnAvalAplicarCorte(
-    window.gnAvalFaixaPorPct(window.gnAvalPct(av)),
+    window.gnAvalFaixaPorPct(window.gnAvalPct(av), av),
     window.gnAvalFaltas(av)
   );
 };
@@ -165,7 +230,7 @@ window.gnAvalFaixa = function (av) {
 // O corte de fato rebaixou esta avaliação? Serve pra explicar na tela em vez de o número
 // e o rótulo parecerem brigar entre si.
 window.gnAvalCorteAplicado = function (av) {
-  return window.gnAvalFaixaPorPct(window.gnAvalPct(av)) !== window.gnAvalFaixa(av);
+  return window.gnAvalFaixaPorPct(window.gnAvalPct(av), av) !== window.gnAvalFaixa(av);
 };
 
 window.gnAvalCorteTxt = function (av) {
