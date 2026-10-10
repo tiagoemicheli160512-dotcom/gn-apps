@@ -10102,6 +10102,82 @@ function renderFaltas(){
    perda contável depois — "quantos copos a loja quebrou no mês" é pergunta de gestão, e
    não se responde varrendo descrição digitada à mão. checklist_diario.manutencao é jsonb,
    então o campo novo não depende de DDL; itens antigos simplesmente não têm a chave. */
+// Lança o item no controle de utensílios. Idempotente por m.saldo_aplicado: um segundo
+// toque (ou reabrir a tela) não desconta de novo.
+async function lancarUtensilioNoControle(id){
+  const m=state.manutencao.find(x=>String(x.id)===String(id));
+  if(!m || m.tipo!==MANUT_TIPO_UTENSILIO) return;
+  if(m.saldo_aplicado){ showToast('Esse item já está no controle.'); return; }
+  const nome=String(m.descricao||'').trim();
+  if(!nome){ showToast('⚠️ Escreva na descrição qual é a peça (ex.: copo de chopp).','error'); return; }
+  const qtd=parseFloat(m.qtd)||0;
+  if(qtd<=0){ showToast('⚠️ Informe quantas.','error'); return; }
+  const chave=_utensilioChave(nome);
+  const ja=_utensilioDe(nome);
+
+  // PRIMEIRA vez desta peça nesta loja: é aqui que o controle nasce. Pergunta quantas a
+  // loja tem em bom estado ANTES de descontar — senão o saldo nasceria negativo.
+  let inicial=null;
+  if(!ja){
+    const resp=prompt(`Primeira vez que "${nome}" entra no controle desta loja.\n\nQuantas a loja tem em BOM estado agora (sem contar essas ${qtd} de agora)?`,'');
+    if(resp===null) return;                                  // desistiu: não lança nada
+    inicial=parseFloat(String(resp).replace(',','.'));
+    if(!isFinite(inicial)||inicial<0){ showToast('⚠️ Quantidade inválida — não lancei nada.','error'); return; }
+  }
+
+  const quebrou=(m.situacao||MANUT_SITUACOES_UTENSILIO[0])==='Quebrou';
+  const agora=new Date().toISOString();
+  const quem=(usuarioLogado&&usuarioLogado.nome)||LOJA;
+  try{
+    await _utensiliosGravar(saldos=>{
+      const reg=saldos[chave]||{nome, qtd:inicial||0, inicial:inicial||0, inicial_em:agora, inicial_por:quem};
+      // "Quebrou" é perda e desconta. "Faltando" é pedido de reposição: a peça não está
+      // quebrada, então o saldo não muda — mexer nele aqui faria a mesma falta descontar
+      // duas vezes quando a loja lançasse e depois quebrasse de verdade.
+      if(quebrou) reg.qtd=Math.max(0,(parseFloat(reg.qtd)||0)-qtd);
+      reg.nome=nome;
+      reg.atualizado_em=agora; reg.atualizado_por=quem;
+      saldos[chave]=reg;
+      return saldos;
+    });
+    m.saldo_aplicado=true;
+    m.saldo_chave=chave;
+    autoSave(); _debouncedSaveAll();
+    const s=_utensilioDe(nome);
+    showToast(quebrou
+      ? `✅ Lançado. Saldo de "${nome}": ${s?s.qtd:'—'}`
+      : `✅ Lançado como falta. Saldo de "${nome}" segue em ${s?s.qtd:'—'}`);
+  }catch(e){
+    window.gnLogError && window.gnLogError('checklist:lancarUtensilio', e);
+    showToast('⚠️ Não consegui gravar o controle agora. Tenta de novo.','error');
+  }
+  renderManutencao();
+}
+
+// Correção do saldo — supervisão/mestre apenas.
+async function corrigirSaldoUtensilio(chave){
+  if(!_utensilioPodeCorrigir()){ showToast('⚠️ Só supervisão corrige o saldo.','error'); return; }
+  const reg=_utensiliosSaldo()[chave];
+  if(!reg) return;
+  const resp=prompt(`Corrigir o saldo de "${reg.nome}".\n\nQuantas a loja tem em bom estado, contadas agora?`, String(reg.qtd));
+  if(resp===null) return;
+  const n=parseFloat(String(resp).replace(',','.'));
+  if(!isFinite(n)||n<0){ showToast('⚠️ Quantidade inválida.','error'); return; }
+  try{
+    await _utensiliosGravar(saldos=>{
+      if(!saldos[chave]) return saldos;
+      saldos[chave].qtd=n;
+      saldos[chave].atualizado_em=new Date().toISOString();
+      saldos[chave].atualizado_por=(usuarioLogado&&usuarioLogado.nome)||LOJA;
+      saldos[chave].corrigido=true;
+      return saldos;
+    });
+    _logAuditoriaChk('CORRIGIR_SALDO_UTENSILIO',{peca:reg.nome,de:reg.qtd,para:n});
+    showToast(`✅ Saldo de "${reg.nome}" agora é ${n}.`);
+  }catch(e){ showToast('⚠️ Não consegui gravar a correção.','error'); }
+  renderManutencao();
+}
+
 const MANUT_TIPO_UTENSILIO = 'Utensílio / Louça';
 const MANUT_TIPOS_CHK = ['Estrutura','Ar Condicionado','Fogão/Fritadeira','Elevador','Exaustor','Informática',MANUT_TIPO_UTENSILIO,'Outro'];
 // "Quebrou" é perda (a loja tinha e estragou); "Faltando" é reposição (não tem, precisa).
@@ -10150,6 +10226,58 @@ async function confirmarResolucao(id){
   _logAuditoriaChk('CONFIRMAR_MANUTENCAO',{setor:m.setor,descricao:m.descricao});
 }
 
+/* ── CONTROLE DE UTENSÍLIOS ────────────────────────────────────────────────────────────
+   "Na primeira vez que for ser colocado o item avariado, criar a quantidade que tem em
+   loja bom, pois já vai virar um controle de utensílios."
+
+   Ciclo fechado, decidido com o dono: a loja informa quantos tem em bom estado na PRIMEIRA
+   vez que lança aquela peça; cada "Quebrou N" desconta N; quando o pessoal de manutenção
+   resolve informando quantos repôs, o saldo volta a subir. Informar o inicial é da loja
+   (quem está com o copo na mão é quem conta); CORRIGIR o saldo depois é de supervisão —
+   mesmo motivo que travou a aba Entrada de carnes, onde a loja alterando número de controle
+   gerava erro.
+
+   Mora em gn_lojas.all_data.utensilios_saldo, na linha DA LOJA (comKey) — mesma linha e
+   mesmo padrão de manut_oficial_items, que já é lido e escrito pelos dois apps. Não depende
+   de DDL. Atenção: a linha de MASTER_CONFIG é reescrita inteira pelo sbPushMasterConfig()
+   do app Lojas; a linha da loja não, e é por isso que o saldo fica aqui e não lá.
+
+   O desconto NÃO acontece a cada tecla. O item de manutenção é editado ao vivo (updateManut
+   dispara em cada dígito), então descontar na edição tiraria 1, depois 12, depois 120 ao
+   digitar "120". Existe um passo explícito ("Lançar no controle") e o item guarda
+   saldo_aplicado — a marca do que já foi aplicado, pelo mesmo motivo que autoEnt_<dia>
+   existe nas carnes: sem ela, reabrir a tela aplicaria de novo. */
+const UTENS_CHAVE_MAX = 60;
+function _utensilioChave(nome){
+  return String(nome==null?'':nome)
+    .normalize('NFD').replace(/[̀-ͯ]/g,'')   // "canecão" e "canecao" são a MESMA peça
+    .toLowerCase().replace(/\s+/g,' ').trim().slice(0, UTENS_CHAVE_MAX);
+}
+function _utensiliosSaldo(){ return state.utensiliosSaldo || {}; }
+function _utensilioDe(nome){
+  const k=_utensilioChave(nome);
+  return k ? (_utensiliosSaldo()[k]||null) : null;
+}
+// Lê-altera-grava na linha da loja. Relê imediatamente antes de gravar porque o app de
+// Manutenção escreve na MESMA linha (manut_oficial_items) — gravar a partir de uma cópia
+// velha apagaria o que ele acabou de pôr lá. É a mesma lição da escala.
+async function _utensiliosGravar(mutator){
+  const ck=comissoesLojaKey();
+  const {data,error}=await sb.from('gn_lojas').select('all_data').eq('loja',ck).maybeSingle();
+  if(error) throw error;
+  const allData=(data&&data.all_data)||{};
+  const atual=allData.utensilios_saldo||{};
+  const novo=mutator(JSON.parse(JSON.stringify(atual)));
+  const {error:e2}=await sb.from('gn_lojas').update({all_data:{...allData, utensilios_saldo:novo}}).eq('loja',ck);
+  if(e2) throw e2;
+  state.utensiliosSaldo=novo;
+  return novo;
+}
+function _utensilioPodeCorrigir(){
+  const c=String((usuarioLogado&&usuarioLogado.cargo)||'').toLowerCase();
+  return CARGOS_SUPERVISAO_CHK.includes(c);
+}
+
 // Manutenções "oficiais" — registradas pelo RH/master direto no app GN Manutenção
 // (gn_lojas.all_data.manut_oficial_items). Aqui só lemos e confirmamos; quem cria/
 // edita o status continua sendo o app Manutenção, pra não duplicar o fluxo.
@@ -10159,7 +10287,10 @@ async function carregarManutOficial(){
     const {data,error}=await sb.from('gn_lojas').select('all_data').eq('loja',ck).maybeSingle();
     state.manutOficial=(!error&&data&&Array.isArray(data.all_data?.manut_oficial_items))
       ? data.all_data.manut_oficial_items : [];
-  }catch(e){ state.manutOficial=[]; }
+    // O saldo de utensílios vem da MESMA leitura — nenhuma consulta a mais.
+    state.utensiliosSaldo=(!error&&data&&data.all_data&&data.all_data.utensilios_saldo&&typeof data.all_data.utensilios_saldo==='object')
+      ? data.all_data.utensilios_saldo : {};
+  }catch(e){ state.manutOficial=[]; state.utensiliosSaldo=state.utensiliosSaldo||{}; }
   renderManutencao();
 }
 
@@ -10207,7 +10338,30 @@ function renderManutencao(){
   ].filter(Boolean).join(' · ');
   document.getElementById('manut-count').textContent=resumo;
   empty.style.display=totalItens?'none':'block';
-  const itensOficialHtml = manutOficial.length ? `<div style="margin:14px 0 8px;padding-top:10px;border-top:1px solid #2a2a2a;font-size:11px;font-weight:800;color:#1A1D23;text-transform:uppercase;letter-spacing:.4px">📋 Registrado pelo RH/Manutenção</div>` +
+  // Painel do controle de utensílios. Fica na mesma aba porque é daqui que o saldo se
+  // mexe; uma tela separada viraria um número que ninguém abre. Só aparece quando já
+  // existe alguma peça no controle — antes disso não há o que mostrar.
+  const _saldos=Object.entries(_utensiliosSaldo())
+    .filter(([,v])=>v&&v.nome)
+    .sort((a,b)=>(parseFloat(a[1].qtd)||0)-(parseFloat(b[1].qtd)||0));
+  const _podeCorrigir=_utensilioPodeCorrigir();
+  const saldosHtml = _saldos.length ? `
+    <div style="margin:14px 0 8px;padding-top:10px;border-top:1px solid #2a2a2a;font-size:11px;font-weight:800;color:#1A1D23;text-transform:uppercase;letter-spacing:.4px">🍽️ Controle de utensílios</div>
+    <div style="font-size:10.5px;color:#666;margin-bottom:7px;line-height:1.45">Quantas a loja tem em bom estado. Cai quando é lançada uma quebra e sobe quando a manutenção informa o que repôs.${_podeCorrigir?'' : ' Quem corrige o saldo é a supervisão.'}</div>
+    ${_saldos.map(([chave,v])=>{
+      const q=parseFloat(v.qtd)||0;
+      const cor=q<=0?'#DC2626':q<=2?'#B45309':'#047857';
+      return `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 9px;border:1px solid rgba(0,0,0,.08);border-radius:8px;margin-bottom:5px;background:#fff;">
+        <div style="min-width:0;flex:1">
+          <div style="font-size:12px;font-weight:700;color:#1A1D23;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(v.nome)}</div>
+          <div style="font-size:10px;color:#666;margin-top:1px">${v.atualizado_em?('atualizado em '+String(v.atualizado_em).slice(8,10)+'/'+String(v.atualizado_em).slice(5,7)):''}${v.atualizado_por?' por '+escHtml(v.atualizado_por):''}${v.corrigido?' · corrigido':''}</div>
+        </div>
+        <div style="font-size:16px;font-weight:900;color:${cor};font-variant-numeric:tabular-nums">${q}</div>
+        ${_podeCorrigir?`<button class="btn-secondary" style="font-size:10px;padding:4px 8px;flex-shrink:0" onclick="corrigirSaldoUtensilio('${escHtml(chave).replace(/'/g,"\\'")}')">corrigir</button>`:''}
+      </div>`;
+    }).join('')}` : '';
+
+  const itensOficialHtml = saldosHtml + (manutOficial.length ? `<div style="margin:14px 0 8px;padding-top:10px;border-top:1px solid #2a2a2a;font-size:11px;font-weight:800;color:#1A1D23;text-transform:uppercase;letter-spacing:.4px">📋 Registrado pelo RH/Manutenção</div>` +
     manutOficial.map(m=>{
       const statusLabel=m.status==='Resolvido'?'✅ Resolvido':m.status==='Em andamento'?'🔄 Em andamento':'⏳ Pendente';
       const statusColor=m.status==='Resolvido'?'background:#E9F7E9;color:#1A1D23;':m.status==='Em andamento'?'background:#F5F5EB;color:#1A1D23;':'background:#F5EBEB;color:#1A1D23;';
@@ -10251,7 +10405,7 @@ function renderManutencao(){
         ${m.fotoBase64?`<img src="${m.fotoBase64}" class="foto-thumb">`:''}
         <div style="font-size:10px;color:#666;margin-top:6px;">Registrado pelo RH/Manutenção — aguarde atualização de status.</div>
       </div>`;
-    }).join('') : '';
+    }).join('') : '');
   lista.innerHTML=state.manutencao.map(m=>{
     // ── RESOLVIDO: card compacto de confirmação ──
     if(m.status==='Resolvido'){
@@ -10322,7 +10476,26 @@ function renderManutencao(){
           <div><label class="field-label">Quantas</label>
             <input type="number" min="1" step="1" inputmode="numeric" style="font-size:12px;"
               oninput="updateManut(${m.id},'qtd',this.value)" value="${escHtml(m.qtd||'')}" placeholder="1"></div>
-        </div>`:''}
+        </div>
+        ${(()=>{
+          // O desconto só acontece neste botão, nunca na digitação: updateManut dispara a
+          // cada dígito, e descontar ali tiraria 1, depois 12, depois 120 ao digitar "120".
+          const s=_utensilioDe(m.descricao);
+          if(m.saldo_aplicado) return `<div style="font-size:11px;color:#047857;font-weight:700;background:rgba(5,150,105,.08);border-radius:8px;padding:7px 9px;">
+            ✅ Já está no controle${s?` · saldo de "${escHtml(s.nome)}": <b>${s.qtd}</b>`:''}</div>`;
+          const nome=String(m.descricao||'').trim();
+          const pronto=nome && (parseFloat(m.qtd)||0)>0;
+          return `<div style="background:rgba(217,119,6,.07);border:1px solid rgba(217,119,6,.22);border-radius:8px;padding:8px 9px;">
+            <div style="font-size:11px;color:#B45309;font-weight:700;line-height:1.4;margin-bottom:6px;">
+              ${s
+                ? `Saldo atual de "${escHtml(s.nome)}": <b>${s.qtd}</b>`
+                : (nome ? `Primeira vez de "${escHtml(nome)}" — vou perguntar quantas a loja tem em bom estado.`
+                        : 'Escreva na descrição qual é a peça pra lançar no controle.')}
+            </div>
+            <button class="btn-secondary" style="font-size:11px;padding:6px 10px;${pronto?'':'opacity:.5'}"
+              ${pronto?'':'disabled'} onclick="lancarUtensilioNoControle(${m.id})">📦 Lançar no controle</button>
+          </div>`;
+        })()}`:''}
         <div><label class="field-label">📞 Contato</label>
           <input type="text" style="font-size:12px;" placeholder="Nome / telefone do responsável"
             oninput="updateManut(${m.id},'contato',this.value)" value="${escHtml(m.contato||'')}"></div>
