@@ -38,17 +38,18 @@ diferente da prevista — era outra coisa que o Luiz apontou.
 
 *3) COPO E PRATO QUEBRADO AGORA TÊM ONDE LANÇAR*  —  pedido da **Taynara** (Bangu)
 
-Ela pediu uma planilha de perdas de louça e uma lista do que está faltando na loja. Ficou no
-lugar onde a manutenção já olha, em vez de uma planilha separada que ninguém abriria.
+Ela pediu uma planilha de perdas de louça e uma lista do que está faltando na loja.
 
-No **Check-list → aba Manutenção**, clique em adicionar e escolha o tipo
-**"Utensílio / Louça"**. Aparecem dois campos:
+Tem **aba própria** agora, no Check-list: **🍽️ Utensílios**, logo depois de Insumos no menu.
+
+Lá dentro, **+ Registrar** e preencha:
 
 • **O que houve** — *Quebrou* ou *Faltando*
 • **Quantas**
+• **Descrição** — o nome da peça ("copo de chopp", "pratinho de casquinha de siri")
 
-Na descrição, escreva qual é a peça ("copo de chopp", "pratinho de casquinha de siri").
-Pronto: cai direto na fila da manutenção, com aviso.
+Pronto: cai direto na fila da manutenção, com aviso pra eles. Serve pra copo, prato, talher,
+bandeja — tudo que é utensílio de salão e cozinha.
 
 ═══════════════════════════════════════
 
@@ -61,7 +62,7 @@ Daí em diante:
 
 • Lançou *Quebrou 3* → o saldo cai 3
 • A manutenção levou peças novas → o saldo sobe
-• O saldo de cada peça fica na própria aba Manutenção
+• O saldo de cada peça fica no fim da própria aba Utensílios
 
 Se o número não bater com a contagem física, **fale com a supervisão**: corrigir o saldo é
 com eles, não com a loja.
