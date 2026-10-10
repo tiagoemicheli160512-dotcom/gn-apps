@@ -9502,6 +9502,7 @@ async function _carregarCarnesAutoLojas(force){
         recs.forEach(r=>{ porDia[diaKey] += parseFloat(r && r.qtd_recebida)||0; });
       });
       const porDiaNota = {seg:0,ter:0,qua:0,qui:0,sex:0,sab:0,dom:0};
+      const notasVistas = new Set();
       entradasSemana.forEach(e=>{
         const nome = (e.insumo||'').toUpperCase();
         const m = CARNES_ENTRADA_MATCH[c.key];
@@ -9509,13 +9510,27 @@ async function _carregarCarnesAutoLojas(force){
         if(m.exc.some(re=>re.test(nome))) return;
         const diaKey = _diaSemanaKeyFromISO(e.dataNF);
         if(!diaKey || porDiaNota[diaKey]===undefined) return;
+        // Lançar a mesma linha da mesma nota duas vezes é comum na aba Entrada (a loja
+        // reabre a nota e lança de novo). Com o número da nota em mãos, linha repetida
+        // idêntica é relançamento, não uma segunda remessa: conta uma vez só.
+        const digitos = String(e.nf==null?'':e.nf).replace(/\D/g,'');
+        if(digitos){
+          const assinatura = digitos+'|'+nome+'|'+e.dataNF+'|'+e.qtd;
+          if(notasVistas.has(assinatura)) return;
+          notasVistas.add(assinatura);
+        }
         porDiaNota[diaKey] += parseFloat(e.qtd)||0;
       });
+      // A escolha entre entrega e nota é DA SEMANA, não de cada dia. A entrega é datada pela
+      // data_entrega PROGRAMADA (nas carnes, sempre a segunda) e a nota pela dataNF REAL (a
+      // carne costuma chegar terça ou quarta) — então, decidindo dia a dia, a entrega passava
+      // na segunda e a MESMA mercadoria passava de novo pela nota na terça. Era isso que
+      // duplicava a entrada: a mesma carne entrando duas vezes, em dois dias.
+      const temEntregaConferida = Object.keys(porDia).some(d=>porDia[d]>0);
       const totaisDia = {};
-      Object.keys(porDia).forEach(d=>{ totaisDia[d] = porDia[d]>0 ? porDia[d] : porDiaNota[d]; });
+      Object.keys(porDia).forEach(d=>{ totaisDia[d] = temEntregaConferida ? porDia[d] : porDiaNota[d]; });
 
       Object.keys(totaisDia).forEach(d=>{
-        if(totaisDia[d]<=0) return;
         // autoEnt_<dia> guarda o último valor que a automação escreveu naquele dia. Serve pra
         // duas coisas: a segunda entrega do mesmo dia atualiza o total (o campo ainda está no
         // valor que a automação pôs), e um número digitado à mão nunca é sobrescrito (o campo
@@ -9523,6 +9538,17 @@ async function _carregarCarnesAutoLojas(force){
         const atual = cd['ent_'+d];
         const vazio = atual===undefined || atual==='';
         const aindaDaAutomacao = !vazio && cd['autoEnt_'+d]!==undefined && Number(atual)===Number(cd['autoEnt_'+d]);
+        if(totaisDia[d]<=0){
+          // O dia ficou sem fonte nenhuma. Sair daqui sem mexer era o que fazia a duplicação
+          // já gravada ficar pra sempre na tela: o valor velho da automação continuava lá,
+          // sem nada por trás. Limpa o que a automação pôs (e, no 🔄, o que foi digitado),
+          // que é o que desfaz a duplicação sem precisar corrigir loja por loja no banco.
+          if(force || aindaDaAutomacao){
+            if(!vazio && Number(atual)!==0){ cd['ent_'+d]=''; changed=true; }
+            if(cd['autoEnt_'+d]!==undefined){ delete cd['autoEnt_'+d]; changed=true; }
+          }
+          return;
+        }
         if(force || vazio || aindaDaAutomacao){
           if(Number(atual)!==totaisDia[d]) changed=true;
           cd['ent_'+d]=totaisDia[d];
