@@ -363,10 +363,6 @@
        A gerência tem que bater o olho nisso, e no fim da Home quase ninguém chegava. -->
   <div id="mes-anterior-home-card"></div>
 
-  <!-- Caixa de sugestões, aberta por uma semana. Fica DEPOIS do card de vendas de propósito:
-       a primeira coisa que a loja abre o app pra ver é o número do dia. -->
-  <div id="sugestoes-app-home-card"></div>
-
   <div id="dash-section" style="display:none"></div>
 
   <div id="data-comemorativa-home-card"></div>
@@ -1249,244 +1245,6 @@ function _renderAvisoEleicoesHome(mostrar, sess, isMasterAtivo) {
       ${item('Deixe combinado quem cobre se alguém atrasar voltando da seção.')}
       ${fase.seguinte ? item(`Depois vem o <b>2º turno em ${dm(fase.seguinte)}</b> — mesmo planejamento.`) : ''}
     </ul>
-  </div>`;
-}
-
-/* ── Caixa de sugestões (provisória, uma semana) ───────────────────────────────────────
-   Combinado com o dono: uma janela curta pra quem usa o app o dia inteiro dizer o que
-   atrapalha. Depois ele filtra o que vale. Três decisões que mudam o resultado:
-
-   • DUAS perguntas curtas, não uma caixa grande. Campo livre sozinho rende "melhorar o
-     app" e "deixar mais rápido" — bastante coisa e quase nada acionável. Perguntando o que
-     atrapalha E o que resolveria, vem o caso concreto.
-   • A lista é pública, com nome (escolha do dono). Quem chega depois vê o que já foi dito.
-   • Botão "também quero" em vez de redigitar: a segunda pessoa não repete a sugestão, e a
-     contagem vira o sinal de prioridade na hora de filtrar — que é justamente o que falta.
-
-   Cada sugestão é uma LINHA PRÓPRIA em gn_lojas (SUGESTAO_<ts>_<rand>), não um item dentro
-   de uma lista num campo só. Com dezenas de pessoas mandando na mesma semana, ler-alterar-
-   gravar uma linha compartilhada perderia sugestão sem ninguém perceber. Linha por sugestão
-   é um POST independente: não tem como uma apagar a outra. A tabela já é usada assim
-   (VENDAS_<data>_<loja>, DOCS_<loja>, URGENCIA_CONFIG). */
-const SUG_PREFIXO = 'SUGESTAO_';
-const SUG_FIM     = '2026-10-09';   // último dia pra mandar; depois a caixa fecha sozinha
-const SUG_CARGOS_LEEM_DEPOIS = ['mestre', 'supervisor'];
-
-let _sugLista      = null;    // null = ainda não carregou
-let _sugCarregando = false;
-let _sugFormAberto = false;
-let _sugEnviando   = false;
-let _sugErro       = '';
-
-function _sugHojeISO() {
-  const d = new Date();
-  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-}
-function _sugJanelaAberta() { return _sugHojeISO() <= SUG_FIM; }
-function _sugLeDepois(sess) {
-  return SUG_CARGOS_LEEM_DEPOIS.includes(String(sess && sess.cargo || '').toLowerCase());
-}
-// Quem vê o card: todo mundo enquanto a janela está aberta (a sugestão é sobre o app, e
-// quem usa o app não é só a loja); depois que fecha, só mestre e supervisor — senão o que
-// foi escrito fica preso num card que ninguém mais abre.
-function _sugPodeVer(sess) {
-  if (!sess) return false;
-  return _sugJanelaAberta() || _sugLeDepois(sess);
-}
-function _sugDiasRestantes() {
-  const hoje = new Date(_sugHojeISO() + 'T12:00:00');
-  const fim  = new Date(SUG_FIM + 'T12:00:00');
-  return Math.max(0, Math.round((fim - hoje) / 86400000));
-}
-function _sugEsc(s) { return window.escapeHtml ? window.escapeHtml(s) : String(s == null ? '' : s); }
-
-async function _sugCarregar(forcar) {
-  if (_sugCarregando) return;
-  if (_sugLista && !forcar) return;
-  _sugCarregando = true;
-  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
-  try {
-    const res = await fetch(
-      `${SB_URL}/rest/v1/gn_lojas?loja=like.${SUG_PREFIXO}*&select=loja,all_data`, { headers: H });
-    const rows = res.ok ? await res.json() : null;
-    _sugLista = Array.isArray(rows)
-      ? rows.map(r => Object.assign({ id: r.loja }, r.all_data || {}))
-            .filter(s => s.atrapalha)
-            .sort((a, b) => (b.votos || []).length - (a.votos || []).length ||
-                            String(b.criado_em || '').localeCompare(String(a.criado_em || '')))
-      : [];
-  } catch (e) {
-    window.gnLogError && window.gnLogError('sugestoes:carregar', e);
-    _sugLista = [];
-  } finally {
-    _sugCarregando = false;
-  }
-}
-
-function _sugToggleForm() {
-  _sugFormAberto = !_sugFormAberto;
-  _sugErro = '';
-  _renderSugestoesHome(session, !!masterLoja);
-}
-
-async function _sugEnviar() {
-  if (_sugEnviando) return;
-  const elA = document.getElementById('sug-atrapalha');
-  const elR = document.getElementById('sug-resolveria');
-  const atrapalha = (elA && elA.value || '').trim();
-  const resolveria = (elR && elR.value || '').trim();
-  if (atrapalha.length < 10) {
-    _sugErro = 'Escreve um pouco mais sobre o que atrapalha — com o caso concreto dá pra resolver; só "melhorar o app" não dá.';
-    _renderSugestoesHome(session, !!masterLoja);
-    return;
-  }
-  _sugEnviando = true; _sugErro = '';
-  _renderSugestoesHome(session, !!masterLoja);
-  const id = SUG_PREFIXO + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
-  const corpo = {
-    loja: id,
-    all_data: {
-      atrapalha, resolveria,
-      autor: session.nome, autorId: session.id,
-      autorLoja: (masterLoja || session.loja || ''),
-      cargo: session.cargo || '',
-      criado_em: new Date().toISOString(),
-      votos: []
-    },
-    updated_by: session.nome
-  };
-  try {
-    const res = await fetch(`${SB_URL}/rest/v1/gn_lojas`, {
-      method: 'POST',
-      headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY,
-                 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-      body: JSON.stringify(corpo)
-    });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    if (elA) elA.value = ''; if (elR) elR.value = '';
-    _sugFormAberto = false;
-    await _sugCarregar(true);
-  } catch (e) {
-    window.gnLogError && window.gnLogError('sugestoes:enviar', e);
-    _sugErro = 'Não consegui enviar agora. Confere a internet e tenta de novo — o que você escreveu continua aí.';
-  } finally {
-    _sugEnviando = false;
-    _renderSugestoesHome(session, !!masterLoja);
-  }
-}
-
-// Voto é ler-alterar-gravar numa linha pequena e de uma sugestão só, então a disputa é
-// baixa; relê antes de gravar pra reduzir o que ainda sobra. Se dois votarem no mesmo
-// segundo na MESMA sugestão, um pode se perder — é contagem de interesse, não de dinheiro.
-async function _sugVotar(id) {
-  if (!session) return;
-  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
-  try {
-    const res = await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(id)}&select=all_data`, { headers: H });
-    const rows = res.ok ? await res.json() : null;
-    if (!rows || !rows.length) return;
-    const dados = rows[0].all_data || {};
-    const votos = Array.isArray(dados.votos) ? dados.votos.slice() : [];
-    const eu = session.nome;
-    const i = votos.indexOf(eu);
-    if (i >= 0) votos.splice(i, 1); else votos.push(eu);
-    dados.votos = votos;
-    await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(id)}`, {
-      method: 'PATCH',
-      headers: Object.assign({ 'Content-Type': 'application/json', Prefer: 'return=minimal' }, H),
-      body: JSON.stringify({ all_data: dados })
-    });
-    await _sugCarregar(true);
-  } catch (e) {
-    window.gnLogError && window.gnLogError('sugestoes:votar', e);
-  }
-  _renderSugestoesHome(session, !!masterLoja);
-}
-
-function _sugItemHtml(s) {
-  const votos = Array.isArray(s.votos) ? s.votos : [];
-  const euVotei = !!session && votos.includes(session.nome);
-  const minha = !!session && String(s.autorId) === String(session.id);
-  const quem = _sugEsc(s.autor || '—') + (s.autorLoja ? ' · ' + _sugEsc(LOJA_DISPLAY[s.autorLoja] || s.autorLoja) : '');
-  return `<div style="border-top:1px solid rgba(0,0,0,.07);padding:10px 0 2px">
-    <div style="font-size:11.5px;color:rgba(0,0,0,.82);line-height:1.5;white-space:pre-wrap">${_sugEsc(s.atrapalha)}</div>
-    ${s.resolveria ? `<div style="font-size:11px;color:rgba(0,0,0,.55);line-height:1.5;margin-top:4px;white-space:pre-wrap">💡 ${_sugEsc(s.resolveria)}</div>` : ''}
-    <div style="display:flex;align-items:center;gap:8px;margin-top:7px;flex-wrap:wrap">
-      <span style="font-size:10px;color:rgba(0,0,0,.4)">${quem}${minha ? ' · <b>sua</b>' : ''}</span>
-      <button onclick="_sugVotar('${_sugEsc(s.id)}')"
-        style="margin-left:auto;background:${euVotei ? 'rgba(5,150,105,.14)' : 'rgba(0,0,0,.05)'};
-        border:1px solid ${euVotei ? 'rgba(5,150,105,.35)' : 'rgba(0,0,0,.1)'};border-radius:20px;
-        padding:4px 11px;font-size:10.5px;font-weight:700;cursor:pointer;font-family:inherit;
-        color:${euVotei ? '#047857' : 'rgba(0,0,0,.6)'}">
-        👍 também quero${votos.length ? ' · ' + votos.length : ''}</button>
-    </div>
-  </div>`;
-}
-
-function _renderSugestoesHome(sess, isMasterAtivo) {
-  const el = document.getElementById('sugestoes-app-home-card');
-  if (!el) return;
-  if (!_sugPodeVer(sess)) { el.innerHTML = ''; return; }
-
-  if (_sugLista === null) {
-    _sugCarregar().then(() => _renderSugestoesHome(session, !!masterLoja));
-  }
-
-  const aberta = _sugJanelaAberta();
-  const dias = _sugDiasRestantes();
-  const prazo = !aberta ? 'encerrada'
-    : dias === 0 ? 'último dia'
-    : dias === 1 ? 'termina amanhã'
-    : `faltam ${dias} dias`;
-  const lista = _sugLista || [];
-
-  el.innerHTML = `<div style="background:rgba(139,92,246,.06);border:1px solid rgba(139,92,246,.22);border-left:3px solid #8B5CF6;border-radius:14px;padding:13px 15px;margin:0 16px 14px">
-    <div style="display:flex;align-items:center;gap:8px">
-      <span style="font-size:18px;flex-shrink:0">💬</span>
-      <div style="flex:1;min-width:0">
-        <div style="font-size:12px;font-weight:800;color:#1A1D23">O que dá pra melhorar no app?</div>
-        <div style="font-size:10px;color:rgba(0,0,0,.5);margin-top:1px">Caixa aberta até ${SUG_FIM.slice(8,10)}/${SUG_FIM.slice(5,7)} · ${prazo}</div>
-      </div>
-    </div>
-
-    ${aberta ? `<div style="font-size:11.5px;color:rgba(0,0,0,.72);line-height:1.55;margin-top:9px">
-      Você usa isso aqui todo dia e enxerga o que trava na prática. Conta o que te atrapalha —
-      vale tela confusa, passo demais pra fazer coisa simples, número que não bate, o que for.
-      <b>Tudo vai ser lido</b>, e o que der pra fazer entra na fila.
-    </div>` : `<div style="font-size:11.5px;color:rgba(0,0,0,.72);line-height:1.55;margin-top:9px">
-      A caixa fechou em ${SUG_FIM.slice(8,10)}/${SUG_FIM.slice(5,7)}. Abaixo está tudo o que foi mandado,
-      por ordem de quantas pessoas pediram a mesma coisa.
-    </div>`}
-
-    ${aberta ? (_sugFormAberto ? `
-      <div style="margin-top:11px">
-        <label style="display:block;font-size:10.5px;font-weight:800;color:rgba(0,0,0,.6);margin-bottom:4px">O QUE TE ATRAPALHA HOJE?</label>
-        <textarea id="sug-atrapalha" rows="3" placeholder="Ex.: pra lançar a contagem eu preciso abrir item por item, e são mais de 200 — leva uma hora."
-          style="width:100%;box-sizing:border-box;background:#fff;border:1px solid rgba(0,0,0,.14);border-radius:10px;padding:9px;font-size:12px;font-family:inherit;resize:vertical"></textarea>
-        <label style="display:block;font-size:10.5px;font-weight:800;color:rgba(0,0,0,.6);margin:9px 0 4px">COMO FICARIA MELHOR? <span style="font-weight:500;color:rgba(0,0,0,.4)">(se tiver ideia)</span></label>
-        <textarea id="sug-resolveria" rows="2" placeholder="Ex.: uma tela só com tudo em lista, pra ir descendo e digitando."
-          style="width:100%;box-sizing:border-box;background:#fff;border:1px solid rgba(0,0,0,.14);border-radius:10px;padding:9px;font-size:12px;font-family:inherit;resize:vertical"></textarea>
-        ${_sugErro ? `<div style="font-size:11px;color:#b91c1c;margin-top:7px;line-height:1.45">${_sugEsc(_sugErro)}</div>` : ''}
-        <div style="display:flex;gap:7px;margin-top:9px">
-          <button onclick="_sugEnviar()" ${_sugEnviando ? 'disabled' : ''}
-            style="flex:1;background:#8B5CF6;border:none;border-radius:10px;padding:10px;color:#fff;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit;opacity:${_sugEnviando ? '.6' : '1'}">
-            ${_sugEnviando ? 'Enviando...' : 'Enviar sugestão'}</button>
-          <button onclick="_sugToggleForm()"
-            style="background:rgba(0,0,0,.05);border:1px solid rgba(0,0,0,.1);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;color:rgba(0,0,0,.6)">
-            Cancelar</button>
-        </div>
-      </div>` : `
-      <button onclick="_sugToggleForm()"
-        style="width:100%;margin-top:11px;background:#8B5CF6;border:none;border-radius:10px;padding:11px;color:#fff;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">
-        ✍️ Escrever uma sugestão</button>`) : ''}
-
-    ${lista.length ? `<div style="margin-top:13px">
-      <div style="font-size:10.5px;font-weight:800;color:rgba(0,0,0,.5)">
-        ${lista.length} ${lista.length === 1 ? 'SUGESTÃO' : 'SUGESTÕES'} ATÉ AGORA</div>
-      ${lista.map(_sugItemHtml).join('')}
-    </div>` : (_sugLista === null
-      ? `<div style="font-size:11px;color:rgba(0,0,0,.4);margin-top:11px">Carregando o que já mandaram...</div>`
-      : `<div style="font-size:11px;color:rgba(0,0,0,.45);margin-top:11px;line-height:1.5">Ninguém mandou nada ainda — a primeira é sua.</div>`)}
   </div>`;
 }
 
@@ -4760,10 +4518,6 @@ function _refreshPermUI(sess) {
   loadBadges(sess, isMaster);
   const _mostrarCards = (!isMaster || !!masterLoja) && !_ehCargoModuloUnico(sess);
   _renderAvisoEleicoesHome(_mostrarCards, sess, isMaster);
-  // Fora do _mostrarCards de propósito: a caixa de sugestões é sobre o APP, não sobre a
-  // loja. Quem está em "Todas as lojas" (mestre, supervisor) e quem é do administrativo
-  // usam o app tanto quanto a gerência — e são eles que vão ler o que chegou.
-  _renderSugestoesHome(sess, isMaster);
   _renderVendaMesHome(_mostrarCards, sess, isMaster);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
   _renderVisitaSupervisaoHome(_mostrarCards, sess, isMaster);
@@ -5005,10 +4759,6 @@ function showHome(sess) {
   loadBadges(sess, isMaster);
   const _mostrarCards = (!isMaster || !!masterLoja) && !_ehCargoModuloUnico(sess);
   _renderAvisoEleicoesHome(_mostrarCards, sess, isMaster);
-  // Fora do _mostrarCards de propósito: a caixa de sugestões é sobre o APP, não sobre a
-  // loja. Quem está em "Todas as lojas" (mestre, supervisor) e quem é do administrativo
-  // usam o app tanto quanto a gerência — e são eles que vão ler o que chegou.
-  _renderSugestoesHome(sess, isMaster);
   _renderVendaMesHome(_mostrarCards, sess, isMaster);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
   _renderVisitaSupervisaoHome(_mostrarCards, sess, isMaster);
