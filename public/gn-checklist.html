@@ -9384,6 +9384,21 @@ function _diaSemanaKeyFromISO(iso){
   return ['dom','seg','ter','qua','qui','sex','sab'][d.getDay()];
 }
 
+// Número da nota só com os dígitos: a portaria grava "265.958" e a loja digita "265958" na
+// aba Entrada — é a MESMA nota, e é por ela que se sabe que a entrega conferida e a nota
+// lançada são a mesma mercadoria.
+function _nfDigitos(v){ return String(v==null?'':v).replace(/\D/g,''); }
+
+// Dia da semana de uma data (ou de um timestamp), mas SÓ se ela cair dentro da semana
+// carregada. _diaSemanaKeyFromISO devolve um dia pra qualquer data, sem saber de que semana
+// ela é — então, sem esta checagem, uma nota de outra semana cairia num dia desta.
+function _diaSemanaKeyNaSemana(valor, semanaIni, semanaFim){
+  const dia = String(valor==null?'':valor).slice(0,10);
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(dia)) return null;
+  if(dia < semanaIni || dia > semanaFim) return null;
+  return _diaSemanaKeyFromISO(dia);
+}
+
 // Grava a contagem de abertura desta semana (rowIni, já puxada em _carregarCarnesAutoLojas)
 // também como o fechamento (contagem_final) da SEMANA ANTERIOR — é a mesma pesagem física,
 // só que fecha uma semana e abre a outra ao mesmo tempo. Sem isso, contagem_final da semana
@@ -9459,7 +9474,7 @@ async function _carregarCarnesAutoLojas(force){
     let entregasRows = [];
     if(idsRelevantes.length){
       const {data,error} = await sb.from('gn_provisoes')
-        .select('catalogo_id,data_entrega,gn_recebimentos(qtd_recebida)')
+        .select('catalogo_id,data_entrega,gn_recebimentos(qtd_recebida,nota_numero,validado_em)')
         .eq('loja_slug', lojaSlug)
         .in('catalogo_id', idsRelevantes)
         .gte('data_entrega', semanaIni).lte('data_entrega', semanaFim);
@@ -9493,15 +9508,9 @@ async function _carregarCarnesAutoLojas(force){
       // a carne chegou fora de uma entrega programada (compra de emergência, por exemplo).
       // Somar as duas contaria a mesma carne duas vezes — é a mesma mercadoria vista de dois
       // lugares: uma pela portaria, outra pela nota.
-      const porDia = {seg:0,ter:0,qua:0,qui:0,sex:0,sab:0,dom:0};
-      entregasRows.forEach(p=>{
-        if(p.catalogo_id !== catId) return;
-        const diaKey = _diaSemanaKeyFromISO(p.data_entrega);
-        if(!diaKey || porDia[diaKey]===undefined) return;
-        const recs = Array.isArray(p.gn_recebimentos) ? p.gn_recebimentos : (p.gn_recebimentos?[p.gn_recebimentos]:[]);
-        recs.forEach(r=>{ porDia[diaKey] += parseFloat(r && r.qtd_recebida)||0; });
-      });
-      const porDiaNota = {seg:0,ter:0,qua:0,qui:0,sex:0,sab:0,dom:0};
+      // As notas de Entrada de Mercadoria desta carne vêm primeiro porque são elas que dizem
+      // a DATA REAL em que a carne chegou (a entrega conferida só sabe a data programada).
+      const notasCarne = [];
       const notasVistas = new Set();
       entradasSemana.forEach(e=>{
         const nome = (e.insumo||'').toUpperCase();
@@ -9509,18 +9518,42 @@ async function _carregarCarnesAutoLojas(force){
         if(!m.inc.some(re=>re.test(nome))) return;
         if(m.exc.some(re=>re.test(nome))) return;
         const diaKey = _diaSemanaKeyFromISO(e.dataNF);
-        if(!diaKey || porDiaNota[diaKey]===undefined) return;
+        if(!diaKey) return;
         // Lançar a mesma linha da mesma nota duas vezes é comum na aba Entrada (a loja
         // reabre a nota e lança de novo). Com o número da nota em mãos, linha repetida
         // idêntica é relançamento, não uma segunda remessa: conta uma vez só.
-        const digitos = String(e.nf==null?'':e.nf).replace(/\D/g,'');
+        const digitos = _nfDigitos(e.nf);
         if(digitos){
           const assinatura = digitos+'|'+nome+'|'+e.dataNF+'|'+e.qtd;
           if(notasVistas.has(assinatura)) return;
           notasVistas.add(assinatura);
         }
-        porDiaNota[diaKey] += parseFloat(e.qtd)||0;
+        notasCarne.push({ nf:digitos, dia:diaKey, dataNF:e.dataNF, qtd:parseFloat(e.qtd)||0 });
       });
+
+      // A quantidade da entrega é a conferida na portaria, mas o DIA dela não: data_entrega é
+      // a data em que o pedido foi PROGRAMADO (nas carnes, sempre a segunda) e a carne chega
+      // terça ou quarta. Mostrar a entrada na segunda era o que fazia a loja mexer à mão. A
+      // data real vem, nesta ordem: da nota que casa pelo número; do momento em que a
+      // portaria conferiu; e só então da data programada, que é o último recurso.
+      const porDia = {seg:0,ter:0,qua:0,qui:0,sex:0,sab:0,dom:0};
+      entregasRows.forEach(p=>{
+        if(p.catalogo_id !== catId) return;
+        const recs = Array.isArray(p.gn_recebimentos) ? p.gn_recebimentos : (p.gn_recebimentos?[p.gn_recebimentos]:[]);
+        recs.forEach(r=>{
+          const qtd = parseFloat(r && r.qtd_recebida)||0;
+          if(qtd<=0) return;
+          const digitos = _nfDigitos(r && r.nota_numero);
+          const casada = digitos ? notasCarne.find(n=>n.nf===digitos) : null;
+          const diaKey = (casada && _diaSemanaKeyNaSemana(casada.dataNF, semanaIni, semanaFim))
+                      || _diaSemanaKeyNaSemana(r && r.validado_em, semanaIni, semanaFim)
+                      || _diaSemanaKeyFromISO(p.data_entrega);
+          if(!diaKey || porDia[diaKey]===undefined) return;
+          porDia[diaKey] += qtd;
+        });
+      });
+      const porDiaNota = {seg:0,ter:0,qua:0,qui:0,sex:0,sab:0,dom:0};
+      notasCarne.forEach(n=>{ if(porDiaNota[n.dia]!==undefined) porDiaNota[n.dia] += n.qtd; });
       // A escolha entre entrega e nota é DA SEMANA, não de cada dia. A entrega é datada pela
       // data_entrega PROGRAMADA (nas carnes, sempre a segunda) e a nota pela dataNF REAL (a
       // carne costuma chegar terça ou quarta) — então, decidindo dia a dia, a entrega passava
