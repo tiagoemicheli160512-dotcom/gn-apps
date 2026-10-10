@@ -10679,36 +10679,72 @@ const TAB_LABELS = {
 };
 let _tabsCollapsed = false;
 let _tabsForceExpand = false;
-let _tabsHeaderDelta = null;
-// Quanto a altura do documento encolhe ao colapsar (grade cheia → faixa fina).
-// Precisa ser medida com a grade ainda visível (ver _updateTabsCollapse).
-function _getTabsHeaderDelta(){
-  if(_tabsHeaderDelta === null){
-    const wrap = document.querySelector('.tabs-wrap');
-    if(wrap && wrap.offsetHeight > 0) _tabsHeaderDelta = Math.max(0, wrap.offsetHeight - 36);
+// Colapsar tira a grade (~290px) do fluxo, e o documento encurta. Se a posição de rolagem
+// atual deixar de existir, o navegador puxa a página de volta pro topo — o que reabre a
+// grade, o que alonga o documento de novo: a tela "treme".
+//
+// Antes isso era evitado RECUSANDO colapsar quando sobraria pouca rolagem
+// (`scrollableNow - delta < 32`). O efeito colateral é que a grade ficava inteira justamente
+// nas abas CURTAS — Insumos com um item, Utensílios — que é onde ela mais atrapalha quem
+// está digitando. Medido: Insumos com 1 item dava margem de -254px, ou seja, a guarda
+// barrava sempre. Foi o que a loja relatou.
+//
+// Em vez de recusar, o documento mantém a MESMA altura nos dois estados: o espaço que a
+// grade ocupava vira padding no fim da página. Invisível (fica depois do conteúdo), a
+// rolagem nunca deixa de ser válida, não há repuxo pro topo — e sem repuxo não há tremor.
+function _aplicarColapsoAbas(colapsar){
+  if(!colapsar){
+    document.body.style.paddingBottom = '';
+    document.body.classList.remove('tabs-collapsed');
+    return;
   }
-  return _tabsHeaderDelta || 0;
+  // A compensação é MEDIDA (altura antes × depois de tirar a grade do fluxo), não estimada.
+  // A estimativa anterior (altura da grade − 36px da faixa) errava alguns pixels por causa
+  // dos espaçamentos, e o documento mudava de tamanho mesmo assim.
+  document.body.style.paddingBottom = '';
+  const antes = document.documentElement.scrollHeight;
+  document.body.classList.add('tabs-collapsed');
+  const depois = document.documentElement.scrollHeight;
+  document.body.style.paddingBottom = Math.max(0, antes - depois) + 'px';
 }
 function _updateTabsCollapse(){
   if(_tabsForceExpand) return;
   const collapsed = window.scrollY > 24;
   if(collapsed === _tabsCollapsed) return;
-  if(collapsed){
-    // Só colapsa se sobrar espaço de rolagem depois de encolher o cabeçalho — senão
-    // o documento fica mais curto que a posição de rolagem atual, o navegador força
-    // a rolagem de volta pro topo, isso reabre a grade, e o ciclo se repete (tela
-    // "tremendo") em abas com pouco conteúdo, como Visitas.
-    const scrollableNow = document.documentElement.scrollHeight - window.innerHeight;
-    if(scrollableNow - _getTabsHeaderDelta() < 32) return;
-  }
   _tabsCollapsed = collapsed;
-  document.body.classList.toggle('tabs-collapsed', collapsed);
+  _aplicarColapsoAbas(collapsed);
 }
 window.addEventListener('scroll', _updateTabsCollapse, {passive:true});
+
+// Rolagem não cobre tudo: aba curta não rola. Insumos com um item mede exatamente a altura
+// da tela (medido: página 844px / tela 844px), então NENHUM evento de rolagem acontece e a
+// grade fica inteira na frente do formulário — é o print que a loja mandou. O gatilho que
+// falta é o outro momento citado no pedido ("dificulta pra digitar"): ao focar um campo da
+// aba, a grade recolhe na hora, sem depender de rolagem.
+function _recolherAbasAoDigitar(e){
+  const el = e && e.target;
+  if(!el || !el.matches || !el.matches('input, select, textarea')) return;
+  // Só campos do conteúdo da aba. Modais são sobrepostos (position:fixed) e recolher a
+  // grade atrás deles mexeria na página por baixo sem motivo nenhum.
+  if(!el.closest('.tab-content')) return;
+  for(let n = el; n && n !== document.body; n = n.parentElement){
+    if(getComputedStyle(n).position === 'fixed') return;
+  }
+  // Quem tocou na faixa pra reabrir a grade e em seguida foi digitar quer o espaço de volta.
+  _tabsForceExpand = false;
+  if(_tabsCollapsed) return;
+  _tabsCollapsed = true;
+  _aplicarColapsoAbas(true);
+}
+document.addEventListener('focusin', _recolherAbasAoDigitar, {passive:true});
+
 function expandTabsBar(){
   _tabsForceExpand = true;
   _tabsCollapsed = false;
-  document.body.classList.remove('tabs-collapsed');
+  // Reabrir é sempre pelo _aplicarColapsoAbas(false), que tira a classe E o padding de
+  // compensação juntos — esquecer o padding deixaria um vão morto no fim da página, do tipo
+  // que ninguém liga ao recolhimento das abas.
+  _aplicarColapsoAbas(false);
   window.addEventListener('scroll', function _clear(){
     _tabsForceExpand = false;
     window.removeEventListener('scroll', _clear);
@@ -10787,7 +10823,7 @@ function switchTab(tab,btn){
   // conteúdo novo estiver na tela — evita ficar preso num estado colapsado que não
   // cabe no conteúdo da aba recém-aberta (ver _updateTabsCollapse).
   _tabsCollapsed = false;
-  document.body.classList.remove('tabs-collapsed');
+  _aplicarColapsoAbas(false);
   requestAnimationFrame(_updateTabsCollapse);
   if(tab==='supervisao'){
     if(!supDesbloqueado){
