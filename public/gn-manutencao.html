@@ -1129,6 +1129,14 @@ async function salvarStatus(loja, data, itemId){
       method:'PATCH', prefer:'return=minimal', body:{manutencao:arr}
     });
     if(novoStatus==='Resolvido'&&fotoAntiga) window.gnDeleteFotoStorage(SB_URL,SB_KEY,fotoAntiga);
+    // Louça resolvida é reposição: pergunta quantas foram entregues e devolve ao saldo da
+    // loja. É a metade que fecha o ciclo — sem ela o saldo só cai, e em dois meses vira um
+    // número que ninguém leva a sério. Depois do PATCH do status: se a gravação do saldo
+    // falhar, o status continua salvo (o conserto aconteceu de verdade) e é só a reposição
+    // que fica pra lançar — o contrário deixaria o item eternamente pendente.
+    if(novoStatus==='Resolvido' && arr[idx].tipo==='Utensílio / Louça' && !arr[idx].reposicao_aplicada){
+      await _reporSaldoUtensilio(loja, data, itemId, arr[idx]);
+    }
     const local=S.itens.find(m=>String(m.id)===String(itemId)&&m._loja===loja&&m._data===data);
     if(local){ local.status=novoStatus; local.fotoBase64=arr[idx].fotoBase64; }
     _logAuditoriaManut('ALTERAR_STATUS',{loja,setor:local?.setor||'',status:novoStatus});
@@ -1137,6 +1145,74 @@ async function salvarStatus(loja, data, itemId){
     renderBotNav(); renderPendBadge(); renderLista();
     toast('Status atualizado!');
   }catch(e){ toast('Erro ao salvar'); }
+}
+
+/* ── Reposição de louça: a volta do saldo ───────────────────────────────────────────────
+   A loja informa quantas tem em bom estado na primeira vez que lança a peça, e cada quebra
+   desconta. Aqui é o outro lado: quando a manutenção resolve, informa quantas entregou e o
+   saldo sobe de novo.
+
+   O saldo mora em gn_lojas.all_data.utensilios_saldo, na linha DA LOJA — a mesma onde
+   manut_oficial_items já mora, lida e escrita pelos dois apps. Relê imediatamente antes de
+   gravar porque o Check-list escreve no mesmo lugar: gravar a partir de uma cópia velha
+   apagaria o que a loja acabou de lançar.
+
+   A chave da peça é derivada do nome igual no Check-list (sem acento, minúscula, espaços
+   colapsados) — "Canecão" e "canecao" são a mesma peça. Se as duas pontas normalizarem
+   diferente, a reposição cria uma SEGUNDA linha de saldo e o controle se parte em dois. */
+function _utensilioChaveManut(nome){
+  return String(nome==null?'':nome)
+    .normalize('NFD').replace(/[̀-ͯ]/g,'')
+    .toLowerCase().replace(/\s+/g,' ').trim().slice(0,60);
+}
+async function _reporSaldoUtensilio(loja, data, itemId, item){
+  const nome=String(item.descricao||'').trim();
+  const chave=item.saldo_chave || _utensilioChaveManut(nome);
+  if(!chave) return;
+  const pedido=parseFloat(item.qtd)||0;
+  const resp=prompt(`Resolvido: "${nome||'louça'}" — ${esc(loja)}.\n\nQuantas foram entregues pra loja?`+(pedido>0?`\n(a loja lançou ${pedido})`:''), pedido>0?String(pedido):'');
+  if(resp===null) return;                                   // pulou: saldo fica como está
+  const n=parseFloat(String(resp).replace(',','.'));
+  if(!isFinite(n)||n<0){ toast('Quantidade inválida — saldo não mexido'); return; }
+  if(n===0) return;
+  const comKey=CHK_TO_COM[loja]||loja;
+  try{
+    const rows=await sb(`gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`);
+    const allData=(rows.length&&rows[0].all_data)||{};
+    const saldos=(allData.utensilios_saldo&&typeof allData.utensilios_saldo==='object')?allData.utensilios_saldo:{};
+    const agora=new Date().toISOString();
+    const quem=(S.usuario&&S.usuario.nome)||'manutenção';
+    // Peça que nunca passou pelo controle da loja: a reposição abre a linha com o que foi
+    // entregue. Melhor que descartar — é quantidade real que entrou na loja.
+    const reg=saldos[chave]||{nome:nome||chave, qtd:0, inicial:0, inicial_em:agora, inicial_por:quem};
+    reg.qtd=(parseFloat(reg.qtd)||0)+n;
+    if(nome) reg.nome=nome;
+    reg.atualizado_em=agora; reg.atualizado_por=quem;
+    saldos[chave]=reg;
+    await sb(`gn_lojas?loja=eq.${encodeURIComponent(comKey)}`,{
+      method:'PATCH',prefer:'return=minimal',body:{all_data:{...allData,utensilios_saldo:saldos}}
+    });
+    // Marca no próprio item que a reposição já entrou, pra um segundo "Resolvido" não somar
+    // de novo (o status pode ser remarcado).
+    const rows2=await sb(`checklist_diario?data_operacao=eq.${data}&loja=eq.${encodeURIComponent(loja)}&select=manutencao`);
+    if(rows2.length){
+      const arr2=Array.isArray(rows2[0].manutencao)?rows2[0].manutencao:[];
+      const i2=arr2.findIndex(m=>String(m.id)===String(itemId));
+      if(i2>=0){
+        arr2[i2].reposicao_aplicada=true;
+        arr2[i2].reposicao_qtd=n;
+        await sb(`checklist_diario?data_operacao=eq.${data}&loja=eq.${encodeURIComponent(loja)}`,{
+          method:'PATCH',prefer:'return=minimal',body:{manutencao:arr2}
+        });
+        if(item) { item.reposicao_aplicada=true; item.reposicao_qtd=n; }
+      }
+    }
+    _logAuditoriaManut('REPOR_UTENSILIO',{loja,peca:nome,qtd:n,saldo:reg.qtd});
+    toast(`Reposição de ${n} lançada. Saldo da loja: ${reg.qtd}`);
+  }catch(e){
+    window.gnLogError && window.gnLogError('manutencao:reporSaldoUtensilio', e);
+    toast('Status salvo, mas não consegui lançar a reposição no saldo');
+  }
 }
 
 async function salvarStatusOficial(loja, itemId){
