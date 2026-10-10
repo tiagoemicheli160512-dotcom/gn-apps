@@ -2979,7 +2979,26 @@ function scheduleComissoesOp(mutator){
   clearTimeout(comissoesSyncTimer);
   comissoesSyncTimer = setTimeout(flushComissoesOps, 900);
 }
-async function flushComissoesOps(immediate){
+// UM flush por vez. Sem esta trava, um segundo flush começava enquanto o primeiro ainda
+// estava no ar: os dois liam o MESMO retrato do servidor, cada um aplicava só os seus
+// mutators, e o último PATCH apagava o do outro. Sem erro na tela, sem fila pendente, e com
+// a tela continuando certa (o comissoesWD local tem tudo) — é o "salva momentaneamente, mas
+// alguns minutos depois retorna sozinho" que São Gonçalo e Bangu relataram. A janela abre
+// sempre que a ida+volta ao servidor passa dos 900ms do debounce, o que no Wi-Fi de loja é
+// comum: medido com latência de 800ms, a primeira edição se perdia TODA vez.
+//
+// Quem dá await nesta função continua voltando só depois de a SUA edição estar gravada: se a
+// fila ainda tem coisa quando o flush em curso termina, roda de novo.
+let _comissoesFlushEmCurso = null;
+function flushComissoesOps(immediate){
+  if(_comissoesFlushEmCurso){
+    return _comissoesFlushEmCurso.then(()=> comissoesOpsQueue.length ? flushComissoesOps(immediate) : undefined);
+  }
+  _comissoesFlushEmCurso = _flushComissoesOpsAgora(immediate)
+    .finally(()=>{ _comissoesFlushEmCurso = null; });
+  return _comissoesFlushEmCurso;
+}
+async function _flushComissoesOpsAgora(immediate){
   if(!comissoesOpsQueue.length || comissoesWeekIdx==null) return;
   const ops = comissoesOpsQueue; comissoesOpsQueue = [];
   const lojaKey = comissoesLojaKey();
