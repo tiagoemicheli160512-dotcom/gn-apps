@@ -876,11 +876,43 @@ function _epNotaGet(fornecedor) {
   if (!n || n.dia !== _epNotaHoje()) return null;
   return n;
 }
-function _epNotaSet(fornecedor, numero, valor) {
+// `extra` carrega os dois casos que a loja não conseguia registrar antes (relato do Luiz,
+// estoquista do Norte Shopping): mercadoria que chega SEM NOTA — e aí nada podia ser
+// confirmado, a mercadoria ficava fora do estoque — e mercadoria entregue por uma empresa
+// diferente da que Compras previu. Nos dois casos o recebimento acontece normalmente; o que
+// muda é que fica registrado o que de fato aconteceu, em vez de um número de nota inventado.
+//   • semNota + motivo: declarado pela loja, grava nota_numero null e fica marcado.
+//   • entregou: quem entregou de verdade, quando não é o fornecedor previsto.
+function _epNotaSet(fornecedor, numero, valor, extra) {
   const f = fornecedor || 'SEM FORNECEDOR';
   if (!_epNotaPorForn[loja]) _epNotaPorForn[loja] = {};
-  _epNotaPorForn[loja][f] = { numero: numero, valor: valor, dia: _epNotaHoje() };
+  _epNotaPorForn[loja][f] = Object.assign(
+    { numero: numero, valor: valor, dia: _epNotaHoje() },
+    extra || {}
+  );
   _epNotaSalvar();
+}
+
+// Motivos de chegar sem nota. Lista fechada em vez de texto livre: é o que torna a
+// pendência cobrável depois (dá pra separar "nota vem depois" de "venda sem nota mesmo") —
+// campo livre viraria "sem nota" repetido 300 vezes e não serviria pra nada.
+const EP_SEM_NOTA_MOTIVOS = [
+  'Nota vem depois (fornecedor vai mandar)',
+  'Transferência de outra loja',
+  'Brinde / bonificação do fornecedor',
+  'Troca de mercadoria avariada',
+  'Compra de emergência sem nota',
+];
+
+// Texto que vai pra gn_recebimentos.observacao. É o registro honesto do recebimento, lido
+// depois na aba Notas. Não existe coluna própria pra isso e criar uma depende de DDL no
+// banco (hoje bloqueado), então observacao é onde cabe — com prefixo fixo pra dar pra
+// filtrar, e NÃO em cima de uma observação que já exista.
+function _epObsRecebimento(nota) {
+  const partes = [];
+  if (nota && nota.semNota) partes.push('SEM NOTA: ' + (nota.motivo || 'não informado'));
+  if (nota && nota.entregou) partes.push('ENTREGUE POR: ' + nota.entregou);
+  return partes.length ? partes.join(' · ') : null;
 }
 let _entregaItensMap = {}; // id -> itens (para recalc sem JSON no onclick)
 let pedidoCustom = [];  // itens novos criados no app [{item, fornecedor, grupo, subgrupo, produto, und, custo, posIndex}]
@@ -10411,12 +10443,17 @@ function render() {
           // a loja conferir o número que está sendo gravado nos itens seguintes, com
           // saída pra corrigir se digitou errado (ou se chegou uma segunda nota no dia).
           const notaForn=_epNotaGet(forn);
-          const notaHtml=notaForn
-            ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;background:rgba(5,150,105,.08);border-radius:8px;padding:4px 8px">
-                <span style="font-size:10px;font-weight:700;color:#047857;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">🧾 Nota ${escapeHtml(notaForn.numero)} · R$ ${(parseFloat(notaForn.valor)||0).toFixed(2).replace('.',',')}</span>
-                <button onclick="trocarNotaEntrega('${forn.replace(/'/g,"\\'")}', event)" style="flex-shrink:0;background:none;border:none;color:#047857;font-size:10px;font-weight:800;text-decoration:underline;padding:0">trocar</button>
-              </div>`
-            : '';
+          // Sem nota aparece em âmbar, não em verde: é um recebimento válido mas com
+          // documento pendente, e a loja precisa distinguir um do outro de relance.
+          const _notaChip=(txt,cor,fundo)=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;background:${fundo};border-radius:8px;padding:4px 8px">
+                <span style="font-size:10px;font-weight:700;color:${cor};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${txt}</span>
+                <button onclick="trocarNotaEntrega('${forn.replace(/'/g,"\\'")}', event)" style="flex-shrink:0;background:none;border:none;color:${cor};font-size:10px;font-weight:800;text-decoration:underline;padding:0">trocar</button>
+              </div>`;
+          const _entregouTxt=notaForn&&notaForn.entregou?` · 🚚 ${escapeHtml(notaForn.entregou)}`:'';
+          const notaHtml=!notaForn ? ''
+            : notaForn.semNota
+              ? _notaChip(`⚠️ SEM NOTA · ${escapeHtml(notaForn.motivo||'motivo não informado')}${_entregouTxt}`,'#B45309','rgba(217,119,6,.10)')
+              : _notaChip(`🧾 Nota ${escapeHtml(notaForn.numero)} · R$ ${(parseFloat(notaForn.valor)||0).toFixed(2).replace('.',',')}${_entregouTxt}`,'#047857','rgba(5,150,105,.08)');
           return `<div class="ep-grupo${_epGruposAbertos.has(gid)?' aberto':''}" id="${gid}">
             <div class="ep-grupo-header" onclick="toggleEpGrupo('${gid}')" style="border-left:3px solid ${finalizado?'#16A34A':'#D97706'};flex-direction:column;align-items:stretch;gap:5px">
               <div style="display:flex;align-items:center;justify-content:space-between">
@@ -10698,8 +10735,9 @@ function render() {
               <div onclick="toggleNotaEntrega('${gid}')" style="padding:12px 14px;cursor:pointer">
                 <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
                   <div style="flex:1;min-width:0">
-                    <div style="font-size:13px;font-weight:900;color:${cor}">${g.numero ? '🧾 Nota ' + escapeHtml(g.numero) : '⚠️ Sem nota registrada'}</div>
+                    <div style="font-size:13px;font-weight:900;color:${cor}">${g.numero ? '🧾 Nota ' + escapeHtml(g.numero) : (/^SEM NOTA/.test(g.obs||'') ? '⚠️ Chegou sem nota' : '⚠️ Sem nota registrada')}</div>
                     <div style="font-size:11px;color:#475569;font-weight:700;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(g.fornecedor)}</div>
+                    ${g.obs ? `<div style="font-size:10.5px;color:#B45309;font-weight:700;margin-top:3px;line-height:1.35">${escapeHtml(g.obs)}</div>` : ''}
                     <div style="font-size:10px;color:#64748b;margin-top:3px">📅 ${fmtDT(g.quando)}</div>
                     <div style="font-size:10px;color:#64748b;margin-top:1px">👤 Confirmado por ${escapeHtml(g.validadoPor || '—')}</div>
                   </div>
@@ -11764,7 +11802,7 @@ async function _epFetchHistorico(slug, desde) {
   let offset=0;
   const all=[];
   while(true){
-    const page=await sbRequest('gn_provisoes?loja_slug=eq.'+slug+'&status=in.(RECEBIDO_OK,DIVERGENCIA,DEVOLVIDO)&atualizado_em=gte.'+desde+'&select=*,gn_catalogo(produto,und),gn_pedidos(data_pedido,semana_inicio),gn_recebimentos(qtd_recebida,valor_recebido,validado_por,validado_em,diferenca_qtd,nota_numero,nota_valor)&order=atualizado_em.desc&limit='+pageSize+'&offset='+offset,{method:'GET'});
+    const page=await sbRequest('gn_provisoes?loja_slug=eq.'+slug+'&status=in.(RECEBIDO_OK,DIVERGENCIA,DEVOLVIDO)&atualizado_em=gte.'+desde+'&select=*,gn_catalogo(produto,und),gn_pedidos(data_pedido,semana_inicio),gn_recebimentos(qtd_recebida,valor_recebido,validado_por,validado_em,diferenca_qtd,nota_numero,nota_valor,observacao)&order=atualizado_em.desc&limit='+pageSize+'&offset='+offset,{method:'GET'});
     all.push(...(page||[]));
     if(!page||page.length<pageSize) break;
     offset+=pageSize;
@@ -11854,6 +11892,11 @@ function _epAgruparNotas(rows) {
       grupos[chave] = {
         chave, numero, fornecedor: forn, dia,
         notaValor: rec && rec.nota_valor != null ? parseFloat(rec.nota_valor) : null,
+        // O "SEM NOTA: <motivo>" / "ENTREGUE POR: <empresa>" que a loja declarou na hora de
+        // receber. Sem isto, um recebimento sem nota declarado de propósito ficava igual a
+        // uma confirmação antiga que simplesmente não tinha nota gravada — e aí não há como
+        // cobrar o documento de ninguém.
+        obs: (rec && rec.observacao) || '',
         quando, validadoPor: (rec && rec.validado_por) || '', itens: [], totalItens: 0,
       };
     }
@@ -11864,6 +11907,7 @@ function _epAgruparNotas(rows) {
     // "quando/quem confirmou" — é o momento em que a entrega começou a ser conferida.
     if (quando && (!g.quando || quando < g.quando)) { g.quando = quando; g.validadoPor = (rec && rec.validado_por) || g.validadoPor; }
     if (g.notaValor == null && rec && rec.nota_valor != null) g.notaValor = parseFloat(rec.nota_valor);
+    if (!g.obs && rec && rec.observacao) g.obs = rec.observacao;
   });
   return Object.values(grupos).sort((a,b) => String(b.quando).localeCompare(String(a.quando)));
 }
@@ -12161,8 +12205,9 @@ function abrirModalNotaEntrega(id, fornecedor) {
     + '</div>'
     + '<div style="overflow-y:auto;padding:14px 16px">'
     + '<div style="background:rgba(217,119,6,.08);border:1px solid rgba(217,119,6,.25);border-radius:10px;padding:9px 11px;font-size:11px;color:#B45309;font-weight:600;margin-bottom:14px">'
-    + 'Obrigatório pra confirmar o recebimento. A nota vale pra <b>todos os itens deste fornecedor</b> nesta entrega — só precisa digitar uma vez.'
+    + 'A nota vale pra <b>todos os itens deste fornecedor</b> nesta entrega — só precisa digitar uma vez. Chegou sem nota? Marque a opção no fim.'
     + '</div>'
+    + '<div id="notaEntregaCampos">'
     + '<label style="font-size:9px;color:#64748b;font-weight:700;text-transform:uppercase;display:block;margin-bottom:3px">Número da nota</label>'
     + '<input id="notaEntregaNumero" type="text" inputmode="numeric" autocomplete="off" placeholder="Ex.: 123456"'
     + ' value="' + escapeHtml(atual ? atual.numero : '') + '"'
@@ -12172,6 +12217,40 @@ function abrirModalNotaEntrega(id, fornecedor) {
     + ' value="' + (atual && atual.valor != null ? atual.valor : '') + '"'
     + ' style="width:100%;background:#FFFFFF;border:1px solid #E1E4E9;border-radius:8px;color:#475569;padding:9px;font-size:14px;box-sizing:border-box"/>'
     + (totalPrev > 0 ? '<div style="font-size:10px;color:#64748b;margin-top:5px">Previsto pra este fornecedor: R$ ' + totalPrev.toFixed(2).replace('.', ',') + '</div>' : '')
+    + '</div>'
+    // ── Chegou sem nota ────────────────────────────────────────────────────────────────
+    // Antes, mercadoria sem nota simplesmente não podia ser recebida: a exigência era
+    // reafirmada no último ponto antes de gravar, então o estoquista ficava com a
+    // mercadoria na mão e nada no app. Agora ele DECLARA, com motivo — o recebimento entra
+    // igual (quantidade conferida vai pro estoque) e fica marcado como pendente de
+    // documento, pra Compras cobrar depois. O controle continua: nada entra em silêncio.
+    + '<div style="border-top:1px solid rgba(0,0,0,.08);margin-top:14px;padding-top:12px">'
+    + '<label style="display:flex;align-items:flex-start;gap:9px;cursor:pointer">'
+    + '<input id="notaEntregaSemNota" type="checkbox" onchange="_epNotaToggleSemNota()"'
+    + (atual && atual.semNota ? ' checked' : '')
+    + ' style="width:18px;height:18px;flex-shrink:0;margin:1px 0 0;accent-color:#B45309"/>'
+    + '<span style="font-size:12px;font-weight:700;color:#1A1D23;line-height:1.35">Chegou sem nota'
+    + '<span style="display:block;font-size:10.5px;font-weight:500;color:#64748b;margin-top:1px">A mercadoria entra no estoque e fica marcada como pendente de documento.</span>'
+    + '</span></label>'
+    + '<div id="notaEntregaMotivoBox" style="margin-top:10px;' + (atual && atual.semNota ? '' : 'display:none') + '">'
+    + '<label style="font-size:9px;color:#64748b;font-weight:700;text-transform:uppercase;display:block;margin-bottom:3px">Por que chegou sem nota?</label>'
+    + '<select id="notaEntregaMotivo" style="width:100%;background:#FFFFFF;border:1px solid #E1E4E9;border-radius:8px;color:#475569;padding:9px;font-size:13px;box-sizing:border-box">'
+    + '<option value="">Selecione o motivo</option>'
+    + EP_SEM_NOTA_MOTIVOS.map(function(m){
+        return '<option value="' + escapeHtml(m) + '"' + (atual && atual.motivo === m ? ' selected' : '') + '>' + escapeHtml(m) + '</option>'; }).join('')
+    + '</select></div></div>'
+    // ── Entregue por outra empresa ─────────────────────────────────────────────────────
+    // "Mercadoria prevista chegar por uma empresa e chega em outra." O item continua no
+    // grupo do fornecedor que Compras previu (é de lá que vem o pedido e o valor), mas
+    // quem entregou de fato fica registrado — antes a loja tinha que lançar a nota de uma
+    // empresa debaixo do nome de outra, e o espelho da nota saía com o fornecedor errado.
+    + '<div style="border-top:1px solid rgba(0,0,0,.08);margin-top:12px;padding-top:12px">'
+    + '<label style="font-size:9px;color:#64748b;font-weight:700;text-transform:uppercase;display:block;margin-bottom:3px">Quem entregou <span style="font-weight:500;text-transform:none">(só se foi outra empresa)</span></label>'
+    + '<input id="notaEntregaEntregou" type="text" autocomplete="off" placeholder="' + escapeHtml(forn) + '"'
+    + ' value="' + escapeHtml(atual && atual.entregou ? atual.entregou : '') + '"'
+    + ' style="width:100%;background:#FFFFFF;border:1px solid #E1E4E9;border-radius:8px;color:#475569;padding:9px;font-size:13px;box-sizing:border-box"/>'
+    + '<div style="font-size:10px;color:#64748b;margin-top:4px">Em branco = entregou ' + escapeHtml(forn) + ', como estava previsto.</div>'
+    + '</div>'
     + '<div id="notaEntregaErro" style="font-size:11px;color:#DC2626;font-weight:700;min-height:15px;margin-top:8px"></div>'
     + '</div>'
     + '<div style="padding:14px 16px;display:grid;grid-template-columns:1fr 1fr;gap:10px;border-top:1px solid rgba(0,0,0,.08)">'
@@ -12183,19 +12262,46 @@ function abrirModalNotaEntrega(id, fornecedor) {
   setTimeout(function(){ const i = document.getElementById('notaEntregaNumero'); if (i) i.focus(); }, 80);
 }
 
+// Esconde os campos da nota quando a loja declara que não tem nota — deixá-los à vista,
+// vazios e ignorados, convidava a digitar um número qualquer só pra passar da tela.
+function _epNotaToggleSemNota() {
+  const sem = !!(document.getElementById('notaEntregaSemNota') || {}).checked;
+  const campos = document.getElementById('notaEntregaCampos');
+  const motivo = document.getElementById('notaEntregaMotivoBox');
+  if (campos) campos.style.display = sem ? 'none' : '';
+  if (motivo) motivo.style.display = sem ? '' : 'none';
+}
+
 function _salvarNotaEntrega() {
   const modal = document.getElementById('modalNotaEntrega');
   if (!modal) return;
   const err = document.getElementById('notaEntregaErro');
+  const semNota = !!(document.getElementById('notaEntregaSemNota') || {}).checked;
+  const entregou = ((document.getElementById('notaEntregaEntregou') || {}).value || '').trim();
+  const id = modal.dataset.provId;
+  const forn = modal.dataset.fornecedor;
+
+  // Sem nota: o número e o valor não existem, o motivo é que passa a ser obrigatório. Sem
+  // essa exigência o "sem nota" viraria o caminho fácil pra tudo, e a pendência não teria
+  // como ser cobrada depois.
+  if (semNota) {
+    const motivo = ((document.getElementById('notaEntregaMotivo') || {}).value || '').trim();
+    if (!motivo) { if (err) err.textContent = '⚠️ Escolha o motivo de ter chegado sem nota.'; return; }
+    _epNotaSet(forn, '', null, { semNota: true, motivo: motivo, entregou: entregou || '' });
+    modal.remove();
+    if (id) { _epSeguirAposNota(id); return; }
+    showToast('⚠️ Marcado como SEM NOTA para ' + forn + ' — ' + motivo + '.');
+    render();
+    return;
+  }
+
   const numero = (document.getElementById('notaEntregaNumero').value || '').trim();
   const valorTxt = (document.getElementById('notaEntregaValor').value || '').replace(',', '.').trim();
   const valor = parseFloat(valorTxt);
   if (!numero) { if (err) err.textContent = '⚠️ Informe o número da nota.'; return; }
   if (!valorTxt || !isFinite(valor) || valor <= 0) { if (err) err.textContent = '⚠️ Informe o valor total da nota (maior que zero).'; return; }
 
-  const id = modal.dataset.provId;
-  const forn = modal.dataset.fornecedor;
-  _epNotaSet(forn, numero, valor);
+  _epNotaSet(forn, numero, valor, { semNota: false, motivo: '', entregou: entregou || '' });
   modal.remove();
   if (id) { _epSeguirAposNota(id); return; }
   showToast('🧾 Nota ' + numero + ' salva para ' + forn + '.');
@@ -12308,13 +12414,25 @@ function confirmarEntrega(id){
   // toa). Mesmo padrão de "tem certeza" já usado ao confirmar fornecedores no app Pedidos.
   const produtoNome=prov.gn_catalogo?.produto||'este item';
   const und=prov.gn_catalogo?.und||'';
-  if (!confirm(`Confirmar recebimento de "${produtoNome}"?\n\nQtd recebida: ${qtdRec} ${und}\nValor: R$ ${valRec.toFixed(2).replace('.',',')}\nNota: ${nota.numero} (R$ ${(parseFloat(nota.valor)||0).toFixed(2).replace('.',',')})` + (status==='DIVERGENCIA' ? `\n\n⚠️ Diferente do previsto (${qtdPrev} ${und}) — vai registrar como divergência.` : ''))) return;
+  // A linha da nota no "tem certeza" muda conforme o caso — quem declarou sem nota tem que
+  // ver isso escrito antes de confirmar, senão a declaração passa sem ninguém reparar.
+  const linhaNota = nota.semNota
+    ? `SEM NOTA — ${nota.motivo || 'motivo não informado'}`
+    : `Nota: ${nota.numero} (R$ ${(parseFloat(nota.valor)||0).toFixed(2).replace('.',',')})`;
+  const linhaEntregou = nota.entregou ? `\nEntregue por: ${nota.entregou}` : '';
+  if (!confirm(`Confirmar recebimento de "${produtoNome}"?\n\nQtd recebida: ${qtdRec} ${und}\nValor: R$ ${valRec.toFixed(2).replace('.',',')}\n${linhaNota}${linhaEntregou}` + (status==='DIVERGENCIA' ? `\n\n⚠️ Diferente do previsto (${qtdPrev} ${und}) — vai registrar como divergência.` : ''))) return;
 
   // 1) Grava na hora no aparelho, sem depender da rede — mesmo padrão de resiliência
   // já usado na Contagem (autoSave local + retry em segundo plano).
   if(!_epFilaPendente[loja]) _epFilaPendente[loja]=[];
   _epFilaPendente[loja]=_epFilaPendente[loja].filter(x=>x.id!==id); // evita duplicar se reconfirmar
-  _epFilaPendente[loja].push({id,qtdRec,valRec,diff,status,validado_por,notaNumero:nota.numero,notaValor:nota.valor,ts:Date.now(),prov});
+  // Sem nota, não vai número nem valor inventado: vão nulos, e a observação é que carrega o
+  // "SEM NOTA: <motivo>" / "ENTREGUE POR: <empresa>".
+  _epFilaPendente[loja].push({id,qtdRec,valRec,diff,status,validado_por,
+    notaNumero: nota.semNota ? '' : nota.numero,
+    notaValor:  nota.semNota ? null : nota.valor,
+    obs: _epObsRecebimento(nota),
+    ts:Date.now(),prov});
   _epFilaSalvar();
 
   // 2) Trava o item na tela como confirmado (mas sinalizando "sincronizando") — usuário
@@ -12455,7 +12573,10 @@ async function _epProcessarFila(){
           body:JSON.stringify({provisao_id:item.id,qtd_recebida:item.qtdRec,valor_recebido:item.valRec,diferenca_qtd:item.diff,validado_por:item.validado_por,
             // Confirmações que já estavam na fila do aparelho antes desta versão não têm
             // nota — vão como null em vez de quebrar o insert, e o espelho mostra "—".
-            nota_numero:item.notaNumero||null,nota_valor:item.notaValor!=null?item.notaValor:null})});
+            nota_numero:item.notaNumero||null,nota_valor:item.notaValor!=null?item.notaValor:null,
+            // Confirmações que já estavam na fila antes desta versão não têm `obs` — vão
+            // como null, igual às sem nota antigas, e a aba Notas segue mostrando "—".
+            observacao:item.obs||null})});
       }catch(eRec){
         // reverte a provisão pra não ficar marcada como recebida sem nenhum registro
         await sbRequest('gn_provisoes?id=eq.'+item.id,{method:'PATCH',headers:{'Prefer':'return=minimal'},body:JSON.stringify({status:'AGUARDANDO'})}).catch(()=>{});
