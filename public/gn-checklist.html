@@ -3582,6 +3582,29 @@ async function _uploadFotoChk(b64, pasta){
   }
 }
 
+// Foto antiga, guardada como base64 dentro do próprio JSON, que atravessa dias ──────
+// O item pendente (falta, manutenção) é copiado pro dia seguinte com tudo o que tem
+// dentro. Quando a foto é base64 — como era antes do Storage — cada dia passa a guardar
+// a imagem inteira outra vez. Medido no banco: 54 fotos viraram 1190 cópias, 37 MB, e
+// uma delas estava em 81 linhas; toda tela que lê manutenção dos últimos 30 dias baixava
+// 8,4 MB pra mostrar 341 kB de texto.
+//
+// Então, ao trazer o item do dia anterior, a foto antiga sobe UMA vez pro Storage e o
+// item passa a carregar só a URL — igual às fotos novas. Se o upload falhar, o base64
+// fica como está: ninguém perde foto por causa desta limpeza.
+async function _migrarFotosLegadas(itens, campo, pasta){
+  const subidas = new Map();
+  let trocou = false;
+  for(const it of itens||[]){
+    const v = it && it[campo];
+    if(typeof v !== 'string' || !v.startsWith('data:')) continue;
+    if(!subidas.has(v)) subidas.set(v, await _uploadFotoChk(v, pasta));
+    const url = subidas.get(v);
+    if(url){ it[campo] = url; trocou = true; }
+  }
+  return trocou;
+}
+
 function addDespesa(){
   const id = Date.now();
   state.despesas.push({id, descricao:'', valor:0, foto:''});
@@ -14281,11 +14304,19 @@ async function initAppWithLoja(){
       if(ontem && !error){
         if(!state.faltas.length && Array.isArray(ontem.faltas)){
           const carry = ontem.faltas.filter(f => f.nome && f.nome.trim());
-          if(carry.length){ state.faltas = carry.map((f,i)=>({...f,id:Date.now()+i+1})); renderFaltas(); }
+          if(carry.length){
+            state.faltas = carry.map((f,i)=>({...f,id:Date.now()+i+1}));
+            await _migrarFotosLegadas(state.faltas, 'fotoBase64', 'checklist-faltas');
+            renderFaltas();
+          }
         }
         if(!state.manutencao.length && Array.isArray(ontem.manutencao)){
           const carry = ontem.manutencao.filter(m => !(m.status === 'Resolvido' && m.confirmado_loja));
-          if(carry.length){ state.manutencao = carry.map((m,i)=>({...m,id:Date.now()+i+100})); renderManutencao(); }
+          if(carry.length){
+            state.manutencao = carry.map((m,i)=>({...m,id:Date.now()+i+100}));
+            await _migrarFotosLegadas(state.manutencao, 'fotoBase64', 'checklist-manutencao');
+            renderManutencao();
+          }
         }
       }
     }catch(e){}
