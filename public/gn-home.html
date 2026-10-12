@@ -1710,6 +1710,232 @@ function _dreFormHtml(loja, comp) {
   </div>`;
 }
 
+/* ── DRE da rede: lançar o mês inteiro de uma vez ──────────────────────────────────────
+   "Essa questão da mini DRE, tem que ver."
+
+   Medido antes de mexer: a linha DRE_CONFIG NÃO EXISTIA no banco. Zero realizado, zero %
+   ajustada, em zero lojas, em zero meses — desde que o card existe. O Mini DRE nunca foi
+   usado uma vez.
+
+   E a causa não é ninguém olhar, como nos outros casos: é que não havia o que olhar. O
+   realizado é CMV, folha, aluguel e impostos — números que vêm da contabilidade uma vez por
+   mês. Quem TEM esses números (o dono, o escritório) teria que entrar na Home de 11 lojas,
+   uma por uma, abrir o card do mês anterior e digitar seis valores em cada. Quem está na
+   Home todo dia (o gerente) não tem os números. O caminho pedia a pessoa errada.
+
+   Aqui as 11 lojas ficam numa tela só, no Painel de Gestão, com o faturamento do mês já
+   carregado e o TETO de cada conta ao lado do campo — digitar 'folha' sem saber que o teto
+   é 24% do faturamento é digitar no escuro.
+
+   Decisões:
+   - Senha UMA vez, no topo, e vale pra todos os lançamentos da tela. A trava por credencial
+     continua (o celular fica logado o dia todo, e isto é o balizador da rede), mas pedir
+     senha 11 vezes seria recriar o atrito que esta tela existe pra tirar.
+   - Cada loja grava sozinha, no seu botão. Uma gravação só no fim perderia o trabalho
+     inteiro numa queda de rede no meio — e aqui são 66 campos.
+   - Relê a linha antes de CADA gravação e mexe só na chave daquela loja: DRE_CONFIG é
+     compartilhada, e escrever o que estava em memória apagaria o que outra pessoa lançou.
+   - Maglia fora (CLAUDE.md: não foi citada). São as 11.                                  */
+let _dreRedeComp = null;       // competência escolhida na tela
+let _dreRedeFat = {};          // faturamento por loja no mês escolhido
+let _dreRedeCarregando = false;
+let _dreRedeAberta = null;     // loja com o formulário expandido
+let _dreRedeMsg = {};          // mensagem por loja (erro ou confirmação)
+
+function _dreRedeLojas() {
+  return LOJAS_LISTA.filter(k => k !== 'MAGLIA');
+}
+function _dreRedeCompPadrao() {
+  const d = new Date();
+  d.setDate(1); d.setMonth(d.getMonth() - 1);
+  return _dreCompetencia(d);
+}
+function _dreRedeOpcoesMes() {
+  const out = [];
+  const d = new Date(); d.setDate(1);
+  for (let i = 1; i <= 13; i++) {
+    const x = new Date(d.getFullYear(), d.getMonth() - i, 1);
+    out.push(_dreCompetencia(x));
+  }
+  return out;
+}
+
+async function _dreRedeCarregar(force) {
+  if (_dreRedeCarregando) return;
+  _dreRedeCarregando = true;
+  try {
+    if (!_dreRedeComp) _dreRedeComp = _dreRedeCompPadrao();
+    await _dreCarregar(force);
+    const lojas = _dreRedeLojas();
+    const fats = await Promise.all(lojas.map(l => _dreFatDoMes(l, _dreRedeComp)));
+    _dreRedeFat = {};
+    lojas.forEach((l, i) => { _dreRedeFat[l] = fats[i]; });
+  } catch (e) {
+    window.gnLogError && window.gnLogError('dre:redeCarregar', e);
+  } finally {
+    _dreRedeCarregando = false;
+    renderDashboard();
+  }
+}
+
+function _dreRedeTrocarMes(comp) {
+  _dreRedeComp = comp;
+  _dreRedeAberta = null;
+  _dreRedeMsg = {};
+  _dreRedeFat = {};
+  _dreRedeCarregar(false);
+  renderDashboard();
+}
+function _dreRedeAbrir(loja) {
+  _dreRedeAberta = _dreRedeAberta === loja ? null : loja;
+  renderDashboard();
+}
+
+async function _dreRedeSalvarLoja(loja) {
+  const comp = _dreRedeComp;
+  const user = ((document.getElementById('dre-rede-user') || {}).value || '').trim();
+  const pass = ((document.getElementById('dre-rede-pass') || {}).value || '');
+  const msg = (t, erro) => { _dreRedeMsg[loja] = { t, erro: !!erro }; renderDashboard(); };
+  if (!user || !pass) { msg('Preencha usuário e senha no topo da tela.', true); return; }
+
+  const real = {};
+  for (const c of DRE_CONTAS) {
+    const el = document.getElementById('dre-rede-' + loja.replace(/\W/g, '_') + '-' + c.k);
+    const raw = ((el || {}).value || '').trim();
+    if (raw === '') continue;
+    const v = parseFloat(raw.replace(/\./g, '').replace(',', '.'));
+    if (!isFinite(v) || v < 0) { msg('O valor de ' + c.label + ' não pode ser negativo.', true); return; }
+    real[c.k] = v;
+  }
+
+  // Despesa maior que o faturamento do mês é quase sempre dedo errado (um zero a mais).
+  // Não bloqueia — mês ruim existe —, mas pede confirmação, que é o que separa engano de
+  // informação.
+  const fat = _dreRedeFat[loja];
+  const soma = Object.values(real).reduce((s, v) => s + v, 0);
+  if (fat && soma > fat * 1.5) {
+    const ok = confirm(`As despesas de ${LOJA_DISPLAY[loja] || loja} somam R$ ${soma.toLocaleString('pt-BR', {minimumFractionDigits:2})}, ` +
+      `bem acima do faturamento do mês (R$ ${fat.toLocaleString('pt-BR', {minimumFractionDigits:2})}).\n\nConfere e salva assim mesmo?`);
+    if (!ok) return;
+  }
+
+  msg('Salvando…', false);
+  try {
+    const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+    const auth = await window.gnFetchJson(`${SB_URL}/rest/v1/rpc/verificar_login`, H, 'dreRede:auth', [],
+      { method: 'POST', body: JSON.stringify({ p_nome: user, p_senha: pass, p_app: 'gn-home:dre-rede' }) });
+    const cargo = (auth[0] && auth[0].cargo || '').toLowerCase();
+    if (!auth.length) { msg('Usuário ou senha incorretos.', true); return; }
+    if (!DRE_CARGOS_EDICAO.includes(cargo)) { msg(`${auth[0].nome} está como ${cargo || 'sem cargo'} — sem permissão pro DRE.`, true); return; }
+
+    const atual = await _dreCarregar(true);
+    if (atual === null) { msg('Sem conexão com o banco. Tente de novo.', true); return; }
+    const dados = JSON.parse(JSON.stringify(atual || {}));
+    dados.real = dados.real || {};
+    const chave = loja + '|' + comp;
+    if (Object.keys(real).length) {
+      dados.real[chave] = { ...real, _por: auth[0].nome || user, _em: new Date().toISOString() };
+    } else {
+      delete dados.real[chave];   // apagar tudo e salvar = limpar o mês daquela loja
+    }
+    const existe = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${DRE_LINHA}&select=loja`, H, 'dreRede:existe', null);
+    if (existe === null) { msg('Sem conexão com o banco. Tente de novo.', true); return; }
+    // Upsert explícito: um PATCH que não casa com NENHUMA linha devolve 204 (ok) e não grava
+    // nada — e aqui a linha NÃO EXISTE até o primeiro lançamento da rede, que é exatamente o
+    // caso de hoje. Era esse o jeito de a tela dizer "salvo" sem ter salvo.
+    const res = existe.length
+      ? await fetch(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${DRE_LINHA}`, { method: 'PATCH', headers: H, body: JSON.stringify({ all_data: dados }) })
+      : await fetch(`${SB_URL}/rest/v1/gn_lojas`, { method: 'POST', headers: H, body: JSON.stringify({ loja: DRE_LINHA, all_data: dados }) });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    _dreAllData = dados;
+    _dreRedeAberta = null;
+    msg(Object.keys(real).length ? '✅ Lançado.' : 'Mês limpo.', false);
+  } catch (e) {
+    window.gnLogError && window.gnLogError('dre:redeSalvar', e);
+    msg('Não consegui salvar agora. Tente de novo.', true);
+  }
+}
+
+function _buildDreRedePanel() {
+  if (!_dreRedeComp) { _dreRedeComp = _dreRedeCompPadrao(); _dreRedeCarregar(false); }
+  const lojas = _dreRedeLojas();
+  const fR = v => (v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const lancadas = lojas.filter(l => {
+    const r = _dreRealizado(l, _dreRedeComp);
+    return DRE_CONTAS.some(c => r[c.k] != null && r[c.k] !== '');
+  }).length;
+
+  const meses = _dreRedeOpcoesMes().map(c =>
+    `<option value="${c}"${c === _dreRedeComp ? ' selected' : ''}>${_dreCompLabel(c)}</option>`).join('');
+
+  const linhas = lojas.map(loja => {
+    const id = loja.replace(/\W/g, '_');
+    const nome = LOJA_DISPLAY[loja] || loja;
+    const cor = COR_LOJA[loja] || '#F97316';
+    const fat = _dreRedeFat[loja];
+    const r = _dreRealizado(loja, _dreRedeComp);
+    const tem = DRE_CONTAS.some(c => r[c.k] != null && r[c.k] !== '');
+    const aberta = _dreRedeAberta === loja;
+    const m = _dreRedeMsg[loja];
+
+    const campos = DRE_CONTAS.map(c => {
+      const teto = fat ? fat * _drePct(loja, c.k) / 100 : null;
+      const v = r[c.k] != null && r[c.k] !== '' ? r[c.k] : '';
+      return `<div style="display:grid;grid-template-columns:1fr 118px;gap:8px;align-items:center;margin-bottom:7px">
+        <div style="min-width:0">
+          <div style="font-size:11.5px;font-weight:700;color:rgba(0,0,0,.7)">${c.label} <b style="color:rgba(0,0,0,.35)">${_drePct(loja, c.k).toFixed(0)}%</b></div>
+          <div style="font-size:9.5px;color:rgba(0,0,0,.38);line-height:1.3">${teto === null ? c.nota : 'teto: R$ ' + fR(teto)}</div>
+        </div>
+        <!-- O placeholder NÃO repete o teto: no print ele parecia valor já preenchido, e a
+             pessoa fecharia a loja achando que lançou. O teto já está no rótulo ao lado. -->
+        <input type="number" step="0.01" min="0" inputmode="decimal" id="dre-rede-${id}-${c.k}" value="${v}"
+          placeholder="—"
+          style="width:100%;background:#F5F6F8;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:7px 9px;font-size:12.5px;font-weight:700;color:#1A1D23;font-family:inherit;text-align:right;outline:none;font-variant-numeric:tabular-nums">
+      </div>`;
+    }).join('');
+
+    return `<div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-left:3px solid ${cor};border-radius:12px;margin-bottom:8px;overflow:hidden">
+      <div onclick="_dreRedeAbrir('${loja}')" style="display:flex;align-items:center;gap:9px;padding:11px 13px;cursor:pointer">
+        <span style="font-size:13px;flex-shrink:0">${tem ? '✅' : '⬜'}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12.5px;font-weight:700;color:#1A1D23">${nome}</div>
+          <div style="font-size:10px;color:rgba(0,0,0,.4);margin-top:1px">
+            ${fat === undefined ? 'carregando…' : fat === null ? 'não consegui ler o faturamento' : 'faturou R$ ' + fR(fat)}
+            ${tem && r._por ? ' · lançado por ' + escapeHtml(String(r._por)) : ''}
+          </div>
+        </div>
+        <span style="color:rgba(0,0,0,.25);font-size:15px">${aberta ? '▴' : '▾'}</span>
+      </div>
+      ${aberta ? `<div style="padding:0 13px 13px;border-top:1px solid rgba(0,0,0,.06);padding-top:11px">
+        ${campos}
+        <button onclick="_dreRedeSalvarLoja('${loja}')" style="width:100%;margin-top:4px;background:#1A1D23;border:none;border-radius:9px;color:#fff;font-size:12px;font-weight:800;padding:10px;cursor:pointer;font-family:inherit">Salvar ${escapeHtml(nome)}</button>
+      </div>` : ''}
+      ${m ? `<div style="padding:0 13px 10px;font-size:11px;font-weight:700;color:${m.erro ? '#dc2626' : '#16a34a'}">${escapeHtml(m.t)}</div>` : ''}
+    </div>`;
+  }).join('');
+
+  return `
+    <div style="background:rgba(250,204,21,.07);border:1px solid rgba(250,204,21,.25);border-radius:12px;padding:11px 13px;margin-bottom:12px">
+      <div style="font-size:12px;font-weight:800;color:#1A1D23;margin-bottom:3px">Lançar o realizado do mês</div>
+      <div style="font-size:10.5px;color:rgba(0,0,0,.5);line-height:1.45">
+        CMV, folha, aluguel e impostos vêm da contabilidade e não existem em nenhuma outra tela do app — é aqui que eles entram.
+        O <b>teto</b> ao lado de cada campo é a % alvo aplicada no faturamento do mês daquela loja.</div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+      <select onchange="_dreRedeTrocarMes(this.value)" style="flex:1;min-width:150px;background:#fff;border:1px solid rgba(0,0,0,.12);border-radius:9px;padding:8px 10px;font-size:12px;font-weight:700;color:#1A1D23;font-family:inherit">${meses}</select>
+      <span style="font-size:11px;font-weight:800;color:${lancadas === lojas.length ? '#16a34a' : 'rgba(0,0,0,.45)'}">${lancadas} de ${lojas.length} lançadas</span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+      <input type="text" id="dre-rede-user" placeholder="Seu usuário" autocomplete="username"
+        style="background:#fff;border:1px solid rgba(0,0,0,.12);border-radius:9px;padding:8px 10px;font-size:12px;color:#1A1D23;font-family:inherit;outline:none">
+      <input type="password" id="dre-rede-pass" placeholder="Sua senha" autocomplete="current-password"
+        style="background:#fff;border:1px solid rgba(0,0,0,.12);border-radius:9px;padding:8px 10px;font-size:12px;color:#1A1D23;font-family:inherit;outline:none">
+    </div>
+    <div style="font-size:10px;color:rgba(0,0,0,.38);margin:-6px 0 12px;line-height:1.4">
+      A senha é pedida uma vez e vale pra todos os lançamentos desta tela. Ela existe porque o aparelho fica logado o dia todo e isto é o balizador da rede.</div>
+    ${linhas}`;
+}
+
 async function _dreSalvar() {
   const errEl = document.getElementById('dre-err');
   const btn = document.getElementById('dre-salvar-btn');
@@ -10100,6 +10326,9 @@ function renderDashboard() {
   } else if (_dashTab==='barris') {
     content = _buildBarrisSemanalPanel();
 
+  } else if (_dashTab==='dre') {
+    content = _buildDreRedePanel();
+
   } else { // ⚙ Metas
     const perLabel=_dashPer==='sem'?'semana':'mês';
     content=`
@@ -10139,9 +10368,10 @@ function renderDashboard() {
         <button class="dash-tab${_dashTab==='xadrez'?' on':''}" onclick="_setDashTab('xadrez')">🔀 Xadrez</button>
         <button class="dash-tab${_dashTab==='bi'?' on':''}" onclick="_setDashTab('bi')">📊 BI</button>
         <button class="dash-tab${_dashTab==='barris'?' on':''}" onclick="_setDashTab('barris')">🍺 Barris</button>
+        <button class="dash-tab${_dashTab==='dre'?' on':''}" onclick="_setDashTab('dre')">💰 DRE</button>
         <button class="dash-tab${_dashTab==='metas'?' on':''}" onclick="_setDashTab('metas')">⚙ Metas</button>
       </div>
-      ${(_dashTab!=='metas'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris')?periodRow:''}
+      ${(_dashTab!=='metas'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris'&&_dashTab!=='dre')?periodRow:''}
       ${content}
     </div>`;
   _updateHdrBell();
