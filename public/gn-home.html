@@ -391,6 +391,13 @@
     </div>
   </div>
 
+  <!-- "Pra fazer hoje": a primeira coisa depois do nome da loja. Medido antes de existir:
+       em 30 dias, Norte Shopping fechou 48 caixas e conferiu ZERO; São Gonçalo 30 e zero;
+       Campo Grande 29 e zero — enquanto Bangu e Caxias conferiram todos. Não era falta de
+       acesso (gerente e sub abrem o app todo dia), era falta de cobrança: o Painel mostrava
+       19 cards com o mesmo peso, nenhum com dono, prazo ou sinal de feito. -->
+  <div id="pra-hoje-card"></div>
+
   <!-- Validades: o que já venceu e o que vence nos próximos dias. Acima de tudo, inclusive
        do número do dia: vencido fecha o app (ver gn-validade-acesso.js), e o que está pra
        vencer é a única coisa aqui que ainda dá pra evitar se vista a tempo. -->
@@ -2365,6 +2372,129 @@ function _valHomeDias(iso, hojeISO) {
   const a = new Date(hojeISO + 'T12:00:00'), b = new Date(iso + 'T12:00:00');
   if (isNaN(b)) return null;
   return Math.round((b - a) / 86400000);
+}
+
+// ── PRA FAZER HOJE ──────────────────────────────────────────────────────────────────────
+// Lista curta do que a gerência precisa fazer HOJE, com o que já foi feito riscado e o nome
+// de quem fez. Fica acima de tudo porque é a única parte do Painel que cobra alguma coisa.
+//
+// Por que existe: medido no banco, 30 dias. Norte Shopping fechou 48 caixas e registrou
+// ZERO conferências; São Gonçalo 30 e zero; Campo Grande 29 e zero. Bangu e Caxias
+// conferiram todos os 30. Acesso não era o problema — gerente e sub-gerente abrem o app
+// todo dia. O que faltava era a tela dizer o que é da pessoa, o que falta e quem fez.
+//
+// Regra que não se quebra: "feito" sai do DADO que já existe (conferência gravada, % do
+// check-list, status da manutenção), nunca de um "marcar como lido" novo. Marcação manual
+// vira trabalho a mais e, pior, mente: a pessoa marca sem fazer.
+const PRA_HOJE_CARGOS = ['gerente', 'sub_gerente'];
+async function _renderPraHojeHome(mostrar, sess, isMasterAtivo) {
+  const el = document.getElementById('pra-hoje-card');
+  if (!el) return;
+  const cargo = (sess && sess.cargo || '').toLowerCase();
+  const ehMestreNaLoja = isMasterAtivo && masterLoja;
+  if (!mostrar || !sess || (!PRA_HOJE_CARGOS.includes(cargo) && !ehMestreNaLoja)) { el.innerHTML = ''; return; }
+  const loja = ehMestreNaLoja ? masterLoja : sess.loja;
+  if (!LOJAS_LISTA.includes(loja)) { el.innerHTML = ''; return; }
+
+  const iso = d => d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+  const hoje = iso(new Date());
+  const ontemD = new Date(); ontemD.setDate(ontemD.getDate()-1);
+  const ontem = iso(ontemD);
+  const old5 = new Date(); old5.setDate(old5.getDate()-5);
+  const from30 = iso(new Date(Date.now() - 30*86400000));
+  const comKey = LOJA_COM_KEY[loja] || loja;
+  const chkKey = LOJA_DB_KEY[loja] || loja;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+
+  try {
+    const [cxOntem, lojaRows, chkHoje, chkManut] = await Promise.all([
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?loja=eq.${encodeURIComponent(loja)}&status=eq.FECHADO&data=eq.${ontem}&select=id,turno`, H, 'praHoje:caixa', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'praHoje:lojas', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=eq.${hoje}&select=checklist_pct,dia_fechado_em,dia_fechado_por`, H, 'praHoje:chk', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${from30}&select=data_operacao,manutencao&order=data_operacao.desc`, H, 'praHoje:manut', []),
+    ]);
+    const allData = (lojaRows[0] && lojaRows[0].all_data) || {};
+    const conf = allData.caixa_conferencias || {};
+    const esc = s => window.escapeHtml ? window.escapeHtml(String(s == null ? '' : s)) : String(s == null ? '' : s);
+    const hhmm = t => { try { const d = new Date(t); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); } catch(e){ return ''; } };
+    const itens = [];
+
+    // 1. Caixa de ontem — o item que a medição apontou como o mais ignorado da rede.
+    const semConf = (cxOntem || []).filter(r => !conf[r.id]);
+    const comConf = (cxOntem || []).filter(r => conf[r.id]);
+    if ((cxOntem || []).length) {
+      const quem = comConf.length ? conf[comConf[0].id] : null;
+      itens.push({
+        feito: semConf.length === 0,
+        titulo: semConf.length
+          ? `Conferir o caixa de ontem${semConf.length > 1 ? ` (${semConf.length} turnos)` : ''}`
+          : 'Caixa de ontem conferido',
+        detalhe: semConf.length
+          ? semConf.map(r => r.turno).join(' · ')
+          : (quem && quem.conferido_por ? `por ${quem.conferido_por}${quem.conferido_em ? ' às ' + hhmm(quem.conferido_em) : ''}` : ''),
+        url: 'gn-caixa.html',
+      });
+    }
+
+    // 2. Check-list do dia.
+    const pct = chkHoje[0] && chkHoje[0].checklist_pct;
+    const fechado = chkHoje[0] && chkHoje[0].dia_fechado_em;
+    itens.push({
+      feito: !!fechado,
+      titulo: fechado ? 'Check-list do dia fechado' : 'Fechar o Check-list de hoje',
+      detalhe: fechado
+        ? (chkHoje[0].dia_fechado_por ? `por ${chkHoje[0].dia_fechado_por}` : '')
+        : (pct != null ? `${Math.round(pct)}% preenchido` : 'ainda não começou'),
+      url: 'gn-checklist.html',
+    });
+
+    // 3. Manutenção parada — mesma régua do card de Pendências (aberta há mais de 5 dias).
+    const vistos = new Set(); const paradas = [];
+    (chkManut || []).forEach(r => (Array.isArray(r.manutencao) ? r.manutencao : []).forEach(m => {
+      if (!m || m.status === 'Resolvido') return;
+      const k = (m.descricao || '') + '|' + (m.setor || '');
+      if (vistos.has(k)) return;
+      vistos.add(k);
+      if (new Date(r.data_operacao + 'T00:00:00') < old5) paradas.push(m);
+    }));
+    if (paradas.length) {
+      itens.push({ feito: false, titulo: `${paradas.length} manutenção${paradas.length>1?'ões':''} parada${paradas.length>1?'s':''} há mais de 5 dias`,
+        detalhe: paradas.slice(0,2).map(m => m.descricao || m.setor || '—').join(' · '), url: 'gn-checklist.html' });
+    }
+
+    const faltam = itens.filter(i => !i.feito).length;
+    if (!itens.length) { el.innerHTML = ''; return; }
+    const cor = faltam ? '#DC2626' : '#16a34a';
+
+    window._telasListas['pra_hoje'] = {
+      titulo: faltam ? `Faltam ${faltam} de ${itens.length}` : 'Tudo feito hoje',
+      sub: LOJA_DISPLAY[loja] || loja, cor,
+      itens: itens.map(i => ({ texto: (i.feito ? '✓ ' : '○ ') + i.titulo, detalhe: i.detalhe || '', extra: i.feito ? 'feito' : 'falta', extraCor: i.feito ? '#16a34a' : '#DC2626' })),
+    };
+
+    el.innerHTML = `<div style="background:#fff;border:1px solid ${cor}2e;border-left:3px solid ${cor};border-radius:18px;padding:14px 16px;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05)">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:9px">
+        <span style="font-size:16px">${faltam ? '📌' : '✅'}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:800;color:#1A1D23">Pra fazer hoje</div>
+          <div style="font-size:11px;font-weight:700;color:${cor};margin-top:1px">${faltam ? `${faltam} de ${itens.length} ainda não ${faltam>1?'foram feitos':'foi feito'}` : 'tudo feito — obrigado'}</div>
+        </div>
+        <span onclick="abrirListaCard('pra_hoje')" style="cursor:pointer;font-size:11px;font-weight:700;color:${cor};background:${cor}14;border:1px solid ${cor}2e;border-radius:999px;padding:5px 11px;white-space:nowrap">ver tudo ›</span>
+      </div>
+      ${itens.map(i => `<div onclick="navTo('${i.url}')" style="cursor:pointer;display:flex;align-items:center;gap:9px;padding:9px 0;border-top:1px solid rgba(0,0,0,.06)">
+        <span style="width:22px;height:22px;flex-shrink:0;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:900;
+          background:${i.feito ? 'rgba(22,163,74,.12)' : 'rgba(220,38,38,.1)'};color:${i.feito ? '#16a34a' : '#DC2626'}">${i.feito ? '✓' : '!'}</span>
+        <div style="min-width:0;flex:1">
+          <div style="font-size:12px;font-weight:700;color:${i.feito ? 'rgba(0,0,0,.45)' : '#1A1D23'};${i.feito ? 'text-decoration:line-through' : ''}">${esc(i.titulo)}</div>
+          ${i.detalhe ? `<div style="font-size:10px;color:rgba(0,0,0,.45);margin-top:1px">${esc(i.detalhe)}</div>` : ''}
+        </div>
+        <span style="flex-shrink:0;font-size:14px;color:rgba(0,0,0,.25)">›</span>
+      </div>`).join('')}
+    </div>`;
+  } catch (e) {
+    window.gnLogError && window.gnLogError('praHoje:_renderPraHojeHome', e);
+    el.innerHTML = '';
+  }
 }
 
 async function _renderValidadesHome(mostrar, sess, isMasterAtivo) {
@@ -4602,6 +4732,7 @@ function _refreshPermUI(sess) {
   renderModules(sess, isMaster);
   loadBadges(sess, isMaster);
   const _mostrarCards = (!isMaster || !!masterLoja) && !_ehCargoModuloUnico(sess);
+  _renderPraHojeHome(_mostrarCards, sess, isMaster);
   _renderAvisoEleicoesHome(_mostrarCards, sess, isMaster);
   _renderVendaMesHome(_mostrarCards, sess, isMaster);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
@@ -4843,6 +4974,7 @@ function showHome(sess) {
   renderModules(sess, isMaster);
   loadBadges(sess, isMaster);
   const _mostrarCards = (!isMaster || !!masterLoja) && !_ehCargoModuloUnico(sess);
+  _renderPraHojeHome(_mostrarCards, sess, isMaster);
   _renderAvisoEleicoesHome(_mostrarCards, sess, isMaster);
   _renderVendaMesHome(_mostrarCards, sess, isMaster);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
