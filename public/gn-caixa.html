@@ -1108,6 +1108,10 @@ select option { background: var(--graf2); color: var(--txt); }
         </div>
       </div>
       <div id="listaCancel"></div>
+      <!-- Dia sem cancelamento. Existe pra que SILÊNCIO não seja resposta: ou houve
+           cancelamento e ele está lançado, ou alguém assina que não houve. Sem um dos
+           dois, o caixa não fecha. -->
+      <div id="semCancelBox"></div>
     </div>
     <div class="secao">
       <h3>Observação</h3>
@@ -1895,6 +1899,7 @@ function renderTudo() {
       : '<div class="vazio">Nenhum cancelamento.</div>';
     $('cancelQtd').textContent = String(S.cancel.length);
     $('cancelTotal').textContent = money(cancelTotal());
+    renderSemCancelamento();
   }
 
   $('suprFundoTotal').textContent = money(fundo());
@@ -1902,6 +1907,12 @@ function renderTudo() {
   $('suprDinh').textContent = money(suprDinheiro());
   $('dezBase').textContent = money(S.notas10.reduce((a,n) => a + Number(n.valor), 0));
   $('dezRep').textContent = money(repique());
+
+  // O checklist de pré-fechamento depende de coisas que mudam AQUI (lançar o primeiro
+  // cancelamento, excluir o último, declarar dia sem cancelamento). Sem este refresh ele
+  // ficava mostrando a pendência antiga até a tela inteira ser remontada — e quem lê o
+  // checklist acreditaria nele.
+  if (S.fech && !$('pane-fechar').classList.contains('hidden')) renderPreFechamento();
 }
 
 // ── BUFFET DE FEIJOADA E RODÍZIO ──────────────────────────────────────────────
@@ -2188,7 +2199,8 @@ function renderPreFechamento() {
     const temBuffet   = faltaBuffet.length === 0;
     const semJustCount = S.saidas.filter(_semJustificativa).length;
     const temJust = semJustCount === 0;
-    const allOk = temValor && temRepique && temSistema && temFotoSistema && temFotos && temBuffet && temJust && isFechado;
+    const temCancel = !cancelamentoPendente();
+    const allOk = temValor && temRepique && temSistema && temFotoSistema && temFotos && temBuffet && temJust && temCancel && isFechado;
     const semFotoCount = S.saidas.filter(s => !s.foto || s.foto.trim() === '').length;
     preChk.innerHTML = `<div style="background:var(--graf3);border:1px solid ${allOk?'var(--ok)':'var(--linha)'};border-radius:8px;padding:10px 14px;margin-bottom:12px">
       <div style="font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Pré-fechamento</div>
@@ -2198,6 +2210,7 @@ function renderPreFechamento() {
       ${ck(temSistema, 'Total do sistema conferido')}
       ${ck(temFotoSistema, 'Foto do caixa do sistema')}
       ${ck(temFotos, semFotoCount > 0 ? `Fotos dos comprovantes (${semFotoCount} sem foto)` : 'Fotos dos comprovantes')}
+      ${cancelamentoExigido() ? ck(temCancel, S.cancel.length > 0 ? `Cancelamentos lançados (${S.cancel.length})` : 'Cancelamentos do dia respondidos') : ''}
       ${S.saidas.some(x => _exigeJustificativa(x.categoria))
         ? ck(temJust, semJustCount > 0 ? `Justificativa do extra (${semJustCount} sem)` : 'Justificativa do extra')
         : ''}
@@ -2322,6 +2335,10 @@ async function fecharCaixa() {
     erros.push('• Total Real do Sistema não preenchido');
   if (!S.fech?.foto_sistema)
     erros.push('• Foto do Caixa do Sistema não anexada');
+  // Ou houve cancelamento e ele está lançado, ou alguém assina que não houve. Silêncio
+  // não fecha o caixa.
+  if (cancelamentoPendente())
+    erros.push('• Cancelamentos: lance os cancelamentos do dia ou confirme "dia sem cancelamento" com o responsável');
   // Buffet/rodízio: feijoada trava em toda loja que usa buffet (nos dias em que é
   // servida), rodízio só nas lojas de GN_BUFFET_OBRIGATORIO. Zero é resposta válida
   // (não vendeu nenhum) — o que trava é o campo em branco, igual ao repique.
@@ -2863,7 +2880,11 @@ async function carregarHistorico() {
 // registro ficaria só na tela de quem lançou, e o motivo/autorização nunca chegaria a
 // quem confere.
 function _txtCancelamentos() {
-  if (!S.cancel.length) return 'CANCELAMENTOS\n  Nenhum';
+  if (!S.cancel.length) {
+    return semCancelamentoDeclarado()
+      ? `CANCELAMENTOS\n  Dia sem cancelamento (declarado por ${S.fech.sem_cancelamento_por})`
+      : 'CANCELAMENTOS\n  Nenhum lançado — e sem declaração de "dia sem cancelamento"';
+  }
   const linhas = S.cancel.map(x => `  ${money(x.valor)} — ${x.motivo || '—'} (aut.: ${x.autorizado_por || '—'})`).join('\n');
   return `CANCELAMENTOS (${S.cancel.length})\n${linhas}\n  Total: ${money(cancelTotal())}`;
 }
@@ -3245,6 +3266,77 @@ async function addSuprNota() {
 
 function cancelTotal() { return S.cancel.reduce((a, x) => a + (Number(x.valor) || 0), 0); }
 
+// Loja que não usa a seção também não é cobrada por ela no fechamento.
+function cancelamentoExigido() { return gnCancelamentoLiberado(S.loja); }
+function semCancelamentoDeclarado() { return !!(S.fech && S.fech.sem_cancelamento_por); }
+// A pendência que trava o fechamento: nenhum cancelamento lançado E ninguém assinou que
+// não houve. Com cancelamento lançado, o próprio lançamento já responde.
+function cancelamentoPendente() {
+  return cancelamentoExigido() && S.cancel.length === 0 && !semCancelamentoDeclarado();
+}
+
+function renderSemCancelamento() {
+  const box = $('semCancelBox');
+  if (!box) return;
+  // Com cancelamento lançado, não há o que declarar — e deixar o botão na tela só
+  // convidaria a gravar uma contradição.
+  if (S.cancel.length > 0) { box.innerHTML = ''; return; }
+  if (semCancelamentoDeclarado()) {
+    const quando = S.fech.sem_cancelamento_em
+      ? new Date(S.fech.sem_cancelamento_em).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+      : '';
+    box.innerHTML = `<div style="background:rgba(22,163,74,.12);border:1px solid var(--ok);border-radius:8px;padding:10px 13px;margin-top:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <div style="flex:1;min-width:0;font-size:12px;color:var(--txt)">
+        <b>✓ Dia sem cancelamento</b><br>
+        <span style="color:var(--mut);font-size:11px">Declarado por ${escHtmlCx(S.fech.sem_cancelamento_por)}${quando ? ' · ' + quando : ''}</span>
+      </div>
+      ${S.modoConsulta || S.fech.status === 'FECHADO' ? '' : `<button class="del" onclick="desfazerSemCancelamento()" title="Desfazer">✕</button>`}
+    </div>`;
+    return;
+  }
+  if (S.modoConsulta) { box.innerHTML = ''; return; }
+  box.innerHTML = `<div style="background:rgba(234,179,8,.1);border:1px solid var(--ouro);border-radius:8px;padding:10px 13px;margin-top:8px">
+    <div style="font-size:12px;color:var(--txt);margin-bottom:8px">
+      Não houve cancelamento hoje? Então alguém precisa assinar isso — o caixa não fecha sem resposta.
+    </div>
+    <div class="form-row" style="margin-bottom:0">
+      <div class="form-group">
+        <label>Responsável</label>
+        <input id="semCancelResp" type="text" placeholder="Quem está declarando" value="${escHtmlCx((S.user && S.user.nome) || '')}">
+      </div>
+      <button class="btn-add" style="background:var(--ouro)" onclick="declararSemCancelamento()" title="Confirmar dia sem cancelamento">✓</button>
+    </div>
+    <div class="err-txt" id="semCancelMsg"></div>
+  </div>`;
+}
+
+async function declararSemCancelamento() {
+  const resp = ($('semCancelResp')?.value || '').trim();
+  if (!resp) { $('semCancelMsg').textContent = 'Falta dizer quem está declarando.'; return; }
+  if (S.cancel.length > 0) { $('semCancelMsg').textContent = 'Já existe cancelamento lançado neste dia.'; return; }
+  const body = { sem_cancelamento_por: resp, sem_cancelamento_em: new Date().toISOString() };
+  try {
+    await sb(`gn_caixa_fechamento?id=eq.${S.fech.id}`, { method: 'PATCH', prefer: 'return=minimal', body });
+    Object.assign(S.fech, body);
+    renderTudo(); renderPreFechamento(); toast('Dia sem cancelamento registrado');
+  } catch (e) {
+    Object.assign(S.fech, body);
+    _pfEnqueue({ tempId: uuid(), realId: S.fech.id, tabela: 'gn_caixa_fechamento', method: 'PATCH', body });
+    renderTudo(); renderPreFechamento(); toast('⚠️ Offline — salvo localmente');
+  }
+}
+
+async function desfazerSemCancelamento() {
+  const body = { sem_cancelamento_por: null, sem_cancelamento_em: null };
+  try {
+    await sb(`gn_caixa_fechamento?id=eq.${S.fech.id}`, { method: 'PATCH', prefer: 'return=minimal', body });
+  } catch (e) {
+    _pfEnqueue({ tempId: uuid(), realId: S.fech.id, tabela: 'gn_caixa_fechamento', method: 'PATCH', body });
+  }
+  Object.assign(S.fech, body);
+  renderTudo(); renderPreFechamento();
+}
+
 // Os três campos são obrigatórios de propósito. Um cancelamento sem motivo ou sem quem
 // autorizou é exatamente o registro que não serve pra nada depois — que foi o problema que
 // o campo veio resolver. A mensagem diz o que falta, em vez de só recusar.
@@ -3268,7 +3360,10 @@ async function addCancelamento() {
   $('cancelVal').value = ''; $('cancelMotivo').value = ''; $('cancelAutor').value = '';
   try {
     const row = await sb('gn_caixa_cancelamento', { method: 'POST', prefer: 'return=representation', body });
-    S.cancel.push(row[0]); renderTudo(); toast('Cancelamento registrado');
+    S.cancel.push(row[0]);
+    // "Dia sem cancelamento" e um cancelamento lançado não podem coexistir.
+    if (semCancelamentoDeclarado()) await desfazerSemCancelamento();
+    renderTudo(); toast('Cancelamento registrado');
   } catch (e) {
     const tempId = uuid();
     S.cancel.push({ id: tempId, _pendente: true, ...body });
@@ -3727,6 +3822,11 @@ async function flushPending(){
         await sb(`${item.tabela}?id=eq.${item.realId}`,{method:'DELETE',prefer:'return=minimal'});
         const arrKey=_arrPorTabela(item.tabela);
         if(arrKey) S[arrKey]=S[arrKey].filter(r=>String(r.id)!==String(item.realId));
+      } else if(item.method==='PATCH'){
+        // Sem este ramo, um PATCH enfileirado caía no POST lá embaixo e CRIAVA uma linha
+        // nova em vez de atualizar a existente — num fechamento, um segundo fechamento
+        // do mesmo turno.
+        await sb(`${item.tabela}?id=eq.${item.realId}`,{method:'PATCH',prefer:'return=minimal',body:item.body});
       } else {
         const row=await sb(item.tabela,{method:'POST',prefer:'return=representation',body:item.body});
         const arrKey=_arrPorTabela(item.tabela);
