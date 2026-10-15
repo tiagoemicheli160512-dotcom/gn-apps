@@ -1073,6 +1073,46 @@ select option { background: var(--graf2); color: var(--txt); }
         <div class="n">R$ 0,00</div>
       </div>
     </div>
+    <!-- Cancelamentos do dia. É registro, não entra em nenhuma conta do fechamento: o
+         cancelamento já saiu da venda no sistema, somar aqui contaria duas vezes. O que
+         ele existe pra responder é "o que foi cancelado, por quê e quem autorizou". -->
+    <div class="secao" id="secCancel">
+      <h3>Cancelamentos do dia</h3>
+      <div class="form-row">
+        <div class="form-group" style="max-width:110px">
+          <label>Valor</label>
+          <input id="cancelVal" type="text" inputmode="decimal" placeholder="0,00">
+        </div>
+        <div class="form-group">
+          <label>Motivo</label>
+          <input id="cancelMotivo" type="text" placeholder="Ex: pedido trocado">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Quem autorizou</label>
+          <input id="cancelAutor" type="text" placeholder="Nome de quem autorizou">
+        </div>
+        <button class="btn-add" onclick="addCancelamento()">+</button>
+      </div>
+      <div class="err-txt" id="cancelMsg"></div>
+      <div class="dez-box" style="margin-top:8px">
+        <div>
+          <div class="dlabel">Cancelamentos lançados</div>
+          <div style="font-size:15px;font-weight:bold;color:var(--txt);margin-top:2px" id="cancelQtd">0</div>
+        </div>
+        <div style="text-align:right">
+          <div class="dlabel">Total cancelado</div>
+          <!-- O verde do .dval lê como ganho; cancelamento não é ganho. -->
+          <div class="dval" id="cancelTotal" style="color:var(--ouro)">R$ 0,00</div>
+        </div>
+      </div>
+      <div id="listaCancel"></div>
+      <!-- Dia sem cancelamento. Existe pra que SILÊNCIO não seja resposta: ou houve
+           cancelamento e ele está lançado, ou alguém assina que não houve. Sem um dos
+           dois, o caixa não fecha. -->
+      <div id="semCancelBox"></div>
+    </div>
     <div class="secao">
       <h3>Observação</h3>
       <div class="form-group" style="margin-bottom:8px">
@@ -1245,7 +1285,7 @@ const _exigeJustificativa = cat => SAIDAS_COM_JUSTIFICATIVA.includes(cat);
 const _semJustificativa = s => _exigeJustificativa(s.categoria) &&
   !(s.justificativa && s.justificativa.trim().length >= JUSTIFICATIVA_MIN);
 
-const S = { user: null, loja: null, turnoSel: null, fech: null, comprovantes: [], saidas: [], supr: [], notas10: [], bandAtiva: null, modoConsulta: false, confAtual: null, _saidasFechId: null };
+const S = { user: null, loja: null, turnoSel: null, fech: null, comprovantes: [], saidas: [], supr: [], notas10: [], cancel: [], bandAtiva: null, modoConsulta: false, confAtual: null, _saidasFechId: null };
 
 const LOJA_CHK_MAP = Object.fromEntries(GN_LOJAS.map(l=>[l.userKey,l.chkKey]));
 const LOJA_COM_MAP = Object.fromEntries(GN_LOJAS.map(l=>[l.userKey,l.comKey]));
@@ -1569,14 +1609,16 @@ async function abrirCaixa() {
 async function carregarFilhos() {
   const fid = S.fech.id;
   const comKey = LOJA_COM_MAP[S.loja] || S.loja;
-  const [c, s, n, d, lojaConf] = await Promise.all([
+  const [c, s, n, d, lojaConf, cancel] = await Promise.all([
     sb(`gn_caixa_comprovante?fechamento_id=eq.${fid}&select=*&order=criado_em`),
     sb(`gn_caixa_despesa?fechamento_id=eq.${fid}&select=*&order=criado_em`),
     sb(`gn_caixa_suprimento?fechamento_id=eq.${fid}&select=*&order=criado_em`),
     sb(`gn_caixa_gorjeta?fechamento_id=eq.${fid}&select=*&order=criado_em`),
     sb(`gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`).catch(() => null),
+    sb(`gn_caixa_cancelamento?fechamento_id=eq.${fid}&select=*&order=criado_em`).catch(() => []),
   ]);
   S.comprovantes = c || []; S.saidas = s || []; S.supr = n || []; S.notas10 = d || [];
+  S.cancel = cancel || [];
   S._saidasFechId = fid;
   const conferencias = lojaConf?.[0]?.all_data?.caixa_conferencias || {};
   S.confAtual = conferencias[fid] || null;
@@ -1604,13 +1646,16 @@ async function refreshCaixaVivo() {
   if (!S.fech || S.modoConsulta) return;
   try {
     const fid = S.fech.id;
-    const [f, c, s, n, d] = await Promise.all([
+    const [f, c, s, n, d, cancel] = await Promise.all([
       sb(`gn_caixa_fechamento?id=eq.${fid}&select=*`),
       sb(`gn_caixa_comprovante?fechamento_id=eq.${fid}&select=*&order=criado_em`),
       sb(`gn_caixa_despesa?fechamento_id=eq.${fid}&select=*&order=criado_em`),
       sb(`gn_caixa_suprimento?fechamento_id=eq.${fid}&select=*&order=criado_em`),
       sb(`gn_caixa_gorjeta?fechamento_id=eq.${fid}&select=*&order=criado_em`),
+      sb(`gn_caixa_cancelamento?fechamento_id=eq.${fid}&select=*&order=criado_em`).catch(() => null),
     ]);
+    // Lançamento ainda na fila offline não pode ser varrido pelo que voltou do servidor.
+    if (cancel) S.cancel = cancel.concat(S.cancel.filter(x => x._pendente));
     if (f && f.length) {
       const statusMudou = S.fech.status !== f[0].status;
       S.fech = f[0];
@@ -1842,11 +1887,32 @@ function renderTudo() {
     <div class="val">${money(n.valor)}${_pend(n)}</div><button class="del" onclick="excluir('gn_caixa_gorjeta','${n.id}','notas10')">✕</button></div>`).join('')
     : '<div class="vazio">Sem notas.</div>';
 
+  // Cancelamentos: só existe pras lojas que usam (ver GN_CANCELAMENTO_FORA). A seção
+  // inteira some pra quem não usa, em vez de ficar um campo morto na tela de fechamento.
+  const secCancel = $('secCancel');
+  if (secCancel) secCancel.style.display = gnCancelamentoLiberado(S.loja) ? '' : 'none';
+  const listaCancel = $('listaCancel');
+  if (listaCancel) {
+    listaCancel.innerHTML = S.cancel.length ? S.cancel.slice().reverse().map(x =>
+      `<div class="linha-item" style="flex-wrap:wrap"><div class="desc">${escHtmlCx(x.motivo || '—')}<small>Autorizado por ${escHtmlCx(x.autorizado_por || '—')}</small></div>
+      <div class="val">${money(x.valor)}${_pend(x)}</div>${S.modoConsulta ? '' : `<button class="del" onclick="excluir('gn_caixa_cancelamento','${x.id}','cancel')">✕</button>`}</div>`).join('')
+      : '<div class="vazio">Nenhum cancelamento.</div>';
+    $('cancelQtd').textContent = String(S.cancel.length);
+    $('cancelTotal').textContent = money(cancelTotal());
+    renderSemCancelamento();
+  }
+
   $('suprFundoTotal').textContent = money(fundo());
   $('suprNotas').textContent = money(suprNotas());
   $('suprDinh').textContent = money(suprDinheiro());
   $('dezBase').textContent = money(S.notas10.reduce((a,n) => a + Number(n.valor), 0));
   $('dezRep').textContent = money(repique());
+
+  // O checklist de pré-fechamento depende de coisas que mudam AQUI (lançar o primeiro
+  // cancelamento, excluir o último, declarar dia sem cancelamento). Sem este refresh ele
+  // ficava mostrando a pendência antiga até a tela inteira ser remontada — e quem lê o
+  // checklist acreditaria nele.
+  if (S.fech && !$('pane-fechar').classList.contains('hidden')) renderPreFechamento();
 }
 
 // ── BUFFET DE FEIJOADA E RODÍZIO ──────────────────────────────────────────────
@@ -2133,7 +2199,8 @@ function renderPreFechamento() {
     const temBuffet   = faltaBuffet.length === 0;
     const semJustCount = S.saidas.filter(_semJustificativa).length;
     const temJust = semJustCount === 0;
-    const allOk = temValor && temRepique && temSistema && temFotoSistema && temFotos && temBuffet && temJust && isFechado;
+    const temCancel = !cancelamentoPendente();
+    const allOk = temValor && temRepique && temSistema && temFotoSistema && temFotos && temBuffet && temJust && temCancel && isFechado;
     const semFotoCount = S.saidas.filter(s => !s.foto || s.foto.trim() === '').length;
     preChk.innerHTML = `<div style="background:var(--graf3);border:1px solid ${allOk?'var(--ok)':'var(--linha)'};border-radius:8px;padding:10px 14px;margin-bottom:12px">
       <div style="font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Pré-fechamento</div>
@@ -2143,6 +2210,7 @@ function renderPreFechamento() {
       ${ck(temSistema, 'Total do sistema conferido')}
       ${ck(temFotoSistema, 'Foto do caixa do sistema')}
       ${ck(temFotos, semFotoCount > 0 ? `Fotos dos comprovantes (${semFotoCount} sem foto)` : 'Fotos dos comprovantes')}
+      ${cancelamentoExigido() ? ck(temCancel, S.cancel.length > 0 ? `Cancelamentos lançados (${S.cancel.length})` : 'Cancelamentos do dia respondidos') : ''}
       ${S.saidas.some(x => _exigeJustificativa(x.categoria))
         ? ck(temJust, semJustCount > 0 ? `Justificativa do extra (${semJustCount} sem)` : 'Justificativa do extra')
         : ''}
@@ -2267,6 +2335,10 @@ async function fecharCaixa() {
     erros.push('• Total Real do Sistema não preenchido');
   if (!S.fech?.foto_sistema)
     erros.push('• Foto do Caixa do Sistema não anexada');
+  // Ou houve cancelamento e ele está lançado, ou alguém assina que não houve. Silêncio
+  // não fecha o caixa.
+  if (cancelamentoPendente())
+    erros.push('• Cancelamentos: lance os cancelamentos do dia ou confirme "dia sem cancelamento" com o responsável');
   // Buffet/rodízio: feijoada trava em toda loja que usa buffet (nos dias em que é
   // servida), rodízio só nas lojas de GN_BUFFET_OBRIGATORIO. Zero é resposta válida
   // (não vendeu nenhum) — o que trava é o campo em branco, igual ao repique.
@@ -2804,6 +2876,19 @@ async function carregarHistorico() {
   } catch(e) { el.innerHTML = '<div class="vazio">Erro ao carregar histórico.</div>'; }
 }
 
+// Bloco de cancelamentos pros relatórios (WhatsApp, PDF e impressora). Sem isto o
+// registro ficaria só na tela de quem lançou, e o motivo/autorização nunca chegaria a
+// quem confere.
+function _txtCancelamentos() {
+  if (!S.cancel.length) {
+    return semCancelamentoDeclarado()
+      ? `CANCELAMENTOS\n  Dia sem cancelamento (declarado por ${S.fech.sem_cancelamento_por})`
+      : 'CANCELAMENTOS\n  Nenhum lançado — e sem declaração de "dia sem cancelamento"';
+  }
+  const linhas = S.cancel.map(x => `  ${money(x.valor)} — ${x.motivo || '—'} (aut.: ${x.autorizado_por || '—'})`).join('\n');
+  return `CANCELAMENTOS (${S.cancel.length})\n${linhas}\n  Total: ${money(cancelTotal())}`;
+}
+
 function _buildTextoCaixa(fromDb) {
   // fromDb=true lê o valor encontrado direto de S.fech.total_real (persistido no fechar)
   // em vez do input #valorEncontrado — usado pra reimprimir um fechamento do histórico,
@@ -2814,7 +2899,7 @@ function _buildTextoCaixa(fromDb) {
   const difTxt = Math.abs(dif) < 0.01 ? 'Conferido ✓' : (dif > 0 ? `Sobra R$ ${money(Math.abs(dif))}` : `Falta R$ ${money(Math.abs(dif))}`);
   const cart = ENTRADAS.filter(b => !NAO_CARTAO.includes(b.k) && totEntradaK(b.k) > 0)
     .map(b => `  ${b.k}: ${money(totEntradaK(b.k))}`).join('\n');
-  return `GN CAIXA — ${S.loja}\n${S.fech.data.split('-').reverse().join('/')} · ${S.turnoSel}\n━━━━━━━━━━━━━\nRESUMO\nEntradas: ${money(totEntradas())}\niFood: ${money(ifoodVal())}  Online: ${money(onlineVal())}\nDelivery: ${money(deliveryVal())}\nRepique: ${money(repiqueVal())}\nVenda Salão: ${money(vendaSalao())}\nSaídas: ${money(totSaidas())}\nTOTAL GERAL: ${money(totalGeral())}\nVALOR LÍQUIDO: ${money(totLiquido())}\nTotal real: ${money(real)}\n➡ ${difTxt}\n━━━━━━━━━━━━━\nCARTÕES\n${cart || '  —'}\nTotal cartões: ${money(totCartoes())}\n━━━━━━━━━━━━━\nFundo: ${money(fundo())} (notas ${money(suprNotas())} / dinh ${money(suprDinheiro())})\n━━━━━━━━━━━━━\nNOTAS SEM 10%\nValor das notas: ${money(notasTotal())}\n10% não cobrado: ${money(repique())}`;
+  return `GN CAIXA — ${S.loja}\n${S.fech.data.split('-').reverse().join('/')} · ${S.turnoSel}\n━━━━━━━━━━━━━\nRESUMO\nEntradas: ${money(totEntradas())}\niFood: ${money(ifoodVal())}  Online: ${money(onlineVal())}\nDelivery: ${money(deliveryVal())}\nRepique: ${money(repiqueVal())}\nVenda Salão: ${money(vendaSalao())}\nSaídas: ${money(totSaidas())}\nTOTAL GERAL: ${money(totalGeral())}\nVALOR LÍQUIDO: ${money(totLiquido())}\nTotal real: ${money(real)}\n➡ ${difTxt}\n━━━━━━━━━━━━━\nCARTÕES\n${cart || '  —'}\nTotal cartões: ${money(totCartoes())}\n━━━━━━━━━━━━━\nFundo: ${money(fundo())} (notas ${money(suprNotas())} / dinh ${money(suprDinheiro())})\n━━━━━━━━━━━━━\nNOTAS SEM 10%\nValor das notas: ${money(notasTotal())}\n10% não cobrado: ${money(repique())}\n━━━━━━━━━━━━━\n${_txtCancelamentos()}`;
 }
 function enviarWhats() {
   if (S.fech && S.fech.status !== 'FECHADO') {
@@ -2826,7 +2911,7 @@ function enviarWhats() {
   const difTxt = Math.abs(dif) < 0.01 ? 'Conferido ✓' : (dif > 0 ? `Sobra R$ ${money(Math.abs(dif))}` : `Falta R$ ${money(Math.abs(dif))}`);
   const cart = ENTRADAS.filter(b => !NAO_CARTAO.includes(b.k) && totEntradaK(b.k) > 0)
     .map(b => `  ${b.k}: ${money(totEntradaK(b.k))}`).join('\n');
-  const t = `*GN CAIXA — ${S.loja}*\n${S.fech.data.split('-').reverse().join('/')} · ${S.turnoSel}\n━━━━━━━━━━━━━\n*RESUMO*\nEntradas: ${money(totEntradas())}\niFood: ${money(ifoodVal())}  Online: ${money(onlineVal())}\nDelivery: ${money(deliveryVal())}\nRepique: ${money(repiqueVal())}\nVenda Salão: ${money(vendaSalao())}\nSaídas: ${money(totSaidas())}\n*TOTAL GERAL: ${money(totalGeral())}*\n*VALOR LÍQUIDO: ${money(totLiquido())}*\nTotal real: ${money(real)}\n➡ ${difTxt}\n━━━━━━━━━━━━━\n*CARTÕES*\n${cart || '  —'}\nTotal cartões: ${money(totCartoes())}\n━━━━━━━━━━━━━\nFundo: ${money(fundo())} (notas ${money(suprNotas())} / dinh ${money(suprDinheiro())})\n━━━━━━━━━━━━━\n*NOTAS SEM 10%*\nValor das notas: ${money(notasTotal())}\n10% não cobrado: ${money(repique())}`;
+  const t = `*GN CAIXA — ${S.loja}*\n${S.fech.data.split('-').reverse().join('/')} · ${S.turnoSel}\n━━━━━━━━━━━━━\n*RESUMO*\nEntradas: ${money(totEntradas())}\niFood: ${money(ifoodVal())}  Online: ${money(onlineVal())}\nDelivery: ${money(deliveryVal())}\nRepique: ${money(repiqueVal())}\nVenda Salão: ${money(vendaSalao())}\nSaídas: ${money(totSaidas())}\n*TOTAL GERAL: ${money(totalGeral())}*\n*VALOR LÍQUIDO: ${money(totLiquido())}*\nTotal real: ${money(real)}\n➡ ${difTxt}\n━━━━━━━━━━━━━\n*CARTÕES*\n${cart || '  —'}\nTotal cartões: ${money(totCartoes())}\n━━━━━━━━━━━━━\nFundo: ${money(fundo())} (notas ${money(suprNotas())} / dinh ${money(suprDinheiro())})\n━━━━━━━━━━━━━\n*NOTAS SEM 10%*\nValor das notas: ${money(notasTotal())}\n10% não cobrado: ${money(repique())}\n━━━━━━━━━━━━━\n*${_txtCancelamentos()}*`;
   window.open('https://wa.me/?text=' + encodeURIComponent(t), '_blank');
 }
 function gerarPDF(texto, titulo) {
@@ -3175,6 +3260,114 @@ async function addSuprNota() {
     const tempId = uuid();
     S.supr.push({id:tempId,_pendente:true,fechamento_id:S.fech.id,descricao:body.descricao,valor:v});
     _pfEnqueue({tempId,tabela:'gn_caixa_suprimento',method:'POST',body});
+    renderTudo(); toast('⚠️ Offline — salvo localmente');
+  }
+}
+
+function cancelTotal() { return S.cancel.reduce((a, x) => a + (Number(x.valor) || 0), 0); }
+
+// Loja que não usa a seção também não é cobrada por ela no fechamento.
+function cancelamentoExigido() { return gnCancelamentoLiberado(S.loja); }
+function semCancelamentoDeclarado() { return !!(S.fech && S.fech.sem_cancelamento_por); }
+// A pendência que trava o fechamento: nenhum cancelamento lançado E ninguém assinou que
+// não houve. Com cancelamento lançado, o próprio lançamento já responde.
+function cancelamentoPendente() {
+  return cancelamentoExigido() && S.cancel.length === 0 && !semCancelamentoDeclarado();
+}
+
+function renderSemCancelamento() {
+  const box = $('semCancelBox');
+  if (!box) return;
+  // Com cancelamento lançado, não há o que declarar — e deixar o botão na tela só
+  // convidaria a gravar uma contradição.
+  if (S.cancel.length > 0) { box.innerHTML = ''; return; }
+  if (semCancelamentoDeclarado()) {
+    const quando = S.fech.sem_cancelamento_em
+      ? new Date(S.fech.sem_cancelamento_em).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+      : '';
+    box.innerHTML = `<div style="background:rgba(22,163,74,.12);border:1px solid var(--ok);border-radius:8px;padding:10px 13px;margin-top:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <div style="flex:1;min-width:0;font-size:12px;color:var(--txt)">
+        <b>✓ Dia sem cancelamento</b><br>
+        <span style="color:var(--mut);font-size:11px">Declarado por ${escHtmlCx(S.fech.sem_cancelamento_por)}${quando ? ' · ' + quando : ''}</span>
+      </div>
+      ${S.modoConsulta || S.fech.status === 'FECHADO' ? '' : `<button class="del" onclick="desfazerSemCancelamento()" title="Desfazer">✕</button>`}
+    </div>`;
+    return;
+  }
+  if (S.modoConsulta) { box.innerHTML = ''; return; }
+  box.innerHTML = `<div style="background:rgba(234,179,8,.1);border:1px solid var(--ouro);border-radius:8px;padding:10px 13px;margin-top:8px">
+    <div style="font-size:12px;color:var(--txt);margin-bottom:8px">
+      Não houve cancelamento hoje? Então alguém precisa assinar isso — o caixa não fecha sem resposta.
+    </div>
+    <div class="form-row" style="margin-bottom:0">
+      <div class="form-group">
+        <label>Responsável</label>
+        <input id="semCancelResp" type="text" placeholder="Quem está declarando" value="${escHtmlCx((S.user && S.user.nome) || '')}">
+      </div>
+      <button class="btn-add" style="background:var(--ouro)" onclick="declararSemCancelamento()" title="Confirmar dia sem cancelamento">✓</button>
+    </div>
+    <div class="err-txt" id="semCancelMsg"></div>
+  </div>`;
+}
+
+async function declararSemCancelamento() {
+  const resp = ($('semCancelResp')?.value || '').trim();
+  if (!resp) { $('semCancelMsg').textContent = 'Falta dizer quem está declarando.'; return; }
+  if (S.cancel.length > 0) { $('semCancelMsg').textContent = 'Já existe cancelamento lançado neste dia.'; return; }
+  const body = { sem_cancelamento_por: resp, sem_cancelamento_em: new Date().toISOString() };
+  try {
+    await sb(`gn_caixa_fechamento?id=eq.${S.fech.id}`, { method: 'PATCH', prefer: 'return=minimal', body });
+    Object.assign(S.fech, body);
+    renderTudo(); renderPreFechamento(); toast('Dia sem cancelamento registrado');
+  } catch (e) {
+    Object.assign(S.fech, body);
+    _pfEnqueue({ tempId: uuid(), realId: S.fech.id, tabela: 'gn_caixa_fechamento', method: 'PATCH', body });
+    renderTudo(); renderPreFechamento(); toast('⚠️ Offline — salvo localmente');
+  }
+}
+
+async function desfazerSemCancelamento() {
+  const body = { sem_cancelamento_por: null, sem_cancelamento_em: null };
+  try {
+    await sb(`gn_caixa_fechamento?id=eq.${S.fech.id}`, { method: 'PATCH', prefer: 'return=minimal', body });
+  } catch (e) {
+    _pfEnqueue({ tempId: uuid(), realId: S.fech.id, tabela: 'gn_caixa_fechamento', method: 'PATCH', body });
+  }
+  Object.assign(S.fech, body);
+  renderTudo(); renderPreFechamento();
+}
+
+// Os três campos são obrigatórios de propósito. Um cancelamento sem motivo ou sem quem
+// autorizou é exatamente o registro que não serve pra nada depois — que foi o problema que
+// o campo veio resolver. A mensagem diz o que falta, em vez de só recusar.
+function _cancelFalta(valor, motivo, autor) {
+  const f = [];
+  if (!(valor > 0)) f.push('o valor');
+  if (!motivo) f.push('o motivo');
+  if (!autor) f.push('quem autorizou');
+  if (!f.length) return '';
+  return 'Falta preencher ' + (f.length > 1 ? f.slice(0, -1).join(', ') + ' e ' + f[f.length - 1] : f[0]) + '.';
+}
+
+async function addCancelamento() {
+  const v = parseMoney($('cancelVal').value);
+  const motivo = $('cancelMotivo').value.trim();
+  const autor = $('cancelAutor').value.trim();
+  const falta = _cancelFalta(v, motivo, autor);
+  $('cancelMsg').textContent = falta;
+  if (falta) return;
+  const body = { fechamento_id: S.fech.id, valor: v, motivo, autorizado_por: autor };
+  $('cancelVal').value = ''; $('cancelMotivo').value = ''; $('cancelAutor').value = '';
+  try {
+    const row = await sb('gn_caixa_cancelamento', { method: 'POST', prefer: 'return=representation', body });
+    S.cancel.push(row[0]);
+    // "Dia sem cancelamento" e um cancelamento lançado não podem coexistir.
+    if (semCancelamentoDeclarado()) await desfazerSemCancelamento();
+    renderTudo(); toast('Cancelamento registrado');
+  } catch (e) {
+    const tempId = uuid();
+    S.cancel.push({ id: tempId, _pendente: true, ...body });
+    _pfEnqueue({ tempId, tabela: 'gn_caixa_cancelamento', method: 'POST', body });
     renderTudo(); toast('⚠️ Offline — salvo localmente');
   }
 }
@@ -3616,6 +3809,7 @@ function _arrPorTabela(tabela){
   if(tabela==='gn_caixa_despesa') return 'saidas';
   if(tabela==='gn_caixa_suprimento') return 'supr';
   if(tabela==='gn_caixa_gorjeta') return 'notas10';
+  if(tabela==='gn_caixa_cancelamento') return 'cancel';
   return null;
 }
 async function flushPending(){
@@ -3628,6 +3822,11 @@ async function flushPending(){
         await sb(`${item.tabela}?id=eq.${item.realId}`,{method:'DELETE',prefer:'return=minimal'});
         const arrKey=_arrPorTabela(item.tabela);
         if(arrKey) S[arrKey]=S[arrKey].filter(r=>String(r.id)!==String(item.realId));
+      } else if(item.method==='PATCH'){
+        // Sem este ramo, um PATCH enfileirado caía no POST lá embaixo e CRIAVA uma linha
+        // nova em vez de atualizar a existente — num fechamento, um segundo fechamento
+        // do mesmo turno.
+        await sb(`${item.tabela}?id=eq.${item.realId}`,{method:'PATCH',prefer:'return=minimal',body:item.body});
       } else {
         const row=await sb(item.tabela,{method:'POST',prefer:'return=representation',body:item.body});
         const arrKey=_arrPorTabela(item.tabela);

@@ -401,10 +401,21 @@ window.gnFatorDoDia = function (f, d, fatorContrato) {
 // 11 lojas originais. O pedido do meio turno não citou, então a opção não aparece pra ela
 // — basta tirar daqui pra liberar, em qualquer um dos apps de uma vez.
 window.GN_MEIO_TURNO_FORA = ['MAGLIA'];
-window.gnMeioTurnoLiberado = function (loja) {
-  if (!loja) return true;   // sem loja definida, não escondo nada
+// Mesma regra pro registro de cancelamentos no fechamento de caixa: o pedido não citou a
+// Maglia, então a seção não aparece pra ela.
+window.GN_CANCELAMENTO_FORA = ['MAGLIA'];
+// Uma comparação só pras duas listas (e pras próximas): a chave da loja chega com caixa e
+// espaços variando conforme o app, e cada cópia dessa comparação é uma chance de divergir.
+window.gnLojaForaDe = function (lista, loja) {
+  if (!loja) return false;   // sem loja definida, não escondo nada
   const alvo = String(loja).trim().toUpperCase();
-  return !window.GN_MEIO_TURNO_FORA.some(k => String(k).toUpperCase() === alvo);
+  return (lista || []).some(k => String(k).trim().toUpperCase() === alvo);
+};
+window.gnMeioTurnoLiberado = function (loja) {
+  return !window.gnLojaForaDe(window.GN_MEIO_TURNO_FORA, loja);
+};
+window.gnCancelamentoLiberado = function (loja) {
+  return !window.gnLojaForaDe(window.GN_CANCELAMENTO_FORA, loja);
 };
 // A lista de status que a tela oferece, já sem o que não vale pra aquela loja.
 window.gnStatusDaLoja = function (lista, loja) {
