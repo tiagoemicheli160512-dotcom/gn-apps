@@ -366,6 +366,53 @@ window.gnGorjetaFatorDia = function(tipo, semIdx) {
   return f;
 };
 
+// ── MEIO TURNO ────────────────────────────────────────────────────────────────────────
+// Um dia de meio turno paga uma FRAÇÃO da cota daquele dia: 70% no turno dia, 30% no
+// turno noite. O que não foi pago não some nem fica com a pessoa — cai no pool e vai pro
+// rateio de quem tem direito, pelo mesmo caminho do Jovem Aprendiz acima: como
+// poolRateio = baseTotal - sumAF, reduzir a cota já joga a diferença no pool sozinha, sem
+// nenhuma transferência à parte.
+//
+// Quem fez meio turno continua contando como UMA PESSOA INTEIRA no divisor do dia (ela
+// trabalhou), continua elegível ao rateio, e aquele dia pesa 0,7/0,3 também no rateio, em
+// vez de 1 — proporcional ao que foi trabalhado dos dois lados.
+//
+// Não tem corte por semana como o do Jovem Aprendiz: o meio turno é opção nova, nenhuma
+// semana antiga tem dia marcado assim, então não há histórico pra reinterpretar.
+window.GN_MEIO_TURNO_FATOR = { DIA: 0.7, NOITE: 0.3 };
+window.gnMeioTurnoFator = function (turno) {
+  return window.GN_MEIO_TURNO_FATOR[turno === 'NOITE' ? 'NOITE' : 'DIA'];
+};
+// Turno é gravado por dia, em f.turnos[d]. Func gravado antes desse campo existir, ou dia
+// sem turno escolhido, vale DIA — que é o que a tela já mostra marcado.
+window.gnTurnoDoDia = function (f, d) {
+  return (f && f.turnos && f.turnos[d]) === 'NOITE' ? 'NOITE' : 'DIA';
+};
+// Quanto aquele DIA vale pra essa pessoa, juntando o fator do contrato (Jovem Aprendiz) e
+// o do meio turno. Um Jovem Aprendiz em meio turno dia leva 0,5 × 0,7.
+window.gnFatorDoDia = function (f, d, fatorContrato) {
+  if (!f || !f.dias || f.dias[d] !== 'MEIO TURNO') return fatorContrato;
+  return fatorContrato * window.gnMeioTurnoFator(window.gnTurnoDoDia(f, d));
+};
+// Status que PAGAM cota do dia, e status que contam como dia trabalhado pro rateio. Eram
+// duas listas escritas à mão em seis arquivos; aqui elas têm nome, e o meio turno entra
+// nas duas de uma vez.
+// Regra combinada no CLAUDE.md: mudança pedida sem citar a Maglia pelo nome vale só pras
+// 11 lojas originais. O pedido do meio turno não citou, então a opção não aparece pra ela
+// — basta tirar daqui pra liberar, em qualquer um dos apps de uma vez.
+window.GN_MEIO_TURNO_FORA = ['MAGLIA'];
+window.gnMeioTurnoLiberado = function (loja) {
+  if (!loja) return true;   // sem loja definida, não escondo nada
+  const alvo = String(loja).trim().toUpperCase();
+  return !window.GN_MEIO_TURNO_FORA.some(k => String(k).toUpperCase() === alvo);
+};
+// A lista de status que a tela oferece, já sem o que não vale pra aquela loja.
+window.gnStatusDaLoja = function (lista, loja) {
+  return window.gnMeioTurnoLiberado(loja) ? lista : lista.filter(s => s !== 'MEIO TURNO');
+};
+window.GN_DIA_PAGA    = ['PRESENTE', 'HORISTA', 'JOVEM APRENDIZ', 'FOLGA', 'BANCO DE HORAS', 'FÉRIAS', 'MEIO TURNO'];
+window.GN_DIA_RATEIO  = ['PRESENTE', 'HORISTA', 'FOLGA', 'BANCO DE HORAS', 'FÉRIAS', 'MEIO TURNO'];
+
 function calcSemana(wd, saldoAnt = 0) {
   const ativos = wd.funcs.filter(f => f.nome.trim());
   const nAtivos = ativos.length;
@@ -382,12 +429,16 @@ function calcSemana(wd, saldoAnt = 0) {
     // divergirem.
     const fatorDia = gnGorjetaFatorDia(f.tipo, wd.semIdx);
     let bruta = 0;
-    dias.forEach((dia, d) => { if (['PRESENTE', 'HORISTA', 'JOVEM APRENDIZ', 'FOLGA', 'BANCO DE HORAS', 'FÉRIAS'].includes(f.dias[d])) bruta += dia.cotaUnit * fatorDia; });
+    dias.forEach((dia, d) => { if (GN_DIA_PAGA.includes(f.dias[d])) bruta += dia.cotaUnit * gnFatorDoDia(f, d, fatorDia); });
     const nFS = f.dias.filter(s => ['FALTA', 'SUSPENSÃO'].includes(s)).length;
     const mult = nFS >= 2 ? 0 : nFS === 1 ? 0.5 : 1;
     const AF = bruta * mult;
-    const elegivel = f.tipo !== 'JOVEM APRENDIZ' && nFS === 0 && f.dias.filter(s => s === 'ATESTADO' || s === 'JUSTIFICATIVA').length === 0 && f.dias.filter(s => ['PRESENTE', 'HORISTA', 'FOLGA', 'BANCO DE HORAS', 'FÉRIAS'].includes(s)).length > 0;
-    const diasEleg = elegivel ? f.dias.filter(s => ['PRESENTE', 'HORISTA', 'FOLGA', 'BANCO DE HORAS', 'FÉRIAS'].includes(s)).length : 0;
+    const elegivel = f.tipo !== 'JOVEM APRENDIZ' && nFS === 0 && f.dias.filter(s => s === 'ATESTADO' || s === 'JUSTIFICATIVA').length === 0 && f.dias.filter(s => GN_DIA_RATEIO.includes(s)).length > 0;
+    // Dia de meio turno pesa 0,7/0,3 aqui também — o rateio acompanha o que foi
+    // trabalhado, em vez de dar peso de dia cheio a quem fez metade. Vira fracionário, e
+    // tudo bem: diasEleg só existe como peso dentro desta função, nunca vai pra tela.
+    const diasEleg = elegivel ? f.dias.reduce((soma, st, d) => GN_DIA_RATEIO.includes(st)
+      ? soma + (st === 'MEIO TURNO' ? gnMeioTurnoFator(gnTurnoDoDia(f, d)) : 1) : soma, 0) : 0;
     return { ...f, bruta, mult, AF, elegivel, diasEleg, nFS, fatorDia };
   });
   const baseTotal = dias.reduce((s, d) => s + d.e90, 0);
