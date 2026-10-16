@@ -232,6 +232,11 @@ window.CARGOS_GESTAO           = ['gerente','sub_gerente','supervisor','administ
 window.CARGOS_MASTER_EQUIV     = ['mestre','supervisor','administrador','compras']; // bypass de restrição de horário/acesso (RH, Manutenção)
 window.CARGOS_INVENTARIO       = ['mestre','supervisor','administrador','admin','gerente']; // acesso ao GN Inventário
 window.CARGOS_REABRIR          = ['admin','administrador','gerente','sub-gerente','subgerente','sub gerente','supervisor','mestre']; // reabrir caixa fechado
+// Quem pode assinar um cancelamento (autorizar) e a declaração de "dia sem cancelamento".
+// Aponta pra CARGOS_REABRIR de propósito, em vez de repetir a lista: hoje é a mesma faixa
+// — quem responde pela loja — e duplicar o rol é como as duas versões divergem meses
+// depois. É decisão de negócio separada; se um dia diferir, muda aqui.
+window.CARGOS_CANCELAMENTO     = window.CARGOS_REABRIR;
 window.CARGOS_RH_LIVRE         = ['mestre','supervisor','administrador','compras','admin','gerente']; // sem restrição de horário no GN RH
 window.CARGOS_CAIXA_BYPASS     = ['gerente','mestre','admin'];            // bypass de permissão no módulo Caixa (Home)
 window.CARGOS_PUSH_TODAS_LOJAS = ['compras','supervisor','administrador','mestre']; // push notification sem filtro de loja

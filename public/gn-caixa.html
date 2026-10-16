@@ -1089,10 +1089,17 @@ select option { background: var(--graf2); color: var(--txt); }
           <input id="cancelMotivo" type="text" placeholder="Ex: pedido trocado">
         </div>
       </div>
+      <!-- Nome + senha, não texto livre: o nome gravado passa a ser o que a validação
+           devolve, não o que foi digitado. Sem isso, "quem autorizou" é só um nome que
+           qualquer um escreve — e é um campo que autoriza dinheiro saindo. -->
       <div class="form-row">
         <div class="form-group">
           <label>Quem autorizou</label>
-          <input id="cancelAutor" type="text" placeholder="Nome de quem autorizou">
+          <input id="cancelAutorNome" type="text" placeholder="Usuário de quem autorizou" autocomplete="off" autocapitalize="off">
+        </div>
+        <div class="form-group">
+          <label>Senha</label>
+          <input id="cancelAutorSenha" type="password" placeholder="Senha" autocomplete="off">
         </div>
         <button class="btn-add" onclick="addCancelamento()">+</button>
       </div>
@@ -3388,7 +3395,11 @@ function renderSemCancelamento() {
     <div class="form-row" style="margin-bottom:0">
       <div class="form-group">
         <label>Responsável</label>
-        <input id="semCancelResp" type="text" placeholder="Quem está declarando" value="${escHtmlCx((S.user && S.user.nome) || '')}">
+        <input id="semCancelResp" type="text" placeholder="Usuário" autocomplete="off" autocapitalize="off" value="${escHtmlCx((S.user && S.user.nome) || '')}">
+      </div>
+      <div class="form-group">
+        <label>Senha</label>
+        <input id="semCancelSenha" type="password" placeholder="Senha" autocomplete="off">
       </div>
       <button class="btn-add" style="background:var(--ouro)" onclick="declararSemCancelamento()" title="Confirmar dia sem cancelamento">✓</button>
     </div>
@@ -3398,17 +3409,22 @@ function renderSemCancelamento() {
 
 async function declararSemCancelamento() {
   const resp = ($('semCancelResp')?.value || '').trim();
-  if (!resp) { $('semCancelMsg').textContent = 'Falta dizer quem está declarando.'; return; }
+  const senha = $('semCancelSenha')?.value || '';
   if (S.cancel.length > 0) { $('semCancelMsg').textContent = 'Já existe cancelamento lançado neste dia.'; return; }
-  const body = { sem_cancelamento_por: resp, sem_cancelamento_em: new Date().toISOString() };
+  const { u, erro } = await _verificarAssinatura(resp, senha, 'gn-caixa:sem-cancelamento');
+  if (erro) { $('semCancelMsg').textContent = erro; return; }
+  // Nome verificado, não digitado — é o que faz a declaração valer alguma coisa.
+  const body = { sem_cancelamento_por: u.nome, sem_cancelamento_em: new Date().toISOString() };
   try {
     await sb(`gn_caixa_fechamento?id=eq.${S.fech.id}`, { method: 'PATCH', prefer: 'return=minimal', body });
     Object.assign(S.fech, body);
-    renderTudo(); renderPreFechamento(); toast('Dia sem cancelamento registrado');
+    renderTudo(); renderPreFechamento(); toast('Dia sem cancelamento assinado por ' + u.nome);
   } catch (e) {
-    Object.assign(S.fech, body);
-    _pfEnqueue({ tempId: uuid(), realId: S.fech.id, tabela: 'gn_caixa_fechamento', method: 'PATCH', body });
-    renderTudo(); renderPreFechamento(); toast('⚠️ Offline — salvo localmente');
+    // Sem fila offline, mesma razão do cancelamento: a declaração é a resposta que
+    // destrava o fechamento, e destravar em cima de algo que não gravou é o pior dos
+    // dois mundos.
+    if (window.gnLogError) window.gnLogError('caixa:declararSemCancelamento', e);
+    $('semCancelMsg').textContent = 'Não consegui registrar — tente de novo.';
   }
 }
 
@@ -3426,35 +3442,70 @@ async function desfazerSemCancelamento() {
 // Os três campos são obrigatórios de propósito. Um cancelamento sem motivo ou sem quem
 // autorizou é exatamente o registro que não serve pra nada depois — que foi o problema que
 // o campo veio resolver. A mensagem diz o que falta, em vez de só recusar.
-function _cancelFalta(valor, motivo, autor) {
+function _cancelFalta(valor, motivo, autor, senha) {
   const f = [];
   if (!(valor > 0)) f.push('o valor');
   if (!motivo) f.push('o motivo');
   if (!autor) f.push('quem autorizou');
+  if (senha !== undefined && !senha) f.push('a senha de quem autorizou');
   if (!f.length) return '';
   return 'Falta preencher ' + (f.length > 1 ? f.slice(0, -1).join(', ') + ' e ' + f[f.length - 1] : f[0]) + '.';
+}
+
+// Valida nome + senha e devolve o usuário VERIFICADO, ou uma mensagem de erro pronta.
+// Mesmo caminho da reabertura de caixa (confirmarReabrir): rpc/verificar_login e depois a
+// checagem de cargo. O `contexto` vira rótulo no log de tentativas falhas
+// (gn_login_tentativas), então uma senha errada aqui não se confunde com um login do app.
+//
+// Offline NÃO passa: um cancelamento ou uma declaração sem a senha conferida é
+// exatamente o registro que o dono não quer — melhor dizer que precisa de rede do que
+// gravar um nome que ninguém validou. O fechamento já exige rede pelas fotos, então não
+// é um caminho novo de trava.
+async function _verificarAssinatura(nome, senha, contexto) {
+  if (!nome) return { erro: 'Falta o usuário.' };
+  if (!senha) return { erro: 'Falta a senha.' };
+  let rows;
+  try {
+    rows = await sb('rpc/verificar_login', { method: 'POST', body: { p_nome: nome, p_senha: senha, p_app: contexto } });
+  } catch (e) {
+    if (window.gnLogError) window.gnLogError('caixa:_verificarAssinatura', e);
+    return { erro: 'Sem conexão para conferir a senha — tente de novo quando a rede voltar.' };
+  }
+  if (!rows || !rows.length) return { erro: 'Usuário ou senha incorretos.' };
+  const u = rows[0];
+  const cargo = (u.cargo || '').toLowerCase();
+  if (!(window.CARGOS_CANCELAMENTO || []).includes(cargo)) {
+    return { erro: `${u.nome} não tem cargo para assinar isso. (${u.cargo})` };
+  }
+  return { u };
 }
 
 async function addCancelamento() {
   const v = parseMoney($('cancelVal').value);
   const motivo = $('cancelMotivo').value.trim();
-  const autor = $('cancelAutor').value.trim();
-  const falta = _cancelFalta(v, motivo, autor);
+  const nome = $('cancelAutorNome').value.trim();
+  const senha = $('cancelAutorSenha').value;
+  const falta = _cancelFalta(v, motivo, nome, senha);
   $('cancelMsg').textContent = falta;
   if (falta) return;
-  const body = { fechamento_id: S.fech.id, valor: v, motivo, autorizado_por: autor };
-  $('cancelVal').value = ''; $('cancelMotivo').value = ''; $('cancelAutor').value = '';
+  const { u, erro } = await _verificarAssinatura(nome, senha, 'gn-caixa:cancelamento');
+  if (erro) { $('cancelMsg').textContent = erro; return; }
+  // O nome gravado é o que a validação devolveu, não o digitado: é isso que impede
+  // lançar um cancelamento no nome de quem não autorizou.
+  const body = { fechamento_id: S.fech.id, valor: v, motivo, autorizado_por: u.nome };
   try {
     const row = await sb('gn_caixa_cancelamento', { method: 'POST', prefer: 'return=representation', body });
     S.cancel.push(row[0]);
+    $('cancelVal').value = ''; $('cancelMotivo').value = ''; $('cancelAutorNome').value = ''; $('cancelAutorSenha').value = '';
     // "Dia sem cancelamento" e um cancelamento lançado não podem coexistir.
     if (semCancelamentoDeclarado()) await desfazerSemCancelamento();
-    renderTudo(); toast('Cancelamento registrado');
+    renderTudo(); toast('Cancelamento registrado por ' + u.nome);
   } catch (e) {
-    const tempId = uuid();
-    S.cancel.push({ id: tempId, _pendente: true, ...body });
-    _pfEnqueue({ tempId, tabela: 'gn_caixa_cancelamento', method: 'POST', body });
-    renderTudo(); toast('⚠️ Offline — salvo localmente');
+    // Sem fila offline: a senha já foi conferida, mas o registro não gravou. Enfileirar
+    // deixaria na tela um cancelamento que pode nunca existir no banco, e o caixa fecharia
+    // em cima dele. Os campos ficam preenchidos pra tentar de novo.
+    if (window.gnLogError) window.gnLogError('caixa:addCancelamento', e);
+    $('cancelMsg').textContent = 'Não consegui gravar o cancelamento — tente de novo.';
   }
 }
 
