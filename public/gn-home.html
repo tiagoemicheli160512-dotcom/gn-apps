@@ -7944,10 +7944,15 @@ function _raioxMapearDecl(rows) {
   (rows || []).forEach(fech => {
     const lk = _normLoja(fech.loja);
     if (!LOJAS_LISTA.includes(lk)) return;
-    const d = porLoja[lk] = porLoja[lk] || { caixas: 0, declarados: 0, abertos: 0, responsaveis: [], quando: null };
+    const d = porLoja[lk] = porLoja[lk] || { caixas: 0, declarados: 0, abertos: 0, responsaveis: [], quando: null, datasOk: [], datasFalta: [] };
     if (fech.status === 'FECHADO') d.caixas++; else { d.abertos++; return; }
-    if (!fech.sem_cancelamento_por) return;
+    // As DATAS, não só a contagem: "4 caixas sem ninguém confirmar" não dá pra cobrar;
+    // "sem resposta em 14/10 e 16/10" dá. Guarda o turno junto porque um dia pode ter
+    // dois fechamentos, e faltar um deles não é faltar o dia inteiro.
+    const marca = { data: fech.data, turno: fech.turno || '' };
+    if (!fech.sem_cancelamento_por) { d.datasFalta.push(marca); return; }
     d.declarados++;
+    d.datasOk.push(marca);
     const nome = String(fech.sem_cancelamento_por).trim();
     if (nome && !d.responsaveis.includes(nome)) d.responsaveis.push(nome);
     if (fech.sem_cancelamento_em && (!d.quando || fech.sem_cancelamento_em > d.quando)) d.quando = fech.sem_cancelamento_em;
@@ -10823,6 +10828,38 @@ function _buildCancelPanel() {
 // que não tiveram, aparecer a informação que não teve cancelamento e quem confirmou".
 // A assinatura é o que transforma um silêncio numa resposta — por isso loja que fechou o
 // caixa sem ninguém assinar sai em âmbar, não junto das que responderam.
+// Datas legíveis a partir de [{data,turno}].
+// Dia com TODOS os fechamentos na lista sai só como data; dia com parte sai com o turno,
+// porque "14/10" quando só a noite ficou sem resposta mandaria cobrar o dia inteiro.
+// `todos` é o universo de fechamentos da loja, pra saber o que é "todos daquele dia".
+function _cancelDatas(lista, todos) {
+  if (!lista || !lista.length) return '';
+  const porDiaTotal = {};
+  (todos || lista).forEach(x => { (porDiaTotal[x.data] = porDiaTotal[x.data] || []).push(x.turno); });
+  const porDia = {};
+  lista.forEach(x => { (porDia[x.data] = porDia[x.data] || []).push(x.turno); });
+  const dm = iso => String(iso || '').slice(8, 10) + '/' + String(iso || '').slice(5, 7);
+  const partes = Object.keys(porDia).sort().map(dia => {
+    const doDia = porDia[dia], noDia = porDiaTotal[dia] || doDia;
+    if (doDia.length >= noDia.length) return dm(dia);
+    const turnos = doDia.filter(Boolean);
+    return turnos.length ? `${dm(dia)} (${turnos.join(' e ')})` : dm(dia);
+  });
+  // Mês inteiro com muitos buracos viraria um paredão; o que passa de 6 vira contagem.
+  if (partes.length > 6) return partes.slice(0, 6).join(', ') + ` e mais ${partes.length - 6}`;
+  return partes.length > 1
+    ? partes.slice(0, -1).join(', ') + ' e ' + partes[partes.length - 1]
+    : partes[0];
+}
+// Intervalo, pro que já está resolvido: listar as 5 datas de quem respondeu tudo só
+// ocuparia a linha sem dizer nada que a pessoa precise fazer.
+function _cancelPeriodoDatas(lista) {
+  if (!lista || !lista.length) return '';
+  const dias = [...new Set(lista.map(x => x.data))].sort();
+  const dm = iso => String(iso || '').slice(8, 10) + '/' + String(iso || '').slice(5, 7);
+  return dias.length === 1 ? dm(dias[0]) : `${dm(dias[0])} a ${dm(dias[dias.length - 1])}`;
+}
+
 const _CANCEL_ESTADO = {
   declarado: { cor: 'var(--txt-green)', ico: '✓' },
   parcial:   { cor: 'var(--txt-amber)', ico: '!' },
@@ -10836,10 +10873,13 @@ function _cancelSemNadaHtml(d) {
     ? l.responsaveis.map(esc).join(', ')
     : '—';
   const cx = n => n + ' caixa' + (n === 1 ? '' : 's');
+  const todos = l => (l.datasOk || []).concat(l.datasFalta || []);
   const frase = l => {
-    if (l.estado === 'declarado') return `Confirmado por <b style="color:var(--t1)">${nomes(l)}</b> · ${cx(l.declarados)}`;
-    if (l.estado === 'parcial')   return `Confirmado por <b style="color:var(--t1)">${nomes(l)}</b> em ${l.declarados} de ${cx(l.caixas)} — ${l.caixas - l.declarados} sem ninguém responder`;
-    if (l.estado === 'sem_info')  return `${cx(l.caixas)} fechado${l.caixas === 1 ? '' : 's'} sem ninguém confirmar que não houve cancelamento`;
+    const periodo = _cancelPeriodoDatas(l.datasOk);
+    const faltam = _cancelDatas(l.datasFalta, todos(l));
+    if (l.estado === 'declarado') return `Confirmado por <b style="color:var(--t1)">${nomes(l)}</b> · ${cx(l.declarados)}${periodo ? `, ${periodo}` : ''}`;
+    if (l.estado === 'parcial')   return `Confirmado por <b style="color:var(--t1)">${nomes(l)}</b> em ${l.declarados} de ${cx(l.caixas)}.<br><b style="color:var(--txt-amber)">Sem resposta em ${faltam}</b>`;
+    if (l.estado === 'sem_info')  return `${cx(l.caixas)} fechado${l.caixas === 1 ? '' : 's'} sem ninguém confirmar que não houve cancelamento.<br><b style="color:var(--txt-amber)">Sem resposta em ${faltam}</b>`;
     return 'Nenhum caixa fechado no período';
   };
   return `<div style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid var(--txt-green);border-radius:14px;padding:12px 14px;margin-bottom:10px">
@@ -10911,16 +10951,18 @@ function _cancelRelatorioSemNada(d, wpp) {
   const cx = n => n + ' caixa' + (n === 1 ? '' : 's');
   const porEstado = e => d.semCancel.filter(l => l.estado === e);
   let out = `\n${wpp ? '✅ ' : ''}${b('Sem cancelamento no período:')}\n`;
+  const todos = l => (l.datasOk || []).concat(l.datasFalta || []);
   porEstado('declarado').forEach(l => {
-    out += `   ${l.nome} — confirmado por ${l.responsaveis.join(', ') || '—'} (${cx(l.declarados)})\n`;
+    const per = _cancelPeriodoDatas(l.datasOk);
+    out += `   ${l.nome} — confirmado por ${l.responsaveis.join(', ') || '—'} (${cx(l.declarados)}${per ? ', ' + per : ''})\n`;
   });
   porEstado('parcial').forEach(l => {
-    out += `   ${l.nome} — confirmado por ${l.responsaveis.join(', ') || '—'} em ${l.declarados} de ${cx(l.caixas)}; ${l.caixas - l.declarados} sem resposta\n`;
+    out += `   ${l.nome} — confirmado por ${l.responsaveis.join(', ') || '—'} em ${l.declarados} de ${cx(l.caixas)}; sem resposta em ${_cancelDatas(l.datasFalta, todos(l))}\n`;
   });
   const semInfo = porEstado('sem_info');
   if (semInfo.length) {
     out += `\n${wpp ? '⚠ ' : ''}${b('Fechou sem ninguém confirmar:')}\n`;
-    semInfo.forEach(l => { out += `   ${l.nome} — ${cx(l.caixas)}\n`; });
+    semInfo.forEach(l => { out += `   ${l.nome} — ${cx(l.caixas)}: ${_cancelDatas(l.datasFalta, todos(l))}\n`; });
   }
   const semCaixa = porEstado('sem_caixa');
   if (semCaixa.length) out += `\n${i('Sem caixa fechado no período:')} ${semCaixa.map(l => l.nome).join(', ')}\n`;
