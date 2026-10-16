@@ -950,6 +950,7 @@ select option { background: var(--graf2); color: var(--txt); }
     <div class="section-title">Saídas registradas</div>
     <div id="listaSaidas"></div>
     <input type="file" id="fotoSaidaInput" accept="image/*" capture="environment" style="display:none" onchange="onFotoSaidaChange(this)">
+    <input type="file" id="fotoCancelInput" accept="image/*" capture="environment" style="display:none" onchange="onFotoCancelChange(this)">
   </div>
 
   <div class="pane hidden" id="pane-supr">
@@ -1893,9 +1894,23 @@ function renderTudo() {
   if (secCancel) secCancel.style.display = gnCancelamentoLiberado(S.loja) ? '' : 'none';
   const listaCancel = $('listaCancel');
   if (listaCancel) {
+    // Foto do cupom: botão pra anexar, miniatura quando já tem, e o aviso quando falta —
+    // o mesmo desenho da justificativa de despesa, que também trava o fechamento.
+    // Lançamento ainda pendente de sincronismo não aceita foto: o PATCH iria pro id
+    // temporário e se perderia. O botão diz isso em vez de falhar calado.
+    const _fotoCancelBtn = x => S.modoConsulta ? ''
+      : (x._pendente
+          ? `<span title="Sincronize o lançamento antes de anexar a foto" style="color:var(--mut);font-size:13px;padding:2px 4px;flex-shrink:0">⏳</span>`
+          : `<button onclick="_abrirFotoCancel('${x.id}')" style="background:none;border:none;color:var(--mut);cursor:pointer;font-size:15px;padding:2px 4px;flex-shrink:0;line-height:1" title="Anexar foto do cupom">📷</button>`);
+    const _fotoCancelThumb = x => x.foto
+      ? `<div style="flex:0 0 100%;margin-top:6px;position:relative;display:inline-block;max-width:100%">
+          <img src="${x.foto}" style="max-width:100%;max-height:100px;border-radius:6px;object-fit:cover;cursor:pointer;display:block" onclick="this.style.maxHeight=this.style.maxHeight==='none'?'100px':'none'" title="Toque para expandir">
+          ${S.modoConsulta ? '' : `<button onclick="_excluirFotoCancel('${x.id}')" title="Excluir foto" style="position:absolute;top:4px;right:4px;background:rgba(0,0,0,.65);border:none;border-radius:50%;width:22px;height:22px;color:#fff;font-size:13px;cursor:pointer;line-height:1;padding:0;display:flex;align-items:center;justify-content:center">✕</button>`}
+        </div>`
+      : `<div style="flex:0 0 100%;font-size:11px;color:var(--err);margin-top:3px;font-weight:600">⚠️ Sem foto do cupom — trava o fechamento</div>`;
     listaCancel.innerHTML = S.cancel.length ? S.cancel.slice().reverse().map(x =>
       `<div class="linha-item" style="flex-wrap:wrap"><div class="desc">${escHtmlCx(x.motivo || '—')}<small>Autorizado por ${escHtmlCx(x.autorizado_por || '—')}</small></div>
-      <div class="val">${money(x.valor)}${_pend(x)}</div>${S.modoConsulta ? '' : `<button class="del" onclick="excluir('gn_caixa_cancelamento','${x.id}','cancel')">✕</button>`}</div>`).join('')
+      <div class="val">${money(x.valor)}${_pend(x)}</div>${_fotoCancelBtn(x)}${S.modoConsulta ? '' : `<button class="del" onclick="excluir('gn_caixa_cancelamento','${x.id}','cancel')">✕</button>`}${_fotoCancelThumb(x)}</div>`).join('')
       : '<div class="vazio">Nenhum cancelamento.</div>';
     $('cancelQtd').textContent = String(S.cancel.length);
     $('cancelTotal').textContent = money(cancelTotal());
@@ -2199,7 +2214,8 @@ function renderPreFechamento() {
     const temBuffet   = faltaBuffet.length === 0;
     const semJustCount = S.saidas.filter(_semJustificativa).length;
     const temJust = semJustCount === 0;
-    const temCancel = !cancelamentoPendente();
+    const cancelSemFoto = cancelamentosSemFoto().length;
+    const temCancel = !cancelamentoPendente() && cancelSemFoto === 0;
     const allOk = temValor && temRepique && temSistema && temFotoSistema && temFotos && temBuffet && temJust && temCancel && isFechado;
     const semFotoCount = S.saidas.filter(s => !s.foto || s.foto.trim() === '').length;
     preChk.innerHTML = `<div style="background:var(--graf3);border:1px solid ${allOk?'var(--ok)':'var(--linha)'};border-radius:8px;padding:10px 14px;margin-bottom:12px">
@@ -2210,7 +2226,10 @@ function renderPreFechamento() {
       ${ck(temSistema, 'Total do sistema conferido')}
       ${ck(temFotoSistema, 'Foto do caixa do sistema')}
       ${ck(temFotos, semFotoCount > 0 ? `Fotos dos comprovantes (${semFotoCount} sem foto)` : 'Fotos dos comprovantes')}
-      ${cancelamentoExigido() ? ck(temCancel, S.cancel.length > 0 ? `Cancelamentos lançados (${S.cancel.length})` : 'Cancelamentos do dia respondidos') : ''}
+      ${cancelamentoExigido() ? ck(temCancel,
+          cancelSemFoto > 0 ? `Cancelamentos: ${cancelSemFoto} sem foto do cupom`
+          : S.cancel.length > 0 ? `Cancelamentos lançados (${S.cancel.length})`
+          : 'Cancelamentos do dia respondidos') : ''}
       ${S.saidas.some(x => _exigeJustificativa(x.categoria))
         ? ck(temJust, semJustCount > 0 ? `Justificativa do extra (${semJustCount} sem)` : 'Justificativa do extra')
         : ''}
@@ -2339,6 +2358,9 @@ async function fecharCaixa() {
   // não fecha o caixa.
   if (cancelamentoPendente())
     erros.push('• Cancelamentos: lance os cancelamentos do dia ou confirme "dia sem cancelamento" com o responsável');
+  const semFoto = cancelamentosSemFoto();
+  if (semFoto.length)
+    erros.push(`• Cancelamentos: ${semFoto.length === 1 ? 'falta a foto do cupom de 1 cancelamento' : `faltam as fotos de ${semFoto.length} cancelamentos`} (toque no 📷 ao lado de cada um)`);
   // Buffet/rodízio: feijoada trava em toda loja que usa buffet (nos dias em que é
   // servida), rodízio só nas lojas de GN_BUFFET_OBRIGATORIO. Zero é resposta válida
   // (não vendeu nenhum) — o que trava é o campo em branco, igual ao repique.
@@ -2967,6 +2989,9 @@ async function reimprimirDoHome(id) {
 async function excluir(tabela, id, arr) {
   if (!confirm('Excluir este lançamento?')) return;
   const item = S[arr]?.find(x => x.id === id);
+  // Foto do registro excluído sai do Storage junto — foi exatamente o descuido que deixou
+  // 22 das 40 primeiras fotos órfãs lá (ver comentário em onFotoSaidaChange).
+  const fotoDoItem = item && item.foto ? item.foto : null;
   if (item?._pendente) {
     _pfDequeue(id);
     S[arr] = S[arr].filter(x => x.id !== id);
@@ -2976,6 +3001,7 @@ async function excluir(tabela, id, arr) {
   try {
     await sb(`${tabela}?id=eq.${id}`, { method: 'DELETE', prefer: 'return=minimal' });
     S[arr] = S[arr].filter(x => x.id !== id);
+    if (fotoDoItem) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoDoItem);
     renderTudo(); toast('Excluído');
     // Reflete a exclusão no Check-list/comissão — sem isso, apagar um comprovante ou
     // despesa lançado errado deixava checklist_diario/gn_comissoes com o valor antigo pra
@@ -3055,6 +3081,59 @@ async function onFotoSaidaChange(input) {
   if (S.fech?.data) sincronizarChecklist(S.fech.data).catch(()=>{});
   if (fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
   toast('📷 Foto salva');
+}
+
+// ── FOTO DO CUPOM CANCELADO ──────────────────────────────────────────────────────────
+// Mesmo fluxo da foto de despesa, inclusive o "grava PRIMEIRO, mostra depois": dizer
+// "foto salva" pra uma foto que não gravou é o que faz a loja descobrir a perda no dia
+// seguinte, quando já não dá pra refazer.
+let _fotoCancelId = null;
+function _abrirFotoCancel(id) {
+  _fotoCancelId = id;
+  const inp = document.getElementById('fotoCancelInput');
+  if (inp) { inp.value = ''; inp.click(); }
+}
+
+async function onFotoCancelChange(input) {
+  const file = input.files[0];
+  if (!file || !_fotoCancelId) return;
+  const item = S.cancel.find(x => String(x.id) === String(_fotoCancelId));
+  const fotoAntiga = item ? item.foto : null;
+  let url = null;
+  try {
+    toast('📷 Processando...');
+    const b64 = await _comprimirImagem(file, 800, 0.7);
+    url = await window.gnUploadFotoStorage(SB_URL, SB_KEY, 'caixa-cancelamento', b64);
+  } catch(e) { toast('❌ Erro ao processar foto'); return; }
+  try {
+    await sb(`gn_caixa_cancelamento?id=eq.${_fotoCancelId}`, { method: 'PATCH', prefer: 'return=minimal', body: { foto: url } });
+  } catch(e) {
+    if (window.gnLogError) window.gnLogError('caixa:onFotoCancelChange', e);
+    toast('❌ A foto não salvou — tente de novo');
+    return;
+  }
+  if (item) item.foto = url;
+  renderTudo(); renderPreFechamento();
+  if (fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
+  toast('📷 Foto salva');
+}
+
+async function _excluirFotoCancel(id) {
+  const item = S.cancel.find(x => String(x.id) === String(id));
+  if (!item) return;
+  if (!confirm('Excluir esta foto? Sem ela o caixa não fecha.')) return;
+  const fotoAntiga = item.foto;
+  try {
+    await sb(`gn_caixa_cancelamento?id=eq.${id}`, { method: 'PATCH', prefer: 'return=minimal', body: { foto: null } });
+  } catch(e) {
+    if (window.gnLogError) window.gnLogError('caixa:_excluirFotoCancel', e);
+    toast('❌ Não consegui remover — tente de novo');
+    return;
+  }
+  item.foto = null;
+  renderTudo(); renderPreFechamento();
+  if (fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
+  toast('Foto removida');
 }
 
 async function _excluirFotoSaida(id) {
@@ -3273,6 +3352,13 @@ function semCancelamentoDeclarado() { return !!(S.fech && S.fech.sem_cancelament
 // não houve. Com cancelamento lançado, o próprio lançamento já responde.
 function cancelamentoPendente() {
   return cancelamentoExigido() && S.cancel.length === 0 && !semCancelamentoDeclarado();
+}
+// Cupom cancelado sem foto também trava, pela mesma razão da foto do caixa do sistema:
+// o registro sem o comprovante não dá pra conferir depois, e quem confere não está na
+// loja. Vale só pro que foi lançado DESTE fechamento — cancelamento antigo, de antes da
+// foto existir, está em caixa já fechado e não é alcançado por esta regra.
+function cancelamentosSemFoto() {
+  return cancelamentoExigido() ? S.cancel.filter(x => !x.foto) : [];
 }
 
 function renderSemCancelamento() {
