@@ -453,6 +453,11 @@
        vencer é a única coisa aqui que ainda dá pra evitar se vista a tempo. -->
   <div id="validades-home-card"></div>
 
+  <!-- Notas canceladas de ontem: o caixa fechou ontem, a conferência é hoje. Fica aqui em
+       cima porque é informação com prazo — depois de uns dias ninguém lembra do que foi
+       cancelado nem quem autorizou. -->
+  <div id="cancel-ontem-home-card"></div>
+
   <!-- Aviso de eleição — acima do card de venda de propósito: é o primeiro recado do mês -->
   <div id="eleicoes-escala-home-card"></div>
 
@@ -4888,6 +4893,141 @@ function _renderBarrisSemanalHome(mostrar) {
   </div>`;
 }
 
+// ── NOTAS CANCELADAS DE ONTEM ───────────────────────────────────────────────────────────
+//
+// Pedido do dono: "um novo card com a informação das notas canceladas ou quando não tiver
+// nenhuma. Fechei o caixa hoje, ele aparece no dia seguinte, pra já saber se teve notas
+// canceladas no dia anterior e conferir."
+//
+// Lê o fechamento de ONTEM (gn_caixa_fechamento) e os cancelamentos pendurados nele
+// (gn_caixa_cancelamento) — os mesmos registros que o app Caixa grava, que desde o campo de
+// cancelamento não fecha sem lançar os do dia OU alguém assinar "dia sem cancelamento"
+// (ver cancelamentoPendente() em gn-caixa.html).
+//
+// Três estados, e a diferença entre eles é o ponto do card:
+//   TEVE      — lista valor, motivo e quem autorizou, que é o que se confere.
+//   NÃO TEVE  — alguém assinou que não houve. É uma afirmação, com nome em cima.
+//   SEM INFO  — o caixa fechou sem nenhum dos dois. Só acontece em fechamento anterior a
+//               este controle, e NÃO pode ser pintado de verde: a diferença entre "ninguém
+//               cancelou nada" e "ninguém registrou nada" é exatamente o que o card existe
+//               pra mostrar.
+//
+// E quando um turno de ontem ficou ABERTO o card diz, em vez de afirmar "nenhuma nota
+// cancelada" sobre um dia que simplesmente não foi fechado.
+//
+// Fora da Maglia, que não usa o controle (GN_CANCELAMENTO_FORA em gn-lojas-config.js) — lá
+// o card mostraria "sem informação" todo santo dia.
+//
+// Mesma plateia do "Pra fazer hoje": é o mesmo trabalho (conferir o caixa de ontem).
+const CANCEL_ONTEM_CARGOS = PRA_HOJE_CARGOS;
+async function _renderCancelamentosOntemHome(mostrar, sess, isMasterAtivo) {
+  const el = document.getElementById('cancel-ontem-home-card');
+  if (!el) return;
+  const cargo = (sess && sess.cargo || '').toLowerCase();
+  const ehMestreNaLoja = isMasterAtivo && masterLoja;
+  if (!mostrar || !sess || (!CANCEL_ONTEM_CARGOS.includes(cargo) && !ehMestreNaLoja)) { el.innerHTML = ''; return; }
+  const loja = ehMestreNaLoja ? masterLoja : sess.loja;
+  if (!LOJAS_LISTA.includes(loja)) { el.innerHTML = ''; return; }
+  if (window.gnCancelamentoLiberado && !window.gnCancelamentoLiberado(loja)) { el.innerHTML = ''; return; }
+
+  const iso = d => d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+  const ontemD = new Date(); ontemD.setDate(ontemD.getDate()-1);
+  const ontem = iso(ontemD);
+  const dm = ontem.slice(8,10) + '/' + ontem.slice(5,7);
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const esc = s => window.escapeHtml ? window.escapeHtml(String(s == null ? '' : s)) : String(s == null ? '' : s);
+
+  try {
+    const fechs = await window.gnFetchJson(
+      `${SB_URL}/rest/v1/gn_caixa_fechamento?loja=eq.${encodeURIComponent(loja)}&data=eq.${ontem}` +
+      `&select=id,turno,status,sem_cancelamento_por,sem_cancelamento_em&order=turno.asc`,
+      H, 'cancelOntem:fech', []);
+    // Sem nenhum registro de ontem não há o que conferir. Caixa que nem chegou a ser aberto
+    // é cobrança do card de pendências, não deste.
+    if (!fechs || !fechs.length) { el.innerHTML = ''; return; }
+
+    // Cancelamento lançado em turno ainda ABERTO também é cancelamento — entra na lista. O
+    // turno aberto vira aviso à parte, porque aí a informação é incompleta, não negativa.
+    const cancels = await window.gnFetchJson(
+      `${SB_URL}/rest/v1/gn_caixa_cancelamento?fechamento_id=in.(${fechs.map(f => f.id).join(',')})` +
+      `&select=fechamento_id,valor,motivo,autorizado_por&order=criado_em.asc`,
+      H, 'cancelOntem:cancel', []) || [];
+
+    const turnoDe = {}; fechs.forEach(f => { turnoDe[f.id] = f.turno; });
+    const variosTurnos = fechs.length > 1;
+    const fechados = fechs.filter(f => f.status === 'FECHADO');
+    const abertos  = fechs.filter(f => f.status !== 'FECHADO');
+    const declarados = fechados.filter(f => f.sem_cancelamento_por);
+    const semInfo = fechados.filter(f => !f.sem_cancelamento_por && !cancels.some(c => c.fechamento_id === f.id));
+    const total = cancels.reduce((a, c) => a + (Number(c.valor) || 0), 0);
+    const tNome = f => esc(f.turno || '—');
+
+    const avisoAberto = !abertos.length ? '' :
+      `<div style="margin-top:8px;font-size:10.5px;color:var(--txt-amber);font-weight:700;line-height:1.45">
+        ${abertos.length > 1 ? 'Os turnos' : 'O turno'} ${abertos.map(tNome).join(' e ')} de ontem ainda
+        ${abertos.length > 1 ? 'não foram fechados' : 'não foi fechado'} — pode ter cancelamento ainda não lançado.
+      </div>`;
+
+    let cor, icone, titulo, corpo;
+
+    if (cancels.length) {
+      cor = '#E8580A'; icone = '🧾';
+      titulo = `${cancels.length} nota${cancels.length > 1 ? 's' : ''} cancelada${cancels.length > 1 ? 's' : ''} ontem`;
+      corpo = `
+        <div style="display:flex;align-items:baseline;gap:6px;margin:2px 0 4px">
+          <span style="font-size:17px;font-weight:800;color:var(--t1);font-family:monospace">${_fmtBRL(total)}</span>
+          <span style="font-size:10px;color:var(--t3)">no total</span>
+        </div>
+        ${cancels.map(c => `<div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-top:1px solid var(--b1)">
+          <div style="min-width:0">
+            <div style="font-size:11.5px;font-weight:700;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.motivo) || '—'}</div>
+            <div style="font-size:10px;color:var(--t3)">autorizado por ${esc(c.autorizado_por) || '—'}${variosTurnos && turnoDe[c.fechamento_id] ? ' · ' + esc(turnoDe[c.fechamento_id]) : ''}</div>
+          </div>
+          <div style="font-size:12px;font-weight:800;color:var(--t1);font-family:monospace;white-space:nowrap">${_fmtBRL(Number(c.valor) || 0)}</div>
+        </div>`).join('')}
+        ${semInfo.length ? `<div style="margin-top:8px;font-size:10.5px;color:var(--t3);line-height:1.45">
+          ${semInfo.length > 1 ? 'Os turnos' : 'O turno'} ${semInfo.map(tNome).join(' e ')} fechou sem informação de cancelamento.
+        </div>` : ''}`;
+
+    } else if (declarados.length && !semInfo.length) {
+      // Verde só quando o dia INTEIRO está respondido. Com um turno ainda aberto, a
+      // resposta vale só pros turnos que fecharam — e o título diz quais, em vez de
+      // afirmar em verde que não houve cancelamento "ontem" com meio dia em aberto.
+      const diaCompleto = !abertos.length;
+      cor = diaCompleto ? 'var(--txt-green)' : 'var(--txt-amber)'; icone = '✓';
+      titulo = diaCompleto
+        ? 'Nenhuma nota cancelada ontem'
+        : `Nenhuma nota cancelada no turno ${declarados.map(tNome).join(' e ')}`;
+      corpo = `<div style="font-size:11px;color:var(--t2);line-height:1.5">
+        ${declarados.map(f => `Declarado por <b style="color:var(--t1)">${esc(f.sem_cancelamento_por)}</b>${variosTurnos ? ` no turno ${tNome(f)}` : ''}.`).join('<br>')}
+      </div>`;
+
+    } else {
+      // Nada lançado e ninguém assinou — ou só parte dos turnos assinou. Cinza de propósito:
+      // não é "não teve", é "não se sabe".
+      cor = 'var(--t4)'; icone = '?';
+      titulo = 'Sem informação de cancelamento ontem';
+      corpo = `<div style="font-size:11px;color:var(--t2);line-height:1.5">
+        ${declarados.length
+          ? `${declarados.map(f => `${tNome(f)} declarou que não houve (${esc(f.sem_cancelamento_por)})`).join('; ')}. ` +
+            `Já ${semInfo.length > 1 ? 'os turnos' : 'o turno'} ${semInfo.map(tNome).join(' e ')} fechou sem lançar nem declarar.`
+          : 'O caixa de ontem fechou sem lançar cancelamento e sem ninguém declarar que não houve.'}
+      </div>`;
+    }
+
+    el.innerHTML = `<div onclick="navTo('gn-caixa.html')" style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid ${cor};border-radius:18px;padding:14px 16px;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05);cursor:pointer">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px">
+        <div style="font-size:12px;font-weight:800;color:var(--t1);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${icone} ${titulo}</div>
+        <div style="font-size:10px;font-weight:800;color:${cor};flex-shrink:0">Ontem ${dm}</div>
+      </div>
+      ${corpo}
+      ${avisoAberto}
+    </div>`;
+  } catch (e) {
+    el.innerHTML = '';
+  }
+}
+
 // ── Sino de notificações no cabeçalho ──────────────────────────────────────
 // Ponto único e sempre visível (não depende de rolar a tela) pro que já é
 // calculado em outros lugares: os alertas do Painel de Gestão consolidado
@@ -5001,6 +5141,7 @@ function _refreshPermUI(sess) {
   loadBadges(sess, isMaster);
   const _mostrarCards = (!isMaster || !!masterLoja) && !_ehCargoModuloUnico(sess);
   _renderPraHojeHome(_mostrarCards, sess, isMaster);
+  _renderCancelamentosOntemHome(_mostrarCards, sess, isMaster);
   _renderAvisoEleicoesHome(_mostrarCards, sess, isMaster);
   _renderVendaMesHome(_mostrarCards, sess, isMaster);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
@@ -5243,6 +5384,7 @@ function showHome(sess) {
   loadBadges(sess, isMaster);
   const _mostrarCards = (!isMaster || !!masterLoja) && !_ehCargoModuloUnico(sess);
   _renderPraHojeHome(_mostrarCards, sess, isMaster);
+  _renderCancelamentosOntemHome(_mostrarCards, sess, isMaster);
   _renderAvisoEleicoesHome(_mostrarCards, sess, isMaster);
   _renderVendaMesHome(_mostrarCards, sess, isMaster);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
