@@ -499,3 +499,146 @@ window.gnBhValorHoras = function (horas, valorHora) {
   if (v <= 0 || !h) return 0;
   return h > 0 ? h * v * (1 + window.GN_BH_ADICIONAL_EXTRA) : Math.abs(h) * v;
 };
+
+// ── RELATÓRIO EM PDF — padrão único de todos os apps ─────────────────────────────────
+//
+// Antes cada app tinha a sua cópia de gerarPDF, e as cópias já tinham divergido em três
+// variantes: texto cru num <pre> monoespaçado, com um título simples em cima. Só o
+// relatório do Painel de Gestão tinha cabeçalho, KPIs e tabela — e foi esse que o dono
+// aprovou ("limpo e intuitivo, com a marca do GN"). Aqui esse desenho vira o padrão, e os
+// nove apps passam a apontar pra cá: um lugar só pra mexer quando a marca mudar.
+//
+// A marca é o wordmark GN + tagline da tela de login, em TEXTO. Imagem em impressão é o
+// que o navegador descarta primeiro — e um relatório que vai pra direção sem marca é
+// exatamente o que não pode acontecer.
+//
+// Cores explícitas, não tokens: a janela de impressão é um documento novo, sem o :root do
+// app. O PDF antigo usava var(--t1)/var(--s2) e só funcionava por acidente — a
+// declaração caía por ser inválida e sobrava o preto no branco do navegador.
+window.GN_PDF_OURO = '#CA8A04';
+
+window.gnPdfEsc = function (s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+};
+
+// Texto corrido vira estrutura legível, sem inventar dado nenhum:
+//   linha que TERMINA em ':'        → título de seção
+//   linha que começa com 2+ espaços → detalhe, recuado e menor
+//   o resto                         → linha normal
+// Tudo com pre-wrap, pra não perder alinhamento nem espaço de quem montou o texto.
+window.gnPdfCorpoDeTexto = function (texto) {
+  const linhas = String(texto == null ? '' : texto).split('\n');
+  return linhas.map(l => {
+    if (!l.trim()) return '<div class="gap"></div>';
+    const esc = window.gnPdfEsc(l);
+    if (/^\s{2,}/.test(l)) return `<div class="det">${esc}</div>`;
+    if (/:\s*$/.test(l.trim())) return `<div class="sec">${esc}</div>`;
+    return `<div class="lin">${esc}</div>`;
+  }).join('');
+};
+
+// Os 25 relatórios já escrevem o próprio título na primeira linha e o "GN Operações" na
+// última — eles nasceram num gerador que só tinha um <h1> simples. Com o cabeçalho e o
+// rodapé do padrão novo, isso aparecia DUAS vezes, e relatório com título repetido é o
+// oposto de limpo.
+//
+// A remoção é conservadora de propósito: a primeira linha só sai quando, normalizada,
+// é IGUAL ao título — nada de parecido ou começa-com. E o rodapé do texto não é
+// descartado: ele vira o rodapé do documento, no lugar do genérico.
+function _gnPdfNorm(s) {
+  return String(s == null ? '' : s).toLowerCase().normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '').replace(/[*_]/g, '').replace(/\s+/g, ' ').trim();
+}
+window.gnPdfSemDuplicata = function (texto, titulo) {
+  const linhas = String(texto == null ? '' : texto).split('\n');
+  let i = 0;
+  while (i < linhas.length && !linhas[i].trim()) i++;
+  if (i < linhas.length && _gnPdfNorm(linhas[i]) === _gnPdfNorm(titulo)) {
+    linhas.splice(0, i + 1);
+    while (linhas.length && !linhas[0].trim()) linhas.shift();
+  }
+  let rodape = null;
+  while (linhas.length) {
+    const ult = linhas[linhas.length - 1];
+    if (!ult.trim()) { linhas.pop(); continue; }
+    if (/^\s*GN Opera/i.test(ult)) { if (!rodape) rodape = ult.trim(); linhas.pop(); continue; }
+    break;
+  }
+  return { texto: linhas.join('\n'), rodape: rodape };
+};
+
+window.gnPdfAgora = function () {
+  const d = new Date(), p = n => String(n).padStart(2, '0');
+  return `${p(d.getDate())}/${p(d.getMonth() + 1)} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+
+// opts: { titulo, subtitulo, kpis:[{label,valor,sub}], texto | html, rodape }
+// `html` é pra quem já monta tabela própria (o relatório do Painel); `texto` é o caminho
+// dos outros, que mandam texto corrido.
+window.gnRelatorioPDF = function (opts) {
+  const o = opts || {};
+  const esc = window.gnPdfEsc;
+  const titulo = esc(o.titulo || 'Relatório GN');
+  // O <title> vira o NOME DO ARQUIVO quando se salva como PDF, então ele carrega o
+  // período junto — "GN Gestão — Mensal Outubro/2026". O h1 fica sem, porque o período
+  // já está logo abaixo, na linha do subtítulo.
+  const tituloDoc = esc(o.tituloDoc || o.titulo || 'Relatório GN');
+  const sub = esc(o.subtitulo || ('gerado em ' + window.gnPdfAgora()));
+  const kpis = Array.isArray(o.kpis) ? o.kpis.filter(Boolean) : [];
+  const kpiHtml = !kpis.length ? '' :
+    `<div class="kpi-row" style="grid-template-columns:repeat(${Math.min(kpis.length, 3)},1fr)">
+      ${kpis.map(k => `<div class="kpi">
+        <div class="kpi-label">${esc(k.label)}</div>
+        <div class="kpi-val">${esc(k.valor)}</div>
+        ${k.sub ? `<div class="kpi-sub">${esc(k.sub)}</div>` : ''}
+      </div>`).join('')}
+    </div>`;
+  const limpo = o.html != null ? null : window.gnPdfSemDuplicata(o.texto, o.titulo);
+  const corpo = o.html != null ? o.html : window.gnPdfCorpoDeTexto(limpo.texto);
+  const rodape = esc(o.rodape || (limpo && limpo.rodape) || ('GN Operações · ' + (o.titulo || '')));
+
+  const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
+<title>${tituloDoc}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:11pt;color:#1A1D23;background:#FFFFFF;padding:28px}
+  .marca{display:flex;align-items:baseline;gap:7px;margin-bottom:14px}
+  .marca-gn{font-size:15pt;font-weight:900;color:${window.GN_PDF_OURO};letter-spacing:-1px;line-height:1}
+  .marca-tag{font-size:6.5pt;color:#9aa0a6;letter-spacing:2.5px;text-transform:uppercase}
+  h1{font-size:17pt;font-weight:800;color:${window.GN_PDF_OURO};margin-bottom:2px}
+  .sub{font-size:9pt;color:#888;margin-bottom:20px}
+  .kpi-row{display:grid;gap:10px;margin-bottom:20px}
+  .kpi{border:1px solid #e5e7eb;border-radius:8px;padding:12px;text-align:center}
+  .kpi-label{font-size:7.5pt;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+  .kpi-val{font-size:14pt;font-weight:700;color:${window.GN_PDF_OURO};font-family:monospace}
+  .kpi-sub{font-size:7.5pt;color:#9aa0a6;margin-top:3px;line-height:1.3}
+  table{width:100%;border-collapse:collapse;margin-bottom:16px}
+  thead th{padding:8px;text-align:left;font-size:7.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.3px;border-bottom:2px solid ${window.GN_PDF_OURO}}
+  thead th:not(:first-child){text-align:right}
+  tfoot td{border-top:2px solid ${window.GN_PDF_OURO};font-weight:800}
+  h2.sec{font-size:11pt;font-weight:800;margin:4px 0 8px}
+  .sec{font-size:10.5pt;font-weight:800;margin:14px 0 4px;white-space:pre-wrap;word-break:break-word}
+  .lin{font-size:10pt;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+  .det{font-size:9pt;line-height:1.45;color:#555;white-space:pre-wrap;word-break:break-word;padding-left:2px}
+  .gap{height:7px}
+  .footer{font-size:7.5pt;color:#aaa;border-top:1px solid #eee;padding-top:8px;margin-top:18px}
+  @media print{body{padding:0}@page{margin:1.5cm}}
+</style></head><body>
+  <div class="marca"><span class="marca-gn">GN</span><span class="marca-tag">Sistema de Gestão</span></div>
+  <h1>${titulo}</h1>
+  <div class="sub">${sub}</div>
+  ${kpiHtml}
+  ${corpo}
+  <div class="footer">${rodape}</div>
+  <script>window.onload=function(){window.print()}<\/script>
+</body></html>`;
+  const w = window.open('', '_blank');
+  if (w) { w.document.write(html); w.document.close(); }
+};
+
+// O que os nove apps chamam. Mantém a assinatura antiga (texto, titulo) pros 25 pontos
+// de chamada que já existem; `opts` é pra quem quiser acrescentar KPIs depois.
+window.gnRelatorioPDFTexto = function (texto, titulo, opts) {
+  window.gnRelatorioPDF(Object.assign({ titulo: titulo, texto: texto }, opts || {}));
+};
