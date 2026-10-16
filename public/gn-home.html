@@ -882,6 +882,17 @@ let _dashPendenciasEssenciais = null; // {lojaKey: [{chave,emoji,label}]} — me
 let _dashFeriasTodas = null; // [{id, usuarioId, nome, cargo, inicio, fim, origem}] — férias de gerência+equipe, carregado por _loadDashAll pro card do topo
 let _dashGerentes = null; // {lojaKey: [{id, nome, cargo}]} — gerentes/sub-gerentes ativos por loja (gn_usuarios)
 let _dashFuncCount = null; // {lojaKey: nº de funcionários nomeados na escala da semana atual} — pro card mostrar venda/funcionário
+// ── RAIO-X: o cru que o Painel já busca e antes jogava fora ───────────────────────────
+// _loadDashAll já lê gn_comissoes (escala, setor, status de cada dia, documentos),
+// gn_lojas (avarias e conferências de caixa) e gn_banco_horas de TODAS as lojas, mas só
+// guardava os números derivados que os cards antigos usavam. O raio-x precisa recalcular
+// por período escolhido (dia/semana/mês/trimestre), então o cru fica guardado — é memória,
+// não consulta nova.
+let _dashComissoesAll = null; // [{loja(comKey), all_data}]
+let _dashLojasAll     = null; // [{loja(comKey), all_data}] — avariasAll, caixa_conferencias
+let _dashBhCfg        = null; // {chkKey: {periodo_inicio, salariosSetor}}
+let _dashBhMesesRows  = null; // [{loja(chkKey), mes, registros:[{nome,horas,obs}]}]
+let _dashCancelPer    = null; // {lojaKey: [{data,valor,motivo,autor}]} — do período do Painel
 let _dashFeriasGerencia = null; // {lojaKey: [{id, usuarioId, nome, cargo, inicio, fim}]} — períodos de férias (gn_lojas.all_data.ferias_gerencia)
 let _dashFeriasLoading = false;
 let _dashFeriasAno = new Date().getFullYear();
@@ -7702,6 +7713,450 @@ async function _fetchComDia(mondayISO) {
   return { totals, byLoja };
 }
 
+// ── RAIO-X DA LOJA ───────────────────────────────────────────────────────────────────
+//
+// Pedido do dono: transformar o Painel num panorama da loja — faltas, atestado,
+// advertência e suspensão; férias (quantas e por setor); funcionários por setor; banco de
+// horas dos casos mais graves com valor; e as notas canceladas com quem autorizou. Tudo
+// por dia e com período escolhível (dia/semana/mês/trimestre), dentro do card de cada loja.
+//
+// _raioxDaLoja é FUNÇÃO PURA sobre o cru que _loadDashAll já guardou (_dashComissoesAll,
+// _dashBhCfg, _dashBhMesesRows, _dashLojasAll, _dashCancelPer): recebe as datas do
+// período e devolve o panorama. Nenhuma consulta aqui dentro — é o que deixa o chip do
+// card, o painel detalhado e o relatório saírem todos do MESMO número, em vez de três
+// contas parecidas que um dia divergem.
+//
+// De onde vem cada coisa:
+//   faltas/atestado/suspensão/férias → status do DIA na escala (gn_comissoes.all_data)
+//   advertência/demissão            → documento anexado por semana (funcs[].docs), que é
+//                                     como o app RH lê; conta uma vez por semana tocada
+//   setor                           → campo do funcionário na escala
+//   banco de horas                  → gn_banco_horas, por mês, {nome, horas}
+//   cancelamentos                   → gn_caixa_cancelamento via fechamento (a data é dele)
+//   avarias / caixa sem conferir    → gn_lojas.all_data
+const RAIOX_STATUS_DIA = ['FALTA', 'ATESTADO', 'SUSPENSÃO'];
+const RAIOX_DOCS = ['ADVERTENCIA', 'DEMISSAO'];
+const RAIOX_ROTULO = {
+  FALTA: 'Faltas', ATESTADO: 'Atestados', 'SUSPENSÃO': 'Suspensões',
+  ADVERTENCIA: 'Advertências', DEMISSAO: 'Demissões',
+};
+
+function _raioxVazio() {
+  return {
+    equipe: { total: 0, porSetor: {} },
+    ferias: { total: 0, porSetor: {}, pessoas: [] },
+    ocor: { total: 0, FALTA: 0, ATESTADO: 0, 'SUSPENSÃO': 0, ADVERTENCIA: 0, DEMISSAO: 0, porDia: {}, pessoas: [] },
+    bh: { positivas: 0, negativas: 0, valorPositivo: 0, valorNegativo: 0, graves: [], semSalario: false },
+    cancel: { qtd: 0, valor: 0, itens: [] },
+    avarias: { qtd: 0, valor: 0 },
+    caixaSemConf: { qtd: 0, itens: [] },
+  };
+}
+
+function _raioxIsoDoDia(dia) {
+  return dia.y + '-' + String(dia.m).padStart(2, '0') + '-' + String(dia.d).padStart(2, '0');
+}
+
+// opts.cancel troca a fonte de cancelamentos: o card usa o período do Painel
+// (_dashCancelPer, já carregado), e o painel detalhado busca o do período dele.
+function _raioxDaLoja(lojaKey, dates, opts) {
+  const r = _raioxVazio();
+  if (!lojaKey || !dates || !dates.length) return r;
+  const cancelFonte = (opts && opts.cancel) || _dashCancelPer || {};
+  const comKey = LOJA_COM_KEY[lojaKey] || lojaKey;
+  const chkKey = LOJA_DB_KEY[lojaKey] || lojaKey;
+  const de = dates[0], ate = dates[dates.length - 1];
+  const dentro = new Set(dates);
+  const CAL = (typeof COMISSOES_CAL !== 'undefined') ? COMISSOES_CAL : [];
+
+  // ── Escala: ocorrências, férias e quadro por setor ──────────────────────────
+  const linha = (_dashComissoesAll || []).find(x => x.loja === comKey);
+  const allData = (linha && linha.all_data) || {};
+  const pessoas = {};   // nome -> {nome, setor, FALTA, ATESTADO, ...}
+  const feriasPes = {}; // nome -> setor (pessoa conta UMA vez, mesmo com 7 dias de férias)
+  let funcsDoFim = null;
+  const marca = (nome, setor, tipo) => {
+    const p = pessoas[nome] = pessoas[nome] || { nome, setor };
+    p[tipo] = (p[tipo] || 0) + 1;
+    r.ocor[tipo]++;
+  };
+  CAL.forEach((semana, idx) => {
+    const diasNoPeriodo = (semana.days || [])
+      .map((dia, i) => dentro.has(_raioxIsoDoDia(dia)) ? i : -1).filter(i => i >= 0);
+    if (!diasNoPeriodo.length) return;
+    const funcs = _escalaHomeFuncsAtual(allData, idx) || [];
+    funcsDoFim = funcs; // quadro = última semana tocada: lotação é foto, não soma
+    // Semana SEM registro próprio é herdada da anterior, e a herança copia o funcionário
+    // inteiro — `docs` junto (ver _escalaHomeHerdarFunc: `{...f, dias: diasHerd}`). Os
+    // STATUS a herança zera, os documentos não. Então contar documento em semana herdada
+    // faria a mesma advertência ser contada de novo a cada semana sem registro: num
+    // trimestre, uma advertência viraria treze.
+    // Conferido no banco: documento mora na semana em que foi anexado — a Jessica
+    // (Pedreira) tem duas, nas semanas 33 e 37, não em 33,34,35,36,37.
+    const semanaSalva = !!allData[String(idx)];
+    funcs.forEach(f => {
+      const nome = (f.nome || '').trim();
+      if (!nome) return;
+      const setor = (f.setor || '').trim() || 'Sem setor';
+      diasNoPeriodo.forEach(i => {
+        const st = (f.dias || [])[i];
+        if (st === 'FÉRIAS') { feriasPes[nome] = setor; return; }
+        if (!RAIOX_STATUS_DIA.includes(st)) return;
+        const iso = _raioxIsoDoDia(semana.days[i]);
+        marca(nome, setor, st);
+        const d = r.ocor.porDia[iso] = r.ocor.porDia[iso] || {};
+        d[st] = (d[st] || 0) + 1;
+      });
+      // Advertência e demissão não são status de dia: são documento da semana. Por isso
+      // não entram em porDia — datar no primeiro dia do período seria inventar a data.
+      if (semanaSalva) {
+        const docs = f.docs || {};
+        RAIOX_DOCS.forEach(k => { if (docs[k]) marca(nome, setor, k); });
+      }
+    });
+  });
+  (funcsDoFim || []).forEach(f => {
+    if (!(f.nome || '').trim()) return;
+    const setor = (f.setor || '').trim() || 'Sem setor';
+    r.equipe.total++;
+    r.equipe.porSetor[setor] = (r.equipe.porSetor[setor] || 0) + 1;
+  });
+  Object.keys(feriasPes).forEach(nome => {
+    const setor = feriasPes[nome];
+    r.ferias.total++;
+    r.ferias.porSetor[setor] = (r.ferias.porSetor[setor] || 0) + 1;
+    r.ferias.pessoas.push({ nome, setor });
+  });
+  r.ferias.pessoas.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+  r.ocor.total = RAIOX_STATUS_DIA.concat(RAIOX_DOCS).reduce((a, k) => a + r.ocor[k], 0);
+  r.ocor.pessoas = Object.values(pessoas).sort((a, b) => {
+    const soma = p => RAIOX_STATUS_DIA.concat(RAIOX_DOCS).reduce((x, k) => x + (p[k] || 0), 0);
+    return soma(b) - soma(a) || a.nome.localeCompare(b.nome, 'pt-BR');
+  });
+
+  // ── Banco de horas ──────────────────────────────────────────────────────────
+  // O saldo é lançado por MÊS. Período que cruza dois meses soma os dois: é o saldo do
+  // período, não o do mês. O valor da hora sai do salário do SETOR da pessoa (fonte única
+  // em gn-lojas-config.js) — sem salário cadastrado o saldo aparece em horas, sem R$, e o
+  // painel diz por quê, em vez de mostrar R$ 0,00 como se fosse zero de verdade.
+  const bhCfg = (_dashBhCfg || {})[chkKey] || {};
+  const salSetor = bhCfg.salariosSetor || {};
+  const setorDe = {};
+  (funcsDoFim || []).forEach(f => { setorDe[(f.nome || '').trim()] = (f.setor || '').trim(); });
+  const mesesNoPeriodo = new Set(dates.map(d => d.slice(0, 7)));
+  const saldoPes = {};
+  (_dashBhMesesRows || []).forEach(row => {
+    if (row.loja !== chkKey || !mesesNoPeriodo.has(row.mes)) return;
+    (Array.isArray(row.registros) ? row.registros : []).forEach(reg => {
+      const nome = (reg && reg.nome || '').trim();
+      if (!nome || reg.semBanco) return;
+      saldoPes[nome] = (saldoPes[nome] || 0) + (parseFloat(reg.horas) || 0);
+    });
+  });
+  Object.keys(saldoPes).forEach(nome => {
+    const h = saldoPes[nome];
+    if (!h) return;
+    const vh = window.gnBhValorHora ? window.gnBhValorHora(salSetor[setorDe[nome]]) : 0;
+    const valor = window.gnBhValorHoras ? window.gnBhValorHoras(h, vh) : 0;
+    if (!vh) r.bh.semSalario = true;
+    if (h > 0) { r.bh.positivas += h; r.bh.valorPositivo += valor; }
+    else { r.bh.negativas += Math.abs(h); r.bh.valorNegativo += valor; }
+    r.bh.graves.push({ nome, setor: setorDe[nome] || 'Sem setor', horas: h, valor });
+  });
+  // "Casos mais graves" = maior saldo em módulo, negativo antes de positivo no empate:
+  // hora devida é a que cobra ação.
+  r.bh.graves.sort((a, b) => Math.abs(b.horas) - Math.abs(a.horas) || a.horas - b.horas);
+
+  // ── Notas canceladas ────────────────────────────────────────────────────────
+  (cancelFonte[lojaKey] || []).forEach(c => {
+    r.cancel.qtd++; r.cancel.valor += c.valor || 0;
+    r.cancel.itens.push(c);
+  });
+  r.cancel.itens.sort((a, b) => (b.valor || 0) - (a.valor || 0));
+
+  // ── Avarias e perdas ────────────────────────────────────────────────────────
+  // Mesmo filtro do card de Desempenho do mês anterior: transferência de dinheiro e saída
+  // de terceiro não são perda, e cancelado não aconteceu.
+  const lojaRow = (_dashLojasAll || []).find(x => x.loja === comKey);
+  const allLoja = (lojaRow && lojaRow.all_data) || {};
+  ((allLoja.avariasAll || {})[comKey] || []).forEach(a => {
+    if (!a || a.status === 'cancelado' || a.tipo === 'transferencia_dinheiro' || a.tipo === 'saida_terceiro') return;
+    const dia = a.ts ? String(a.ts).slice(0, 10) : '';
+    if (dia < de || dia > ate) return;
+    r.avarias.qtd++; r.avarias.valor += parseFloat(a.valorTotal) || 0;
+  });
+
+  // ── Caixa fechado sem conferência ───────────────────────────────────────────
+  // _dashCaixaSemConferencia já vem pronto dos últimos 30 dias (com os 3 dias de prazo);
+  // aqui é só o recorte do período. Em trimestre a lista não alcança os meses mais
+  // antigos — e o painel diz isso, em vez de mostrar um número que parece completo.
+  ((_dashCaixaSemConferencia || {})[lojaKey] || []).forEach(c => {
+    if (c.data < de || c.data > ate) return;
+    r.caixaSemConf.qtd++; r.caixaSemConf.itens.push(c);
+  });
+  r.caixaSemConf.itens.sort((a, b) => String(a.data).localeCompare(String(b.data)));
+  return r;
+}
+
+// Cancelamentos vêm aninhados no fechamento porque a DATA mora no fechamento. Mesmo
+// mapeamento pro Painel (período do painel) e pro painel detalhado (período próprio) —
+// duas leituras do mesmo formato é como as duas divergem num canto qualquer.
+function _raioxMapearCancel(rows) {
+  const porLoja = {};
+  (rows || []).forEach(fech => {
+    const lk = _normLoja(fech.loja);
+    if (!LOJAS_LISTA.includes(lk)) return;
+    const cs = Array.isArray(fech.gn_caixa_cancelamento) ? fech.gn_caixa_cancelamento
+             : (fech.gn_caixa_cancelamento ? [fech.gn_caixa_cancelamento] : []);
+    cs.forEach(c => {
+      if (!c) return;
+      (porLoja[lk] = porLoja[lk] || []).push({
+        data: fech.data, valor: parseFloat(c.valor) || 0,
+        motivo: c.motivo || '', autor: c.autorizado_por || '',
+      });
+    });
+  });
+  return porLoja;
+}
+
+// ── RAIO-X: a faixa no card da loja ──────────────────────────────────────────────────
+//
+// O grid dos cards é de 2 colunas: cada card tem ~180px no celular e já carrega nome,
+// faturamento, sparkline, barra de meta, grid de dias, badges, funcionários e buffet.
+// O panorama inteiro não cabe ali — então o card mostra os NÚMEROS que pedem ação e o
+// detalhe abre num painel. Chip que não tem o que dizer não aparece: uma fileira de
+// zeros ocuparia o mesmo espaço sem informar nada.
+//
+// Equipe é a única exceção e aparece sempre: é o denominador de tudo o mais no card.
+const _raioxCache = {};
+function _raioxChaveCache() {
+  return _dashPer + ':' + (_dashPer === 'sem' ? _dashWoff : _dashMoff);
+}
+function _raioxPeriodoAtual() {
+  return _dashPer === 'sem' ? _weekRange(_dashWoff) : _monthRange(_dashMoff);
+}
+// Recalcular 12 lojas a cada render (e renderDashboard roda a cada toque em chip) é
+// trabalho repetido sobre dados que não mudaram — o cache morre quando o período muda.
+function _raioxDoCard(lojaKey) {
+  const chave = _raioxChaveCache();
+  if (_raioxCache._chave !== chave) { for (const k in _raioxCache) delete _raioxCache[k]; _raioxCache._chave = chave; }
+  if (!_raioxCache[lojaKey]) _raioxCache[lojaKey] = _raioxDaLoja(lojaKey, _raioxPeriodoAtual().dates);
+  return _raioxCache[lojaKey];
+}
+
+function _raioxFaixaCard(lojaKey) {
+  if (!_dashComissoesAll) return ''; // ainda carregando
+  const x = _raioxDoCard(lojaKey);
+  const chip = (ico, txt, cor, titulo) =>
+    `<span title="${titulo}" style="display:inline-flex;align-items:center;gap:2px;background:var(--fill-sutil);border-radius:5px;padding:1px 4px;white-space:nowrap;color:${cor || 'var(--t3)'}">${ico} ${txt}</span>`;
+  const chips = [];
+  chips.push(chip('👥', x.equipe.total, 'var(--t3)', 'Funcionários na escala'));
+  if (x.ferias.total) chips.push(chip('🏖', x.ferias.total, 'var(--t3)', `${x.ferias.total} de férias no período`));
+  if (x.ocor.total) chips.push(chip('⚠', x.ocor.total, 'var(--txt-amber)',
+    `Ocorrências: ${RAIOX_STATUS_DIA.concat(RAIOX_DOCS).filter(k => x.ocor[k]).map(k => RAIOX_ROTULO[k] + ' ' + x.ocor[k]).join(' · ')}`));
+  if (x.cancel.qtd) chips.push(chip('🧾', _fmtBRLs(x.cancel.valor), '#E8580A',
+    `${x.cancel.qtd} nota(s) cancelada(s) — ${_fmtBRL(x.cancel.valor)}`));
+  if (x.bh.negativas) chips.push(chip('⏱', '-' + _raioxHoras(x.bh.negativas), 'var(--txt-red)',
+    `${_raioxHoras(x.bh.negativas)} de horas devidas no banco`));
+  if (x.avarias.valor) chips.push(chip('💥', _fmtBRLs(x.avarias.valor), 'var(--txt-red)',
+    `${x.avarias.qtd} avaria(s) — ${_fmtBRL(x.avarias.valor)}`));
+  if (x.caixaSemConf.qtd) chips.push(chip('🔍', x.caixaSemConf.qtd, 'var(--txt-amber)',
+    `${x.caixaSemConf.qtd} caixa(s) fechado(s) sem conferência`));
+  return `<div onclick="event.stopPropagation();_raioxAbrir('${lojaKey}')" title="Abrir o raio-x da loja"
+    style="display:flex;flex-wrap:wrap;gap:3px;margin-top:5px;font-size:9px;font-weight:700;cursor:pointer;line-height:1.5">
+    ${chips.join('')}</div>`;
+}
+
+// Horas com meia hora legível: 12.5 vira "12h30", não "12,5h".
+function _raioxHoras(h) {
+  const n = Math.abs(parseFloat(h) || 0);
+  const inteiras = Math.floor(n);
+  const min = Math.round((n - inteiras) * 60);
+  return min ? `${inteiras}h${String(min).padStart(2, '0')}` : `${inteiras}h`;
+}
+
+// ── RAIO-X: o painel detalhado ───────────────────────────────────────────────────────
+//
+// Abre a partir da faixa do card. É aqui que mora tudo o que não cabe em 180px: o quadro
+// por setor, quem está de férias, as ocorrências por tipo / por dia / por pessoa, o banco
+// de horas com os casos mais graves, as notas canceladas com motivo e quem autorizou, as
+// avarias e os caixas por conferir.
+//
+// Período PRÓPRIO (dia/semana/mês/trimestre), independente do toggle do Painel — mesmo
+// desenho do modal de relatório, pelo mesmo motivo: dá pra olhar o trimestre de uma loja
+// sem desarrumar o Painel inteiro pra todas as outras. Reaproveita _relRange.
+let _raioxLoja = null, _raioxPer = 'sem', _raioxOff = 0, _raioxDados = null;
+const _raioxCancelCache = {};
+
+async function _raioxCancelDoPeriodo(dates) {
+  const chave = dates[0] + '|' + dates[dates.length - 1];
+  if (_raioxCancelCache[chave]) return _raioxCancelCache[chave];
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const rows = await window.gnFetchJson(
+    `${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${dates[0]}&data=lte.${dates[dates.length - 1]}` +
+    `&select=loja,data,gn_caixa_cancelamento(valor,motivo,autorizado_por)`, H, 'raiox:cancel', []);
+  return (_raioxCancelCache[chave] = _raioxMapearCancel(rows));
+}
+
+async function _raioxCarregar() {
+  const range = _relRange(_raioxPer, _raioxOff);
+  const cancel = await _raioxCancelDoPeriodo(range.dates).catch(() => ({}));
+  _raioxDados = { range, x: _raioxDaLoja(_raioxLoja, range.dates, { cancel }) };
+}
+
+async function _raioxAbrir(lojaKey) {
+  if (!LOJAS_LISTA.includes(lojaKey)) return;
+  _raioxLoja = lojaKey;
+  // Abre casando com o que está navegado no Painel, e dali navega livre.
+  _raioxPer = _dashPer === 'sem' ? 'sem' : 'mes';
+  _raioxOff = _dashPer === 'sem' ? _dashWoff : _dashMoff;
+  const ex = document.getElementById('_raiox-modal');
+  if (ex) ex.remove();
+  const modal = document.createElement('div');
+  modal.id = '_raiox-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:9999;display:flex;align-items:flex-end;justify-content:center';
+  modal.innerHTML = `<div id="_raiox-folha" style="background:var(--s1);border-radius:16px 16px 0 0;width:100%;max-width:520px;max-height:92vh;overflow-y:auto;padding:18px 16px calc(18px + env(safe-area-inset-bottom))">
+    <div style="text-align:center;color:var(--t3);font-size:12px;padding:20px">Carregando o raio-x…</div></div>`;
+  modal.addEventListener('click', e => { if (e.target === modal) fecharTelaSobreposta(); });
+  document.body.appendChild(modal);
+  _registrarTelaSobreposta(modal);
+  await _raioxCarregar();
+  _raioxPintar();
+}
+
+async function _raioxTrocarPer(per) {
+  if (_raioxPer === per) return;
+  _raioxPer = per; _raioxOff = 0;
+  _raioxMostrarCarregando();
+  await _raioxCarregar();
+  _raioxPintar();
+}
+
+async function _raioxNav(dir) {
+  const novo = Math.min(0, _raioxOff + dir);
+  if (novo === _raioxOff) return;
+  _raioxOff = novo;
+  _raioxMostrarCarregando();
+  await _raioxCarregar();
+  _raioxPintar();
+}
+
+function _raioxMostrarCarregando() {
+  const t = document.getElementById('_raiox-sub');
+  if (t) t.textContent = '⏳ Carregando…';
+}
+
+function _raioxPintar() {
+  const folha = document.getElementById('_raiox-folha');
+  if (folha) folha.innerHTML = _raioxHtml();
+}
+
+function _raioxSecao(titulo, corpo, cor) {
+  return `<div style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid ${cor || 'var(--t4)'};border-radius:14px;padding:12px 14px;margin-bottom:10px">
+    <div style="font-size:9px;font-weight:800;color:var(--t4);letter-spacing:1.2px;text-transform:uppercase;margin-bottom:7px">${titulo}</div>
+    ${corpo}</div>`;
+}
+// Linha "chave  ·  valor" usada nas listas — tabular pra os números alinharem.
+function _raioxLinha(esq, dir, sub) {
+  return `<div style="display:flex;justify-content:space-between;gap:10px;padding:5px 0;border-top:1px solid var(--b1)">
+    <div style="min-width:0"><div style="font-size:11.5px;font-weight:700;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esq}</div>
+    ${sub ? `<div style="font-size:9.5px;color:var(--t3)">${sub}</div>` : ''}</div>
+    <div style="font-size:11.5px;font-weight:800;color:var(--t1);font-variant-numeric:tabular-nums;white-space:nowrap">${dir}</div></div>`;
+}
+function _raioxPorSetor(mapa) {
+  const chaves = Object.keys(mapa).sort((a, b) => mapa[b] - mapa[a] || a.localeCompare(b, 'pt-BR'));
+  if (!chaves.length) return `<div style="font-size:11px;color:var(--t3)">Ninguém na escala deste período.</div>`;
+  return `<div style="display:flex;flex-wrap:wrap;gap:4px">${chaves.map(st =>
+    `<span style="background:var(--fill-sutil);border-radius:6px;padding:3px 7px;font-size:10.5px;color:var(--t2)">
+      ${window.escapeHtml(st)} <b style="color:var(--t1)">${mapa[st]}</b></span>`).join('')}</div>`;
+}
+
+function _raioxHtml() {
+  const esc = s => window.escapeHtml(String(s == null ? '' : s));
+  if (!_raioxDados) return `<div style="text-align:center;color:var(--t3);font-size:12px;padding:20px">Carregando…</div>`;
+  const { range, x } = _raioxDados;
+  const nome = LOJA_DISPLAY[_raioxLoja] || _raioxLoja;
+  const dm = iso => iso.slice(8, 10) + '/' + iso.slice(5, 7);
+
+  const pills = [['dia', 'Dia'], ['sem', 'Semana'], ['mes', 'Mês'], ['tri3', 'Trimestre']].map(([p, lbl]) => {
+    const on = p === _raioxPer;
+    return `<button onclick="_raioxTrocarPer('${p}')" style="flex:1;padding:7px 4px;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;border:1px solid ${on ? '#CA8A04' : 'var(--b2)'};background:${on ? 'rgba(202,138,4,.18)' : 'transparent'};color:${on ? 'var(--t1)' : 'var(--t3)'}">${lbl}</button>`;
+  }).join('');
+
+  // ── Ocorrências ─────────────────────────────────────────────────────────────
+  const tiposComAlgo = RAIOX_STATUS_DIA.concat(RAIOX_DOCS).filter(k => x.ocor[k]);
+  const diasComAlgo = Object.keys(x.ocor.porDia).sort();
+  const ocorHtml = !x.ocor.total
+    ? `<div style="font-size:11px;color:var(--txt-green);font-weight:700">Nenhuma ocorrência no período.</div>`
+    : `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px">${tiposComAlgo.map(k =>
+        `<span style="background:rgba(232,88,10,.10);border-radius:6px;padding:3px 7px;font-size:10.5px;color:var(--t2)">
+          ${RAIOX_ROTULO[k]} <b style="color:var(--t1)">${x.ocor[k]}</b></span>`).join('')}</div>
+      ${diasComAlgo.length ? `<div style="font-size:9px;font-weight:800;color:var(--t4);letter-spacing:1px;margin:8px 0 2px">POR DIA</div>
+        ${diasComAlgo.map(d => _raioxLinha(dm(d),
+          Object.keys(x.ocor.porDia[d]).map(k => `${RAIOX_ROTULO[k]} ${x.ocor.porDia[d][k]}`).join(' · '))).join('')}` : ''}
+      <div style="font-size:9px;font-weight:800;color:var(--t4);letter-spacing:1px;margin:8px 0 2px">POR PESSOA</div>
+      ${x.ocor.pessoas.map(p => _raioxLinha(esc(p.nome),
+        RAIOX_STATUS_DIA.concat(RAIOX_DOCS).filter(k => p[k]).map(k => `${RAIOX_ROTULO[k]} ${p[k]}`).join(' · '),
+        esc(p.setor))).join('')}
+      ${x.ocor.ADVERTENCIA || x.ocor.DEMISSAO ? `<div style="font-size:9.5px;color:var(--t3);margin-top:7px;line-height:1.45">
+        Advertência e demissão são documento da semana, não status de dia — por isso não aparecem na lista por dia.</div>` : ''}`;
+
+  // ── Banco de horas ──────────────────────────────────────────────────────────
+  const bhHtml = (!x.bh.negativas && !x.bh.positivas)
+    ? `<div style="font-size:11px;color:var(--t3)">Nenhum saldo lançado no período.</div>`
+    : `<div style="display:flex;gap:8px;margin-bottom:4px">
+        <div style="flex:1"><div style="font-size:9px;color:var(--t4);font-weight:800">DEVIDAS</div>
+          <div style="font-size:15px;font-weight:800;color:var(--txt-red)">${_raioxHoras(x.bh.negativas)}</div>
+          <div style="font-size:9.5px;color:var(--t3)">${_fmtBRL(x.bh.valorNegativo)}</div></div>
+        <div style="flex:1"><div style="font-size:9px;color:var(--t4);font-weight:800">A RECEBER</div>
+          <div style="font-size:15px;font-weight:800;color:var(--txt-green)">${_raioxHoras(x.bh.positivas)}</div>
+          <div style="font-size:9.5px;color:var(--t3)">${_fmtBRL(x.bh.valorPositivo)}</div></div>
+      </div>
+      ${x.bh.graves.slice(0, 8).map(g => _raioxLinha(esc(g.nome),
+        `${g.horas < 0 ? '-' : '+'}${_raioxHoras(g.horas)}${g.valor ? ' · ' + _fmtBRL(g.valor) : ''}`,
+        esc(g.setor))).join('')}
+      ${x.bh.graves.length > 8 ? `<div style="font-size:9.5px;color:var(--t3);margin-top:6px">e mais ${x.bh.graves.length - 8} — a lista completa fica no app Check-list.</div>` : ''}
+      ${x.bh.semSalario ? `<div style="font-size:9.5px;color:var(--txt-amber);margin-top:7px;line-height:1.45">
+        Tem gente sem salário de setor cadastrado: as horas aparecem, o valor em R$ dessas não entra na soma.</div>` : ''}`;
+
+  // ── Notas canceladas ────────────────────────────────────────────────────────
+  const cancelHtml = !x.cancel.qtd
+    ? `<div style="font-size:11px;color:var(--t3)">Nenhuma nota cancelada lançada no período.</div>`
+    : `<div style="font-size:17px;font-weight:800;color:var(--t1);margin-bottom:2px">${_fmtBRL(x.cancel.valor)}
+        <span style="font-size:10px;color:var(--t3);font-weight:600">em ${x.cancel.qtd} nota${x.cancel.qtd > 1 ? 's' : ''}</span></div>
+      ${x.cancel.itens.slice(0, 12).map(c => _raioxLinha(esc(c.motivo) || '—', _fmtBRL(c.valor),
+        `${dm(c.data)} · autorizado por ${esc(c.autor) || '—'}`)).join('')}
+      ${x.cancel.itens.length > 12 ? `<div style="font-size:9.5px;color:var(--t3);margin-top:6px">e mais ${x.cancel.itens.length - 12}.</div>` : ''}`;
+
+  return `
+    <div style="width:36px;height:3px;background:var(--b2);border-radius:2px;margin:0 auto 14px"></div>
+    <div style="font-size:15px;font-weight:800;color:var(--t1);text-align:center">Raio-X · ${esc(nome)}</div>
+    <div style="display:flex;gap:5px;margin:12px 0 10px">${pills}</div>
+    <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:14px">
+      <button onclick="_raioxNav(-1)" style="background:var(--fill-sutil);border:1px solid var(--b2);border-radius:8px;width:30px;height:30px;color:var(--t1);font-size:15px;cursor:pointer;font-family:inherit">‹</button>
+      <div id="_raiox-sub" style="font-size:12px;font-weight:700;color:var(--t2);min-width:130px;text-align:center">${esc(range.label)}${range.isCurrent ? ' · atual' : ''}</div>
+      <button onclick="_raioxNav(1)" ${range.isCurrent ? 'disabled' : ''} style="background:var(--fill-sutil);border:1px solid var(--b2);border-radius:8px;width:30px;height:30px;color:${range.isCurrent ? 'var(--t4)' : 'var(--t1)'};font-size:15px;cursor:${range.isCurrent ? 'default' : 'pointer'};font-family:inherit">›</button>
+    </div>
+
+    ${_raioxSecao(`Equipe · ${x.equipe.total}`, _raioxPorSetor(x.equipe.porSetor), '#7C83FD')}
+    ${_raioxSecao(`Férias · ${x.ferias.total}`, x.ferias.total
+      ? _raioxPorSetor(x.ferias.porSetor) + `<div style="font-size:10.5px;color:var(--t3);margin-top:6px">${x.ferias.pessoas.map(p => esc(p.nome)).join(' · ')}</div>`
+      : `<div style="font-size:11px;color:var(--t3)">Ninguém de férias no período.</div>`, '#0EA5E9')}
+    ${_raioxSecao(`Ocorrências · ${x.ocor.total}`, ocorHtml, x.ocor.total ? '#E8580A' : 'var(--txt-green)')}
+    ${_raioxSecao('Banco de horas', bhHtml, x.bh.negativas ? 'var(--txt-red)' : 'var(--t4)')}
+    ${_raioxSecao(`Notas canceladas · ${x.cancel.qtd}`, cancelHtml, x.cancel.qtd ? '#E8580A' : 'var(--t4)')}
+    ${_raioxSecao(`Avarias e perdas · ${x.avarias.qtd}`, x.avarias.qtd
+      ? `<div style="font-size:17px;font-weight:800;color:var(--t1)">${_fmtBRL(x.avarias.valor)}</div>`
+      : `<div style="font-size:11px;color:var(--t3)">Nenhuma avaria lançada no período.</div>`, x.avarias.qtd ? 'var(--txt-red)' : 'var(--t4)')}
+    ${_raioxSecao(`Caixa por conferir · ${x.caixaSemConf.qtd}`, x.caixaSemConf.qtd
+      ? x.caixaSemConf.itens.map(c => _raioxLinha(dm(c.data), esc(c.turno))).join('') +
+        `<div style="font-size:9.5px;color:var(--t3);margin-top:7px;line-height:1.45">A verificação cobre os últimos 30 dias e dá 3 dias de prazo — em trimestre, o que é mais antigo que isso não entra nesta conta.</div>`
+      : `<div style="font-size:11px;color:var(--t3)">Nenhum caixa fechado sem conferência neste período.</div>`,
+      x.caixaSemConf.qtd ? 'var(--txt-amber)' : 'var(--t4)')}
+
+    <button onclick="fecharTelaSobreposta()" style="display:block;width:100%;background:transparent;border:1px solid var(--b2);border-radius:10px;color:var(--t3);padding:11px;font-size:12px;cursor:pointer;font-family:inherit;margin-top:4px">Fechar</button>`;
+}
+
 async function _loadDashAll() {
   if (_dashLoading) return;
   _dashLoading = true;
@@ -7743,7 +8198,7 @@ async function _loadDashAll() {
     const comKeysAll = Object.values(LOJA_COM_KEY).join(',');
     const catorze = new Date(); catorze.setDate(catorze.getDate()-14);
     const from14 = catorze.toISOString().slice(0,10);
-    const [fatCur, fatPrv, fatPrvComp, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows, comissoesAllRows, bhConfigRows, caixaFechadosRows, alertasUrgentesRows, visitasPassadasRows, provisoesRows, carnesRows, trioAgendaOntemRows, bhMesesRows, buffetRows] = await Promise.all([
+    const [fatCur, fatPrv, fatPrvComp, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows, comissoesAllRows, bhConfigRows, cancelRows, caixaFechadosRows, alertasUrgentesRows, visitasPassadasRows, provisoesRows, carnesRows, trioAgendaOntemRows, bhMesesRows, buffetRows] = await Promise.all([
       _fetchFat(range.dates).catch(e=>{ _errCb('fatCur')(e); return {}; }),
       _fetchFat(prevRange.dates).catch(e=>{ _errCb('fatPrv')(e); return {}; }),
       precisaCompSeparada ? _fetchFat(prevRangeCompDates).catch(e=>{ _errCb('fatPrvComp')(e); return {}; }) : Promise.resolve(null),
@@ -7758,6 +8213,10 @@ async function _loadDashAll() {
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_manut_visitas?data=eq.${hoje}&select=loja,oficial,hora_chegada,hora_saida`, H, 'dash:visitasManutRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=in.(${comKeysAll})&select=loja,all_data`, H, 'dash:comissoesAllRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_banco_horas?mes=eq.CONFIG&select=loja,registros`, H, 'dash:bhConfigRows', []),
+      // Cancelamentos do período, aninhados no fechamento porque a DATA mora no
+      // fechamento e não no cancelamento — mesma forma da consulta de funcionário extra
+      // em _renderMesAnteriorHome.
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${range.dates[0]}&data=lte.${range.dates[range.dates.length-1]}&select=loja,data,gn_caixa_cancelamento(valor,motivo,autorizado_por)`, H, 'dash:cancelRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?status=eq.FECHADO&data=gte.${from30}&select=id,loja,data,turno`, H, 'dash:caixaFechadosRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_alertas_urgentes?order=criado_em.desc&limit=50&select=id,loja,criado_por,criado_em,resolvido,resolvido_por,resolvido_em,motivo,cargos`, H, 'dash:alertasUrgentesRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_chk_visitas?data=gte.${from14}&data=lt.${hoje}&select=loja,data,hora_chegada`, H, 'dash:visitasPassadasRows', []),
@@ -8009,6 +8468,12 @@ async function _loadDashAll() {
       caixaSemConferencia[lk].push({ data: r.data, turno: r.turno });
     });
     _dashCaixaSemConferencia = caixaSemConferencia;
+    // Cru do raio-x — ver os `let` lá em cima. Nenhuma consulta nova além de cancelRows.
+    _dashComissoesAll = comissoesAllRows || [];
+    _dashLojasAll     = lojasOfRows || [];
+    _dashBhCfg        = bhPorLoja || {};
+    _dashBhMesesRows  = bhMesesRows || [];
+    _dashCancelPer = _raioxMapearCancel(cancelRows);
     const spark={}; LOJAS_LISTA.forEach(k=>{spark[k]=[(fat3[k]||0),(fat2[k]||0),(fatPrv[k]||0),(fatCur[k]||0)];});
     _dashSparkData=spark;
     _dashAlertasUrgentes = alertasUrgentesRows || [];
@@ -8025,6 +8490,8 @@ async function _loadDashAll() {
     _dashEscalaIncompleta=_dashEscalaIncompleta||{}; _dashBancoHorasPendente=_dashBancoHorasPendente||{};
     _dashContratosVencendo=_dashContratosVencendo||{}; _dashManutParada=_dashManutParada||{};
     _dashCaixaSemConferencia=_dashCaixaSemConferencia||{};
+    _dashComissoesAll=_dashComissoesAll||[]; _dashLojasAll=_dashLojasAll||[];
+    _dashBhCfg=_dashBhCfg||{}; _dashBhMesesRows=_dashBhMesesRows||[]; _dashCancelPer=_dashCancelPer||{};
     _dashVisitasHoje=_dashVisitasHoje||{};
     _dashAlertasUrgentes=_dashAlertasUrgentes||[];
     _dashPendenciasEssenciais=_dashPendenciasEssenciais||{};
@@ -10490,8 +10957,8 @@ function renderDashboard() {
             ${selIcon}
             <div class="sc-nome" style="justify-content:space-between;padding-right:22px"><span style="display:flex;align-items:center;gap:5px;min-width:0"><span class="sc-dot" style="background:${cor}"></span><span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${nome}</span></span>${rankBadge}</div>
             ${loading?`<div>${_skelBar('60%','15px')}</div><div style="margin-top:6px">${_skelBar('100%','3px')}</div>`
-              :hasData?`<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:4px"><div class="sc-val">${_fmtBRLs(v)}${diffHtml}</div>${spark?`<div style="margin-top:2px;flex-shrink:0">${spark}</div>`:''}</div>${bar}${diaGrid}${badgeRow}${funcRow}${buffetRow}`
-              :`<div class="sc-empty">Sem dados</div>${diaGrid}${badgeRow}${funcRow}${buffetRow}`}
+              :hasData?`<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:4px"><div class="sc-val">${_fmtBRLs(v)}${diffHtml}</div>${spark?`<div style="margin-top:2px;flex-shrink:0">${spark}</div>`:''}</div>${bar}${diaGrid}${badgeRow}${funcRow}${buffetRow}${_raioxFaixaCard(k)}`
+              :`<div class="sc-empty">Sem dados</div>${diaGrid}${badgeRow}${funcRow}${buffetRow}${_raioxFaixaCard(k)}`}
           </div>`;
       }).join('');
       mainView=`<div class="cons-card">
@@ -10714,6 +11181,9 @@ async function _relCarregarPeriodo(per) {
   // Rodízio/feijoada do mesmo período — falha aqui não derruba o relatório inteiro, só
   // deixa a seção de buffet de fora.
   const buffet = await _fetchBuffet(range.dates).catch(() => ({}));
+  // Cancelamentos do mesmo período — alimentam o recorte Raio-X. Falha aqui não derruba
+  // o relatório, só deixa a seção de notas canceladas vazia.
+  const cancelPorLoja = await _raioxCancelDoPeriodo(range.dates).catch(() => ({}));
   const perTipo = _REL_PER_TIPO[per] || 'Mensal';
   const metaFunc = _metaFuncPeriodo(per);
   const metaFuncAtencao = metaFunc * 15000/18000;
@@ -10746,7 +11216,7 @@ async function _relCarregarPeriodo(per) {
   const mesesLabels = per === 'tri3' ? range.meses.map(m => m.label) : null;
   const now = new Date();
   const dtGer = `${String(now.getDate()).padStart(2,'0')}/${String(now.getMonth()+1).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-  const data = { per, off, range, perTipo, total, lojasDados, dtGer, metaFunc, metaFuncAtencao, mesesLabels, totaisMes };
+  const data = { per, off, range, perTipo, total, lojasDados, dtGer, metaFunc, metaFuncAtencao, mesesLabels, totaisMes, cancelPorLoja };
   window._relCache = window._relCache || {};
   window._relCache[cacheKey] = data;
   window._relData = data;
@@ -10775,8 +11245,8 @@ function _relModalHtml() {
     <div style="display:flex;gap:6px;margin-bottom:10px">${pills}</div>
     <!-- Recorte do relatório. Fica acima dos botões de propósito: é uma escolha sobre o
     CONTEÚDO, e os três botões abaixo já respeitam ela. -->
-    <div style="display:flex;gap:6px;margin-bottom:14px">
-      ${[['', 'Completo'], ['buf', '🍖 Rodízio/feijoada'], ['dir', 'Direção']].map(([k, lbl]) => {
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px">
+      ${[['', 'Completo'], ['buf', '🍖 Rodízio/feijoada'], ['dir', 'Direção'], ['rx', '🩻 Raio-X']].map(([k, lbl]) => {
         const on = k === window._relRecorte;
         return `<button onclick="_relTrocarRecorte('${k}')" style="flex:1;padding:7px 4px;border-radius:8px;font-size:11px;font-weight:700;border:1px solid ${on?'#CA8A04':'rgba(255,255,255,.15)'};background:${on?'rgba(202,138,4,.22)':'transparent'};color:${on?'#fff':'rgba(255,255,255,.45)'};cursor:pointer">${lbl}</button>`;
       }).join('')}
@@ -10799,7 +11269,7 @@ function _relModalHtml() {
 // Troca o recorte sem refazer a busca: os dados já estão em _relData, muda só o que é
 // escrito a partir deles.
 function _relTrocarRecorte(rec) {
-  const novo = (rec === 'buf' || rec === 'dir') ? rec : '';
+  const novo = (rec === 'buf' || rec === 'dir' || rec === 'rx') ? rec : '';
   if (window._relRecorte === novo) return;
   window._relRecorte = novo;
   const modal = document.getElementById('_rel-modal');
@@ -10968,8 +11438,35 @@ function _relPDF() {
       ${dirTemQtd?`<div style="font-size:8pt;color:#888;margin:-10px 0 10px">Quantidade de rodízio e feijoada vendidos no período — o valor dela já está dentro do faturamento da loja.</div>`:''}
       ${dirForaCons?`<div style="font-size:8pt;color:#888;margin:-4px 0 16px">${dirForaCons.nome} aparece na lista mas não entra no faturamento total consolidado.</div>`:''}`;
 
+  // Tabela do recorte Raio-X: uma linha por loja com o panorama de pessoal e perdas, e
+  // abaixo o detalhe das lojas que têm o que detalhar. Mesmo _raioxDaLoja da tela.
+  const rxLojas = window._relRecorte === 'rx' ? _relRaioxDasLojas() : [];
+  const rxCel = (v, cor) => `<td style="padding:7px 8px;text-align:right;border-bottom:1px solid #f0f0f0;${cor?`color:${cor};font-weight:700`:''}">${v}</td>`;
+  const rxHtml = !rxLojas.length ? '' : `
+    <table><thead><tr><th>Loja</th><th>Equipe</th><th>Férias</th><th>Ocorr.</th><th>Banco (devidas)</th><th>Canceladas</th><th>Avarias</th><th>Caixa p/ conferir</th></tr></thead>
+    <tbody>${rxLojas.map(({ nome, x }) => `<tr>
+      <td style="padding:7px 10px;font-weight:600;border-bottom:1px solid #f0f0f0">${nome}</td>
+      ${rxCel(x.equipe.total)}
+      ${rxCel(x.ferias.total || '—')}
+      ${rxCel(x.ocor.total || '—', x.ocor.total ? '#b91c1c' : '')}
+      ${rxCel(x.bh.negativas ? '-' + _raioxHoras(x.bh.negativas) : '—', x.bh.negativas ? '#b91c1c' : '')}
+      ${rxCel(x.cancel.qtd ? x.cancel.qtd + ' · ' + _fmtBRLs(x.cancel.valor) : '—')}
+      ${rxCel(x.avarias.qtd ? _fmtBRLs(x.avarias.valor) : '—')}
+      ${rxCel(x.caixaSemConf.qtd || '—', x.caixaSemConf.qtd ? 'var(--txt-amber)' : '')}
+    </tr>`).join('')}</tbody></table>
+    ${rxLojas.filter(l => _relRaioxTemAlgo(l.x)).map(({ nome, x }) => `
+      <h2 class="sec">${nome}</h2>
+      <div style="font-size:9.5pt;line-height:1.6;margin-bottom:12px">
+        <b>Equipe:</b> ${Object.keys(x.equipe.porSetor).sort().map(st => `${st} ${x.equipe.porSetor[st]}`).join(' · ') || '—'}<br>
+        ${x.ferias.total ? `<b>Férias:</b> ${Object.keys(x.ferias.porSetor).sort().map(st => `${st} ${x.ferias.porSetor[st]}`).join(' · ')} — ${x.ferias.pessoas.map(p => p.nome).join(', ')}<br>` : ''}
+        ${x.ocor.total ? `<b>Ocorrências:</b> ${x.ocor.pessoas.map(p => `${p.nome} (${RAIOX_STATUS_DIA.concat(RAIOX_DOCS).filter(k => p[k]).map(k => RAIOX_ROTULO[k] + ' ' + p[k]).join(', ')})`).join(' · ')}<br>` : ''}
+        ${x.bh.graves.length ? `<b>Banco de horas:</b> ${x.bh.graves.slice(0, 6).map(g => `${g.nome} ${g.horas < 0 ? '-' : '+'}${_raioxHoras(g.horas)}${g.valor ? ' (' + _fmtBRL(g.valor) + ')' : ''}`).join(' · ')}<br>` : ''}
+        ${x.cancel.qtd ? `<b>Notas canceladas:</b> ${x.cancel.itens.map(c => `${_fmtBRL(c.valor)} ${c.motivo || '—'} — autorizado por ${c.autor || '—'}`).join(' · ')}<br>` : ''}
+      </div>`).join('')}
+    <div style="font-size:8pt;color:#888;margin:-4px 0 16px">Advertência e demissão são documento da semana, não status de dia — por isso não têm quebra por dia.</div>`;
+
   const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
-    <title>GN ${window._relRecorte === 'buf' ? 'Rodízio e Feijoada' : 'Gestão'} — ${perTipo} ${range.label}</title>
+    <title>GN ${window._relRecorte === 'buf' ? 'Rodízio e Feijoada' : window._relRecorte === 'rx' ? 'Raio-X' : 'Gestão'} — ${perTipo} ${range.label}</title>
     <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:11pt;color:var(--t1);background:var(--s2);padding:28px}
     h1{font-size:17pt;font-weight:800;color:#CA8A04;margin-bottom:2px}.sub{font-size:9pt;color:var(--t3);margin-bottom:20px}
     .kpi-row{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:20px}
@@ -10985,7 +11482,7 @@ function _relPDF() {
     table.mm thead th{text-align:right}table.mm thead th:first-child{text-align:left}
     @media print{body{padding:0}@page{margin:1.5cm}}</style>
   </head><body>
-    <h1>${window._relRecorte === 'buf' ? '🍽 GN Rodízio e Feijoada' : window._relRecorte === 'dir' ? 'GN Gestão' : '📊 GN Gestão'} — ${perTipo}</h1>
+    <h1>${window._relRecorte === 'buf' ? '🍽 GN Rodízio e Feijoada' : window._relRecorte === 'dir' ? 'GN Gestão' : window._relRecorte === 'rx' ? '🩻 GN Raio-X' : '📊 GN Gestão'} — ${perTipo}</h1>
     <div class="sub">${range.label} · gerado em ${dtGer}</div>
     <div class="kpi-row">
       ${window._relRecorte === 'buf' ? `
@@ -10996,7 +11493,7 @@ function _relPDF() {
       <div class="kpi"><div class="kpi-label">Lojas com dados</div><div class="kpi-val">${storesWithData}/${lojasDados.length}</div></div>
       <div class="kpi"><div class="kpi-label">Período</div><div class="kpi-val" style="font-size:10pt">${range.label}</div></div>`}
     </div>
-    ${window._relRecorte === 'buf' ? bufSoHtml : window._relRecorte === 'dir' ? dirHtml + mesesHtml : `<table><thead><tr><th>Loja</th><th>Faturamento</th><th>Δ vs Ant.</th><th>% Meta</th><th>Func.</th><th>R$/Func</th><th>🍖 Rodízio</th><th>🍲 Feijoada</th><th>CHK</th><th>Manut.</th></tr></thead>
+    ${window._relRecorte === 'buf' ? bufSoHtml : window._relRecorte === 'dir' ? dirHtml + mesesHtml : window._relRecorte === 'rx' ? rxHtml : `<table><thead><tr><th>Loja</th><th>Faturamento</th><th>Δ vs Ant.</th><th>% Meta</th><th>Func.</th><th>R$/Func</th><th>🍖 Rodízio</th><th>🍲 Feijoada</th><th>CHK</th><th>Manut.</th></tr></thead>
     <tbody>${rows}</tbody>${bufFoot}</table>
     <div style="font-size:8pt;color:#888;margin:-10px 0 16px">🍖 rodízio e 🍲 feijoada: quantidade vendida · valor — já incluído no faturamento da loja.</div>
     ${mesesHtml}`}
@@ -11149,12 +11646,95 @@ function _relTextoDirecao(wpp) {
   return txt;
 }
 
+// ── RECORTE "RAIO-X" ─────────────────────────────────────────────────────────────────
+//
+// O panorama de pessoal e perdas de cada loja, no período escolhido — o mesmo que o
+// painel do card mostra, só que de todas as lojas de uma vez e em texto. Sai do MESMO
+// _raioxDaLoja, então relatório e tela nunca divergem.
+//
+// Loja sem nada a relatar aparece numa linha só no fim, em vez de ocupar um bloco inteiro
+// pra dizer "0, 0, 0, 0" — num relatório de 12 lojas isso é metade do texto.
+function _relRaioxDasLojas() {
+  const { range, lojasDados, cancelPorLoja } = window._relData || {};
+  if (!range) return [];
+  return (lojasDados || []).map(l => ({
+    nome: l.nome, k: l.k,
+    x: _raioxDaLoja(l.k, range.dates, { cancel: cancelPorLoja || {} }),
+  }));
+}
+function _relRaioxTemAlgo(x) {
+  return !!(x.ocor.total || x.ferias.total || x.cancel.qtd || x.avarias.qtd
+            || x.bh.negativas || x.bh.positivas || x.caixaSemConf.qtd);
+}
+
+function _relTextoRaiox(wpp) {
+  const { range, perTipo, dtGer } = window._relData || {};
+  if (!range) return '';
+  const b = t => wpp ? `*${t}*` : t;
+  const i = t => wpp ? `_${t}_` : t;
+  const lojas = _relRaioxDasLojas();
+  const comAlgo = lojas.filter(l => _relRaioxTemAlgo(l.x));
+  const semNada = lojas.filter(l => !_relRaioxTemAlgo(l.x));
+  const setorLinha = mapa => Object.keys(mapa)
+    .sort((a, c) => mapa[c] - mapa[a] || a.localeCompare(c, 'pt-BR'))
+    .map(st => `${st} ${mapa[st]}`).join(' · ');
+
+  let txt = `🩻 ${b(`GN Raio-X — ${perTipo} ${range.label}`)}\n\n`;
+  // Totais da rede primeiro: é o que diz se o problema é de uma loja ou de todas.
+  const T = lojas.reduce((a, l) => ({
+    equipe: a.equipe + l.x.equipe.total, ferias: a.ferias + l.x.ferias.total,
+    ocor: a.ocor + l.x.ocor.total, cancelQtd: a.cancelQtd + l.x.cancel.qtd,
+    cancelVal: a.cancelVal + l.x.cancel.valor, avarias: a.avarias + l.x.avarias.valor,
+    bhNeg: a.bhNeg + l.x.bh.negativas, bhPos: a.bhPos + l.x.bh.positivas,
+  }), { equipe:0, ferias:0, ocor:0, cancelQtd:0, cancelVal:0, avarias:0, bhNeg:0, bhPos:0 });
+  txt += `👥 ${b('Equipe:')} ${T.equipe} · 🏖 ${b('Férias:')} ${T.ferias}\n`;
+  txt += `⚠ ${b('Ocorrências:')} ${T.ocor}\n`;
+  if (T.cancelQtd) txt += `🧾 ${b('Canceladas:')} ${T.cancelQtd} · ${_fmtBRL(T.cancelVal)}\n`;
+  if (T.avarias)   txt += `💥 ${b('Avarias:')} ${_fmtBRL(T.avarias)}\n`;
+  if (T.bhNeg || T.bhPos) txt += `⏱ ${b('Banco de horas:')} -${_raioxHoras(T.bhNeg)} devidas · +${_raioxHoras(T.bhPos)} a receber\n`;
+  txt += '\n';
+
+  comAlgo.forEach((l, ix) => {
+    if (ix > 0) txt += '\n';
+    const x = l.x;
+    txt += `📍 ${b(l.nome)} — 👥 ${x.equipe.total}\n`;
+    if (x.ferias.total) txt += `   🏖 Férias: ${x.ferias.total} (${setorLinha(x.ferias.porSetor)})\n`;
+    if (x.ocor.total) {
+      txt += `   ⚠ ${RAIOX_STATUS_DIA.concat(RAIOX_DOCS).filter(k => x.ocor[k]).map(k => `${RAIOX_ROTULO[k]} ${x.ocor[k]}`).join(' · ')}\n`;
+      // Só os nomes que concentram o problema — a lista inteira num relatório de rede
+      // vira um paredão, e quem lê quer saber onde olhar primeiro.
+      const topo = x.ocor.pessoas.slice(0, 3).map(p => p.nome).join(', ');
+      if (topo) txt += `      ${i(topo)}${x.ocor.pessoas.length > 3 ? i(` e mais ${x.ocor.pessoas.length - 3}`) : ''}\n`;
+    }
+    if (x.bh.negativas || x.bh.positivas) {
+      txt += `   ⏱ Banco: -${_raioxHoras(x.bh.negativas)} (${_fmtBRL(x.bh.valorNegativo)}) · +${_raioxHoras(x.bh.positivas)} (${_fmtBRL(x.bh.valorPositivo)})\n`;
+      const pior = x.bh.graves[0];
+      if (pior) txt += `      ${i(`maior saldo: ${pior.nome} ${pior.horas < 0 ? '-' : '+'}${_raioxHoras(pior.horas)}`)}\n`;
+    }
+    if (x.cancel.qtd) {
+      txt += `   🧾 Canceladas: ${x.cancel.qtd} · ${_fmtBRL(x.cancel.valor)}\n`;
+      x.cancel.itens.slice(0, 3).forEach(c => {
+        txt += `      ${_fmtBRL(c.valor)} — ${c.motivo || '—'} (${c.autor || '—'})\n`;
+      });
+      if (x.cancel.itens.length > 3) txt += `      ${i(`e mais ${x.cancel.itens.length - 3}`)}\n`;
+    }
+    if (x.avarias.qtd) txt += `   💥 Avarias: ${x.avarias.qtd} · ${_fmtBRL(x.avarias.valor)}\n`;
+    if (x.caixaSemConf.qtd) txt += `   🔍 Caixa por conferir: ${x.caixaSemConf.qtd}\n`;
+  });
+
+  if (semNada.length) txt += `\n✅ ${b('Sem ocorrência, férias, cancelamento nem avaria:')} ${semNada.map(l => l.nome).join(', ')}\n`;
+  txt += `\n${i('Advertência e demissão são documento da semana, não status de dia.')}`;
+  txt += `\n${i(`GN Operações · ${dtGer}`)}`;
+  return txt;
+}
+
 // Texto do relatório — usado tanto no "Compartilhar via WhatsApp" (mensagem) quanto no
 // "PDF no WhatsApp" (o mesmo conteúdo vira arquivo). wpp=false tira os asteriscos do
 // negrito, que no PDF apareceriam crus.
 function _relTexto(wpp) {
   if (window._relRecorte === 'buf') return _relTextoBuffet(wpp);
   if (window._relRecorte === 'dir') return _relTextoDirecao(wpp);
+  if (window._relRecorte === 'rx')  return _relTextoRaiox(wpp);
   const { range, perTipo, total, lojasDados, dtGer, metaFunc, metaFuncAtencao, mesesLabels, totaisMes } = window._relData || {};
   if (!range) return '';
   const b = t => wpp ? `*${t}*` : t;
@@ -11223,7 +11803,7 @@ async function _relPdfWhatsApp() {
   if (!range) return;
   fecharTelaSobreposta();
   await _compartilharPdfWpp(_relTexto(false),
-    `GN ${window._relRecorte === 'buf' ? 'Rodízio e Feijoada' : 'Gestão'} — ${perTipo} ${range.label}`);
+    `GN ${window._relRecorte === 'buf' ? 'Rodízio e Feijoada' : window._relRecorte === 'rx' ? 'Raio-X' : 'Gestão'} — ${perTipo} ${range.label}`);
 }
 
 function _relWhatsApp() {
