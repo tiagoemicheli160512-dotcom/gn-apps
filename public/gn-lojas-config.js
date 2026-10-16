@@ -227,11 +227,30 @@ window.trioLojaSlugByComKey = function(comKey) {
 // espalhados por 7 arquivos — bastava esquecer um pra deixar um app com
 // permissão inconsistente. Daqui pra frente, mudar o acesso de um cargo é
 // editar só aqui.
+// Cargo é texto livre em gn_usuarios, e comparar por igualdade literal já custou caro:
+// esta lista de reabertura nasceu com 'sub-gerente', 'subgerente' e 'sub gerente' — três
+// grafias que não existem em registro nenhum — enquanto o banco guarda 'sub_gerente'.
+// Os 18 sub-gerentes da rede ficaram sem reabrir caixa, sem excluir caixa aberto e sem
+// assinar cancelamento, cada um lendo na tela que o cargo deles não tinha permissão.
+// Ninguém reporta como bug o que parece regra da empresa.
+//
+// Daqui pra frente a comparação passa por aqui: hífen, underline, espaço e acento não
+// decidem permissão. A lista continua sendo a fonte de QUEM pode; o normalizador só
+// impede que a GRAFIA decida.
+window.gnCargoNorm = function (c) {
+  return String(c || '').toLowerCase().normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+};
+window.gnCargoEm = function (cargo, lista) {
+  const n = window.gnCargoNorm(cargo);
+  return !!n && (lista || []).some(c => window.gnCargoNorm(c) === n);
+};
+
 window.CARGOS_SUPERVISAO       = ['supervisor','administrador'];          // autorizações idênticas às do supervisor
 window.CARGOS_GESTAO           = ['gerente','sub_gerente','supervisor','administrador','compras','mestre']; // acesso amplo de gestão (app Lojas)
 window.CARGOS_MASTER_EQUIV     = ['mestre','supervisor','administrador','compras']; // bypass de restrição de horário/acesso (RH, Manutenção)
 window.CARGOS_INVENTARIO       = ['mestre','supervisor','administrador','admin','gerente']; // acesso ao GN Inventário
-window.CARGOS_REABRIR          = ['admin','administrador','gerente','sub-gerente','subgerente','sub gerente','supervisor','mestre']; // reabrir caixa fechado
+window.CARGOS_REABRIR          = ['admin','administrador','gerente','sub_gerente','supervisor','mestre']; // reabrir caixa fechado
 // Quem pode assinar um cancelamento (autorizar) e a declaração de "dia sem cancelamento".
 // Aponta pra CARGOS_REABRIR de propósito, em vez de repetir a lista: hoje é a mesma faixa
 // — quem responde pela loja — e duplicar o rol é como as duas versões divergem meses
