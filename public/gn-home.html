@@ -892,7 +892,8 @@ let _dashComissoesAll = null; // [{loja(comKey), all_data}]
 let _dashLojasAll     = null; // [{loja(comKey), all_data}] — avariasAll, caixa_conferencias
 let _dashBhCfg        = null; // {chkKey: {periodo_inicio, salariosSetor}}
 let _dashBhMesesRows  = null; // [{loja(chkKey), mes, registros:[{nome,horas,obs}]}]
-let _dashCancelPer    = null; // {lojaKey: [{data,valor,motivo,autor}]} — do período do Painel
+let _dashCancelPer    = null; // {lojaKey: [{data,valor,motivo,autor,foto}]} — do período do Painel
+let _dashDeclPer      = null; // {lojaKey: {caixas, declarados, abertos, responsaveis:[]}} — "dia sem cancelamento"
 let _dashFeriasGerencia = null; // {lojaKey: [{id, usuarioId, nome, cargo, inicio, fim}]} — períodos de férias (gn_lojas.all_data.ferias_gerencia)
 let _dashFeriasLoading = false;
 let _dashFeriasAno = new Date().getFullYear();
@@ -7931,6 +7932,29 @@ function _raioxMapearCancel(rows) {
   return porLoja;
 }
 
+// Quem assinou que NÃO houve cancelamento. Mora no próprio fechamento
+// (sem_cancelamento_por), gravado pelo app Caixa, e vem na mesma consulta dos
+// cancelamentos — a data está no fechamento, então a linha já estava sendo lida.
+//
+// Conta por CAIXA, não por dia: um dia pode ter dois turnos, cada um com seu fechamento e
+// sua própria assinatura. Dizer "2 dias declarados" quando foram os dois turnos do mesmo
+// dia seria inventar um dia que não existiu.
+function _raioxMapearDecl(rows) {
+  const porLoja = {};
+  (rows || []).forEach(fech => {
+    const lk = _normLoja(fech.loja);
+    if (!LOJAS_LISTA.includes(lk)) return;
+    const d = porLoja[lk] = porLoja[lk] || { caixas: 0, declarados: 0, abertos: 0, responsaveis: [], quando: null };
+    if (fech.status === 'FECHADO') d.caixas++; else { d.abertos++; return; }
+    if (!fech.sem_cancelamento_por) return;
+    d.declarados++;
+    const nome = String(fech.sem_cancelamento_por).trim();
+    if (nome && !d.responsaveis.includes(nome)) d.responsaveis.push(nome);
+    if (fech.sem_cancelamento_em && (!d.quando || fech.sem_cancelamento_em > d.quando)) d.quando = fech.sem_cancelamento_em;
+  });
+  return porLoja;
+}
+
 // ── RAIO-X: a faixa no card da loja ──────────────────────────────────────────────────
 //
 // O grid dos cards é de 2 colunas: cada card tem ~180px no celular e já carrega nome,
@@ -8240,7 +8264,7 @@ async function _loadDashAll() {
       // Cancelamentos do período, aninhados no fechamento porque a DATA mora no
       // fechamento e não no cancelamento — mesma forma da consulta de funcionário extra
       // em _renderMesAnteriorHome.
-      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${range.dates[0]}&data=lte.${range.dates[range.dates.length-1]}&select=loja,data,gn_caixa_cancelamento(valor,motivo,autorizado_por,foto)`, H, 'dash:cancelRows', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${range.dates[0]}&data=lte.${range.dates[range.dates.length-1]}&select=loja,data,turno,status,sem_cancelamento_por,sem_cancelamento_em,gn_caixa_cancelamento(valor,motivo,autorizado_por,foto)`, H, 'dash:cancelRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?status=eq.FECHADO&data=gte.${from30}&select=id,loja,data,turno`, H, 'dash:caixaFechadosRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_alertas_urgentes?order=criado_em.desc&limit=50&select=id,loja,criado_por,criado_em,resolvido,resolvido_por,resolvido_em,motivo,cargos`, H, 'dash:alertasUrgentesRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_chk_visitas?data=gte.${from14}&data=lt.${hoje}&select=loja,data,hora_chegada`, H, 'dash:visitasPassadasRows', []),
@@ -8498,6 +8522,7 @@ async function _loadDashAll() {
     _dashBhCfg        = bhPorLoja || {};
     _dashBhMesesRows  = bhMesesRows || [];
     _dashCancelPer = _raioxMapearCancel(cancelRows);
+    _dashDeclPer   = _raioxMapearDecl(cancelRows);
     const spark={}; LOJAS_LISTA.forEach(k=>{spark[k]=[(fat3[k]||0),(fat2[k]||0),(fatPrv[k]||0),(fatCur[k]||0)];});
     _dashSparkData=spark;
     _dashAlertasUrgentes = alertasUrgentesRows || [];
@@ -8515,7 +8540,7 @@ async function _loadDashAll() {
     _dashContratosVencendo=_dashContratosVencendo||{}; _dashManutParada=_dashManutParada||{};
     _dashCaixaSemConferencia=_dashCaixaSemConferencia||{};
     _dashComissoesAll=_dashComissoesAll||[]; _dashLojasAll=_dashLojasAll||[];
-    _dashBhCfg=_dashBhCfg||{}; _dashBhMesesRows=_dashBhMesesRows||[]; _dashCancelPer=_dashCancelPer||{};
+    _dashBhCfg=_dashBhCfg||{}; _dashBhMesesRows=_dashBhMesesRows||[]; _dashCancelPer=_dashCancelPer||{}; _dashDeclPer=_dashDeclPer||{};
     _dashVisitasHoje=_dashVisitasHoje||{};
     _dashAlertasUrgentes=_dashAlertasUrgentes||[];
     _dashPendenciasEssenciais=_dashPendenciasEssenciais||{};
@@ -10719,7 +10744,25 @@ function _cancelMacroDados() {
     qtd: lojas.reduce((a, l) => a + l.itens.length, 0),
     valor: lojas.reduce((a, l) => a + l.valor, 0),
     semFoto: lojas.reduce((a, l) => a + l.semFoto, 0),
-    lojasSemNada: lojasDaRegra.filter(k => !(porLoja[k] || []).length).map(k => LOJA_DISPLAY[k] || k),
+    // Loja sem cancelamento no período não é uma coisa só. Pedido do dono: mostrar que
+    // não teve E quem confirmou. Então cada uma é classificada pelo que o caixa diz:
+    //   'declarado'  — todos os caixas fechados foram assinados: não houve, com nome
+    //   'parcial'    — parte assinada, parte fechada sem ninguém responder
+    //   'sem_info'   — fechou e ninguém assinou nem lançou (caixa anterior ao controle)
+    //   'sem_caixa'  — nenhum caixa fechado no período (nada a declarar ainda)
+    // Juntar tudo em "sem cancelamento" é o mesmo erro de pintar silêncio de verde.
+    semCancel: lojasDaRegra.filter(k => !(porLoja[k] || []).length).map(k => {
+      const d = (_dashDeclPer || {})[k] || { caixas: 0, declarados: 0, abertos: 0, responsaveis: [] };
+      const estado = !d.caixas ? 'sem_caixa'
+        : d.declarados === 0 ? 'sem_info'
+        : d.declarados < d.caixas ? 'parcial'
+        : 'declarado';
+      return { k, nome: LOJA_DISPLAY[k] || k, estado, ...d };
+    }).sort((a, b2) => {
+      // Quem não respondeu primeiro: é o que pede ação.
+      const ordem = { sem_info: 0, parcial: 1, sem_caixa: 2, declarado: 3 };
+      return ordem[a.estado] - ordem[b2.estado] || a.nome.localeCompare(b2.nome, 'pt-BR');
+    }),
     nLojas: lojasDaRegra.length,
   };
 }
@@ -10747,7 +10790,8 @@ function _buildCancelPanel() {
   if (!d.qtd) {
     return _reportBtnsRowHtml('Cancel') + kpis +
       `<div class="att-item"><div><div class="att-nm">Nenhuma nota cancelada em ${esc(periodo)}</div>
-        <div class="att-rs">Nenhuma das ${d.nLojas} lojas lançou cancelamento neste período.</div></div></div>`;
+        <div class="att-rs">Nenhuma das ${d.nLojas} lojas lançou cancelamento neste período.</div></div></div>`
+      + _cancelSemNadaHtml(d);
   }
 
   const blocos = d.lojas.map(l => `
@@ -10772,11 +10816,47 @@ function _buildCancelPanel() {
       </div>`).join('')}
     </div>`).join('');
 
-  const semNada = d.lojasSemNada.length
-    ? `<div style="font-size:10.5px;color:var(--t3);line-height:1.5;margin-top:2px">
-        <b style="color:var(--t2)">Sem cancelamento no período:</b> ${d.lojasSemNada.map(esc).join(', ')}</div>`
-    : '';
-  return _reportBtnsRowHtml('Cancel') + kpis + blocos + semNada;
+  return _reportBtnsRowHtml('Cancel') + kpis + blocos + _cancelSemNadaHtml(d);
+}
+
+// As lojas que não tiveram cancelamento, com quem confirmou. Pedido do dono: "as lojas
+// que não tiveram, aparecer a informação que não teve cancelamento e quem confirmou".
+// A assinatura é o que transforma um silêncio numa resposta — por isso loja que fechou o
+// caixa sem ninguém assinar sai em âmbar, não junto das que responderam.
+const _CANCEL_ESTADO = {
+  declarado: { cor: 'var(--txt-green)', ico: '✓' },
+  parcial:   { cor: 'var(--txt-amber)', ico: '!' },
+  sem_info:  { cor: 'var(--txt-amber)', ico: '?' },
+  sem_caixa: { cor: 'var(--t4)',        ico: '—' },
+};
+function _cancelSemNadaHtml(d) {
+  if (!d.semCancel.length) return '';
+  const esc = s => window.escapeHtml(String(s == null ? '' : s));
+  const nomes = l => l.responsaveis.length
+    ? l.responsaveis.map(esc).join(', ')
+    : '—';
+  const cx = n => n + ' caixa' + (n === 1 ? '' : 's');
+  const frase = l => {
+    if (l.estado === 'declarado') return `Confirmado por <b style="color:var(--t1)">${nomes(l)}</b> · ${cx(l.declarados)}`;
+    if (l.estado === 'parcial')   return `Confirmado por <b style="color:var(--t1)">${nomes(l)}</b> em ${l.declarados} de ${cx(l.caixas)} — ${l.caixas - l.declarados} sem ninguém responder`;
+    if (l.estado === 'sem_info')  return `${cx(l.caixas)} fechado${l.caixas === 1 ? '' : 's'} sem ninguém confirmar que não houve cancelamento`;
+    return 'Nenhum caixa fechado no período';
+  };
+  return `<div style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid var(--txt-green);border-radius:14px;padding:12px 14px;margin-bottom:10px">
+    <div style="font-size:9px;font-weight:800;color:var(--t4);letter-spacing:1.2px;text-transform:uppercase;margin-bottom:7px">
+      Sem cancelamento · ${d.semCancel.length} loja${d.semCancel.length === 1 ? '' : 's'}</div>
+    ${d.semCancel.map(l => {
+      const e = _CANCEL_ESTADO[l.estado];
+      return `<div style="display:flex;gap:8px;padding:6px 0;border-top:1px solid var(--b1)">
+        <span style="color:${e.cor};font-weight:800;font-size:12px;flex-shrink:0;width:12px;text-align:center">${e.ico}</span>
+        <div style="min-width:0;flex:1">
+          <div style="font-size:11.5px;font-weight:700;color:var(--t1)">${esc(l.nome)}</div>
+          <div style="font-size:9.5px;color:var(--t3);line-height:1.4">${frase(l)}</div>
+        </div></div>`;
+    }).join('')}
+    ${d.semCancel.some(l => l.abertos) ? `<div style="font-size:9.5px;color:var(--t3);margin-top:7px;line-height:1.45">
+      Caixa ainda aberto não entra nesta conta — a resposta dele só existe quando fecha.</div>` : ''}
+  </div>`;
 }
 
 // Foto em tela cheia. Registrada como tela sobreposta pra o "voltar" do celular fechar a
@@ -10804,6 +10884,7 @@ function _cancelRelatorioTexto(wpp) {
   let msg = `${wpp ? '🧾 ' : ''}${b(`NOTAS CANCELADAS — ${periodo}`)}\n\n`;
   if (!d.qtd) {
     msg += `Nenhuma das ${d.nLojas} lojas lançou cancelamento neste período.\n`;
+    msg += _cancelRelatorioSemNada(d, wpp);
     return { msg, titulo: `Notas canceladas — ${periodo}` };
   }
   msg += `${b(`Total: ${_fmtBRL(d.valor)}`)} em ${d.qtd} nota${d.qtd === 1 ? '' : 's'}, ${d.lojas.length} loja${d.lojas.length === 1 ? '' : 's'}\n`;
@@ -10816,10 +10897,36 @@ function _cancelRelatorioTexto(wpp) {
       msg += `   ${_fmtBRL(c.valor)} — ${c.motivo || '—'} · ${c.autor || '—'} · ${dia}${c.foto ? '' : ' · sem foto'}\n`;
     });
   });
-  if (d.lojasSemNada.length) msg += `\n${i('Sem cancelamento no período:')} ${d.lojasSemNada.join(', ')}\n`;
+  msg += _cancelRelatorioSemNada(d, wpp);
   if (d.semFoto) msg += `\n${i('As notas sem foto foram lançadas antes da foto do cupom passar a ser exigida.')}\n`;
   return { msg, titulo: `Notas canceladas — ${periodo}` };
 }
+// No relatório a loja que não teve cancelamento vale tanto quanto a que teve: é ela que
+// responde "e as outras?". Com o nome de quem confirmou, vira uma afirmação com dono; sem
+// ninguém ter confirmado, vira uma cobrança — e as duas coisas precisam estar separadas.
+function _cancelRelatorioSemNada(d, wpp) {
+  if (!d.semCancel.length) return '';
+  const b = t => wpp ? `*${t}*` : t;
+  const i = t => wpp ? `_${t}_` : t;
+  const cx = n => n + ' caixa' + (n === 1 ? '' : 's');
+  const porEstado = e => d.semCancel.filter(l => l.estado === e);
+  let out = `\n${wpp ? '✅ ' : ''}${b('Sem cancelamento no período:')}\n`;
+  porEstado('declarado').forEach(l => {
+    out += `   ${l.nome} — confirmado por ${l.responsaveis.join(', ') || '—'} (${cx(l.declarados)})\n`;
+  });
+  porEstado('parcial').forEach(l => {
+    out += `   ${l.nome} — confirmado por ${l.responsaveis.join(', ') || '—'} em ${l.declarados} de ${cx(l.caixas)}; ${l.caixas - l.declarados} sem resposta\n`;
+  });
+  const semInfo = porEstado('sem_info');
+  if (semInfo.length) {
+    out += `\n${wpp ? '⚠ ' : ''}${b('Fechou sem ninguém confirmar:')}\n`;
+    semInfo.forEach(l => { out += `   ${l.nome} — ${cx(l.caixas)}\n`; });
+  }
+  const semCaixa = porEstado('sem_caixa');
+  if (semCaixa.length) out += `\n${i('Sem caixa fechado no período:')} ${semCaixa.map(l => l.nome).join(', ')}\n`;
+  return out;
+}
+
 function gerarWppCancel() {
   if (!_dashCancelPer) { alert('Aguarde os dados carregarem.'); return; }
   window.open('https://wa.me/?text=' + encodeURIComponent(_cancelRelatorioTexto(true).msg), '_blank');
