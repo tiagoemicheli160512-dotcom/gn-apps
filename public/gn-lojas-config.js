@@ -469,3 +469,28 @@ function calcSemana(wd, saldoAnt = 0) {
   });
   return { dias, funcCalc: ff, baseTotal, poolRateio, saldoAnt, saldoTotal, efetivo, retido, nAtivos, pct: saldoTotal > 0 ? efetivo / saldoTotal : 0 };
 }
+
+// ── BANCO DE HORAS — valor da hora ───────────────────────────────────────────────────
+//
+// Estava só em gn-checklist.html, onde o banco de horas é lançado. Quando o Painel de
+// Gestão passou a mostrar o saldo de horas das lojas, a escolha era duplicar a constante
+// ou trazer a conta pra cá. Duplicar número de folha de pagamento em dois arquivos é
+// como o 0,5 vira 0,6 num lado só, meses depois, sem ninguém perceber.
+//
+// A regra: salário do SETOR dividido por 220 dá a hora. Hora positiva (extra) é paga com
+// o adicional; hora negativa é descontada pelo valor cheio, sem adicional — quem deve
+// hora não deve hora extra.
+window.GN_BH_ADICIONAL_EXTRA = 0.5;
+window.GN_BH_HORAS_MES = 220;
+
+window.gnBhValorHora = function (salarioSetor) {
+  const s = parseFloat(salarioSetor) || 0;
+  return s > 0 ? s / window.GN_BH_HORAS_MES : 0;
+};
+
+window.gnBhValorHoras = function (horas, valorHora) {
+  const h = parseFloat(horas) || 0;
+  const v = parseFloat(valorHora) || 0;
+  if (v <= 0 || !h) return 0;
+  return h > 0 ? h * v * (1 + window.GN_BH_ADICIONAL_EXTRA) : Math.abs(h) * v;
+};
