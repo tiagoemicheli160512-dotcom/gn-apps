@@ -7747,6 +7747,7 @@ function _raioxVazio() {
     ferias: { total: 0, porSetor: {}, pessoas: [] },
     ocor: { total: 0, FALTA: 0, ATESTADO: 0, 'SUSPENSÃO': 0, ADVERTENCIA: 0, DEMISSAO: 0, porDia: {}, pessoas: [] },
     bh: { positivas: 0, negativas: 0, valorPositivo: 0, valorNegativo: 0, graves: [], semSalario: false },
+    escala: { semanas: 0, semRegistro: 0 },
     cancel: { qtd: 0, valor: 0, itens: [] },
     avarias: { qtd: 0, valor: 0 },
     caixaSemConf: { qtd: 0, itens: [] },
@@ -7794,6 +7795,14 @@ function _raioxDaLoja(lojaKey, dates, opts) {
     // Conferido no banco: documento mora na semana em que foi anexado — a Jessica
     // (Pedreira) tem duas, nas semanas 33 e 37, não em 33,34,35,36,37.
     const semanaSalva = !!allData[String(idx)];
+    // Semana sem escala lançada não tem ocorrência pra contar — e isso NÃO é o mesmo que
+    // "não houve ocorrência". Medido no banco: em agosto, Campo Grande ficou com 2 das 5
+    // semanas em branco e o resultado foi ZERO falta no mês, enquanto as outras lojas
+    // marcaram de 4 a 20. Zero falta num mês inteiro não é mês impecável, é escala que
+    // não foi lançada. Quem lê o raio-x precisa saber a diferença, senão o silêncio da
+    // loja que não preenche vira o melhor número do Painel.
+    r.escala.semanas++;
+    if (!semanaSalva) r.escala.semRegistro++;
     funcs.forEach(f => {
       const nome = (f.nome || '').trim();
       if (!nome) return;
@@ -7962,6 +7971,10 @@ function _raioxFaixaCard(lojaKey) {
     `${x.avarias.qtd} avaria(s) — ${_fmtBRL(x.avarias.valor)}`));
   if (x.caixaSemConf.qtd) chips.push(chip('🔍', x.caixaSemConf.qtd, 'var(--txt-amber)',
     `${x.caixaSemConf.qtd} caixa(s) fechado(s) sem conferência`));
+  // Sem este chip, a loja que não lança escala aparece com os mesmos zeros da loja que
+  // não teve ocorrência nenhuma — e fica parecendo a melhor do Painel.
+  if (x.escala.semRegistro) chips.push(chip('?', `${x.escala.semRegistro}sem`, 'var(--txt-amber)',
+    `${x.escala.semRegistro} de ${x.escala.semanas} semana(s) do período sem escala lançada`));
   return `<div onclick="event.stopPropagation();_raioxAbrir('${lojaKey}')" title="Abrir o raio-x da loja"
     style="display:flex;flex-wrap:wrap;gap:3px;margin-top:5px;font-size:9px;font-weight:700;cursor:pointer;line-height:1.5">
     ${chips.join('')}</div>`;
@@ -8086,8 +8099,14 @@ function _raioxHtml() {
   // ── Ocorrências ─────────────────────────────────────────────────────────────
   const tiposComAlgo = RAIOX_STATUS_DIA.concat(RAIOX_DOCS).filter(k => x.ocor[k]);
   const diasComAlgo = Object.keys(x.ocor.porDia).sort();
+  const avisoEscala = !x.escala.semRegistro ? '' :
+    `<div style="font-size:10.5px;color:var(--txt-amber);font-weight:700;line-height:1.45;margin-top:7px">
+      ${x.escala.semRegistro} de ${x.escala.semanas} semana${x.escala.semanas > 1 ? 's' : ''} do período está sem escala lançada —
+      o que houve nelas não entra nesta conta.</div>`;
   const ocorHtml = !x.ocor.total
-    ? `<div style="font-size:11px;color:var(--txt-green);font-weight:700">Nenhuma ocorrência no período.</div>`
+    ? (x.escala.semRegistro
+        ? `<div style="font-size:11px;color:var(--t2);font-weight:700">Nada lançado no período.</div>${avisoEscala}`
+        : `<div style="font-size:11px;color:var(--txt-green);font-weight:700">Nenhuma ocorrência no período.</div>`)
     : `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px">${tiposComAlgo.map(k =>
         `<span style="background:rgba(232,88,10,.10);border-radius:6px;padding:3px 7px;font-size:10.5px;color:var(--t2)">
           ${RAIOX_ROTULO[k]} <b style="color:var(--t1)">${x.ocor[k]}</b></span>`).join('')}</div>
@@ -8099,7 +8118,8 @@ function _raioxHtml() {
         RAIOX_STATUS_DIA.concat(RAIOX_DOCS).filter(k => p[k]).map(k => `${RAIOX_ROTULO[k]} ${p[k]}`).join(' · '),
         esc(p.setor))).join('')}
       ${x.ocor.ADVERTENCIA || x.ocor.DEMISSAO ? `<div style="font-size:9.5px;color:var(--t3);margin-top:7px;line-height:1.45">
-        Advertência e demissão são documento da semana, não status de dia — por isso não aparecem na lista por dia.</div>` : ''}`;
+        Advertência e demissão são documento da semana, não status de dia — por isso não aparecem na lista por dia.</div>` : ''}
+      ${avisoEscala}`;
 
   // ── Banco de horas ──────────────────────────────────────────────────────────
   const bhHtml = (!x.bh.negativas && !x.bh.positivas)
@@ -8142,7 +8162,8 @@ function _raioxHtml() {
     ${_raioxSecao(`Férias · ${x.ferias.total}`, x.ferias.total
       ? _raioxPorSetor(x.ferias.porSetor) + `<div style="font-size:10.5px;color:var(--t3);margin-top:6px">${x.ferias.pessoas.map(p => esc(p.nome)).join(' · ')}</div>`
       : `<div style="font-size:11px;color:var(--t3)">Ninguém de férias no período.</div>`, '#0EA5E9')}
-    ${_raioxSecao(`Ocorrências · ${x.ocor.total}`, ocorHtml, x.ocor.total ? '#E8580A' : 'var(--txt-green)')}
+    ${_raioxSecao(`Ocorrências · ${x.ocor.total}`, ocorHtml,
+      x.ocor.total ? '#E8580A' : x.escala.semRegistro ? 'var(--txt-amber)' : 'var(--txt-green)')}
     ${_raioxSecao('Banco de horas', bhHtml, x.bh.negativas ? 'var(--txt-red)' : 'var(--t4)')}
     ${_raioxSecao(`Notas canceladas · ${x.cancel.qtd}`, cancelHtml, x.cancel.qtd ? '#E8580A' : 'var(--t4)')}
     ${_raioxSecao(`Avarias e perdas · ${x.avarias.qtd}`, x.avarias.qtd
@@ -11443,7 +11464,7 @@ function _relPDF() {
   const rxLojas = window._relRecorte === 'rx' ? _relRaioxDasLojas() : [];
   const rxCel = (v, cor) => `<td style="padding:7px 8px;text-align:right;border-bottom:1px solid #f0f0f0;${cor?`color:${cor};font-weight:700`:''}">${v}</td>`;
   const rxHtml = !rxLojas.length ? '' : `
-    <table><thead><tr><th>Loja</th><th>Equipe</th><th>Férias</th><th>Ocorr.</th><th>Banco (devidas)</th><th>Canceladas</th><th>Avarias</th><th>Caixa p/ conferir</th></tr></thead>
+    <table><thead><tr><th>Loja</th><th>Equipe</th><th>Férias</th><th>Ocorr.</th><th>Banco (devidas)</th><th>Canceladas</th><th>Avarias</th><th>Caixa p/ conferir</th><th>Semanas sem escala</th></tr></thead>
     <tbody>${rxLojas.map(({ nome, x }) => `<tr>
       <td style="padding:7px 10px;font-weight:600;border-bottom:1px solid #f0f0f0">${nome}</td>
       ${rxCel(x.equipe.total)}
@@ -11453,6 +11474,7 @@ function _relPDF() {
       ${rxCel(x.cancel.qtd ? x.cancel.qtd + ' · ' + _fmtBRLs(x.cancel.valor) : '—')}
       ${rxCel(x.avarias.qtd ? _fmtBRLs(x.avarias.valor) : '—')}
       ${rxCel(x.caixaSemConf.qtd || '—', x.caixaSemConf.qtd ? 'var(--txt-amber)' : '')}
+      ${rxCel(x.escala.semRegistro ? x.escala.semRegistro + '/' + x.escala.semanas : '—', x.escala.semRegistro ? '#b91c1c' : '')}
     </tr>`).join('')}</tbody></table>
     ${rxLojas.filter(l => _relRaioxTemAlgo(l.x)).map(({ nome, x }) => `
       <h2 class="sec">${nome}</h2>
@@ -11663,8 +11685,10 @@ function _relRaioxDasLojas() {
   }));
 }
 function _relRaioxTemAlgo(x) {
+  // Escala em branco conta como "tem algo a dizer": a loja que não lançou não pode ir
+  // pra linha de "sem ocorrência nenhuma" junto com quem lançou e não teve nada.
   return !!(x.ocor.total || x.ferias.total || x.cancel.qtd || x.avarias.qtd
-            || x.bh.negativas || x.bh.positivas || x.caixaSemConf.qtd);
+            || x.bh.negativas || x.bh.positivas || x.caixaSemConf.qtd || x.escala.semRegistro);
 }
 
 function _relTextoRaiox(wpp) {
@@ -11720,6 +11744,7 @@ function _relTextoRaiox(wpp) {
     }
     if (x.avarias.qtd) txt += `   💥 Avarias: ${x.avarias.qtd} · ${_fmtBRL(x.avarias.valor)}\n`;
     if (x.caixaSemConf.qtd) txt += `   🔍 Caixa por conferir: ${x.caixaSemConf.qtd}\n`;
+    if (x.escala.semRegistro) txt += `   ❓ ${x.escala.semRegistro} de ${x.escala.semanas} semana(s) sem escala lançada — o que houve nelas não entra.\n`;
   });
 
   if (semNada.length) txt += `\n✅ ${b('Sem ocorrência, férias, cancelamento nem avaria:')} ${semNada.map(l => l.nome).join(', ')}\n`;
