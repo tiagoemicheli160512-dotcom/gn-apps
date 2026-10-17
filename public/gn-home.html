@@ -7966,8 +7966,12 @@ function _raioxMapearDecl(rows) {
     const marca = { data: fech.data, turno: fech.turno || '' };
     if (!fech.sem_cancelamento_por) { d.datasFalta.push(marca); return; }
     d.declarados++;
-    d.datasOk.push(marca);
     const nome = String(fech.sem_cancelamento_por).trim();
+    // O nome viaja junto com a DATA, não só na lista de responsáveis da loja. Sem isso o
+    // card dizia "confirmado por Cassia, Augusto em 2 de 5 caixas" — dá pra saber que
+    // dois caixas foram respondidos, mas não QUAIS, nem quem respondeu cada um. Nova
+    // América tinha 15/10 (Cassia) e 16/10 (Augusto) e as duas datas não apareciam.
+    d.datasOk.push(Object.assign({ por: nome }, marca));
     if (nome && !d.responsaveis.includes(nome)) d.responsaveis.push(nome);
     if (fech.sem_cancelamento_em && (!d.quando || fech.sem_cancelamento_em > d.quando)) d.quando = fech.sem_cancelamento_em;
   });
@@ -10881,18 +10885,26 @@ function _cancelPorCategoriaHtml(d) {
 // Dia com TODOS os fechamentos na lista sai só como data; dia com parte sai com o turno,
 // porque "14/10" quando só a noite ficou sem resposta mandaria cobrar o dia inteiro.
 // `todos` é o universo de fechamentos da loja, pra saber o que é "todos daquele dia".
-function _cancelDatas(lista, todos) {
+// `escQuem`, quando vem, liga cada data a quem assinou aquele caixa — e é A FUNÇÃO DE
+// ESCAPE do chamador, não um booleano: estes nomes vêm do banco e esta saída entra
+// direto no HTML do card. Quem monta texto puro (relatório/WhatsApp) passa a identidade.
+function _cancelDatas(lista, todos, escQuem) {
   if (!lista || !lista.length) return '';
   const porDiaTotal = {};
   (todos || lista).forEach(x => { (porDiaTotal[x.data] = porDiaTotal[x.data] || []).push(x.turno); });
   const porDia = {};
-  lista.forEach(x => { (porDia[x.data] = porDia[x.data] || []).push(x.turno); });
+  lista.forEach(x => { (porDia[x.data] = porDia[x.data] || []).push(x); });
   const dm = iso => String(iso || '').slice(8, 10) + '/' + String(iso || '').slice(5, 7);
   const partes = Object.keys(porDia).sort().map(dia => {
     const doDia = porDia[dia], noDia = porDiaTotal[dia] || doDia;
-    if (doDia.length >= noDia.length) return dm(dia);
-    const turnos = doDia.filter(Boolean);
-    return turnos.length ? `${dm(dia)} (${turnos.join(' e ')})` : dm(dia);
+    const turnos = doDia.map(x => x.turno).filter(Boolean);
+    // Dia com dois fechamentos e só um deles nesta lista: nomeia o turno, senão "14/10"
+    // afirmaria que o dia inteiro está na mesma situação.
+    const base = (doDia.length < noDia.length && turnos.length)
+      ? `${dm(dia)} (${turnos.join(' e ')})` : dm(dia);
+    if (!escQuem) return base;
+    const quem = [...new Set(doDia.map(x => x.por).filter(Boolean))].map(escQuem);
+    return quem.length ? `${base} por ${quem.join(' e ')}` : base;
   });
   // Mês inteiro com muitos buracos viraria um paredão; o que passa de 6 vira contagem.
   if (partes.length > 6) return partes.slice(0, 6).join(', ') + ` e mais ${partes.length - 6}`;
@@ -10927,7 +10939,9 @@ function _cancelSemNadaHtml(d) {
     const periodo = _cancelPeriodoDatas(l.datasOk);
     const faltam = _cancelDatas(l.datasFalta, todos(l));
     if (l.estado === 'declarado') return `Confirmado por <b style="color:var(--t1)">${nomes(l)}</b> · ${cx(l.declarados)}${periodo ? `, ${periodo}` : ''}`;
-    if (l.estado === 'parcial')   return `Confirmado por <b style="color:var(--t1)">${nomes(l)}</b> em ${l.declarados} de ${cx(l.caixas)}.<br><b style="color:var(--txt-amber)">Sem resposta em ${faltam}</b>`;
+    // As duas metades mostram DATA: as que foram confirmadas (com quem) e as que ficaram
+    // sem resposta. Só a contagem de um lado deixava o registro de 15/10 e 16/10 invisível.
+    if (l.estado === 'parcial')   return `Confirmado em <b style="color:var(--t1)">${_cancelDatas(l.datasOk, todos(l), esc)}</b> · ${l.declarados} de ${cx(l.caixas)}.<br><b style="color:var(--txt-amber)">Sem resposta em ${faltam}</b>`;
     if (l.estado === 'sem_info')  return `${cx(l.caixas)} fechado${l.caixas === 1 ? '' : 's'} sem ninguém confirmar que não houve cancelamento.<br><b style="color:var(--txt-amber)">Sem resposta em ${faltam}</b>`;
     return 'Nenhum caixa fechado no período';
   };
@@ -11022,7 +11036,7 @@ function _cancelRelatorioSemNada(d, wpp) {
     out += `   ${l.nome} — confirmado por ${l.responsaveis.join(', ') || '—'} (${cx(l.declarados)}${per ? ', ' + per : ''})\n`;
   });
   porEstado('parcial').forEach(l => {
-    out += `   ${l.nome} — confirmado por ${l.responsaveis.join(', ') || '—'} em ${l.declarados} de ${cx(l.caixas)}; sem resposta em ${_cancelDatas(l.datasFalta, todos(l))}\n`;
+    out += `   ${l.nome} — confirmado em ${_cancelDatas(l.datasOk, todos(l), x => x)} (${l.declarados} de ${cx(l.caixas)}); sem resposta em ${_cancelDatas(l.datasFalta, todos(l))}\n`;
   });
   const semInfo = porEstado('sem_info');
   if (semInfo.length) {
