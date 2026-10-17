@@ -1084,9 +1084,20 @@ select option { background: var(--graf2); color: var(--txt); }
           <label>Valor</label>
           <input id="cancelVal" type="text" inputmode="decimal" placeholder="0,00">
         </div>
+        <!-- Categoria é o eixo do relatório; o detalhe abaixo é o caso. Antes havia só o
+             campo livre, com a dica "Ex: pedido trocado" — que ensinava a resposta vaga
+             e foi exatamente o que voltou ("Troca de pedido", "Falta"). As opções saem de
+             GN_CANCEL_CATEGORIAS (gn-lojas-config.js), montadas a partir dos motivos
+             reais já registrados. -->
         <div class="form-group">
-          <label>Motivo</label>
-          <input id="cancelMotivo" type="text" placeholder="Ex: pedido trocado">
+          <label>Categoria</label>
+          <select id="cancelCategoria"></select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>O que aconteceu</label>
+          <input id="cancelMotivo" type="text" placeholder="Ex: trocou o rodízio por meia porção">
         </div>
       </div>
       <!-- Nome + senha, não texto livre: o nome gravado passa a ser o que a validação
@@ -1899,6 +1910,14 @@ function renderTudo() {
   // inteira some pra quem não usa, em vez de ficar um campo morto na tela de fechamento.
   const secCancel = $('secCancel');
   if (secCancel) secCancel.style.display = gnCancelamentoLiberado(S.loja) ? '' : 'none';
+  // Opções da categoria: montadas uma vez, a partir da lista compartilhada. A primeira é
+  // um placeholder sem valor, pra ninguém gravar "Troca de pedido" por ser o que estava
+  // na tela — a escolha tem que ser um ato.
+  const selCat = $('cancelCategoria');
+  if (selCat && !selCat.options.length) {
+    selCat.innerHTML = '<option value="">Escolha…</option>' +
+      (window.GN_CANCEL_CATEGORIAS || []).map(c => `<option value="${escHtmlCx(c)}">${escHtmlCx(c)}</option>`).join('');
+  }
   const listaCancel = $('listaCancel');
   if (listaCancel) {
     // Foto do cupom: botão pra anexar, miniatura quando já tem, e o aviso quando falta —
@@ -1916,7 +1935,7 @@ function renderTudo() {
         </div>`
       : `<div style="flex:0 0 100%;font-size:11px;color:var(--err);margin-top:3px;font-weight:600">⚠️ Sem foto do cupom — trava o fechamento</div>`;
     listaCancel.innerHTML = S.cancel.length ? S.cancel.slice().reverse().map(x =>
-      `<div class="linha-item" style="flex-wrap:wrap"><div class="desc">${escHtmlCx(x.motivo || '—')}<small>Autorizado por ${escHtmlCx(x.autorizado_por || '—')}</small></div>
+      `<div class="linha-item" style="flex-wrap:wrap"><div class="desc">${escHtmlCx(window.gnCancelMotivoTexto ? (window.gnCancelMotivoTexto(x) || '—') : (x.motivo || '—'))}<small>Autorizado por ${escHtmlCx(x.autorizado_por || '—')}</small></div>
       <div class="val">${money(x.valor)}${_pend(x)}</div>${_fotoCancelBtn(x)}${S.modoConsulta ? '' : `<button class="del" onclick="excluir('gn_caixa_cancelamento','${x.id}','cancel')">✕</button>`}${_fotoCancelThumb(x)}</div>`).join('')
       : '<div class="vazio">Nenhum cancelamento.</div>';
     $('cancelQtd').textContent = String(S.cancel.length);
@@ -2913,7 +2932,7 @@ function _txtCancelamentos() {
       ? `CANCELAMENTOS\n  Dia sem cancelamento (declarado por ${S.fech.sem_cancelamento_por})`
       : 'CANCELAMENTOS\n  Nenhum lançado — e sem declaração de "dia sem cancelamento"';
   }
-  const linhas = S.cancel.map(x => `  ${money(x.valor)} — ${x.motivo || '—'} (aut.: ${x.autorizado_por || '—'})`).join('\n');
+  const linhas = S.cancel.map(x => `  ${money(x.valor)} — ${(window.gnCancelMotivoTexto ? window.gnCancelMotivoTexto(x) : x.motivo) || '—'} (aut.: ${x.autorizado_por || '—'})`).join('\n');
   return `CANCELAMENTOS (${S.cancel.length})\n${linhas}\n  Total: ${money(cancelTotal())}`;
 }
 
@@ -3440,14 +3459,18 @@ async function desfazerSemCancelamento() {
 // Os três campos são obrigatórios de propósito. Um cancelamento sem motivo ou sem quem
 // autorizou é exatamente o registro que não serve pra nada depois — que foi o problema que
 // o campo veio resolver. A mensagem diz o que falta, em vez de só recusar.
-function _cancelFalta(valor, motivo, autor, senha) {
+function _cancelFalta(valor, motivo, autor, senha, categoria) {
+  // A categoria e o detalhe têm regra própria (gnCancelMotivoFalta, em gn-lojas-config.js):
+  // a mensagem dali é específica — diz se falta escolher a categoria, se o detalhe repete
+  // a categoria ou se está curto demais — e some na lista genérica de "falta preencher".
+  const motivoErro = window.gnCancelMotivoFalta ? window.gnCancelMotivoFalta(categoria, motivo) : (motivo ? '' : 'Falta o motivo.');
   const f = [];
   if (!(valor > 0)) f.push('o valor');
-  if (!motivo) f.push('o motivo');
   if (!autor) f.push('quem autorizou');
   if (senha !== undefined && !senha) f.push('a senha de quem autorizou');
-  if (!f.length) return '';
-  return 'Falta preencher ' + (f.length > 1 ? f.slice(0, -1).join(', ') + ' e ' + f[f.length - 1] : f[0]) + '.';
+  if (!f.length) return motivoErro;
+  const lista = 'Falta preencher ' + (f.length > 1 ? f.slice(0, -1).join(', ') + ' e ' + f[f.length - 1] : f[0]) + '.';
+  return motivoErro ? lista + ' ' + motivoErro : lista;
 }
 
 // Valida nome + senha e devolve o usuário VERIFICADO, ou uma mensagem de erro pronta.
@@ -3480,20 +3503,22 @@ async function _verificarAssinatura(nome, senha, contexto) {
 async function addCancelamento() {
   const v = parseMoney($('cancelVal').value);
   const motivo = $('cancelMotivo').value.trim();
+  const categoria = $('cancelCategoria').value;
   const nome = $('cancelAutorNome').value.trim();
   const senha = $('cancelAutorSenha').value;
-  const falta = _cancelFalta(v, motivo, nome, senha);
+  const falta = _cancelFalta(v, motivo, nome, senha, categoria);
   $('cancelMsg').textContent = falta;
   if (falta) return;
   const { u, erro } = await _verificarAssinatura(nome, senha, 'gn-caixa:cancelamento');
   if (erro) { $('cancelMsg').textContent = erro; return; }
   // O nome gravado é o que a validação devolveu, não o digitado: é isso que impede
   // lançar um cancelamento no nome de quem não autorizou.
-  const body = { fechamento_id: S.fech.id, valor: v, motivo, autorizado_por: u.nome };
+  const body = { fechamento_id: S.fech.id, valor: v, motivo, motivo_categoria: categoria, autorizado_por: u.nome };
   try {
     const row = await sb('gn_caixa_cancelamento', { method: 'POST', prefer: 'return=representation', body });
     S.cancel.push(row[0]);
     $('cancelVal').value = ''; $('cancelMotivo').value = ''; $('cancelAutorNome').value = ''; $('cancelAutorSenha').value = '';
+    $('cancelCategoria').selectedIndex = 0;
     // "Dia sem cancelamento" e um cancelamento lançado não podem coexistir.
     if (semCancelamentoDeclarado()) await desfazerSemCancelamento();
     renderTudo(); toast('Cancelamento registrado por ' + u.nome);

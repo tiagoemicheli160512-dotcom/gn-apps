@@ -256,6 +256,69 @@ window.CARGOS_REABRIR          = ['admin','administrador','gerente','sub_gerente
 // — quem responde pela loja — e duplicar o rol é como as duas versões divergem meses
 // depois. É decisão de negócio separada; se um dia diferir, muda aqui.
 window.CARGOS_CANCELAMENTO     = window.CARGOS_REABRIR;
+
+// ── MOTIVO DO CANCELAMENTO: CATEGORIA + DETALHE ───────────────────────────
+// Os 28 primeiros cancelamentos registrados deram 28 textos diferentes — agrupar pelo
+// motivo escrito não dizia nada. Pior: o campo aceitava qualquer coisa, e a própria dica
+// da tela ("Ex: pedido trocado") ensinava a resposta vaga. Campo Grande escreveu
+// "Troca de pedido" e "Falta"; a segunda tem cinco letras e não explica cancelamento
+// nenhum. Do outro lado, Itaquera escreveu "Cancelou porque não tinha sorvete e pegou
+// somente pudim" — a diferença não era a pessoa, era o que o campo pedia.
+//
+// Agora são dois campos: a CATEGORIA, que é o eixo do relatório, e o DETALHE, que conta o
+// caso. As categorias saíram dos motivos reais, não de um palpite — a maior delas (troca
+// de pedido/produto) cobre 12 dos 28.
+window.GN_CANCEL_CATEGORIAS = [
+  'Troca de pedido ou produto',
+  'Erro de lançamento',
+  'Produto em falta',
+  'Cliente desistiu',
+  'Problema no produto',
+  'Cortesia / acerto com o cliente',
+  'Outro',
+];
+
+// Mínimo do detalhe. Não é rigor por rigor: corta a resposta de uma palavra ("Falta",
+// "Troca", "erro") sem barrar quem escreve curto e direto — "troca de prato" tem 14 e
+// "Garçom registrou errado" tem 23, os dois passam.
+window.GN_CANCEL_DETALHE_MIN = 10;
+
+// O que vai na tela e no relatório. Linha antiga (sem categoria) mostra só o motivo, que
+// é o que ela tem — some a categoria, não some a informação.
+window.gnCancelMotivoTexto = function (c) {
+  if (!c) return '';
+  const cat = String(c.motivo_categoria || c.categoria || '').trim();
+  const det = String(c.motivo || '').trim();
+  if (cat && det) return cat + ' — ' + det;
+  return cat || det || '';
+};
+
+// Valida o par categoria+detalhe. Devolve '' quando está bom, ou a frase pronta pra tela.
+// Recusa o detalhe que só repete a categoria ("Troca de pedido" dentro de "Troca de
+// pedido ou produto"): escolher a categoria não é explicar o caso.
+window.gnCancelMotivoFalta = function (categoria, detalhe) {
+  const cat = String(categoria || '').trim();
+  const det = String(detalhe || '').trim();
+  if (!cat) return 'Escolha a categoria do cancelamento.';
+  if (!det) return 'Falta dizer o que aconteceu.';
+  const norm = (x) => x.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+  const nd = norm(det), nc = norm(cat);
+  // "Repetir a categoria" é o detalhe que não acrescenta NADA: ou é a categoria dita de
+  // outro jeito ("Troca de pedido" dentro de "Troca de pedido ou produto"), ou é a
+  // categoria mais duas palavras de enfeite.
+  //
+  // Conter as palavras da categoria, por si só, não é repetir — "Cliente desistiu porque
+  // demorou 40 minutos" começa pela categoria e é exatamente a explicação que se quer.
+  // Barrar isso travaria o fechamento de quem está escrevendo certo, que é um estrago
+  // maior do que o motivo vago que se quer evitar.
+  if (nd && nc) {
+    const sobra = nc.indexOf(nd) >= 0 ? '' : nd.split(nc).join('');
+    if (sobra.length < 6) return 'O detalhe está repetindo a categoria — conte o que aconteceu no caso.';
+  }
+  if (det.length < window.GN_CANCEL_DETALHE_MIN)
+    return 'Conte o que aconteceu, com um pouco mais de detalhe.';
+  return '';
+};
 window.CARGOS_RH_LIVRE         = ['mestre','supervisor','administrador','compras','admin','gerente']; // sem restrição de horário no GN RH
 window.CARGOS_CAIXA_BYPASS     = ['gerente','mestre','admin'];            // bypass de permissão no módulo Caixa (Home)
 window.CARGOS_PUSH_TODAS_LOJAS = ['compras','supervisor','administrador','mestre']; // push notification sem filtro de loja
