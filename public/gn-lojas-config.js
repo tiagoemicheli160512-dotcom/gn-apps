@@ -724,3 +724,243 @@ window.gnRelatorioPDF = function (opts) {
 window.gnRelatorioPDFTexto = function (texto, titulo, opts) {
   window.gnRelatorioPDF(Object.assign({ titulo: titulo, texto: texto }, opts || {}));
 };
+
+// ══════════════════════════════════════════════════════════════════════════
+// SIMULAÇÃO DE ESCALA 5x2 (aba Simular 5x2 do app Check-list)
+// ══════════════════════════════════════════════════════════════════════════
+//
+// A rede vai migrar pra 5x2 e precisa ver o estrago antes de aplicar. Esta é a parte que
+// pensa; a tela só desenha o que sai daqui. Nada aqui escreve escala — a simulação mora em
+// gn_escala_simulacao, tabela própria, longe de gn_comissoes.
+//
+// ── POR QUE UMA RÉGUA TIRADA DO HISTÓRICO, E NÃO UM TETO FIXO ──
+// Um teto do tipo "no máximo R$ X por pessoa" seria chute. O que o histórico mostra é que
+// cada loja JÁ opera cada dia da semana num patamar próprio, e bem diferente entre si:
+//
+//   Bangu, média dos últimos 90 dias
+//     terça   R$  6.938 com ~20,3 pessoas  →  R$   342 por pessoa
+//     domingo R$ 28.392 com ~18,4 pessoas  →  R$ 1.543 por pessoa
+//
+// Ou seja: a venda varia de 4 a 6 vezes na semana enquanto o número de pessoas é quase
+// plano — em Bangu e na Nova América o DOMINGO, o dia mais forte, hoje tem MENOS gente
+// que o sábado. A régua, então, é o que a própria loja sustenta naquele dia da semana.
+// Simulação que pede mais que isso é aperto de verdade, não opinião.
+//
+// Os dias são índice 0..6 = segunda a domingo, a mesma ordem de COMISSOES_CAL e do campo
+// `dias` de cada funcionário em gn_comissoes.
+window.GN_SIM5X2_DIAS = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo'];
+// Abreviação de TRÊS letras, não a inicial: com uma letra só, segunda e sexta viram ambas
+// "S" e quarta e quinta ambas "Q". Nos botões de folga, no celular, isso é a diferença
+// entre folgar na segunda e folgar na sexta — e não há hover pra desempatar.
+window.GN_SIM5X2_DIAS_ABREV = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
+window.GN_SIM5X2_FOLGAS = 2;          // 5x2: cinco dias de trabalho, dois de folga
+// Quanto a simulação pode passar do patamar histórico do dia antes de virar alerta. 15% é
+// a folga que absorve variação normal de movimento; acima disso o dia está pedindo mais de
+// cada pessoa do que a loja já conseguiu entregar naquele dia da semana.
+window.GN_SIM5X2_APERTO = 1.15;
+window.GN_SIM5X2_APERTO_GRAVE = 1.40;
+// Abaixo disso é gente parada num dia fraco — não quebra nada, mas é onde a folga cabe.
+window.GN_SIM5X2_SOBRA = 0.70;
+// Com menos amostras que isto o patamar do dia é palpite, e o alerta se cala em vez de
+// afirmar. "Não sei" é resposta; número inventado não é.
+window.GN_SIM5X2_MIN_AMOSTRAS = 3;
+
+function _gnSimMediana(arr) {
+  const v = (arr || []).filter(x => typeof x === 'number' && isFinite(x)).sort((a, b) => a - b);
+  if (!v.length) return null;
+  const m = Math.floor(v.length / 2);
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+}
+
+// Perfil da loja por dia da semana: o que ela vende e com quanta gente, de verdade.
+//
+// `vendas`  : linhas de checklist_diario [{data_operacao, venda_salao, venda_delivery}]
+// `semanas` : [[presentesDia0..presentesDia6], ...] — uma entrada por semana já escalada
+//
+// Mediana, não média: uma segunda de feriado ou um domingo de reinauguração puxam a média
+// e mandariam o alerta inteiro pro lado errado.
+window.gnSim5x2Perfil = function (vendas, semanas) {
+  const porDia = Array.from({ length: 7 }, () => ({ vendas: [], pessoas: [] }));
+  (vendas || []).forEach(r => {
+    const iso = String(r.data_operacao || r.data || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return;
+    // Date com 'T12:00' evita o pulo de fuso que jogaria o dia pra véspera.
+    const d = new Date(iso + 'T12:00:00');
+    if (isNaN(d)) return;
+    const dow = (d.getDay() + 6) % 7;                   // 0 = segunda
+    const tot = (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0);
+    if (tot > 0) porDia[dow].vendas.push(tot);          // dia sem venda é dia sem dado
+  });
+  (semanas || []).forEach(sem => {
+    (sem || []).forEach((n, i) => { if (i < 7 && typeof n === 'number' && n > 0) porDia[i].pessoas.push(n); });
+  });
+  return porDia.map((p, i) => {
+    const venda = _gnSimMediana(p.vendas);
+    const pessoas = _gnSimMediana(p.pessoas);
+    const amostras = Math.min(p.vendas.length, p.pessoas.length);
+    return {
+      dia: i, nome: window.GN_SIM5X2_DIAS[i],
+      venda, pessoas,
+      // A régua do dia: quanto cada pessoa carrega quando a loja roda como roda hoje.
+      porPessoa: (venda && pessoas) ? venda / pessoas : null,
+      amostras,
+      confiavel: amostras >= window.GN_SIM5X2_MIN_AMOSTRAS,
+    };
+  });
+};
+
+// Distribui as folgas 5x2. Determinística de propósito: a mesma equipe e o mesmo perfil têm
+// que sair sempre na mesma proposta, senão não dá pra discutir "a sugestão" com ninguém.
+//
+// A ideia: cada dia recebe uma COTA de folgas inversamente proporcional ao que ele vende.
+// Terça folga muita gente, domingo quase ninguém. Dentro disso, as folgas de um setor são
+// espalhadas entre dias diferentes — tirar o Salão inteiro na mesma terça é ruptura, por
+// mais que a terça seja fraca.
+window.gnSim5x2Sugerir = function (funcs, perfil) {
+  const pessoas = (funcs || []).filter(f => f && f.nome);
+  if (!pessoas.length) return {};
+  const N = pessoas.length;
+  const totalFolgas = N * window.GN_SIM5X2_FOLGAS;
+
+  // Peso do dia = quão dispensável ele é. Dia sem venda conhecida entra com peso médio,
+  // em vez de virar o depósito de folgas por falta de dado.
+  const vendas = perfil.map(p => p.venda);
+  const vistas = vendas.filter(v => v > 0);
+  const vMedia = vistas.length ? vistas.reduce((a, b) => a + b, 0) / vistas.length : 1;
+  const peso = vendas.map(v => 1 / Math.max(v > 0 ? v : vMedia, 1));
+  const somaPeso = peso.reduce((a, b) => a + b, 0);
+  const cota = peso.map(p => (p / somaPeso) * totalFolgas);
+
+  // Sobra da cota por dia, consumida conforme as folgas são dadas.
+  const resta = cota.slice();
+  const porSetorDia = {};   // quantas folgas cada setor já deu em cada dia
+  const folgas = {};
+
+  // Ordem estável: setor, depois nome. Sem isso a proposta muda a cada carregamento.
+  const ordem = pessoas.map((f, i) => ({ f, i }))
+    .sort((a, b2) => String(a.f.setor || '').localeCompare(String(b2.f.setor || ''), 'pt-BR')
+                  || String(a.f.nome || '').localeCompare(String(b2.f.nome || ''), 'pt-BR'));
+
+  ordem.forEach(({ f, i }) => {
+    const setor = String(f.setor || '—');
+    porSetorDia[setor] = porSetorDia[setor] || Array(7).fill(0);
+    const escolhidos = [];
+    for (let k = 0; k < window.GN_SIM5X2_FOLGAS; k++) {
+      let melhor = -1, melhorNota = -Infinity;
+      for (let d = 0; d < 7; d++) {
+        if (escolhidos.includes(d)) continue;           // duas folgas em dias diferentes
+        // Nota: o que ainda cabe de folga no dia, penalizado pelo que o setor já tirou ali.
+        const nota = resta[d] - porSetorDia[setor][d] * 1.5;
+        if (nota > melhorNota) { melhorNota = nota; melhor = d; }
+      }
+      if (melhor < 0) break;
+      escolhidos.push(melhor);
+      resta[melhor] -= 1;
+      porSetorDia[setor][melhor] += 1;
+    }
+    folgas[i] = escolhidos.sort((a, b2) => a - b2);
+  });
+  return folgas;
+};
+
+// O que a simulação produz por dia, e onde ela aperta.
+//
+// `folgas` é {indiceDoFunc: [dia, dia]}. Quem não aparece no mapa trabalha os 7 dias — o
+// que é um cenário válido de comparação (é a escala de hoje), não um erro.
+window.gnSim5x2Avaliar = function (funcs, folgas, perfil) {
+  const pessoas = (funcs || []).map((f, i) => ({ f, i })).filter(x => x.f && x.f.nome);
+  const setores = [...new Set(pessoas.map(x => String(x.f.setor || '—')))].sort();
+  const dias = [];
+  for (let d = 0; d < 7; d++) {
+    const trabalham = pessoas.filter(x => !((folgas || {})[x.i] || []).includes(d));
+    const porSetor = {};
+    setores.forEach(s => { porSetor[s] = trabalham.filter(x => String(x.f.setor || '—') === s).length; });
+    const p = perfil[d] || {};
+    const porPessoa = (p.venda && trabalham.length) ? p.venda / trabalham.length : null;
+    // Razão entre o que a simulação pede de cada pessoa e o que a loja já sustenta nesse
+    // dia. 1,0 = igual a hoje. 1,5 = cada pessoa carregando 50% a mais.
+    const razao = (porPessoa && p.porPessoa) ? porPessoa / p.porPessoa : null;
+    dias.push({
+      dia: d, nome: window.GN_SIM5X2_DIAS[d],
+      pessoas: trabalham.length, porSetor,
+      vendaEsperada: p.venda || null, porPessoa, razao,
+      pessoasHoje: p.pessoas || null, porPessoaHoje: p.porPessoa || null,
+      confiavel: !!p.confiavel,
+    });
+  }
+  return { dias, setores, alertas: window.gnSim5x2Alertas(dias, setores, perfil) };
+};
+
+// Os alertas. Cada um diz o DIA, o QUÊ e o QUANTO — alerta sem número não se discute.
+window.gnSim5x2Alertas = function (dias, setores, perfil) {
+  const out = [];
+  const brl = n => 'R$ ' + Math.round(n).toLocaleString('pt-BR');
+  dias.forEach(d => {
+    if (!d.pessoas) {
+      out.push({ dia: d.dia, nivel: 'grave', tipo: 'sem_ninguem',
+        msg: `${d.nome}: ninguém escalado.` });
+      return;
+    }
+    // Setor que a loja sempre teve e a simulação zera: isso não é aperto, é ruptura.
+    setores.forEach(s => {
+      if (d.porSetor[s] === 0) {
+        out.push({ dia: d.dia, nivel: 'grave', tipo: 'ruptura_setor', setor: s,
+          msg: `${d.nome}: ${s} fica sem ninguém.` });
+      }
+    });
+    if (!d.confiavel) {
+      out.push({ dia: d.dia, nivel: 'info', tipo: 'sem_historico',
+        msg: `${d.nome}: histórico curto demais pra comparar — não dá pra dizer se aperta.` });
+      return;
+    }
+    if (d.razao >= window.GN_SIM5X2_APERTO) {
+      const pct = Math.round((d.razao - 1) * 100);
+      out.push({
+        dia: d.dia,
+        nivel: d.razao >= window.GN_SIM5X2_APERTO_GRAVE ? 'grave' : 'atencao',
+        tipo: 'apertada',
+        msg: `${d.nome}: ${d.pessoas} pessoas pra ${brl(d.vendaEsperada)} — ${brl(d.porPessoa)} por pessoa, ${pct}% acima do que a loja costuma segurar nesse dia (${brl(d.porPessoaHoje)}, com ${d.pessoasHoje}).`,
+      });
+    } else if (d.razao <= window.GN_SIM5X2_SOBRA) {
+      const pct = Math.round((1 - d.razao) * 100);
+      out.push({ dia: d.dia, nivel: 'sobra', tipo: 'folgada',
+        msg: `${d.nome}: ${d.pessoas} pessoas pra ${brl(d.vendaEsperada)} — ${pct}% mais folgado que o normal da loja. É aqui que cabe folga.` });
+    }
+  });
+  const ordem = { grave: 0, atencao: 1, sobra: 2, info: 3 };
+  return out.sort((a, b) => ordem[a.nivel] - ordem[b.nivel] || a.dia - b.dia);
+};
+
+// O número que decide a conversa: 5x2 com o quadro de hoje dá conta?
+//
+// Cada pessoa num 5x2 entrega 5 dias por semana. A loja precisa, por semana, da soma das
+// pessoas que ela usa em cada dia (pessoa-dias). Dividir um pelo outro dá o quadro mínimo
+// pra manter o patamar ATUAL de cada dia — e a diferença pro quadro de hoje é o buraco.
+//
+// Em Bangu isso dá 139 pessoa-dias por semana (17+20+20+20+22+23+17) ÷ 5 = 28 pessoas,
+// contra as 22 de hoje. Sem esse número, a simulação mostra sete dias apertados sem dizer
+// que o aperto é aritmético: 22 pessoas em 5x2 não cobrem a semana que a loja opera hoje.
+window.gnSim5x2Resumo = function (funcs, folgas, perfil) {
+  const pessoas = (funcs || []).filter(f => f && f.nome).length;
+  const comBase = (perfil || []).filter(p => p.confiavel && p.pessoas);
+  const pessoaDiasHoje = comBase.reduce((a, p) => a + p.pessoas, 0);
+  const diasSemBase = 7 - comBase.length;
+  // Pessoa-dias que a simulação entrega: cada um trabalha 7 menos as folgas dele.
+  const entregues = (funcs || []).reduce((a, f, i) => {
+    if (!f || !f.nome) return a;
+    return a + (7 - (((folgas || {})[i] || []).length));
+  }, 0);
+  const quadroNecessario = pessoaDiasHoje ? Math.ceil(pessoaDiasHoje / (7 - window.GN_SIM5X2_FOLGAS)) : null;
+  return {
+    pessoas,
+    pessoaDiasHoje: pessoaDiasHoje || null,
+    pessoaDiasSimulados: entregues,
+    quadroNecessario,
+    // Positivo = faltam pessoas pra manter o patamar de hoje com 5x2.
+    faltam: quadroNecessario == null ? null : Math.max(0, quadroNecessario - pessoas),
+    sobram: quadroNecessario == null ? null : Math.max(0, pessoas - quadroNecessario),
+    // Quantos dias ficaram de fora da conta por falta de histórico — sem isso o "faltam N"
+    // pareceria exato quando é parcial.
+    diasSemBase,
+  };
+};
