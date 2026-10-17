@@ -964,3 +964,97 @@ window.gnSim5x2Resumo = function (funcs, folgas, perfil) {
     diasSemBase,
   };
 };
+
+// ── O DOMINGO É OUTRO BICHO ────────────────────────────────────────────────
+//
+// O domingo não é só o dia que mais vende: é o dia em que a lei tira gente da loja.
+// O descanso dominical não é igual pra todo mundo —
+//   mulher: folga num domingo a cada 15 dias (trabalha um sim, outro não);
+//   homem:  um domingo de folga por mês.
+// Então duas lojas com o mesmo número de pessoas têm domingos diferentes conforme quantas
+// mulheres cada uma tem. É a conta que ninguém fazia na hora de montar a escala, e o
+// motivo de o domingo "furar" sempre.
+//
+// Este cálculo é de um DOMINGO MÉDIO: qual domingo do mês cai na semana simulada muda o
+// número exato. A tela diz isso — número redondo sem a ressalva vira promessa.
+window.GN_SIM5X2_DOM_FOLGAS_MULHER = 2;   // domingos de folga por mês
+window.GN_SIM5X2_DOM_FOLGAS_HOMEM  = 1;
+window.GN_SIM5X2_DOMINGOS_MES      = 52 / 12;   // ≈ 4,33 domingos por mês
+window.GN_SIM5X2_DOM_IDX           = 6;         // domingo é o índice 6 (segunda = 0)
+
+// `folgas` é o mapa da simulação: parte da obrigação de domingo pode já estar coberta por
+// quem a simulação mandou folgar nesse dia. O que interessa pra operação é o que AINDA
+// vai faltar — é esse o número que vira extra.
+window.gnSim5x2Domingo = function (funcs, folgas) {
+  const pessoas = (funcs || []).map((f, i) => ({ f, i })).filter(x => x.f && x.f.nome);
+  const sexo = x => String(x.f.sexo || '').toUpperCase();
+  const mulheres = pessoas.filter(x => sexo(x) === 'F');
+  const homens   = pessoas.filter(x => sexo(x) === 'M');
+  const semInfo  = pessoas.filter(x => sexo(x) !== 'F' && sexo(x) !== 'M');
+
+  const D = window.GN_SIM5X2_DOMINGOS_MES;
+  const porDireitoF = mulheres.length * (window.GN_SIM5X2_DOM_FOLGAS_MULHER / D);
+  const porDireitoM = homens.length   * (window.GN_SIM5X2_DOM_FOLGAS_HOMEM  / D);
+  const porDireito  = porDireitoF + porDireitoM;
+
+  const jaFolgam = pessoas.filter(x =>
+    ((folgas || {})[x.i] || []).includes(window.GN_SIM5X2_DOM_IDX)).length;
+
+  return {
+    pessoas: pessoas.length,
+    mulheres: mulheres.length,
+    homens: homens.length,
+    semInfo: semInfo.length,
+    // Quantos a loja perde no domingo por direito de folga, num domingo médio.
+    porDireito: Math.round(porDireito * 10) / 10,
+    porDireitoMulheres: Math.round(porDireitoF * 10) / 10,
+    porDireitoHomens: Math.round(porDireitoM * 10) / 10,
+    jaFolgam,
+    // O que a simulação ainda NÃO previu — é daqui que sai o pedido de extra.
+    aMais: Math.max(0, Math.ceil(porDireito - jaFolgam)),
+    // Sem o sexo de todo mundo, o número é piso e não total: quem falta só pode somar.
+    completo: semInfo.length === 0,
+  };
+};
+
+// A frase que vai pra tela e pro relatório. Separada do cálculo porque é ela que o dono lê.
+window.gnSim5x2DomingoTexto = function (dom) {
+  if (!dom || !dom.pessoas) return '';
+  if (dom.mulheres === 0 && dom.homens === 0) {
+    return `Domingo: ninguém com sexo informado ainda — sem isso não dá pra calcular as folgas de domingo (${dom.semInfo} pessoa${dom.semInfo === 1 ? '' : 's'} a preencher na Escala).`;
+  }
+  const n = x => String(x).replace('.', ',');
+  let t = `Domingo: ${dom.mulheres} ${dom.mulheres === 1 ? 'mulher' : 'mulheres'} e ${dom.homens} ${dom.homens === 1 ? 'homem' : 'homens'} — por direito de folga dominical saem ~${n(dom.porDireito)} pessoas num domingo médio (${n(dom.porDireitoMulheres)} delas + ${n(dom.porDireitoHomens)} deles).`;
+  t += dom.aMais > 0
+    ? ` A simulação já folga ${dom.jaFolgam} nesse dia, então ainda faltariam ~${dom.aMais} — é o tamanho do extra.`
+    : ` A simulação já folga ${dom.jaFolgam} nesse dia, o que cobre a obrigação.`;
+  if (dom.semInfo > 0) t += ` ${dom.semInfo} pessoa${dom.semInfo === 1 ? '' : 's'} ainda sem sexo informado: o número tende a subir.`;
+  return t;
+};
+
+// O domingo da tabela conta quem a SIMULAÇÃO escalou. Mas parte dessa gente vai estar de
+// folga por direito, e o número real é menor. Sem este alerta a tabela mostrava domingo
+// confortável ao lado de um aviso dizendo que faltariam 5 pessoas — duas afirmações
+// opostas na mesma tela, e a verde é a que o olho acredita.
+window.gnSim5x2AlertaDomingo = function (dias, dom, perfil) {
+  if (!dom || !dom.aMais) return null;
+  const d = (dias || []).find(x => x.dia === window.GN_SIM5X2_DOM_IDX);
+  const p = (perfil || [])[window.GN_SIM5X2_DOM_IDX];
+  if (!d || !p || !p.confiavel || !d.vendaEsperada) return null;
+  const real = Math.max(0, d.pessoas - dom.aMais);
+  const brl = n => 'R$ ' + Math.round(n).toLocaleString('pt-BR');
+  if (!real) {
+    return { dia: window.GN_SIM5X2_DOM_IDX, nivel: 'grave', tipo: 'domingo_direito',
+      msg: `Domingo: com as folgas de direito, a loja ficaria sem ninguém.` };
+  }
+  const porPessoa = d.vendaEsperada / real;
+  const razao = p.porPessoa ? porPessoa / p.porPessoa : null;
+  const pct = razao ? Math.round((razao - 1) * 100) : null;
+  return {
+    dia: window.GN_SIM5X2_DOM_IDX,
+    nivel: razao >= window.GN_SIM5X2_APERTO_GRAVE ? 'grave'
+         : razao >= window.GN_SIM5X2_APERTO ? 'atencao' : 'sobra',
+    tipo: 'domingo_direito',
+    msg: `Domingo de verdade: a tabela mostra ${d.pessoas}, mas com as folgas de direito sobram ~${real} — ${brl(porPessoa)} por pessoa${pct == null ? '' : `, ${pct >= 0 ? pct + '% acima' : (-pct) + '% abaixo'} do normal da loja`}. Cobrir com ~${dom.aMais} extra${dom.aMais === 1 ? '' : 's'} devolve o domingo ao patamar da tabela.`,
+  };
+};
