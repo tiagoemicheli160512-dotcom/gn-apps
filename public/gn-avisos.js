@@ -43,6 +43,28 @@
       ],
     },
     {
+      // Feriado do comércio, numa segunda. O aviso sai do ar sozinho no fim do dia 19 —
+      // é pra isso que serve o `ate`.
+      //
+      // Peso alto porque segunda de feriado é o MAIOR dia da rede, não um dia comum
+      // deslocado: nas duas últimas, as 11 lojas somaram R$ 330 mil (07/09) e R$ 440 mil
+      // (12/10), contra ~R$ 68 mil numa segunda normal. O 12/10 vendeu mais que um
+      // domingo médio (R$ 307 mil). Escalar como segunda é o erro caro aqui.
+      id: 'dia-comercio-2026',
+      de: '2026-10-17', ate: '2026-10-19',
+      peso: 'alto', icone: '🏪',
+      titulo: 'Dia do Comércio 19/10 — reforce a escala',
+      sub: 'segunda-feira, feriado',
+      texto: 'Segunda de feriado <b>não é segunda</b>. Nos dois últimos, a rede fez <b>R$ 330 mil</b> (07/09) e <b>R$ 440 mil</b> (12/10) — contra cerca de <b>R$ 68 mil</b> numa segunda comum. O 12/10 vendeu mais que um domingo médio.',
+      itens: [
+        'Monte a escala desse dia como se fosse <b>domingo forte</b>, não segunda.',
+        'Confira na véspera o <b>abastecimento e a produção</b>: a conta é de feriado, não de segunda.',
+        'Reforce os <b>horários de pico</b> em vez de espalhar gente o dia inteiro.',
+        'Loja de shopping: confirme o <b>horário do shopping</b> no feriado antes de fechar a escala.',
+        'Deixe combinado <b>quem cobre</b> se faltar alguém — num dia desses não dá pra absorver.',
+      ],
+    },
+    {
       id: 'eleicao-2026-2t',
       de: '2026-10-05', ate: '2026-10-25',
       peso: 'normal', icone: '🗳️',
