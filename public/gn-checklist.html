@@ -10980,9 +10980,13 @@ async function abrirSim5x2(){
       el.innerHTML = '<div style="text-align:center;padding:30px;color:var(--t2);font-size:12px">Nenhum funcionário cadastrado nesta semana — a simulação precisa da equipe pra rodar.</div>';
       return;
     }
-    const [vendas, semanas] = await Promise.all([_sim5x2Vendas(), _sim5x2Semanas()]);
-    const perfil = window.gnSim5x2Perfil(vendas, semanas);
-    _sim5x2 = { funcs, perfil, folgas: window.gnSim5x2Sugerir(funcs, perfil), nome:'', lista:null, origem:'sugestao' };
+    const [vendas, esc] = await Promise.all([_sim5x2Vendas(), _sim5x2Semanas()]);
+    const perfil = window.gnSim5x2Perfil(vendas, esc.semanas);
+    // Jornada inicial: a que a loja já pratica. Sem horário cadastrado, parte da jornada
+    // que fecha exatamente as 42h em 5 dias (8h24) — a âncora da regra, não um chute.
+    const horasDia = esc.horasDia || (window.GN_SIM5X2_META_SEMANAL / 5);
+    _sim5x2 = { funcs, perfil, horasDia, horasDiaReal: esc.horasDia,
+                folgas: window.gnSim5x2Sugerir(funcs, perfil), nome:'', lista:null, origem:'sugestao' };
     renderSim5x2();
     await _sim5x2Lista();
     renderSim5x2();
@@ -11008,13 +11012,33 @@ async function _sim5x2Vendas(){
 
 // Quanta gente a loja REALMENTE teve em cada dia, nas últimas semanas de escala. É a outra
 // metade da régua: venda sozinha não diz se o dia estava apertado.
+//
+// Devolve junto a JORNADA que a loja já pratica (líquida de 1h de almoço, igual ao
+// _calcHorasSemanais da aba Escala) — é com ela que o campo de horas vem preenchido, pra
+// a simulação começar do que existe e não de um número redondo.
 async function _sim5x2Semanas(){
   const all = await fetchComissoesAllData(comissoesLojaKey());
   const idxs = Object.keys(all||{}).filter(k=>/^\d+$/.test(k)).map(Number).sort((a,b)=>a-b).slice(-10);
-  return idxs.map(i=>{
+  const semanas = idxs.map(i=>{
     const fs = _escalaFuncsAtivos((all[String(i)]||{}).funcs||[]);
     return Array.from({length:7},(_,d)=>fs.filter(f=>ESCALA_PRESENTE_SET.has((f.dias||[])[d]||'PRESENTE')).length);
   }).filter(sem=>sem.some(n=>n>0));
+  const hs = [];
+  _escalaFuncsAtivos((all[String(idxs[idxs.length-1])]||{}).funcs||[]).forEach(f=>{
+    (f.horario_dias||[]).forEach(hd=>{ const h=_sim5x2HorasDoDia(hd); if(h) hs.push(h); });
+  });
+  return { semanas, horasDia: hs.length ? hs.reduce((a,b)=>a+b,0)/hs.length : null };
+}
+// Horas líquidas de um dia, descontando 1h de almoço. Lançamento fora do mundo real
+// (23h de jornada, por erro de digitação) é descartado em vez de contaminar a média.
+function _sim5x2HorasDoDia(hd){
+  if(!hd || !hd.entrada || !hd.saida) return null;
+  if(!/^\d{1,2}:\d{2}$/.test(hd.entrada) || !/^\d{1,2}:\d{2}$/.test(hd.saida)) return null;
+  const p = t => { const [h,m]=t.split(':').map(Number); return h*60+m; };
+  let m = p(hd.saida) - p(hd.entrada);
+  if(m <= 0) m += 24*60;
+  m -= 60;
+  return (m > 0 && m < 16*60) ? m/60 : null;
 }
 
 function _sim5x2Brl(n){ return n==null?'—':'R$ '+Math.round(n).toLocaleString('pt-BR'); }
@@ -11027,15 +11051,63 @@ function renderSim5x2(){
   const esc = escHtml;
 
   // ── O número que decide a conversa ──
-  const faltamTxt = rs.quadroNecessario == null
-    ? 'Sem histórico suficiente pra dizer de quanta gente o 5x2 precisa.'
+  // ── O TOPO: horas, não pessoas ──
+  //
+  // A direção da rede é NÃO contratar e cobrir o 5x2 com quem já está na loja, usando
+  // banco de horas. Então a pergunta do topo deixou de ser "quanta gente falta" e passou a
+  // ser "cabe em 42h por pessoa?". Manter "faltam 6 pessoas" em destaque ao lado disso
+  // seria pôr duas respostas opostas na mesma tela — e a de cima é a que vale.
+  //
+  // O banco só serve se FECHA: 42h semanais trabalhadas, e o que passar vira hora extra a
+  // compensar até o fim do ciclo de 6 meses. Se a 5x2 da loja exigir mais que 42h, o banco
+  // não aperta um pouco — cresce toda semana.
+  const hr = window.gnSim5x2Horas(funcs, folgas, perfil, _sim5x2.horasDia);
+  const f1h = n => (Math.round(n * 10) / 10).toString().replace('.', ',');
+  const hrCor = hr.fecha === null ? 'var(--t3)' : (hr.fecha && !hr.acimaDoTeto) ? '#16a34a' : '#dc2626';
+
+  const veredito = hr.fecha === null
+    ? `<b>Sem histórico suficiente</b> pra dizer se o 5x2 desta loja cabe nas ${window.GN_SIM5X2_META_SEMANAL}h.`
+    : hr.fecha
+      ? `<b style="color:#16a34a">Cabe nas ${hr.meta}h.</b> Cada pessoa precisaria de <b>${f1h(hr.porPessoaNecessaria)}h por semana</b> — o banco fecha 0 a 0 no ciclo.`
+      : `<b style="color:#dc2626">Não cabe nas ${hr.meta}h.</b> Cada pessoa precisaria de <b>${f1h(hr.porPessoaNecessaria)}h por semana</b>, ${f1h(hr.excedenteSemanal)}h a mais.`;
+
+  const detalheBanco = (hr.fecha === false)
+    ? `<div style="font-size:11px;color:var(--t1);margin-top:5px;line-height:1.5">
+         Em ${window.GN_SIM5X2_BANCO_MESES} meses isso vira <b>${f1h(hr.bancoCiclo)}h de banco por pessoa</b> —
+         ${f1h(hr.diasPraZerar)} dias de folga só pra zerar. Banco que não zera vira hora extra a pagar.</div>`
+    : '';
+
+  // A contagem de pessoas continua, mas como APOIO: é a tradução do buraco pra quem
+  // pensa em quadro, não a recomendação. A direção é cobrir com jornada.
+  const apoioPessoas = rs.quadroNecessario == null ? ''
     : rs.faltam > 0
-      ? `Pra segurar o patamar de hoje em 5x2 seriam <b>${rs.quadroNecessario} pessoas</b>. A loja tem <b>${rs.pessoas}</b> — <b style="color:var(--err,#dc2626)">faltam ${rs.faltam}</b>.`
-      : `Com <b>${rs.pessoas} pessoas</b> o 5x2 cobre o patamar de hoje (precisaria de ${rs.quadroNecessario}).`;
-  const cabeca = `<div style="background:var(--s2,rgba(0,0,0,.03));border:1px solid rgba(0,0,0,.08);border-left:3px solid var(--gn-color,#E8580A);border-radius:12px;padding:12px 14px;margin-bottom:10px">
-    <div style="font-size:12.5px;line-height:1.5;color:var(--t1)">${faltamTxt}</div>
+      ? `<div style="font-size:10.5px;color:var(--t2);margin-top:5px;line-height:1.45">
+           Pelo caminho da contratação isso equivaleria a <b>${rs.faltam} ${rs.faltam === 1 ? 'pessoa' : 'pessoas'}</b>
+           a mais (${rs.quadroNecessario} no total, contra ${rs.pessoas} hoje) — a direção é cobrir com jornada.</div>`
+      : `<div style="font-size:10.5px;color:var(--t2);margin-top:5px;line-height:1.45">
+           O quadro de <b>${rs.pessoas} pessoas</b> cobre o 5x2 sem reforço.</div>`;
+
+  const cabeca = `<div style="background:var(--s2,rgba(0,0,0,.03));border:1px solid rgba(0,0,0,.08);border-left:3px solid ${hrCor};border-radius:12px;padding:12px 14px;margin-bottom:10px">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:7px;flex-wrap:wrap">
+      <div style="font-size:10px;font-weight:800;color:var(--t2);letter-spacing:.5px">JORNADA E BANCO DE HORAS</div>
+      <div style="display:flex;align-items:center;gap:4px;margin-left:auto">
+        <span style="font-size:10.5px;color:var(--t2)">Jornada/dia</span>
+        <!-- value com PONTO: input[type=number] descarta "8,4" e o campo aparece vazio.
+             A vírgula fica só no texto que a pessoa lê. -->
+        <input id="sim5x2-horas" type="number" step="0.25" min="1" max="14" value="${Math.round(_sim5x2.horasDia*100)/100}"
+          onchange="_sim5x2SetHoras(this.value)"
+          style="width:62px;padding:4px 6px;border-radius:7px;border:1px solid rgba(0,0,0,.14);background:var(--fill-sutil);color:var(--t1);font-size:11.5px;font-family:inherit;text-align:center">
+        <span style="font-size:10.5px;color:var(--t2)">h</span>
+      </div>
+    </div>
+    <div style="font-size:12.5px;line-height:1.5;color:var(--t1)">${veredito}</div>
+    ${detalheBanco}
+    ${hr.acimaDoTeto ? `<div style="font-size:11px;color:#dc2626;font-weight:700;margin-top:5px">⚠ A jornada simulada (${f1h(hr.horasDia)}h/dia) passa do teto legal de ${window.GN_SIM5X2_TETO_DIA}h por dia.</div>` : ''}
+    ${apoioPessoas}
     <div style="font-size:10.5px;color:var(--t2);margin-top:5px;line-height:1.45">
-      A conta: a loja usa <b>${rs.pessoaDiasHoje ?? '—'}</b> pessoa-dias por semana e cada pessoa em 5x2 entrega 5.
+      Meta: <b>${hr.meta}h por semana</b> trabalhadas — ${f1h(hr.jornadaDaMeta)}h por dia em 5 dias. Teto legal: ${window.GN_SIM5X2_TETO_DIA}h/dia.
+      ${_sim5x2.horasDiaReal ? `A loja pratica hoje ~${f1h(_sim5x2.horasDiaReal)}h/dia.` : 'Sem horário cadastrado na escala — o campo começou na jornada da meta.'}
+      A loja usa <b>${rs.pessoaDiasHoje ?? '—'}</b> pessoa-dias por semana.
       ${rs.diasSemBase ? `<br><b style="color:var(--txt-amber,#b45309)">${rs.diasSemBase} dia(s) da semana ficaram de fora da conta por falta de histórico.</b>` : ''}
     </div></div>`;
 
@@ -11102,6 +11174,14 @@ function renderSim5x2(){
                        background:${off?'#06b6d4':'var(--fill-sutil)'};color:${off?'#fff':'var(--t3)'}">${window.GN_SIM5X2_DIAS_ABREV[d]}</button>`;
             }).join('')}
           </div>
+          ${(() => {
+            // Horas da SEMANA desta pessoa: dias trabalhados × jornada. É o número que o
+            // banco de horas cobra, e ele só aparece pessoa a pessoa — a média da loja
+            // esconde quem está estourando.
+            const p = hr.porPessoa.find(x => x.i === i) || { semana: 0, excedente: 0 };
+            const cor = p.excedente > 0.05 ? '#dc2626' : p.excedente < -0.05 ? 'var(--t3)' : '#16a34a';
+            return `<div style="width:42px;text-align:right;font-size:9.5px;font-weight:700;color:${cor}" title="${f1h(p.semana)}h na semana · meta ${hr.meta}h">${f1h(p.semana)}h</div>`;
+          })()}
           <div style="width:30px;text-align:right;font-size:10px;font-weight:700;color:${(folgas[i]||[]).length===2?'var(--t3)':'#dc2626'}">${(folgas[i]||[]).length}/2</div>
         </div>`).join('')}
     </div>`).join('');
@@ -11120,6 +11200,15 @@ function renderSim5x2(){
     + _sim5x2CenariosHtml();
 }
 
+function _sim5x2SetHoras(v){
+  if(!_sim5x2) return;
+  const h = parseFloat(String(v).replace(',', '.'));
+  // Jornada fora do mundo real não vira simulação: volta pro valor anterior em vez de
+  // desenhar um banco de horas calculado sobre 40h por dia.
+  if(!isFinite(h) || h < 1 || h > 14) { renderSim5x2(); return; }
+  _sim5x2.horasDia = h;
+  renderSim5x2();
+}
 function _sim5x2Toggle(i, d){
   if(!_sim5x2) return;
   const f = (_sim5x2.folgas[i] || []).slice();
@@ -11253,6 +11342,19 @@ function gerarPDFSim5x2(){
   } else {
     t += `Sem histórico suficiente para dimensionar o quadro.\n`;
   }
+  // Jornada e banco de horas: é o que o dono chamou de "explícito na provisão da escala".
+  // Sem isso o relatório diria quanta gente falta sem dizer quantas horas isso custa nem
+  // se o banco fecha no ciclo.
+  const hr = window.gnSim5x2Horas(funcs, folgas, perfil, _sim5x2.horasDia);
+  const f1h = n => (Math.round(n*10)/10).toString().replace('.', ',');
+  t += `\nJornada e banco de horas:\n`;
+  t += `   Jornada simulada: ${f1h(hr.horasDia)}h por dia (meta ${hr.meta}h/semana = ${f1h(hr.jornadaDaMeta)}h/dia em 5 dias; teto legal ${window.GN_SIM5X2_TETO_DIA}h/dia).\n`;
+  t += `   ${window.gnSim5x2HorasTexto(hr)}\n`;
+  const estourando = hr.porPessoa.filter(p => p.excedente > 0.05);
+  if(estourando.length){
+    t += `   Acima das ${hr.meta}h na semana: ${estourando.length} de ${hr.porPessoa.length} pessoas.\n`;
+  }
+
   const dom = window.gnSim5x2Domingo(funcs, folgas);
   const domTxt = window.gnSim5x2DomingoTexto(dom);
   if(domTxt) t += `\nFolga de domingo:\n   ${domTxt}\n`;
@@ -11269,7 +11371,9 @@ function gerarPDFSim5x2(){
   t += `\nFolgas por pessoa:\n`;
   funcs.forEach((f,i)=>{
     const ds = (folgas[i]||[]).map(d=>window.GN_SIM5X2_DIAS[d]).join(' e ');
-    t += `   ${f.nome} (${f.setor}): ${ds || 'sem folga'}\n`;
+    const p = hr.porPessoa.find(x=>x.i===i);
+    const hsem = p ? ` — ${f1h(p.semana)}h na semana${p.excedente>0.05?` (+${f1h(p.excedente)}h pro banco)`:''}` : '';
+    t += `   ${f.nome} (${f.setor}): ${ds || 'sem folga'}${hsem}\n`;
   });
   t += `\nGN Operações · simulação 5x2 · ${lojaDisp(LOJA)}`;
   window.gnRelatorioPDFTexto(t, `Simulação 5x2 — ${lojaDisp(LOJA)}`);
