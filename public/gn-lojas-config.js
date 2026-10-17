@@ -1058,3 +1058,90 @@ window.gnSim5x2AlertaDomingo = function (dias, dom, perfil) {
     msg: `Domingo de verdade: a tabela mostra ${d.pessoas}, mas com as folgas de direito sobram ~${real} — ${brl(porPessoa)} por pessoa${pct == null ? '' : `, ${pct >= 0 ? pct + '% acima' : (-pct) + '% abaixo'} do normal da loja`}. Cobrir com ~${dom.aMais} extra${dom.aMais === 1 ? '' : 's'} devolve o domingo ao patamar da tabela.`,
   };
 };
+
+// ── JORNADA, 42 HORAS E O BANCO QUE TEM QUE ZERAR ──────────────────────────
+//
+// O banco de horas só funciona se ele FECHA. A regra da casa: 42 horas semanais
+// trabalhadas; o que passar disso é hora extra que entra no banco e precisa ser
+// compensada com folga até o fim do ciclo de 6 meses — todo mundo 0 a 0.
+//
+// Daí vem a pergunta que a simulação tem que responder antes de a escala valer: a 5x2
+// desta loja cabe em 42h por pessoa? Se não couber, o banco não "aperta um pouco" — ele
+// cresce toda semana e, no fim do ciclo, vira uma dívida que só se paga com folga (o que
+// reabre o buraco) ou com hora extra em dinheiro.
+//
+// Em números reais: Guarulhos precisa de 48,4h por pessoa/semana. São +6,4h por semana,
+// 167h em seis meses, 20 dias de folga por pessoa só pra zerar. Não é disciplina, é
+// aritmética — e é melhor descobrir no rascunho.
+window.GN_SIM5X2_META_SEMANAL = 42;     // horas trabalhadas por semana, por pessoa
+window.GN_SIM5X2_TETO_DIA     = 10;     // limite legal por dia (8h + 2h extras)
+window.GN_SIM5X2_BANCO_MESES  = 6;      // ciclo do banco de horas
+window.GN_SIM5X2_BANCO_SEMANAS = 26;
+
+// `horasDia` é a jornada diária simulada. Vem preenchida com a que a loja já pratica e é
+// editável — é o botão que o dono quis: "e se todo mundo fizer 8h30?".
+window.gnSim5x2Horas = function (funcs, folgas, perfil, horasDia) {
+  const h = Number(horasDia) || 0;
+  const pessoas = (funcs || []).map((f, i) => ({ f, i })).filter(x => x.f && x.f.nome);
+  const META = window.GN_SIM5X2_META_SEMANAL;
+
+  const porPessoa = pessoas.map(x => {
+    const dias = 7 - (((folgas || {})[x.i] || []).length);
+    const semana = dias * h;
+    return {
+      i: x.i, nome: x.f.nome, setor: x.f.setor || '—',
+      dias, semana,
+      excedente: semana - META,
+      acimaDoTeto: h > window.GN_SIM5X2_TETO_DIA,
+    };
+  });
+
+  // O que a LOJA precisa entregar por semana, pelo histórico: pessoa-dias × jornada.
+  const comBase = (perfil || []).filter(p => p.confiavel && p.pessoas);
+  const pessoaDias = comBase.reduce((a, p) => a + p.pessoas, 0);
+  const horasNecessarias = pessoaDias * h;
+  // Dividido pela equipe, é o que cada um teria que fazer pra loja rodar como roda hoje.
+  //
+  // Sem pessoa-dias no histórico isto DEVE ser null, não zero: zero fazia a conta dar
+  // "0h por semana, dentro das 42h — o banco fecha 0 a 0", que é a tranquilização mais
+  // perigosa que esta tela podia dar. Loja sem histórico não tem veredito.
+  const porPessoaNecessaria = (pessoas.length && pessoaDias)
+    ? horasNecessarias / pessoas.length : null;
+
+  const excedenteSemanal = porPessoaNecessaria == null ? null : porPessoaNecessaria - META;
+  const bancoCiclo = excedenteSemanal == null ? null : excedenteSemanal * window.GN_SIM5X2_BANCO_SEMANAS;
+  // Pra zerar, a folga vale um dia de meta (42h ÷ 5 dias).
+  const diasPraZerar = (bancoCiclo == null || bancoCiclo <= 0) ? 0 : bancoCiclo / (META / 5);
+
+  return {
+    horasDia: h,
+    meta: META,
+    // Jornada que faria 42h exatas em 5 dias — a âncora da conversa (8h24).
+    jornadaDaMeta: META / 5,
+    porPessoa,
+    entregueSemana: porPessoa.reduce((a, p) => a + p.semana, 0),
+    horasNecessarias: horasNecessarias || null,
+    porPessoaNecessaria,
+    excedenteSemanal,
+    bancoCiclo,
+    diasPraZerar,
+    fecha: excedenteSemanal == null ? null : excedenteSemanal <= 0,
+    acimaDoTeto: h > window.GN_SIM5X2_TETO_DIA,
+    semBase: comBase.length < 7,
+  };
+};
+
+window.gnSim5x2HorasTexto = function (hr) {
+  if (!hr || hr.porPessoaNecessaria == null) {
+    return 'Sem histórico suficiente pra dizer quantas horas por pessoa a semana exige.';
+  }
+  const f1 = n => (Math.round(n * 10) / 10).toString().replace('.', ',');
+  let t = `Pra loja rodar como roda hoje, cada pessoa precisaria de ${f1(hr.porPessoaNecessaria)}h por semana`;
+  if (hr.fecha) {
+    t += ` — dentro das ${hr.meta}h. O banco fecha 0 a 0 no ciclo.`;
+  } else {
+    t += `, ${f1(hr.excedenteSemanal)}h acima das ${hr.meta}h. Isso vira ${f1(hr.bancoCiclo)}h de banco por pessoa em ${window.GN_SIM5X2_BANCO_MESES} meses — ${f1(hr.diasPraZerar)} dias de folga só pra zerar.`;
+  }
+  if (hr.acimaDoTeto) t += ` ⚠ A jornada simulada (${f1(hr.horasDia)}h/dia) passa do teto legal de ${window.GN_SIM5X2_TETO_DIA}h por dia.`;
+  return t;
+};
