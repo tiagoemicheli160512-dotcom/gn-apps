@@ -4650,20 +4650,46 @@ function _bhSaldoFunc(nome, meses){
   }, 0);
 }
 
-function _bhTodosFuncionarios(){
-  // Combina funcionários ativos (gorjetas) + quem aparece nos registros
+// Quem a grade do ciclo EM VISTA tem que listar. `meses` são os meses desse ciclo
+// (ctx.mesesSaldo — os mesmos que viram coluna e somam no Saldo); sem eles cai no
+// comportamento antigo de varrer _bhRegistros inteiro.
+//
+// O recorte por ciclo é o ponto. Antes, bastava a pessoa ter UM lançamento em qualquer mês
+// já carregado pra ela continuar na lista pra sempre — e _bhRegistros traz a loja inteira,
+// ciclos encerrados incluídos. Na Bangu isso somava 12 linhas ao ciclo novo: cinco de gente
+// que saiu (Cristiane, Daiana, Giovani, Jhones, Ricardo — o último lançamento de cada uma
+// está no ciclo que fechou em 25/09) e sete de nome escrito curto antes de a loja completar
+// o cadastro — "JULIANA" ao lado de "JULIANA Lima" e "JULIANA Machado", "MILENA" ao lado
+// de "MILENA de Jesus". O apelido de _nomesAnteriores não resolve esses: ninguém renomeou
+// nada, a loja só digitou diferente, e no caso das Julianas nem dá pra saber qual delas era.
+//
+// Fora do cadastro, só entra quem tem lançamento NOS MESES EM VISTA — essa hora é real e
+// precisa aparecer pra ser acertada. Medido na rede toda antes de mexer: 46 linhas somem e
+// NENHUMA delas tinha hora no ciclo em vista. Consultar um ciclo encerrado traz todas de
+// volta, que é o certo: lá as horas são delas.
+function _bhTodosFuncionarios(meses){
+  // Combina funcionários do cadastro (gorjetas) + quem aparece nos registros do ciclo
   // Usa Map com chave normalizada para deduplicar nomes com variações de acento/espaço
   // A versão das gorjetas tem precedência como nome canônico
   const map = new Map();
-  const cad = (comissoesWD?.funcs || []).filter(f => f && f.nome && f.nome.trim());
+  const todos = (comissoesWD?.funcs || []).filter(f => f && f.nome && f.nome.trim());
+  const chaves = (meses && meses.length) ? meses : Object.keys(_bhRegistros);
+  // Nomes lançados nos meses em vista, pra decidir quem fica mesmo sem estar no cadastro.
+  const lancados = new Set();
+  chaves.forEach(m => (_bhRegistros[m] || []).forEach(r => { if(r && r.nome) lancados.add(_bhNormNome(r.nome)); }));
+  const temLancamento = f => lancados.has(_bhNormNome(f.nome))
+    || _bhAliasesDe(f.nome, todos).some(a => lancados.has(_bhNormNome(a)));
+  // Arquivado na aba Dados é alguém que saiu: some da grade igual sumiu de lá. A exceção é
+  // quem saiu no meio do ciclo e deixou hora lançada nele — esse saldo ainda vai ser acertado.
+  const cad = todos.filter(f => !f.arquivado || temLancamento(f));
   cad.forEach(f => map.set(_bhNormNome(f.nome), f.nome.trim()));
   // Um lançamento feito com o nome ANTIGO da pessoa não abre linha nova: ele pertence a quem
   // hoje se chama de outro jeito. Sem isto a loja que renomeou o cadastro via a lista inteira
   // duplicada — "Carol" e "Carol Marinho" em linhas separadas, o saldo partido no meio.
   const apelidos = new Map();          // nome antigo (norm) → nome atual
-  cad.forEach(f => _bhAliasesDe(f.nome, cad).forEach(a => apelidos.set(_bhNormNome(a), f.nome.trim())));
-  Object.values(_bhRegistros).forEach(arr=>(arr||[]).forEach(r=>{
-    if(!r.nome) return;
+  cad.forEach(f => _bhAliasesDe(f.nome, todos).forEach(a => apelidos.set(_bhNormNome(a), f.nome.trim())));
+  chaves.forEach(m => (_bhRegistros[m] || []).forEach(r => {
+    if(!r || !r.nome) return;
     const k = _bhNormNome(r.nome);
     if(map.has(k) || apelidos.has(k)) return;
     map.set(k, r.nome);
@@ -4937,7 +4963,7 @@ function _bhCalcularAlertas(){
   const ALERTA_3M = qtdDecorridos >= 3;
   const ALERTA_PRECLOSE = qtdDecorridos >= qtdTotal - 1;
 
-  const funcionarios = _bhTodosFuncionarios();
+  const funcionarios = _bhTodosFuncionarios(ctx.mesesSaldo);
   const alertas = [];
 
   funcionarios.forEach(nome=>{
@@ -5310,7 +5336,7 @@ function renderBancoHoras(){
   const mesesCiclo = ctx.meses;
   const mesesSaldo = ctx.mesesSaldo;
   const legadoSet = new Set(ctx.mesesLegado);
-  const funcionarios = _bhTodosFuncionarios();
+  const funcionarios = _bhTodosFuncionarios(mesesSaldo);
   const diaCiclo = ctx.diaCiclo;
   const cicloNota = diaCiclo && diaCiclo > 1 ? ` · ciclo: dia ${diaCiclo} de cada mês` : '';
 
@@ -5591,7 +5617,7 @@ function abrirRelatorioBancoHoras(){
   const ctx = _bhContexto();
   if(!ctx){ showToast('Configure o período primeiro','error'); return; }
   const meses = ctx.mesesSaldo;   // mesma soma da coluna Saldo (inclui o legado pré-ciclo)
-  const funcionarios = _bhTodosFuncionarios();
+  const funcionarios = _bhTodosFuncionarios(meses);
   const LIMITE=8;
   const temSal = _bhConfig?.salariosSetor && Object.keys(_bhConfig.salariosSetor).length>0;
   const hoje = hojeLocal().slice(0,7);
@@ -14408,7 +14434,7 @@ function buildRelatorioBanco(cab){
   txt += `Ciclo: ${brD(ctx.alvo.inicio)} → ${brD(ctx.alvo.fim)}${ctx.verAnterior?' (CICLO ANTERIOR)':''}\n`;
   txt += `Período: ${_bhMesLabel(meses[0])} → ${_bhMesLabel(meses[meses.length-1])}\n`;
   txt += `Gerado em: ${new Date().toLocaleDateString('pt-BR')}\n\n`;
-  const funcs = _bhTodosFuncionarios();
+  const funcs = _bhTodosFuncionarios(meses);
   const temSal = _bhConfig?.salariosSetor && Object.keys(_bhConfig.salariosSetor).length>0;
   if(!funcs.length){ txt += 'Nenhum funcionário cadastrado.\n'; }
   else {
