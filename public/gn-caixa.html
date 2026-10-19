@@ -636,6 +636,49 @@ input[type=date], .card input[type=date] { background:var(--graf2) !important; c
 
 .modal-btns { display: flex; gap: 10px; }
 
+/* Conferência de lançamentos por bandeira.
+   A lista rola dentro do modal: uma bandeira já chegou a 71 lançamentos num turno. */
+.btn-conferir {
+  width: 100%;
+  margin-top: 12px;
+  background: var(--graf3);
+  border: 1px solid var(--linha);
+  color: var(--txt);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: bold;
+  padding: 11px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.btn-conferir:active { opacity: 0.8; }
+.btn-conferir:disabled { opacity: 0.45; cursor: default; }
+.btn-conferir.alerta { border-color: var(--erro); color: var(--erro); }
+
+#confLista { max-height: 42vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--linha); border-radius: 10px; background: var(--graf3); }
+.conf-linha {
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 10px; border-bottom: 1px solid var(--linha);
+  cursor: pointer; user-select: none;
+}
+.conf-linha:last-child { border-bottom: none; }
+.conf-linha:active { background: rgba(0,0,0,0.05); }
+.conf-linha .cx {
+  width: 24px; height: 24px; flex-shrink: 0;
+  border: 2px solid var(--mut); border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 15px; font-weight: bold; color: var(--ok); line-height: 1;
+}
+.conf-linha.on .cx { border-color: var(--ok); background: rgba(22,163,74,0.14); }
+.conf-linha .cv {
+  flex: 1; font-size: 17px; font-weight: bold; color: var(--ouro);
+  font-variant-numeric: tabular-nums;
+}
+.conf-linha.on .cv { opacity: 0.5; text-decoration: line-through; }
+.conf-linha .ch { font-size: 11px; color: var(--mut); flex-shrink: 0; }
+.conf-linha.travada { cursor: default; opacity: 0.6; }
+
 .btn-cancel {
   flex: 1;
   background: var(--graf3);
@@ -1163,10 +1206,25 @@ select option { background: var(--graf2); color: var(--txt); }
   <div class="modal-sheet">
     <div class="modal-nm" id="modalNm"></div>
     <div class="modal-cod" id="modalCod"></div>
-    <input class="modal-input" id="modalVal" type="text" inputmode="decimal" placeholder="0,00">
-    <div class="modal-btns">
-      <button class="btn-cancel" onclick="fecharModal()">Cancelar</button>
-      <button class="btn-ok" onclick="confirmarBand()">Lançar</button>
+
+    <!-- Lançar: o caminho do dia a dia, igual ao de sempre. -->
+    <div id="paneLancar">
+      <input class="modal-input" id="modalVal" type="text" inputmode="decimal" placeholder="0,00">
+      <div class="modal-btns">
+        <button class="btn-cancel" onclick="fecharModal()">Cancelar</button>
+        <button class="btn-ok" onclick="confirmarBand()">Lançar</button>
+      </div>
+      <button class="btn-conferir" id="btnAbrirConferir" onclick="abrirConferir()"></button>
+    </div>
+
+    <!-- Conferir: a mesma bandeira, só os lançamentos dela, um a um. -->
+    <div id="paneConferir" class="hidden">
+      <div id="confResumo"></div>
+      <div id="confLista"></div>
+      <div class="modal-btns" style="margin-top:14px">
+        <button class="btn-cancel" onclick="voltarDoConferir()">← Voltar</button>
+        <button class="btn-ok" onclick="fecharModal()">Pronto</button>
+      </div>
     </div>
   </div>
 </div>
@@ -1876,8 +1934,12 @@ function renderTudo() {
   const _pend = x => x._pendente ? '<span style="color:#D97706;font-size:10px;margin-left:4px" title="Aguardando sync">⏳</span>' : '';
   $('listaReceb').innerHTML = S.comprovantes.length ? S.comprovantes.slice().reverse().map(c => {
     const b = ENTRADAS.find(x => x.k === c.bandeira) || { cod: '—' };
+    // ✓ de conferido também aqui: é nesta lista que o operador já olha, e saber o que
+    // ele mesmo já bateu contra o relatório evita refazer a conferência do zero.
+    const _ok = c.conferido_em
+      ? `<span style="color:var(--ok);font-size:12px;margin-right:5px" title="Conferido${c.conferido_por ? ' por ' + escHtmlCx(c.conferido_por) : ''}">✓</span>` : '';
     return `<div class="linha-item"><div class="desc">${c.bandeira}<small>${b.cod === '—' ? 'manual' : 'cód ' + b.cod}</small></div>
-    <div class="val">${money(c.valor)}${_pend(c)}</div><button class="del" onclick="excluir('gn_caixa_comprovante','${c.id}','comprovantes')">✕</button></div>`;
+    <div class="val">${_ok}${money(c.valor)}${_pend(c)}</div><button class="del" onclick="excluir('gn_caixa_comprovante','${c.id}','comprovantes')">✕</button></div>`;
   }).join('') : '<div class="vazio">Nenhum recebimento.</div>';
 
   // A justificativa fica à vista na própria lista: é o que a supervisão lê sem precisar
@@ -1954,6 +2016,15 @@ function renderTudo() {
   // ficava mostrando a pendência antiga até a tela inteira ser remontada — e quem lê o
   // checklist acreditaria nele.
   if (S.fech && !$('pane-fechar').classList.contains('hidden')) renderPreFechamento();
+
+  // Modal da bandeira aberto: mantém o que ele mostra em dia com o que acabou de chegar
+  // (refreshCaixaVivo traz lançamento feito em outro aparelho, no mesmo turno).
+  const _mb = $('modalBand');
+  if (S.bandAtiva && _mb && !_mb.classList.contains('hidden')) {
+    const _pc = $('paneConferir');
+    if (_pc && !_pc.classList.contains('hidden')) renderConferir();
+    else _mostrarPaneLancar();
+  }
 }
 
 // ── BUFFET DE FEIJOADA E RODÍZIO ──────────────────────────────────────────────
@@ -2783,6 +2854,7 @@ const GUIA_SECOES = [
       'Repita a cada comprovante recebido durante o turno.',
     ]) + _guiaCallout('warn','⚠️','Sem internet, o lançamento fica salvo no aparelho (ícone ⏳) e sincroniza sozinho quando a conexão voltar.')
       + _guiaCallout('danger','🚨','Se o RH já conferiu esse caixa e achou diferença numa bandeira, ela aparece destacada (laranja ou vermelho, conforme o tamanho da diferença). Corrija o lançamento até bater — o badge muda pra "✅ Corrigido" sozinho.')
+      + _guiaCallout('tip','🔍','<b>Pra achar o erro quando dá diferença:</b> toque na bandeira e use <span class="guia-ui">Conferir lançamentos</span>. Ele mostra só os lançamentos daquela bandeira, um por linha — marque cada valor que você achou no relatório da maquininha. O que sobrar sem marca é o que não bate. Se o RH já apontou a diferença, a tela vai dizendo quanto ainda falta aparecer; e se você marcar todos e a diferença continuar, é porque falta um recebimento que nunca foi lançado.')
   },
   { id:'saidas', num:'03', titulo:'Saídas', roles:['operador'],
     resumo:'Despesas pagas com o dinheiro do caixa durante o turno.',
@@ -3246,11 +3318,169 @@ function abrirModal(k) {
   $('modalNm').textContent = k;
   $('modalCod').textContent = b.cod === '—' ? 'Lançamento manual' : 'Código maquininha: ' + b.cod;
   $('modalVal').value = '';
+  _mostrarPaneLancar();
   $('modalBand').classList.remove('hidden');
   setTimeout(() => $('modalVal').focus(), 50);
 }
 
-function fecharModal() { $('modalBand').classList.add('hidden'); S.bandAtiva = null; }
+function fecharModal() {
+  $('modalBand').classList.add('hidden');
+  S.bandAtiva = null;
+  _mostrarPaneLancar();
+}
+
+/* ── Conferir lançamentos de uma bandeira ──────────────────────────────────────────────
+   "Quando dá uma diferença, pra tentar achar o erro fica difícil, pois os valores ficam
+   misturados."
+
+   E ficam mesmo: medido nos últimos 60 dias, um caixa tem em média 27 lançamentos (mediana
+   14, máximo 317) espalhados por 10,7 bandeiras numa lista só. Por bandeira a média cai pra
+   2,5 — então separar já resolve quase tudo sozinho. O que sobra é a conta, e ela também não
+   precisa ser feita de cabeça: quando o RH já conferiu, o app sabe o valor dele, e marcando
+   um a um dá pra dizer na hora quanto ainda falta aparecer.
+
+   A marca é de AUDITORIA, não financeira: não muda valor nenhum. Por isso vale também com o
+   caixa fechado (modo consulta), que é justamente quando a divergência do RH aparece — sem
+   isso o recurso não serviria pra nada na hora em que é mais necessário. */
+function _confLancamentos(k) {
+  return S.comprovantes.filter(c => c.bandeira === k)
+    .slice().sort((a, b) => String(a.criado_em || '').localeCompare(String(b.criado_em || '')));
+}
+const _confSoma = arr => arr.reduce((a, c) => a + Number(c.valor || 0), 0);
+const _confMarcados = arr => arr.filter(c => c.conferido_em);
+
+function _mostrarPaneLancar() {
+  const pl = $('paneLancar'), pc = $('paneConferir');
+  if (!pl || !pc) return;
+  pl.classList.remove('hidden');
+  pc.classList.add('hidden');
+  const btn = $('btnAbrirConferir');
+  if (!btn) return;
+  const lista = S.bandAtiva ? _confLancamentos(S.bandAtiva) : [];
+  const confBand = S.confAtual?.itens?.bandeiras?.[S.bandAtiva];
+  const dif = confBand && confBand.conferido != null
+    ? Math.round((confBand.conferido - _confSoma(lista)) * 100) / 100
+    : (confBand ? (confBand.dif || 0) : 0);
+  const temDiverg = Math.abs(dif) >= 0.01;
+  btn.classList.toggle('alerta', temDiverg);
+  if (!lista.length) {
+    btn.disabled = true;
+    btn.textContent = 'Nenhum lançamento nesta bandeira ainda';
+    return;
+  }
+  btn.disabled = false;
+  const nM = _confMarcados(lista).length;
+  const plural = lista.length === 1 ? '1 lançamento' : lista.length + ' lançamentos';
+  // Curto de propósito: "2 já conferidos" por extenso quebrava o botão em duas linhas a 390px.
+  btn.textContent = (temDiverg ? '🚨 ' : '🔍 ') + 'Conferir ' + plural + (nM ? ' · ' + nM + ' ✓' : '');
+}
+
+function abrirConferir() {
+  if (!S.bandAtiva) return;
+  $('paneLancar').classList.add('hidden');
+  $('paneConferir').classList.remove('hidden');
+  renderConferir();
+}
+
+function voltarDoConferir() { _mostrarPaneLancar(); }
+
+function renderConferir() {
+  const k = S.bandAtiva;
+  if (!k) return;
+  const lista = _confLancamentos(k);
+  const totalSistema = _confSoma(lista);
+  const marcados = _confMarcados(lista);
+  const somaMarcada = _confSoma(marcados);
+  const faltaMarcar = Math.round((totalSistema - somaMarcada) * 100) / 100;
+
+  const confBand = S.confAtual?.itens?.bandeiras?.[k];
+  const rh = confBand && confBand.conferido != null ? Number(confBand.conferido) : null;
+  const dif = rh != null ? Math.round((rh - totalSistema) * 100) / 100 : null;
+  const temDiverg = dif != null && Math.abs(dif) >= 0.01;
+
+  const linhaResumo = (rot, val, cor) =>
+    `<div style="display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:3px 0">
+       <span style="color:var(--mut)">${rot}</span>
+       <b style="color:${cor || 'var(--txt)'};font-variant-numeric:tabular-nums">${val}</b>
+     </div>`;
+
+  let topo = '';
+  if (temDiverg) {
+    // O que o RH contou a mais (ou a menos) que o sistema. Dizer o valor que está
+    // faltando aparecer é mais útil que dizer só que "tem diferença".
+    const falta = dif > 0
+      ? `Falta lançar <b>${money(Math.abs(dif))}</b>`
+      : `Há <b>${money(Math.abs(dif))}</b> lançados a mais`;
+    topo = `<div style="background:rgba(220,38,38,0.1);border:1.5px solid var(--erro);border-radius:10px;padding:10px 12px;margin-bottom:10px">
+        <div style="font-size:12px;font-weight:bold;color:var(--erro);margin-bottom:6px">🚨 ${falta}</div>
+        ${linhaResumo('RH contou', money(rh))}
+        ${linhaResumo('No app', money(totalSistema))}
+      </div>`;
+  }
+
+  // Quando tudo já foi marcado e ainda sobra diferença, o erro não está no que foi digitado:
+  // está no que NÃO foi digitado. Dizer isso evita a terceira passada na mesma lista.
+  const tudoMarcado = lista.length > 0 && marcados.length === lista.length;
+  let veredito = '';
+  if (tudoMarcado && temDiverg) {
+    veredito = `<div style="font-size:11px;color:var(--erro);margin-top:8px;line-height:1.45">
+      Todos os ${lista.length} lançamentos batem com o relatório, e a diferença continua.
+      Então falta um recebimento que nunca foi lançado — ${dif > 0 ? 'procure no relatório o valor de ' + money(Math.abs(dif)) : 'confira se algum valor foi lançado em bandeira errada'}.
+    </div>`;
+  } else if (tudoMarcado) {
+    veredito = `<div style="font-size:11px;color:var(--ok);margin-top:8px;font-weight:bold">✅ Todos os lançamentos conferidos.</div>`;
+  }
+
+  $('confResumo').innerHTML = topo
+    + `<div style="background:var(--graf3);border:1px solid var(--linha);border-radius:10px;padding:10px 12px;margin-bottom:10px">
+        ${linhaResumo('Marcados', `${marcados.length} de ${lista.length} · ${money(somaMarcada)}`, 'var(--ok)')}
+        ${linhaResumo('Ainda sem marcar', money(faltaMarcar), faltaMarcar >= 0.01 ? 'var(--ouro)' : 'var(--mut)')}
+        ${veredito}
+      </div>
+      <div style="font-size:11px;color:var(--mut);margin-bottom:6px;line-height:1.4">
+        Marque cada valor que você achou no relatório da maquininha. O que sobrar sem marca é o que não bate.
+      </div>`;
+
+  $('confLista').innerHTML = lista.map(c => {
+    const on = !!c.conferido_em;
+    const hora = c.criado_em ? new Date(c.criado_em).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '';
+    // Lançamento que ainda não subiu não tem id de verdade no banco — marcar ele agora
+    // gravaria num id que vai deixar de existir quando a fila sincronizar.
+    const travada = !!c._pendente;
+    const titulo = travada ? 'Aguardando sincronizar — dá pra marcar assim que subir'
+      : (on && c.conferido_por ? 'Conferido por ' + escHtmlCx(c.conferido_por) : 'Toque para marcar');
+    return `<div class="conf-linha${on ? ' on' : ''}${travada ? ' travada' : ''}"
+         onclick="${travada ? '' : `toggleConferido('${c.id}')`}" title="${titulo}">
+      <span class="cx">${on ? '✓' : ''}</span>
+      <span class="cv">${money(c.valor)}</span>
+      <span class="ch">${travada ? '⏳' : hora}</span>
+    </div>`;
+  }).join('');
+}
+
+async function toggleConferido(id) {
+  const c = S.comprovantes.find(x => String(x.id) === String(id));
+  if (!c) return;
+  if (c._pendente) { toast('Esse lançamento ainda não sincronizou'); return; }
+  const marcando = !c.conferido_em;
+  const antes = { em: c.conferido_em || null, por: c.conferido_por || null };
+  const body = marcando
+    ? { conferido_em: new Date().toISOString(), conferido_por: (S.user && S.user.nome) || 'Usuário' }
+    : { conferido_em: null, conferido_por: null };
+  // Otimista: a marca aparece no toque. Rede é o caso lento, não o comum.
+  c.conferido_em = body.conferido_em;
+  c.conferido_por = body.conferido_por;
+  renderConferir();
+  try {
+    await sb(`gn_caixa_comprovante?id=eq.${c.id}`, { method: 'PATCH', prefer: 'return=minimal', body });
+  } catch (e) {
+    // A fila já sabe mandar PATCH (ver flushPending) — a marca sobe sozinha ao reconectar,
+    // em vez de sumir da tela e o operador ter que conferir tudo de novo.
+    _pfEnqueue({ tempId: uuid(), tabela: 'gn_caixa_comprovante', method: 'PATCH', realId: c.id, body });
+    toast('⚠️ Offline — marca salva localmente');
+  }
+  renderTudo();
+}
 
 let _confirmarBandEmVoo = false;
 async function confirmarBand() {
