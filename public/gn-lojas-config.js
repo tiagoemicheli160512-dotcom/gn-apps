@@ -1145,3 +1145,29 @@ window.gnSim5x2HorasTexto = function (hr) {
   if (hr.acimaDoTeto) t += ` ⚠ A jornada simulada (${f1(hr.horasDia)}h/dia) passa do teto legal de ${window.GN_SIM5X2_TETO_DIA}h por dia.`;
   return t;
 };
+
+// ── ORDEM ALFABÉTICA DE PESSOAS ────────────────────────────────────────────────────────
+// "Os funcionários em ordem alfabética, fica mais fácil pra conferir."
+//
+// Uma função só pros três apps (Check-list aba Dados, Gorjetas e Gorjetas Mestra) porque
+// a lista é a MESMA pessoa nos três — ordens diferentes entre telas custariam exatamente a
+// conferência que isto existe pra facilitar.
+//
+// `sensitivity:'base'` é o que faz "Cícero" cair entre "Caio" e "Daniele", e não depois de
+// "Z": sem isso o acento vira outro caractere e o nome some do lugar onde o olho procura.
+// Caixa alta também não conta — o cadastro tem "ANTÔNIO Lima" ao lado de "Gabriel Santos".
+//
+// IMPORTANTE: isto ordena o que é MOSTRADO, nunca o array de funcionários. Em gn_comissoes
+// o índice do array É a identidade da pessoa (dias da semana, faltas, férias, rateio e o
+// `atvIdx` que casa com funcCalc saem todos dele) — ordenar o array de verdade embaralharia
+// escala e pagamento de uma vez, sem erro nenhum aparecendo na tela.
+window.gnCmpNome = function (a, b) {
+  const na = String(a == null ? '' : a).trim();
+  const nb = String(b == null ? '' : b).trim();
+  // Vaga sem nome vai pro fim: é slot vazio, não pessoa — no topo empurraria a lista
+  // inteira pra baixo e esconderia justamente quem se quer conferir.
+  if (!na && !nb) return 0;
+  if (!na) return 1;
+  if (!nb) return -1;
+  return na.localeCompare(nb, 'pt-BR', { sensitivity: 'base', numeric: true });
+};
