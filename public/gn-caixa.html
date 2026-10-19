@@ -1116,6 +1116,10 @@ select option { background: var(--graf2); color: var(--txt); }
         <div class="dlbl">Diferença (Sistema vs Venda Registrada)</div>
         <div class="n">R$ 0,00</div>
       </div>
+      <!-- Quem vê a diferença está AQUI, e a ferramenta pra caçar o erro está na aba
+           Recebido. Sem esta ponte, o recurso existe e ninguém acha no momento em que
+           precisa dele. -->
+      <div id="difDica" style="display:none"></div>
     </div>
     <!-- Cancelamentos do dia. É registro, não entra em nenhuma conta do fechamento: o
          cancelamento já saiu da venda no sistema, somar aqui contaria duas vezes. O que
@@ -2394,6 +2398,23 @@ function calcDifSistema() {
     const label = dif < 0 ? ' (faltando)' : ' (sobra)';
     difEl.querySelector('.n').textContent = sinal + money(Math.abs(dif)) + label;
   }
+  _renderDicaConferir(dif, !!$('totalSistema').value);
+}
+
+// A dica de como caçar a diferença — só aparece quando há diferença pra caçar. Fora
+// disso seria mais um texto fixo na tela, e texto fixo some do radar justamente quando
+// passa a importar.
+function _renderDicaConferir(dif, temSistema) {
+  const el = $('difDica');
+  if (!el) return;
+  if (!temSistema || Math.abs(dif) < 0.01) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = '';
+  el.innerHTML = `<div style="background:var(--graf3);border:1px solid var(--linha);border-radius:10px;padding:10px 12px;margin-top:8px;font-size:11px;color:var(--t1,var(--txt));line-height:1.5">
+      <b>🔍 Pra achar onde foi:</b> abra a aba <span class="guia-ui">Recebido</span>, toque na
+      bandeira e use <b>Conferir lançamentos</b>. Lance ali o total que cada uma deu no
+      relatório (ou na contagem, no caso do dinheiro) e marque valor a valor — a bandeira
+      que não fechar aparece sozinha, com quanto falta.
+    </div>`;
 }
 
 // REPIQUE FORA DA CURVA — o repique é digitado à mão, em reais, e alimenta três coisas
@@ -2854,7 +2875,7 @@ const GUIA_SECOES = [
       'Repita a cada comprovante recebido durante o turno.',
     ]) + _guiaCallout('warn','⚠️','Sem internet, o lançamento fica salvo no aparelho (ícone ⏳) e sincroniza sozinho quando a conexão voltar.')
       + _guiaCallout('danger','🚨','Se o RH já conferiu esse caixa e achou diferença numa bandeira, ela aparece destacada (laranja ou vermelho, conforme o tamanho da diferença). Corrija o lançamento até bater — o badge muda pra "✅ Corrigido" sozinho.')
-      + _guiaCallout('tip','🔍','<b>Pra achar o erro quando dá diferença:</b> toque na bandeira e use <span class="guia-ui">Conferir lançamentos</span>. Ele mostra só os lançamentos daquela bandeira, um por linha — marque cada valor que você achou na fonte daquela forma de recebimento — relatório da maquininha no cartão, <b>contagem da gaveta no dinheiro</b>, extrato da plataforma no iFood/Online. O que sobrar sem marca é o que não bate. Se o RH já apontou a diferença, a tela vai dizendo quanto ainda falta aparecer; e se você marcar todos e a diferença continuar, é porque falta um recebimento que nunca foi lançado.')
+      + _guiaCallout('tip','🔍','<b>Pra achar o erro quando dá diferença:</b> toque na bandeira e use <span class="guia-ui">Conferir lançamentos</span>. Ele mostra só os lançamentos daquela bandeira, um por linha — lance ali o <b>total que aquela bandeira deu na fonte</b> (relatório da maquininha no cartão, contagem da gaveta no dinheiro, extrato da plataforma no iFood/Online) e marque valor a valor. A tela diz na hora quanto falta aparecer. <b>Não precisa esperar o RH apontar</b> — deu diferença no fechamento, é aqui que se acha. Se o RH já apontou a diferença, a tela vai dizendo quanto ainda falta aparecer; e se você marcar todos e a diferença continuar, é porque falta um recebimento que nunca foi lançado.')
   },
   { id:'saidas', num:'03', titulo:'Saídas', roles:['operador'],
     resumo:'Despesas pagas com o dinheiro do caixa durante o turno.',
@@ -3360,6 +3381,37 @@ function _confFonte(k) {
   return (b && b.cod !== '—') ? 'no relatório da maquininha' : 'no comprovante';
 }
 
+// O que a loja anotou pra esta bandeira. Mora no próprio fechamento
+// (gn_caixa_fechamento.conferencia_loja), e não no documento do RH: aquele é um jsonb
+// compartilhado e gravar nele daqui disputaria read-modify-write com a conferência.
+function _confEsperadoLoja(k) {
+  const m = (S.fech && S.fech.conferencia_loja) || null;
+  if (!m || k == null) return null;
+  const v = m[k];
+  return (v === null || v === undefined || v === '') ? null : Number(v);
+}
+
+// Campo vazio APAGA a anotação, em vez de gravar zero: "não anotei" não é "anotei R$ 0,00",
+// e zero faria a tela cobrar o total inteiro como se estivesse faltando.
+async function salvarEsperadoLoja(txt) {
+  const k = S.bandAtiva;
+  if (!k || !S.fech) return;
+  const cru = String(txt == null ? '' : txt).trim();
+  const v = cru === '' ? null : parseMoney(cru);
+  const mapa = { ...(S.fech.conferencia_loja || {}) };
+  if (v === null || !(v > 0)) delete mapa[k]; else mapa[k] = v;
+  S.fech.conferencia_loja = Object.keys(mapa).length ? mapa : {};
+  renderConferir();
+  try {
+    await sb(`gn_caixa_fechamento?id=eq.${S.fech.id}`,
+      { method: 'PATCH', prefer: 'return=minimal', body: { conferencia_loja: S.fech.conferencia_loja } });
+  } catch (e) {
+    _pfEnqueue({ tempId: uuid(), tabela: 'gn_caixa_fechamento', method: 'PATCH',
+                 realId: S.fech.id, body: { conferencia_loja: S.fech.conferencia_loja } });
+    toast('⚠️ Offline — anotação salva localmente');
+  }
+}
+
 function _mostrarPaneLancar() {
   const pl = $('paneLancar'), pc = $('paneConferir');
   if (!pl || !pc) return;
@@ -3369,9 +3421,12 @@ function _mostrarPaneLancar() {
   if (!btn) return;
   const lista = S.bandAtiva ? _confLancamentos(S.bandAtiva) : [];
   const confBand = S.confAtual?.itens?.bandeiras?.[S.bandAtiva];
-  const dif = confBand && confBand.conferido != null
-    ? Math.round((confBand.conferido - _confSoma(lista)) * 100) / 100
-    : (confBand ? (confBand.dif || 0) : 0);
+  // Mesmo esperado da tela de conferir: o do RH quando existe, senão o que a loja anotou.
+  // Assim a bandeira que a própria loja já sabe que não fecha também acende aqui.
+  const rh = confBand && confBand.conferido != null ? Number(confBand.conferido) : null;
+  const esperado = rh != null ? rh : _confEsperadoLoja(S.bandAtiva);
+  const dif = esperado != null ? Math.round((esperado - _confSoma(lista)) * 100) / 100
+            : (confBand ? (confBand.dif || 0) : 0);
   const temDiverg = Math.abs(dif) >= 0.01;
   btn.classList.toggle('alerta', temDiverg);
   if (!lista.length) {
@@ -3404,10 +3459,19 @@ function renderConferir() {
   const somaMarcada = _confSoma(marcados);
   const faltaMarcar = Math.round((totalSistema - somaMarcada) * 100) / 100;
 
+  // O valor ESPERADO pode vir de dois lugares, e os dois servem:
+  //   - o que o RH contou, quando já houve conferência;
+  //   - o que a própria loja leu no relatório/na gaveta, digitado aqui.
+  // O segundo é o que faz o recurso valer ANTES de ir pro RH: sem um número esperado a
+  // tela só lista, não fecha conta nenhuma. O do RH tem precedência por ser o oficial.
   const confBand = S.confAtual?.itens?.bandeiras?.[k];
   const rh = confBand && confBand.conferido != null ? Number(confBand.conferido) : null;
-  const dif = rh != null ? Math.round((rh - totalSistema) * 100) / 100 : null;
+  const meu = _confEsperadoLoja(k);
+  const esperado = rh != null ? rh : meu;
+  const rotuloEsperado = rh != null ? 'RH contou' : 'No relatório';
+  const dif = esperado != null ? Math.round((esperado - totalSistema) * 100) / 100 : null;
   const temDiverg = dif != null && Math.abs(dif) >= 0.01;
+  const bate = dif != null && Math.abs(dif) < 0.01;
 
   const linhaResumo = (rot, val, cor) =>
     `<div style="display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:3px 0">
@@ -3417,16 +3481,28 @@ function renderConferir() {
 
   let topo = '';
   if (temDiverg) {
-    // O que o RH contou a mais (ou a menos) que o sistema. Dizer o valor que está
-    // faltando aparecer é mais útil que dizer só que "tem diferença".
+    // Dizer o valor que está faltando aparecer é mais útil que dizer só que "tem diferença".
     const falta = dif > 0
       ? `Falta lançar <b>${money(Math.abs(dif))}</b>`
       : `Há <b>${money(Math.abs(dif))}</b> lançados a mais`;
     topo = `<div style="background:rgba(220,38,38,0.1);border:1.5px solid var(--erro);border-radius:10px;padding:10px 12px;margin-bottom:10px">
         <div style="font-size:12px;font-weight:bold;color:var(--erro);margin-bottom:6px">🚨 ${falta}</div>
-        ${linhaResumo('RH contou', money(rh))}
+        ${linhaResumo(rotuloEsperado, money(esperado))}
         ${linhaResumo('No app', money(totalSistema))}
       </div>`;
+  } else if (bate) {
+    topo = `<div style="background:rgba(22,163,74,0.1);border:1.5px solid var(--ok);border-radius:10px;padding:10px 12px;margin-bottom:10px">
+        <div style="font-size:12px;font-weight:bold;color:var(--ok)">✅ Bate com ${rh != null ? 'o que o RH contou' : 'o relatório'} — ${money(esperado)}</div>
+      </div>`;
+  }
+
+  // Quando o RH já conferiu E a loja também anotou, um número diferente do outro é um fato
+  // novo: ou a loja leu outro relatório, ou digitou errado. Calar isso faria a tela mostrar
+  // uma conta certa em cima de uma leitura errada.
+  if (rh != null && meu != null && Math.abs(rh - meu) >= 0.01) {
+    topo += `<div style="font-size:11px;color:var(--ouro);margin:-4px 0 10px;line-height:1.45">
+      ⚠️ Você anotou <b>${money(meu)}</b> e o RH contou <b>${money(rh)}</b>. A conta acima usa o do RH.
+    </div>`;
   }
 
   // Quando tudo já foi marcado e ainda sobra diferença, o erro não está no que foi digitado:
@@ -3435,14 +3511,26 @@ function renderConferir() {
   let veredito = '';
   if (tudoMarcado && temDiverg) {
     veredito = `<div style="font-size:11px;color:var(--erro);margin-top:8px;line-height:1.45">
-      Todos os ${lista.length} lançamentos batem com o relatório, e a diferença continua.
-      Então falta um recebimento que nunca foi lançado — ${dif > 0 ? 'procure no relatório o valor de ' + money(Math.abs(dif)) : 'confira se algum valor foi lançado em bandeira errada'}.
+      Todos os ${lista.length} lançamentos batem, e a diferença continua.
+      Então falta um recebimento que nunca foi lançado — ${dif > 0 ? 'procure ' + _confFonte(k) + ' o valor de ' + money(Math.abs(dif)) : 'confira se algum valor foi lançado em bandeira errada'}.
     </div>`;
   } else if (tudoMarcado) {
     veredito = `<div style="font-size:11px;color:var(--ok);margin-top:8px;font-weight:bold">✅ Todos os lançamentos conferidos.</div>`;
   }
 
-  $('confResumo').innerHTML = topo
+  // O campo do valor esperado fica SEMPRE à mão, mesmo quando o RH já conferiu: é por ele
+  // que a loja acha o erro sozinha, no fechamento, antes de a diferença virar ocorrência.
+  const campoEsperado = `
+    <div style="display:flex;align-items:center;gap:8px;background:var(--graf3);border:1px solid var(--linha);border-radius:10px;padding:9px 11px;margin-bottom:10px">
+      <span style="font-size:11px;color:var(--mut);flex:1;line-height:1.35">Total ${_confFonte(k)}</span>
+      <input id="confEsperado" type="text" inputmode="decimal" placeholder="0,00"
+        value="${meu != null ? String(meu.toFixed(2)).replace('.', ',') : ''}"
+        onchange="salvarEsperadoLoja(this.value)"
+        onkeydown="if(event.key==='Enter')this.blur()"
+        style="width:118px;flex-shrink:0;background:var(--graf2);border:1px solid var(--linha);color:var(--txt);font-family:inherit;font-size:16px;font-weight:bold;padding:8px 10px;border-radius:8px;outline:none;text-align:right">
+    </div>`;
+
+  $('confResumo').innerHTML = topo + campoEsperado
     + `<div style="background:var(--graf3);border:1px solid var(--linha);border-radius:10px;padding:10px 12px;margin-bottom:10px">
         ${linhaResumo('Marcados', `${marcados.length} de ${lista.length} · ${money(somaMarcada)}`, 'var(--ok)')}
         ${linhaResumo('Ainda sem marcar', money(faltaMarcar), faltaMarcar >= 0.01 ? 'var(--ouro)' : 'var(--mut)')}
