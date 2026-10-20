@@ -719,6 +719,11 @@ input[type=date], .card input[type=date] { background:var(--graf2) !important; c
 }
 .conf-linha.on .cv { opacity: 0.5; text-decoration: line-through; }
 .conf-linha .ch { font-size: 11px; color: var(--mut); flex-shrink: 0; }
+.conf-del {
+  flex-shrink: 0; background: none; border: none; color: var(--erro);
+  font-size: 15px; line-height: 1; padding: 4px 2px 4px 8px; cursor: pointer; opacity: .65;
+}
+.conf-del:active { opacity: 1; transform: scale(.9); }
 .conf-linha.travada { cursor: default; opacity: 0.6; }
 
 .btn-cancel {
@@ -1897,18 +1902,32 @@ function renderTudo() {
   if (hdrTot) { const te = totEntradas(); hdrTot.textContent = money(te); hdrTot.style.display = te > 0 ? '' : 'none'; }
 
   let _countDiverg = 0, _countCorrigido = 0, _totalDivergAbs = 0, _hasDivergGrande = false;
+  let _countDivergLoja = 0;   // quantas vieram da conferência da própria loja, não do RH
   ENTRADAS.forEach(b => {
     const el = document.getElementById('bt-' + cssId(b.k));
     if (!el) return;
     const sistemaAtual = totEntradaK(b.k);
     el.textContent = money(sistemaAtual);
     const btn = el.parentElement;
+    // A marca na bandeira agora vem das DUAS conferências, não só da do RH:
+    //   - o que o RH contou, quando já houve conferência (continua tendo precedência);
+    //   - o que a própria loja lançou do sistema, na aba Fechar.
+    // "Ter as bandeiras marcadas a divergência quando apontar pela conferência, que fica
+    //  mais intuitivo qual abrir pra verificar, na aba Recebido." Sem isso a loja
+    //  preenchia a lista no Fechar, voltava pro Recebido e tinha que lembrar de cabeça
+    //  qual bandeira estava vermelha.
     const confBand = S.confAtual?.itens?.bandeiras?.[b.k];
+    const rhVal_ = confBand && confBand.conferido != null ? Number(confBand.conferido) : null;
+    const meuVal_ = _confEsperadoLoja(b.k);
+    const esperado_ = rhVal_ != null ? rhVal_ : meuVal_;
     // Recalcula o dif ao vivo usando o total atual do sistema
-    const liveDif = confBand != null && confBand.conferido != null
-      ? Math.round((confBand.conferido - sistemaAtual) * 100) / 100
+    const liveDif = esperado_ != null
+      ? Math.round((esperado_ - sistemaAtual) * 100) / 100
       : confBand != null ? (confBand.dif || 0) : null;
     const wasDiv = confBand != null && Math.abs(confBand.dif || 0) >= 0.01;
+    // Verde também quando a loja conferiu e bateu — ver a bandeira já resolvida é metade
+    // da utilidade de olhar a grade.
+    const bateu_ = esperado_ != null && liveDif !== null && Math.abs(liveDif) < 0.01;
     let confEl = document.getElementById('bc-' + cssId(b.k));
     if (liveDif !== null && Math.abs(liveDif) >= 0.01) {
       // Ainda há divergência
@@ -1932,12 +1951,17 @@ function renderTudo() {
         btn.appendChild(confEl);
       }
       const sinal = liveDif > 0 ? '+' : '−';
-      const rhVal = confBand.conferido != null ? `RH: ${money(confBand.conferido)}` : '';
+      // Diz de ONDE veio o número esperado: "RH" e "Sistema" pedem ações diferentes da
+      // loja, e um rótulo errado manda corrigir contra a fonte errada.
+      const refTxt = esperado_ != null ? `${rhVal_ != null ? 'RH' : 'Sistema'}: ${money(esperado_)}` : '';
       confEl.style.color = cor;
-      confEl.innerHTML = `${rhVal ? rhVal + '<br>' : ''}<span style="opacity:.85">${sinal} ${money(Math.abs(liveDif))}</span>`;
-    } else if (wasDiv && liveDif !== null && Math.abs(liveDif) < 0.01) {
-      // Havia divergência, mas foi corrigida
-      _countCorrigido++;
+      confEl.innerHTML = `${refTxt ? refTxt + '<br>' : ''}<span style="opacity:.85">${sinal} ${money(Math.abs(liveDif))}</span>`;
+      if (rhVal_ == null) _countDivergLoja++;
+    } else if ((wasDiv || bateu_) && liveDif !== null && Math.abs(liveDif) < 0.01) {
+      // Havia divergência do RH e foi corrigida — ou a loja conferiu e bateu. Só a
+      // primeira conta pro banner de "aguardando nova conferência do RH": a segunda não
+      // tem nada pendente com ninguém.
+      if (wasDiv) _countCorrigido++;
       btn.style.outline = '2px solid #16A34A';
       btn.style.background = 'rgba(34,197,94,0.12)';
       btn.style.color = '#16A34A';
@@ -1948,7 +1972,7 @@ function renderTudo() {
         btn.appendChild(confEl);
       }
       confEl.style.color = '#16A34A';
-      confEl.textContent = '✅ Corrigido';
+      confEl.textContent = wasDiv ? '✅ Corrigido' : '✅ Confere';
     } else {
       btn.style.outline = '';
       btn.style.background = '';
@@ -1958,19 +1982,31 @@ function renderTudo() {
   });
   const bannerDiverg = $('divBannerDiverg');
   if (bannerDiverg) {
-    if (S.confAtual && (_countDiverg > 0 || _countCorrigido > 0)) {
+    // O banner também passou a cobrir a conferência da própria loja — antes só existia se
+    // houvesse S.confAtual (RH), então a loja preenchia o sistema no Fechar e o topo do
+    // Recebido continuava mudo.
+    const _temAlgoALigar = _countDiverg > 0 || (_countCorrigido > 0 && S.confAtual);
+    if (_temAlgoALigar) {
       let html = '';
       if (_countDiverg > 0) {
         const plural = _countDiverg > 1 ? `${_countDiverg} bandeiras` : '1 bandeira';
         const cor = _hasDivergGrande ? '#DC2626' : '#D97706';
         const bg = _hasDivergGrande ? 'rgba(239,68,68,0.12)' : 'rgba(245,158,11,0.1)';
         const brd = _hasDivergGrande ? '#DC2626' : '#D97706';
+        // Quem apontou muda o que a loja faz: do RH é cobrança, da própria conferência é
+        // trabalho em andamento. Dizer "RH encontrou" numa divergência que a loja mesma
+        // achou mandaria procurar uma ocorrência que não existe.
+        const quem = _countDivergLoja === _countDiverg
+          ? `${plural} não ${_countDiverg > 1 ? 'batem' : 'bate'} com o sistema`
+          : (_countDivergLoja > 0
+              ? `${plural} com divergência (RH e conferência da loja)`
+              : `RH encontrou divergência em ${plural}`);
         html += `<div style="background:${bg};border:1.5px solid ${brd};border-radius:8px;padding:8px 12px;margin:8px 0 2px;display:flex;align-items:center;gap:10px">
           <span style="font-size:18px">${_hasDivergGrande ? '🚨' : '⚠️'}</span>
-          <div style="font-size:12px;font-weight:700;color:${cor}">RH encontrou divergência em ${plural} — verificar lançamentos (total: ${money(_totalDivergAbs)})</div>
+          <div style="font-size:12px;font-weight:700;color:${cor}">${quem} — toque na bandeira marcada e use Conferir lançamentos (total: ${money(_totalDivergAbs)})</div>
         </div>`;
       }
-      if (_countCorrigido > 0) {
+      if (_countCorrigido > 0 && S.confAtual) {
         const plural2 = _countCorrigido > 1 ? `${_countCorrigido} bandeiras corrigidas` : '1 bandeira corrigida';
         html += `<div style="background:rgba(34,197,94,0.1);border:1.5px solid #16A34A;border-radius:8px;padding:8px 12px;margin:2px 0 4px;display:flex;align-items:center;gap:10px">
           <span style="font-size:18px">✅</span>
@@ -3717,13 +3753,39 @@ function renderConferir() {
     const travada = !!c._pendente;
     const titulo = travada ? 'Aguardando sincronizar — dá pra marcar assim que subir'
       : (on && c.conferido_por ? 'Conferido por ' + escHtmlCx(c.conferido_por) : 'Toque para marcar');
+    // Achou o lançamento errado? Apaga daqui mesmo. Era o passo que faltava: a tela já
+    // mostrava QUAL valor sobrava, e a pessoa tinha que sair, procurar o mesmo valor na
+    // lista geral misturada e excluir lá — que é exatamente o problema que esta tela
+    // existe pra resolver.
+    // Caixa fechado (modo consulta) não ganha o botão: conferir é auditoria e vale sempre,
+    // mas excluir é mexer em dinheiro e passa pela reabertura, como no resto do app.
+    const btnDel = S.modoConsulta ? ''
+      : `<button class="conf-del" title="Excluir este lançamento"
+           onclick="event.stopPropagation();excluirDaConferencia('${c.id}')">✕</button>`;
     return `<div class="conf-linha${on ? ' on' : ''}${travada ? ' travada' : ''}"
          onclick="${travada ? '' : `toggleConferido('${c.id}')`}" title="${titulo}">
       <span class="cx">${on ? '✓' : ''}</span>
       <span class="cv">${money(c.valor)}</span>
       <span class="ch">${travada ? '⏳' : hora}</span>
+      ${btnDel}
     </div>`;
   }).join('');
+}
+
+// Exclui o lançamento sem sair da conferência. Reaproveita excluir() de propósito: é ela
+// que já trata o lançamento ainda na fila, a exclusão offline, a foto no Storage e — o
+// que mais importa — o ressincronismo do Check-list/comissão, que depende deste valor.
+// Duplicar isso aqui seria criar um segundo caminho pra apagar dinheiro.
+async function excluirDaConferencia(id) {
+  if (S.modoConsulta) { toast('Caixa fechado — reabra para alterar lançamentos'); return; }
+  const c = S.comprovantes.find(x => String(x.id) === String(id));
+  if (!c) return;
+  const band = c.bandeira;
+  await excluir('gn_caixa_comprovante', id, 'comprovantes');
+  // excluir() já chama renderTudo(), que redesenha esta tela quando o modal está aberto.
+  // Se a bandeira ficou sem nenhum lançamento, não há mais o que conferir: volta pro
+  // painel de lançar em vez de deixar uma lista vazia no ar.
+  if (S.bandAtiva === band && !_confLancamentos(band).length) _mostrarPaneLancar();
 }
 
 async function toggleConferido(id) {
