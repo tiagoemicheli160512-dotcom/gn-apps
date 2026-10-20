@@ -151,6 +151,45 @@ input.login-in:focus{border-color:var(--or);box-shadow:0 0 0 3px var(--or-glow),
   box-shadow:inset 0 1px 3px rgba(0,0,0,.2);
 }
 .wnav select:focus{border-color:var(--or)}
+
+/* ── AVISO DE SEMANA ─────────────────────────────────────────────
+   Dois sinais, de propósito: a folha de confirmação aparece na SAÍDA da semana atual, e a
+   faixa fica enquanto a tela estiver fora dela. A faixa é a que mais importa — quem já
+   trocou de semana precisa ver isso o turno inteiro, não só no instante do clique. */
+.sem-fora{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  background:var(--rd-bg);border:1.5px solid var(--rd);border-radius:12px;
+  padding:10px 13px;margin:0 14px 12px;
+}
+.sem-fora-txt{flex:1;min-width:170px;font-size:11.5px;line-height:1.5;color:var(--rd2)}
+.sem-fora-btn{
+  flex-shrink:0;background:var(--rd);border:none;color:#fff;
+  font-family:inherit;font-size:11.5px;font-weight:700;
+  padding:9px 14px;border-radius:9px;cursor:pointer;
+}
+.sem-fora-btn:active{opacity:.85;transform:scale(.97)}
+
+.sem-overlay{
+  position:fixed;inset:0;background:rgba(0,0,0,.72);
+  display:flex;align-items:flex-end;justify-content:center;z-index:400;
+}
+.sem-sheet{
+  width:100%;max-width:520px;background:var(--bg2);
+  border-top:1px solid var(--bd);border-radius:16px 16px 0 0;
+  padding:22px 20px 28px;
+}
+.sem-tit{font-size:17px;font-weight:700;color:var(--rd2);margin-bottom:10px}
+.sem-txt{font-size:13px;line-height:1.6;color:var(--txt);margin-bottom:10px}
+.sem-aviso{
+  font-size:12px;line-height:1.55;color:var(--txt2);
+  background:var(--bg4);border:1px solid var(--bd2);border-radius:10px;
+  padding:10px 12px;margin-bottom:16px;
+}
+.sem-btns{display:flex;gap:10px;flex-wrap:wrap}
+.sem-btns button{font-family:inherit;font-size:13px;font-weight:700;padding:13px;border-radius:10px;cursor:pointer}
+.sem-cancel{flex:1 1 150px;background:var(--gr);border:none;color:#fff}
+.sem-ok{flex:1 1 120px;background:var(--bg4);border:1px solid var(--bd2);color:var(--txt3)}
+.sem-btns button:active{opacity:.85;transform:scale(.98)}
 .wnav button{
   background:var(--bg4);border:1px solid var(--bd2);color:var(--gd2);
   padding:10px 15px;border-radius:10px;font-size:20px;line-height:1;flex-shrink:0;
@@ -788,7 +827,12 @@ function selecionarLoja(key, nome) {
   document.title = 'GN Gorjetas — ' + nome;
   document.getElementById('seletor-loja').style.display='none';
   state.tab     = ld('tab','semana');
-  state.semIdx  = ld('semIdx', calcSemIdxAtual());
+  // SEMPRE a semana vigente ao abrir. Antes isto era ld('semIdx', calcSemIdxAtual()): a
+  // semana ficava gravada no aparelho, então quem consultasse uma semana antiga UMA vez
+  // abria naquela semana pra sempre, em todo acesso seguinte — e lançava bruto, falta e
+  // folga lá sem perceber. Foi o que o dono viu ("tem gente vendo a semana errada").
+  // Quem quiser outra semana continua escolhendo, agora de propósito (ver setSemIdx).
+  state.semIdx  = calcSemIdxAtual();
   state.mesIdx  = 0;
   state.whaTipo = 'geral';
   state.expanded = {};
@@ -2409,6 +2453,7 @@ function render(){
   const tabsVisiveis=abasPermitidas?TABS.filter(t=>t.id==='guia'||abasPermitidas.includes(t.id)):TABS;
   tb.innerHTML=tabsVisiveis.map(t=>`<button class="tab${t.id===state.tab?' on':''}" onclick="setTab('${t.id}')">${t.label}</button>`).join('');
   const ct=document.getElementById('content');
+  _renderAvisoSemanaFora();
   if(state.tab==='semana') renderSemana(ct,sem);
   else if(state.tab==='funcs') renderFuncs(ct,sem);
   else if(state.tab==='pool') renderPool(ct);
@@ -2422,7 +2467,89 @@ function render(){
   else if(state.tab==='guia') renderGuia(ct);
 }
 function setTab(t){if(abasPermitidas&&t!=='guia'&&!abasPermitidas.includes(t))return;state.tab=t;sv('tab',t);document.querySelectorAll('.sidebar-link').forEach(l=>l.classList.remove('active'));const sl=document.querySelector(`.sidebar-link[data-sidebar-tab="${t}"]`);if(sl)sl.classList.add('active');render();}
-function setSemIdx(i){state.semIdx=Math.max(0,Math.min(CAL.length-1,i));sv('semIdx',state.semIdx);render();}
+// A semana não é mais gravada: o app sempre abre na vigente (ver INIT). Sair dela é um
+// ato deliberado, e por isso passa por confirmação — uma vez só, na saída. Já estando numa
+// semana antiga, continuar navegando é claramente de propósito, e VOLTAR pra atual nunca
+// precisa de aviso: é sempre o lugar certo de estar.
+function setSemIdx(i, confirmado){
+  const alvo = Math.max(0, Math.min(CAL.length-1, i));
+  if (alvo === state.semIdx) return;
+  const atual = calcSemIdxAtual();
+  if (!confirmado && state.semIdx === atual && alvo !== atual) { _perguntarTrocaSemana(alvo); return; }
+  state.semIdx = alvo;
+  render();
+}
+function voltarSemanaAtual(){ setSemIdx(calcSemIdxAtual(), true); }
+
+let _semPendente = null;
+function _semLabel(i){ const w = CAL[i]; return w ? `S${String(w.num).padStart(2,'0')} · ${w.header}` : '—'; }
+
+function _perguntarTrocaSemana(alvo){
+  _semPendente = alvo;
+  let el = document.getElementById('avisoTrocaSemana');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'avisoTrocaSemana';
+    el.className = 'sem-overlay';
+    // Clicar fora cancela, como em qualquer folha deste tipo — e cancelar redesenha, que é
+    // o que devolve o <select> pra semana em que a tela realmente está.
+    el.addEventListener('click', e => { if (e.target === el) cancelarTrocaSemana(); });
+    document.body.appendChild(el);
+  }
+  const atual = calcSemIdxAtual();
+  const passado = alvo < atual;
+  el.innerHTML = `<div class="sem-sheet">
+      <div class="sem-tit">⚠️ Sair da semana atual?</div>
+      <div class="sem-txt">
+        Você está na <b>semana atual</b> (${_semLabel(atual)}) e vai abrir
+        ${passado ? 'uma semana <b>já passada</b>' : 'uma semana <b>futura</b>'}:
+        <b>${_semLabel(alvo)}</b>.
+      </div>
+      <div class="sem-aviso">
+        Tudo que você lançar — bruto do dia, falta, folga, férias — vai para
+        <b>${_semLabel(alvo)}</b>, não para a semana atual.
+      </div>
+      <div class="sem-btns">
+        <button class="sem-cancel" onclick="cancelarTrocaSemana()">Ficar na semana atual</button>
+        <button class="sem-ok" onclick="confirmarTrocaSemana()">Ver ${_semLabel(alvo).split(' · ')[0]}</button>
+      </div>
+    </div>`;
+  el.style.display = 'flex';
+}
+function confirmarTrocaSemana(){
+  const alvo = _semPendente; _semPendente = null;
+  const el = document.getElementById('avisoTrocaSemana'); if (el) el.style.display = 'none';
+  if (alvo != null) setSemIdx(alvo, true);
+}
+function cancelarTrocaSemana(){
+  _semPendente = null;
+  const el = document.getElementById('avisoTrocaSemana'); if (el) el.style.display = 'none';
+  render();   // devolve o <select> pra semana em que a tela está de verdade
+}
+
+// Enquanto a tela NÃO estiver na semana vigente, o aviso fica à vista em TODAS as abas —
+// não só na que tem o seletor. É em Funcionários e no Caixa da Semana que se lança, e era
+// ali que dava pra trabalhar a semana inteira sem notar.
+function _renderAvisoSemanaFora(){
+  const ct = document.getElementById('content');
+  if (!ct || !ct.parentNode) return;
+  let el = document.getElementById('avisoSemanaFora');
+  const atual = calcSemIdxAtual();
+  if (state.semIdx === atual) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'avisoSemanaFora';
+    el.className = 'sem-fora';
+    ct.parentNode.insertBefore(el, ct);
+  }
+  const passado = state.semIdx < atual;
+  el.innerHTML = `<div class="sem-fora-txt">
+      <b>Você NÃO está na semana atual.</b><br>
+      Vendo ${passado ? 'a semana passada' : 'uma semana futura'}: <b>${_semLabel(state.semIdx)}</b> ·
+      a atual é <b>${_semLabel(atual)}</b>
+    </div>
+    <button class="sem-fora-btn" onclick="voltarSemanaAtual()">Voltar pra atual</button>`;
+}
 function showToast(msg){
   const t=document.getElementById('toast');
   t.textContent=msg;t.classList.add('show');
