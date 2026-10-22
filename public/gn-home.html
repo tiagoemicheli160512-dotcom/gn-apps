@@ -2480,16 +2480,8 @@ function _relEmpBlocoHtml(comKey, comp, mesNome, podeEnviar) {
 // app Lojas), sem nenhum agregado mensal validado hoje — mostrar um número aproximado
 // arriscaria não bater com o real, então preferimos deixar de fora por enquanto.
 async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
-  try { await _renderMesAnteriorCard(mostrar, sess, isMasterAtivo); }
-  finally { _gateReavaliar(); }
-}
-
-async function _renderMesAnteriorCard(mostrar, sess, isMasterAtivo) {
   const el = document.getElementById('mes-anterior-home-card');
   if (!el) return;
-  // Zerado aqui e preenchido só quando o card desenha de verdade: é o que impede a trava
-  // do mês de ficar de pé com a competência de uma loja que nem está mais na tela.
-  _gateMesCtx = null;
   if (!mostrar || !sess) { el.innerHTML = ''; return; }
   const hoje = new Date();
   // Fica o MÊS TODO (antes sumia depois do dia 3). Com o comparativo, as ocorrências e o
@@ -2603,7 +2595,6 @@ async function _renderMesAnteriorCard(mostrar, sess, isMasterAtivo) {
     const podeEnviarRel = sess.loja === 'GERAL' || !!(sess.permissoes || {}).master;
     _dreCtx = { loja, comp: dreComp, faturamento, mesNome };
     _dreEditando = false;
-    _gateMesCtx = { loja, comp: dreComp };
 
     el.innerHTML = `<details style="background:rgba(79,70,229,.06);border:1px solid rgba(79,70,229,.2);border-left:3px solid #4F46E5;border-radius:18px;padding:0;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05);overflow:hidden">
       <summary style="list-style:none;cursor:pointer;padding:14px 16px;display:flex;align-items:center;gap:10px">
@@ -3843,15 +3834,17 @@ async function _renderFechamentoSemanaCard(mostrar, sess, isMasterAtivo) {
   </div>`;
 }
 
-/* ── Trava obrigatória do fechamento e da ciência ───────────────────────────────────
+/* ── Trava obrigatória do fechamento da semana ──────────────────────────────────────
    "Deixar sem ser obrigatório faz ninguém olhar ou responder. Tem que aparecer antes de
    qualquer coisa e só liberar após ser feito." — decisão do dono, que substitui a anterior
    ("insiste, não trava"): o card ficou semanas na tela com "não respondeu" nos dois chips.
 
-   TRAVA SÓ QUEM DEVE A RESPOSTA, pelo cargo da sessão aberta: gerente e sub no fechamento
-   da semana, gerente na ciência do mês. Caixa, estoquista, supervisor e mestre seguem
-   usando a Home — travar a loja inteira pararia a operação por uma pendência que aquela
-   pessoa nem pode resolver.
+   É SÓ DO FECHAMENTO DA SEMANA. A ciência do mês segue como card normal, sem travar nada —
+   perguntado e confirmado com o dono.
+
+   TRAVA SÓ QUEM DEVE A RESPOSTA, pelo cargo da sessão aberta: gerente e sub. Caixa,
+   estoquista, supervisor e mestre seguem usando a Home — travar a loja inteira pararia a
+   operação por uma pendência que aquela pessoa nem pode resolver.
 
    FALHA ABERTO, sempre. Se o relatório ou as respostas não carregaram, a trava não aparece:
    internet ruim não pode trancar a gerência fora do app, e sem relatório não existe nem
@@ -3863,50 +3856,35 @@ async function _renderFechamentoSemanaCard(mostrar, sess, isMasterAtivo) {
    z-index abaixo do alerta urgente (99999) de propósito: emergência do mestre passa na
    frente de cobrança de relatório. */
 const GATE_ID = 'gate-obrigatorio';
-let _gateAtivo  = null;                        // 'mes' | 'semana' | null
-let _gateFeito  = { mes: false, semana: false }; // passou pelo "Continuar" nesta sessão
-let _gateViu    = { mes: false, semana: false }; // a trava chegou a aparecer nesta sessão
-let _gateOrigem = {};                          // id do card -> { pai, proximo } pra devolver
-let _gateMesCtx = null;                        // { loja, comp } do card do mês já desenhado
+const GATE_CARD = 'fechamento-semana-home-card';
+let _gateAtivo  = false;
+let _gateFeito  = false;   // passou pelo "Continuar" nesta sessão
+let _gateViu    = false;   // a trava chegou a aparecer nesta sessão
+let _gateOrigem = null;    // { pai, proximo } de onde o card saiu, pra devolver no lugar
 
 function _gateReset() {
-  _gateFeito = { mes: false, semana: false };
-  _gateViu   = { mes: false, semana: false };
-  _gateMesCtx = null;
+  _gateFeito = false;
+  _gateViu   = false;
   _fechaQuem = null;
   _fechaRespostas = {};
   _gateLiberar();
 }
 
-function _gateLojaDaSessao(sess) {
-  const isMasterAtivo = sess.loja === 'GERAL' || !!(sess.permissoes || {}).master;
-  return (isMasterAtivo && masterLoja) ? masterLoja : sess.loja;
-}
-
 // Decide a trava a partir do que JÁ está em memória — nunca dispara requisição própria.
-// Quem chama são os dois renders dos cards, no fim deles, quando os dados chegaram.
+// Quem chama é o render do card, no fim dele, quando os dados chegaram.
 function _gateReavaliar() {
   try {
     if (!session || typeof LOJAS_LISTA === 'undefined') { _gateLiberar(); return; }
     const sess = session;
-    const loja = _gateLojaDaSessao(sess);
-    if (!LOJAS_LISTA.includes(loja)) { _gateLiberar(); return; }
-    const cargo = (sess.cargo || '').toLowerCase();
-
-    // 1º a ciência do mês: é o card de cima na Home e o resultado mais largo.
-    if (CIENTE_CARGOS.includes(cargo) && !_gateFeito.mes
-        && _cienteAllData && _gateMesCtx && _gateMesCtx.loja === loja
-        && !_cienteDe(_gateMesCtx.comp, loja)) { _gateTravar('mes'); return; }
-
-    // 2º o fechamento da semana, pra quem ainda não respondeu. `_gateViu.semana` segura a
-    // trava depois do envio: é ali que o relatório finalmente aparece, e soltar na hora
-    // devolveria a pessoa pra Home sem ela ter lido nada.
-    const chave = FECHA_CARGOS[cargo];
-    if (chave && !_gateFeito.semana && _fechaJaAbriu()
+    const isMasterAtivo = sess.loja === 'GERAL' || !!(sess.permissoes || {}).master;
+    const loja = (isMasterAtivo && masterLoja) ? masterLoja : sess.loja;
+    const chave = FECHA_CARGOS[(sess.cargo || '').toLowerCase()];
+    // `_gateViu` segura a trava depois do envio: é ali que o relatório finalmente aparece,
+    // e soltar na hora devolveria a pessoa pra Home sem ela ter lido nada.
+    if (chave && !_gateFeito && LOJAS_LISTA.includes(loja) && _fechaJaAbriu()
         && _fechaAllData && _fechaRel && _fechaRelLoja === loja
         && _fechaPerguntasDe(_fechaRel).length
-        && (!_fechaRespostaDe(_fechaRel.semISO, loja, chave) || _gateViu.semana)) { _gateTravar('semana'); return; }
-
+        && (!_fechaRespostaDe(_fechaRel.semISO, loja, chave) || _gateViu)) { _gateTravar(loja, chave); return; }
     _gateLiberar();
   } catch (e) {
     // Qualquer erro aqui solta a trava: um defeito meu não pode trancar ninguém.
@@ -3940,74 +3918,50 @@ function _gateOverlay() {
   return ov;
 }
 
-const GATE_CARDS = { mes: 'mes-anterior-home-card', semana: 'fechamento-semana-home-card' };
-
-function _gateTravar(tipo) {
+function _gateTravar(loja, chave) {
   const ov = _gateOverlay();
   const holder = document.getElementById(GATE_ID + '-conteudo');
-  const card = document.getElementById(GATE_CARDS[tipo]);
+  const card = document.getElementById(GATE_CARD);
   if (!card || !holder) return;
 
-  if (_gateAtivo !== tipo) {
-    _gateDevolverCards();
+  if (!_gateAtivo) {
     // Guarda de onde o card saiu pra devolver no mesmo lugar quando a trava sair.
-    _gateOrigem[GATE_CARDS[tipo]] = { pai: card.parentNode, proximo: card.nextSibling };
+    _gateOrigem = { pai: card.parentNode, proximo: card.nextSibling };
     holder.appendChild(card);
-    _gateAtivo = tipo;
-    _gateViu[tipo] = true;
+    _gateAtivo = true;
+    _gateViu = true;
     document.body.style.overflow = 'hidden';
   }
 
-  const tit = document.getElementById(GATE_ID + '-titulo');
-  const sub = document.getElementById(GATE_ID + '-sub');
-  const btn = document.getElementById(GATE_ID + '-continuar');
-  const loja = _gateLojaDaSessao(session);
-
-  if (tipo === 'mes') {
-    tit.textContent = 'Antes de seguir: o resultado do mês fechado';
-    sub.textContent = 'Role o relatório até o fim e confirme que viu. O app libera depois disso.';
-    // O card do mês é um <details>: aberto na marra, senão a trava mostraria só o resumo
-    // fechado e o botão de ciência (que fica no fim de dentro) nem existiria na tela.
-    const det = card.querySelector('details');
-    if (det) det.open = true;
-    btn.style.display = 'none';
-  } else {
-    const chave = FECHA_CARGOS[(session.cargo || '').toLowerCase()];
-    const jaRespondeu = !!_fechaRespostaDe(_fechaRel.semISO, loja, chave);
-    tit.textContent = jaRespondeu ? 'Relatório da semana' : 'Antes de seguir: fechamento da semana';
-    sub.textContent = jaRespondeu
-      ? 'Leia o resultado da semana. O app libera quando você continuar.'
-      : 'Responda sobre a semana fechada — sem consultar. O relatório abre depois de responder.';
-    if (!_fechaAberto) { _fechaAberto = true; _renderFechamentoSemanaHome(true, session, !!masterLoja); }
-    const inp = document.getElementById('fecha-user');
-    if (inp && !inp.value) inp.value = session.nome || '';
-    btn.style.display = jaRespondeu ? '' : 'none';
-  }
+  const jaRespondeu = !!_fechaRespostaDe(_fechaRel.semISO, loja, chave);
+  document.getElementById(GATE_ID + '-titulo').textContent =
+    jaRespondeu ? 'Relatório da semana' : 'Antes de seguir: fechamento da semana';
+  document.getElementById(GATE_ID + '-sub').textContent = jaRespondeu
+    ? 'Leia o resultado da semana. O app libera quando você continuar.'
+    : 'Responda sobre a semana fechada — sem consultar. O relatório abre depois de responder.';
+  // O card tem setinha de recolher; recolhido dentro da trava, a tela ficaria vazia com uma
+  // trava de pé. Reabre sozinho.
+  if (!_fechaAberto) { _fechaAberto = true; _renderFechamentoSemanaHome(true, session, !!masterLoja); }
+  const inp = document.getElementById('fecha-user');
+  if (inp && !inp.value) inp.value = session.nome || '';
+  document.getElementById(GATE_ID + '-continuar').style.display = jaRespondeu ? '' : 'none';
   ov.scrollTop = 0;
 }
 
-// "Continuar" só aparece quando a pendência daquela trava já foi cumprida, então aqui é
-// sempre liberação legítima — não é um "pular".
+// "Continuar" só aparece com a semana já respondida, então aqui é sempre liberação
+// legítima — não é um "pular".
 function _gateContinuar() {
-  if (_gateAtivo) _gateFeito[_gateAtivo] = true;
+  _gateFeito = true;
   _gateLiberar();
-  _gateReavaliar();   // pode haver a segunda trava esperando atrás da primeira
-}
-
-function _gateDevolverCards() {
-  Object.keys(_gateOrigem).forEach(id => {
-    const card = document.getElementById(id);
-    const o = _gateOrigem[id];
-    if (card && o && o.pai) o.pai.insertBefore(card, o.proximo || null);
-  });
-  _gateOrigem = {};
 }
 
 function _gateLiberar() {
-  _gateDevolverCards();
+  const card = document.getElementById(GATE_CARD);
+  if (card && _gateOrigem && _gateOrigem.pai) _gateOrigem.pai.insertBefore(card, _gateOrigem.proximo || null);
+  _gateOrigem = null;
   const ov = document.getElementById(GATE_ID);
   if (ov) ov.remove();
-  _gateAtivo = null;
+  _gateAtivo = false;
   document.body.style.overflow = '';
 }
 
