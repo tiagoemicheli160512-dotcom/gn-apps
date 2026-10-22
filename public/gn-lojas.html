@@ -1237,6 +1237,21 @@ function _mergeMapaAninhadoPorLoja(localFiltrado, cloudMapa) {
   return r;
 }
 
+/* Baseline das semanas que o sbPull não aplica mais (mais de uma semana atrás, ver o filtro
+   de diffDias lá): elas estão fechadas, então o que o localStorage trouxe de volta é o que
+   já foi sincronizado. Sem isso o baseline delas nascia vazio a cada reload e o push
+   seguinte somava o valor inteiro em cima da nuvem. */
+function _semearBaselineSemanasFechadas() {
+  const hoje = getMonday(new Date());
+  Object.keys(estIniAll || {}).forEach(k => {
+    const wk = k.split('|')[1];
+    if (!wk) return;
+    const d = new Date(wk + 'T00:00:00');
+    if (isNaN(d)) return;
+    if ((d - hoje) / 86400000 < -7) _estIniAllSync[k] = { ...(estIniAll[k] || {}) };
+  });
+}
+
 // Mesma função acima, mas por DELTA, específica pra estIniAll — substituir o insumo inteiro
 // (como faz _mergeMapaAninhadoPorLoja) apaga silenciosamente o incremento de outro aparelho
 // que tenha mexido no mesmo insumo desde a última sincronização deste. Em vez disso, calcula
@@ -1249,12 +1264,28 @@ function _mergeEstIniAllPorDelta(localFiltrado, cloudMapa) {
   chaves.forEach(k => {
     const localObj    = (localFiltrado || {})[k] || {};
     const cloudObj     = cloud[k] || {};
+    // Sem baseline pra esta chave, este aparelho não tem como saber o que mudou aqui desde a
+    // última sincronização — e tratar "local − 0" como delta somava o valor INTEIRO em cima
+    // do que já estava na nuvem, DOBRANDO o estoque a cada push. Era o que acontecia com
+    // toda semana que o sbPull não aplica mais (mais de uma semana atrás): o baseline dela
+    // zerava em cada reload e o valor dobrava de novo no push seguinte. Sem baseline vale o
+    // mesmo critério dos outros mapas (_mergeMapaAninhadoPorLoja): item a item, o que está
+    // neste aparelho prevalece — mas nada é somado.
+    if (!Object.prototype.hasOwnProperty.call(_estIniAllSync, k)) {
+      r[k] = { ...cloudObj, ...localObj };
+      return;
+    }
     const baselineObj  = _estIniAllSync[k] || {};
     const insumos = new Set([...Object.keys(localObj), ...Object.keys(cloudObj), ...Object.keys(baselineObj)]);
     const merged = {};
     insumos.forEach(insumo => {
       const delta = (localObj[insumo] || 0) - (baselineObj[insumo] || 0);
-      merged[insumo] = delta !== 0 ? Math.max(0, (cloudObj[insumo] || 0) + delta) : (cloudObj[insumo] || 0);
+      if (delta !== 0) { merged[insumo] = Math.max(0, (cloudObj[insumo] || 0) + delta); return; }
+      // Nada mudou aqui desde a última sincronização, então vale a nuvem — mas se a nuvem
+      // não tem esse insumo não há o que preferir, e zerar apagaria um valor que só existe
+      // neste aparelho (semana passada corrigida à mão, ou push que nunca completou).
+      merged[insumo] = Object.prototype.hasOwnProperty.call(cloudObj, insumo)
+        ? cloudObj[insumo] : (localObj[insumo] || 0);
     });
     r[k] = merged;
   });
@@ -11807,6 +11838,7 @@ try {
     }
     semana    = getMonday(new Date());
     estIniAll = p.estIniAll || {};
+    _semearBaselineSemanasFechadas();
     vendasAll = p.vendasAll || {};
     contAll   = p.contAll   || {};
     entradasAll  = p.entradasAll  || {};
