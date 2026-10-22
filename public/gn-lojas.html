@@ -1116,6 +1116,11 @@ function _mergeArrPorId(local, cloud, deletedIds) {
 // apagar a confirmação que a OUTRA loja já tinha feito do lado dela.
 const TRANSFER_FLAGS_MONOTONICOS = ['confirmadoOrigem','confirmadoDestino','pagDinheiroOrigem','pagDinheiroDestino','quitado'];
 
+// Campos de empréstimo que nascem vazios e depois recebem um valor definitivo: se uma das
+// cópias ainda não tem (ou tem null), vale a que tem. Sem isso, a cópia mais atrasada
+// apagava a data de quitação ou o vínculo com o pagamento em dinheiro.
+const TRANSFER_CAMPOS_PRESERVADOS = ['dataQuitacao','formaQuitacao','pagDinheiroAvariaId'];
+
 // Mescla dois registros do MESMO id de empréstimo (cópia local + cópia da nuvem): em vez
 // de um lado descartar o outro por completo, os campos de confirmação avançam por OR —
 // sem isso, uma loja confirmando sua ponta podia empurrar pra nuvem uma cópia antiga do
@@ -1126,7 +1131,9 @@ function _mergeTransferRecord(localRec, cloudRec) {
   if (!localRec) return cloudRec;
   const merged = { ...cloudRec, ...localRec };
   TRANSFER_FLAGS_MONOTONICOS.forEach(f => { merged[f] = !!localRec[f] || !!cloudRec[f]; });
-  if (!merged.dataQuitacao) merged.dataQuitacao = localRec.dataQuitacao || cloudRec.dataQuitacao || null;
+  TRANSFER_CAMPOS_PRESERVADOS.forEach(f => {
+    if (!merged[f]) merged[f] = localRec[f] || cloudRec[f] || null;
+  });
   return merged;
 }
 
@@ -1148,6 +1155,68 @@ function _mergeTransferAllPorId(localFiltrado, cloudTransferAll, deletedIds) {
     r[k] = [...porId.values()];
   });
   return r;
+}
+
+/* Um empréstimo existe em DUAS chaves de transferAll — "origem|semana" e "destino|semana" —
+   e cada chave é mesclada de forma independente (ver _mergeTransferAllPorId), tanto na nuvem
+   quanto aqui, porque filterByLoja() só deixa passar a chave da loja que está sendo gravada.
+   Resultado: as cópias do MESMO empréstimo podiam discordar, e aí a tela lia uma (a PRIMEIRA
+   que aparecia na varredura) e o botão agia sobre outra (a ÚLTIMA). Era isso que travava o
+   empréstimo: o card continuava aberto, mostrando "a outra loja confirmou", e o clique
+   respondia "já quitado" sem nada acontecer.
+
+   Esta função reduz todas as cópias de cada id a UM ÚNICO registro — confirmações avançando
+   por OR, igual à mesclagem com a nuvem — e grava esse mesmo objeto de volta em todas as
+   chaves. Depois dela, qualquer varredura de transferAll (tela, cálculo de saldo, botão)
+   encontra sempre o mesmo estado, e mexer no registro por uma ponta mexe nas duas. */
+function reconciliarTransferAll() {
+  const porId = new Map();
+  Object.values(transferAll).forEach(lista => {
+    (lista || []).forEach(t => {
+      if (!t || !t.id) return;
+      const anterior = porId.get(t.id);
+      porId.set(t.id, anterior ? _mergeTransferRecord(t, anterior) : t);
+    });
+  });
+  Object.keys(transferAll).forEach(k => {
+    if (!Array.isArray(transferAll[k])) return;
+    transferAll[k] = transferAll[k].map(t => (t && t.id && porId.get(t.id)) || t);
+  });
+  return porId;
+}
+
+// Registro único e reconciliado de um empréstimo — usado por todo botão da aba Empréstimos
+// no lugar de varrer transferAll e ficar com a última cópia encontrada.
+function transfPorId(id) {
+  return reconciliarTransferAll().get(id) || null;
+}
+
+// Semana em que o empréstimo foi criado (não a que está na tela) — é a chave onde a cópia
+// dele mora nas duas lojas.
+function _transfWkKey(t) {
+  const d = t && t.data ? new Date(t.data) : new Date();
+  return wkKey(getMonday(isNaN(d) ? new Date() : d));
+}
+
+/* Garante que a linha de lojaX tenha uma cópia deste empréstimo antes de gravar nela.
+   sbPushLoja(lojaX) só leva o que filterByLoja() encontra sob "lojaX|...": se este aparelho
+   não tem nenhuma chave dessa loja com o registro, o PATCH era gravado com sucesso e a
+   confirmação simplesmente não ia junto — sem erro nenhum na tela. Foi assim que um
+   empréstimo de 12 KG de picanha ficou existindo só na loja de origem. */
+function _transfGarantirCopias(t) {
+  if (!t) return;
+  _transfGarantirCopia(t, t.origem);
+  _transfGarantirCopia(t, t.destino);
+}
+
+function _transfGarantirCopia(t, lojaX) {
+  if (!t || !t.id || !lojaX) return;
+  const jaTem = Object.keys(transferAll).some(k =>
+    k.indexOf(lojaX + '|') === 0 && (transferAll[k] || []).some(x => x && x.id === t.id));
+  if (jaTem) return;
+  const k = lojaX + '|' + _transfWkKey(t);
+  if (!Array.isArray(transferAll[k])) transferAll[k] = [];
+  transferAll[k].push(t);
 }
 
 // estIniAll/vendasAll/contAll/pedidoAll são dicionários {lojaKey|semana: {item: valor}} (ou,
@@ -1414,6 +1483,9 @@ async function sbPull(silent) {
     }
     sbStatus = "online"; sbLastError = "";
     updateSyncIndicator();
+    // As cópias que acabaram de chegar das várias linhas podem discordar entre si — alinha
+    // antes de qualquer render ou cálculo (ver reconciliarTransferAll).
+    reconciliarTransferAll();
     _reaplicarVinculosEntradas();
     autoSave();
     if (!silent) render();
@@ -7940,6 +8012,20 @@ function _explicaSaldo(s) {
 }
 
 /* ═══════════ EMPRÉSTIMOS ENTRE LOJAS ═══════════ */
+
+// Quitados da semana que está na tela — o bloco se chama "Quitados esta semana" mas listava
+// todo empréstimo já quitado desde que o app existe, porque getTransfPorLoja() varre todas
+// as semanas de propósito (uma devolução pode acontecer semanas depois do empréstimo).
+function _quitadosDaSemana(tfLoja) {
+  const ini = getMonday(semana).getTime();
+  const fim = ini + 7 * 86400000; // segunda a domingo
+  return [...tfLoja.enviadas, ...tfLoja.recebidas].filter(t => {
+    if (!t.quitado) return false;
+    const q = new Date(t.dataQuitacao || t.data).getTime();
+    return !isNaN(q) && q >= ini && q < fim;
+  });
+}
+
 function getEmprestimosAbertos() {
   const seen = new Set();
   const abertos = { enviados: [], recebidos: [] };
@@ -8063,12 +8149,9 @@ async function quitarEmprestimo(id) {
      - Loja DESTINO (recebeu = credora) confirma que devolveu
      - Loja ORIGEM (enviou = devedora) confirma que recebeu de volta
      Só quando AMBAS confirmam o estoque é revertido */
-  let found = null;
-  Object.values(transferAll).forEach(lista => {
-    (lista||[]).forEach(t => { if (t.id === id) found = t; });
-  });
+  let found = transfPorId(id);
   if (!found) { showToast("⚠️ Empréstimo não encontrado."); return; }
-  if (found.quitado) { showToast("⚠️ Já quitado completamente."); return; }
+  if (found.quitado) { showToast("⚠️ Já quitado completamente."); render(); return; }
 
   const isOrigem  = found.origem  === loja;
   const isDestino = found.destino === loja;
@@ -8078,16 +8161,13 @@ async function quitarEmprestimo(id) {
     return;
   }
 
-  // Marcar confirmação desta loja
-  Object.values(transferAll).forEach(lista => {
-    (lista||[]).forEach(t => {
-      if (t.id !== id) return;
-      if (isDestino) t.confirmadoDestino = true;  // credora: "devolvi"
-      if (isOrigem)  t.confirmadoOrigem  = true;  // devedora: "recebi de volta"
-    });
-  });
+  // Marcar confirmação desta loja — found é o registro compartilhado por todas as chaves
+  // (ver reconciliarTransferAll), então uma atribuição vale pelas duas pontas.
+  if (isDestino) found.confirmadoDestino = true;  // credora: "devolvi"
+  if (isOrigem)  found.confirmadoOrigem  = true;  // devedora: "recebi de volta"
 
   const outraLoja = isOrigem ? found.destino : found.origem;
+  _transfGarantirCopias(found);
   render(); // feedback imediato (otimista) — o resto segue em segundo plano
 
   // Buscar o estado mais recente da OUTRA loja na nuvem antes de decidir se as duas
@@ -8103,26 +8183,30 @@ async function quitarEmprestimo(id) {
     if (remoto) {
       const remotoOk = isOrigem ? !!remoto.confirmadoDestino : !!remoto.confirmadoOrigem;
       if (remotoOk) {
-        Object.values(transferAll).forEach(lista => {
-          (lista||[]).forEach(t => {
-            if (t.id !== id) return;
-            if (isOrigem) t.confirmadoDestino = true;
-            else          t.confirmadoOrigem  = true;
-          });
-        });
+        if (isOrigem) found.confirmadoDestino = true;
+        else          found.confirmadoOrigem  = true;
       }
     }
   } catch(_) { /* offline — segue só com o que já se sabia localmente */ }
+
+  // O poll de 20s pode ter chegado durante o await acima e substituído as listas de
+  // transferAll pelas cópias da nuvem — que ainda não têm a confirmação feita aqui. Pega o
+  // registro que está valendo agora e leva as confirmações já feitas adiante, senão o
+  // clique sumia sem gravar nada.
+  const agora = transfPorId(id);
+  if (agora && agora !== found) {
+    TRANSFER_FLAGS_MONOTONICOS.forEach(f => { if (found[f]) agora[f] = true; });
+    TRANSFER_CAMPOS_PRESERVADOS.forEach(f => { if (!agora[f] && found[f]) agora[f] = found[f]; });
+    found = agora;
+  }
+  _transfGarantirCopias(found);
 
   const ambosConfirmaram = found.confirmadoDestino && found.confirmadoOrigem;
 
   if (ambosConfirmaram) {
     // AMBOS confirmaram → reverter estoque e marcar quitado
-    Object.values(transferAll).forEach(lista => {
-      (lista||[]).forEach(t => {
-        if (t.id === id) { t.quitado = true; t.dataQuitacao = new Date().toISOString(); }
-      });
-    });
+    found.quitado = true;
+    found.dataQuitacao = new Date().toISOString();
     const destKey = found.destino + "|" + wkKey(semana);
     const origKey = found.origem  + "|" + wkKey(semana);
     if (!estIniAll[destKey]) estIniAll[destKey] = {};
@@ -8165,12 +8249,9 @@ function _statusAvariaTransf(t) {
 }
 
 function marcarPagamentoDinheiro(id) {
-  let found = null;
-  Object.values(transferAll).forEach(lista => {
-    (lista||[]).forEach(t => { if (t.id === id) found = t; });
-  });
+  const found = transfPorId(id);
   if (!found) { showToast("⚠️ Empréstimo não encontrado."); return; }
-  if (found.quitado) { showToast("⚠️ Já quitado."); return; }
+  if (found.quitado) { showToast("⚠️ Já quitado."); render(); return; }
   if (found.pagDinheiroAvariaId) { showToast("⚠️ Já enviado pro Financeiro validar."); return; }
 
   const isOrigem  = found.origem  === loja;
@@ -8184,13 +8265,9 @@ function marcarPagamentoDinheiro(id) {
     ? 'Confirmar que "' + found.insumo + '" (' + (found.qtdOriginal!=null?found.qtdOriginal:found.qtd).toFixed(3) + ' ' + (found.unidade||'UN') + ') será pago em dinheiro/PIX pra ' + found.origem + ', em vez de devolvido fisicamente?'
     : 'Confirmar que aceita receber "' + found.insumo + '" (' + (found.qtdOriginal!=null?found.qtdOriginal:found.qtd).toFixed(3) + ' ' + (found.unidade||'UN') + ') em dinheiro/PIX de ' + found.destino + ', em vez de devolução física?')) return;
 
-  Object.values(transferAll).forEach(lista => {
-    (lista||[]).forEach(t => {
-      if (t.id !== id) return;
-      if (isDestino) t.pagDinheiroDestino = true;
-      if (isOrigem)  t.pagDinheiroOrigem  = true;
-    });
-  });
+  if (isDestino) found.pagDinheiroDestino = true;
+  if (isOrigem)  found.pagDinheiroOrigem  = true;
+  _transfGarantirCopias(found);
 
   const ambosConfirmaram = found.pagDinheiroDestino && found.pagDinheiroOrigem;
 
@@ -8209,9 +8286,7 @@ function marcarPagamentoDinheiro(id) {
       tipo: 'transferencia_dinheiro',
       transferId: found.id, transferOrigemLoja: found.origem, transferDestinoLoja: found.destino
     });
-    Object.values(transferAll).forEach(lista => {
-      (lista||[]).forEach(t => { if (t.id === id) t.pagDinheiroAvariaId = avId; });
-    });
+    found.pagDinheiroAvariaId = avId;
     autoSave();
     Promise.all([sbPush(), sbPushLoja(isOrigem ? found.destino : found.origem)]).then(() => {
       showToast("✅ Combinado! Enviado pro Compras validar o valor.");
@@ -8234,8 +8309,7 @@ function marcarPagamentoDinheiro(id) {
 }
 
 function delTransferencia(id) {
-  let found = null;
-  Object.values(transferAll).forEach(lista => { (lista||[]).forEach(t => { if (t.id === id) found = t; }); });
+  const found = transfPorId(id);
   if (!found) return;
   if (found.origem !== loja) { showToast("⚠️ Só a loja de origem pode cancelar."); return; }
   if (found.pagDinheiroAvariaId) { showToast("⚠️ Já enviado pro Financeiro validar o pagamento em dinheiro — não pode mais cancelar por aqui."); return; }
@@ -9938,11 +10012,11 @@ function render() {
         </div>`;
       })()}
 
-      ${tfLoja.enviadas.filter(t=>t.quitado).length + tfLoja.recebidas.filter(t=>t.quitado).length > 0 ? `
+      ${_quitadosDaSemana(tfLoja).length > 0 ? `
       <div>
         <div class="sec-label">✅ Quitados esta semana</div>
         <div class="card">
-          ${[...tfLoja.enviadas,...tfLoja.recebidas].filter(t=>t.quitado).map(t=>`
+          ${_quitadosDaSemana(tfLoja).map(t=>`
             <div class="row-item" style="flex-direction:column;align-items:flex-start;gap:2px">
               <div style="display:flex;width:100%;align-items:center">
                 <span class="item-name">${t.insumo} (${(t.qtdOriginal!=null?t.qtdOriginal:t.qtd).toFixed(3)} ${t.unidade||'UN'})</span>
@@ -11737,6 +11811,7 @@ try {
     contAll   = p.contAll   || {};
     entradasAll  = p.entradasAll  || {};
     transferAll  = p.transferAll  || {};
+    reconciliarTransferAll(); // cópias divergentes salvas em sessões anteriores
     fichasCustom  = p.fichasCustom  || {};
     fichasRemoved = p.fichasRemoved || [];
     insumosCustom = p.insumosCustom || [];
