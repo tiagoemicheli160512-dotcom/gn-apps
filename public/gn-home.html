@@ -475,6 +475,11 @@
   <!-- Desempenho do mês fechado — subiu pra cá (estava lá embaixo, depois das visitas).
        A gerência tem que bater o olho nisso, e no fim da Home quase ninguém chegava. -->
   <div id="mes-anterior-home-card"></div>
+  <!-- O fechamento da semana vem DEPOIS do card do mês: aquele foi movido pra cá de
+       propósito num pedido anterior ("mover ele mais visível"), e empurrá-lo pra baixo
+       desfaria isso. Este card só existe de terça a domingo, então na segunda a ordem de
+       cima da Home fica exatamente como era. -->
+  <div id="fechamento-semana-home-card"></div>
 
   <div id="dash-section" style="display:none"></div>
 
@@ -3444,6 +3449,476 @@ function _buildPendenciasEssenciaisCard(){
 // queixa que originou tudo isto.
 // Maglia fora da conta (CLAUDE.md — não foi citada), e também porque ela não tem nenhum
 // usuário cadastrado: entraria como pendente pra sempre, sem ninguém que pudesse resolver.
+
+/* ── Fechamento da semana: o que a gerência sabe do resultado ───────────────────────────
+   "Queria um fechamento de relatórios com tudo que aconteceu na semana, com validação da
+   senha gerencial. Como já temos hoje a pergunta de valor de venda com opção de marcar a
+   resposta, pra saber se a gerência sabe. Seria bom fazer na terça, o app já abre nela pra
+   gerência e sub, e eles respondem, pra saber se estão acompanhando de fato os resultados."
+
+   É o irmão semanal da ciência do mês (ver CIENTE_LINHA): mesmo card na Home, mesma senha
+   via verificar_login, mesma visibilidade no Painel. A diferença que importa: um botão
+   "vi" prova que alguém clicou; uma PERGUNTA com alternativas prova que alguém sabe.
+
+   TERÇA, não segunda. Medido: 20 dos 36 pedidos dos últimos 70 dias nasceram numa segunda,
+   em TODAS as semanas — segunda é o dia do pedido e da contagem. Terça é o primeiro dia
+   calmo com a semana já fechada.
+
+   A PERGUNTA VEM ANTES DO NÚMERO. O relatório só abre depois de responder: mostrar o
+   faturamento e em seguida perguntar o faturamento mediria leitura de tela, não
+   acompanhamento. É por isso que o relatório e o questionário são dois estados do mesmo
+   card, nunca a mesma tela.
+
+   O QUESTIONÁRIO É POR LOJA, não fixo. Medido na semana 12–18/10: a venda tem resposta nas
+   11 lojas, mas o estoque inicial de carne só em 6, falta de insumo só em 3 e avaria só em
+   4. Perguntar a uma loja quantos quilos ela iniciou a semana quando ela nunca lançou esse
+   número é impossível de corrigir, e perguntar "quantas faltas?" onde a resposta é zero se
+   acerta no chute. Então só entram as perguntas que têm resposta real naquela loja naquela
+   semana — e o que NÃO foi lançado vira item do relatório e do Painel, que é informação
+   melhor que uma pergunta sem gabarito.
+
+   NÃO TRAVA O APP (decisão do dono). A trava de pendência essencial do Check-list bloqueia
+   tudo menos o Guia; usar isso numa terça de manhã atrapalharia a operação e induziria
+   resposta no chute pra liberar a tela. O que cobra é a visibilidade no Painel.
+
+   Guarda em gn_lojas, linha FECHAMENTO_SEMANAL, no formato
+   {semana_inicio: {loja: {gerente:{...}, sub:{...}}}} — 22 respostas por semana, disputa
+   desprezível; ainda assim relê antes de gravar, porque a linha é comum às 11 lojas. */
+const FECHA_LINHA   = 'FECHAMENTO_SEMANAL';
+// Cargo → chave gravada. Os dois respondem, cada um com a sua senha, e cada resposta é um
+// registro próprio: é isso que permite ver se o sub acompanha ou se só o gerente olha.
+const FECHA_CARGOS  = { gerente: 'gerente', sub_gerente: 'sub', subgerente: 'sub' };
+const FECHA_DIA_ABRE = 2;      // terça (0=dom)
+const FECHA_QTD_PERGUNTAS = 3;
+let _fechaAllData = null;
+let _fechaRel      = null;     // relatório calculado da semana fechada
+let _fechaRelLoja  = null;     // loja do relatório em memória
+let _fechaQuem      = null;    // {nome, cargo, chave} autenticado nesta sessão
+let _fechaRespostas = {};      // id da pergunta -> índice marcado
+let _fechaErro      = '';
+let _fechaSalvando  = false;
+let _fechaAberto    = false;
+
+// Segunda da semana FECHADA (a anterior à desta semana) e o domingo dela.
+function _fechaSemanaFechada(hoje) {
+  const d = new Date(hoje || new Date());
+  d.setHours(12, 0, 0, 0);
+  const dow = d.getDay();
+  const segDestaSemana = new Date(d);
+  segDestaSemana.setDate(d.getDate() - (dow === 0 ? 6 : dow - 1));
+  const ini = new Date(segDestaSemana); ini.setDate(segDestaSemana.getDate() - 7);
+  const fim = new Date(ini); fim.setDate(ini.getDate() + 6);
+  return { ini, fim };
+}
+const _fechaISO = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+const _fechaBR  = d => String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0');
+
+// O card aparece da TERÇA em diante. Antes disso a semana nem foi fechada pelo Caixa de
+// domingo, e o relatório sairia pela metade.
+function _fechaJaAbriu(hoje) {
+  const d = new Date(hoje || new Date());
+  const dow = d.getDay();
+  return dow === 0 || dow >= FECHA_DIA_ABRE;   // ter..dom (domingo ainda é a semana anterior)
+}
+
+async function _fechaCarregarRespostas(force) {
+  if (_fechaAllData && !force) return _fechaAllData;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const rows = await window.gnFetchJson(
+    `${SB_URL}/rest/v1/gn_lojas?loja=eq.${FECHA_LINHA}&select=all_data`, H, 'fecha:respostas', null);
+  if (rows === null) return null;   // falha de rede: não cacheia {} (ver _cienteCarregar)
+  _fechaAllData = (rows[0] && rows[0].all_data) || {};
+  return _fechaAllData;
+}
+function _fechaRespostaDe(semISO, loja, chave) {
+  const d = _fechaAllData || {};
+  return (d[semISO] && d[semISO][loja] && d[semISO][loja][chave]) || null;
+}
+
+/* O relatório da semana, montado das mesmas tabelas que os apps já escrevem. `lacunas` é
+   parte do relatório, não um detalhe: "estoque inicial de carne não lançado" é a informação
+   que explica por que a pergunta daquele controle não aparece. */
+async function _fechaMontarRelatorio(loja) {
+  const { ini, fim } = _fechaSemanaFechada();
+  const iniISO = _fechaISO(ini), fimISO = _fechaISO(fim);
+  const antIni = new Date(ini); antIni.setDate(ini.getDate() - 7);
+  const antFim = new Date(ini); antFim.setDate(ini.getDate() - 1);
+  const chkKey = LOJA_DB_KEY[loja] || loja;
+  const comKey = LOJA_COM_KEY[loja] || loja;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const [dias, diasAnt, carnesRows, lojaRows, caixaRows] = await Promise.all([
+    window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${iniISO}&data_operacao=lte.${fimISO}&select=data_operacao,venda_salao,venda_delivery,faltas,manutencao`, H, 'fecha:dias', []),
+    window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${_fechaISO(antIni)}&data_operacao=lte.${_fechaISO(antFim)}&select=venda_salao,venda_delivery`, H, 'fecha:diasAnt', []),
+    window.gnFetchJson(`${SB_URL}/rest/v1/checklist_carnes?loja=eq.${encodeURIComponent(chkKey)}&semana_inicio=eq.${iniISO}&select=carnes`, H, 'fecha:carnes', []),
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'fecha:loja', []),
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?loja=eq.${encodeURIComponent(loja)}&data=gte.${iniISO}&data=lte.${fimISO}&select=data`, H, 'fecha:caixa', []),
+  ]);
+  const soma = rows => (rows || []).reduce((s, r) => s + (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0), 0);
+  const venda = soma(dias), vendaAnt = soma(diasAnt);
+  const arr = v => Array.isArray(v) ? v : [];
+  const faltas = (dias || []).reduce((t, d) => t + arr(d.faltas).length, 0);
+  const manutTodas = (dias || []).flatMap(d => arr(d.manutencao));
+  const utensRegs = manutTodas.filter(m => m && m.tipo === 'Utensílio / Louça');
+  const utensQuebras = utensRegs
+    .filter(m => (m.situacao || '') === 'Quebrou')
+    .reduce((t, m) => t + (parseFloat(m.qtd) || 0), 0);
+  const manutAbertas = manutTodas.filter(m => m && !(m.status === 'Resolvido' && m.confirmado_loja)).length;
+  const allData = (lojaRows && lojaRows[0] && lojaRows[0].all_data) || {};
+  const avarias = Object.values(allData.avariasAll || {}).flatMap(v => arr(v))
+    .filter(a => a && String(a.ts || '').slice(0, 10) >= iniISO && String(a.ts || '').slice(0, 10) <= fimISO);
+  const avariaRS = avarias.reduce((t, a) => t + (parseFloat(a.valorTotal) || 0), 0);
+  const saldoUtens = Object.values(allData.utensilios_saldo || {}).filter(v => v && v.nome);
+  const carnes = (carnesRows && carnesRows[0] && carnesRows[0].carnes) || {};
+  const num = v => { const n = parseFloat(String(v == null ? '' : v).replace(',', '.')); return isFinite(n) ? n : null; };
+  const corte = (k) => {
+    const c = carnes[k] || {};
+    return { inicial: num(c.inicial), final: num(c.contagem_final) };
+  };
+  const rel = {
+    loja, semIni: ini, semFim: fim, semISO: iniISO,
+    venda, vendaAnt, diasLancados: (dias || []).length,
+    faltas, utensQuebras, utensLancados: utensRegs.length, saldoUtens,
+    manutAbertas, avariaRS, avariaQtd: avarias.length,
+    caixasFechados: (caixaRows || []).length,
+    carneSol: corte('carne_sol'), picanha: corte('picanha'),
+    carneSeca: corte('carne_seca'), camarao: corte('camarao'),
+    lacunas: [],
+  };
+  if (!rel.diasLancados) rel.lacunas.push('Nenhum dia da semana lançado no Check-list.');
+  else if (rel.diasLancados < 7) rel.lacunas.push(`Só ${rel.diasLancados} de 7 dias lançados no Check-list.`);
+  if (rel.carneSol.inicial == null) rel.lacunas.push('Estoque inicial de carne de sol não lançado na semana.');
+  if (rel.picanha.inicial == null) rel.lacunas.push('Estoque inicial de picanha não lançado na semana.');
+  if (!rel.saldoUtens.length) rel.lacunas.push('Nenhuma peça no controle de utensílios — falta a contagem.');
+  if (rel.caixasFechados < rel.diasLancados) rel.lacunas.push(`${rel.diasLancados - rel.caixasFechados} dia(s) sem fechamento de caixa.`);
+  return rel;
+}
+
+/* ── Perguntas ─────────────────────────────────────────────────────────────────────────
+   Só entra pergunta com resposta real nesta loja nesta semana (ver o comentário do bloco).
+   As alternativas saem do próprio valor, nunca de números redondos: com opções redondas
+   acerta-se por eliminação e a medição não vale nada. */
+function _fechaPerguntasDe(rel) {
+  const pool = [];
+  const money = v => 'R$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  const kg = v => v.toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 2 }) + ' kg';
+  if (rel.venda > 0) pool.push({ id: 'venda', peso: 0, tipo: 'moeda', valor: rel.venda,
+    texto: 'Quanto a loja vendeu na semana (salão + delivery)?', fmt: money });
+  if (rel.avariaRS > 0) pool.push({ id: 'avaria', peso: 1, tipo: 'moeda', valor: rel.avariaRS,
+    texto: 'Quanto a loja perdeu em avaria na semana?', fmt: money });
+  if (rel.utensLancados > 0) pool.push({ id: 'utens', peso: 1, tipo: 'conta', valor: rel.utensQuebras,
+    texto: 'Quantas peças de louça/utensílio quebraram na semana?', fmt: v => v + (v === 1 ? ' peça' : ' peças') });
+  if (rel.carneSol.inicial != null) pool.push({ id: 'carne_sol', peso: 1, tipo: 'kg', valor: rel.carneSol.inicial,
+    texto: 'Com quantos quilos de CARNE DE SOL a semana começou?', fmt: kg });
+  if (rel.picanha.inicial != null) pool.push({ id: 'picanha', peso: 1, tipo: 'kg', valor: rel.picanha.inicial,
+    texto: 'Com quantos quilos de PICANHA a semana começou?', fmt: kg });
+  if (rel.faltas > 0) pool.push({ id: 'faltas', peso: 1, tipo: 'conta', valor: rel.faltas,
+    texto: 'Quantos itens de insumo faltaram na semana?', fmt: v => v + (v === 1 ? ' item' : ' itens') });
+  // Semente estável por loja+semana: a ordem das alternativas não muda a cada redesenho
+  // (senão a tela embaralha enquanto a pessoa lê), mas muda de loja pra loja e de semana
+  // pra semana — ninguém decora "é sempre a segunda opção".
+  let semente = 0;
+  const base = rel.loja + '|' + rel.semISO;
+  for (let i = 0; i < base.length; i++) semente = (semente * 31 + base.charCodeAt(i)) % 100000;
+  const rnd = () => { semente = (semente * 1103515245 + 12345) % 2147483648; return semente / 2147483648; };
+  const fixas = pool.filter(p => p.peso === 0);
+  const resto = pool.filter(p => p.peso > 0).sort(() => rnd() - 0.5);
+  const escolhidas = [...fixas, ...resto].slice(0, FECHA_QTD_PERGUNTAS);
+  return escolhidas.map(p => {
+    // Arredonda o valor ANTES de montar as opções e usa esse valor como gabarito. A venda da
+    // semana é uma soma de sete dias e chega com poeira de ponto flutuante
+    // (94735.00000000001); arredondando só dentro das opções, o gabarito ficava com a poeira,
+    // indexOf devolvia -1 e a alternativa certa não existia — a pergunta não tinha resposta.
+    const exato = p.tipo === 'conta' ? Math.round(p.valor) : Math.round(p.valor * 100) / 100;
+    let opts, v;
+    if (p.tipo === 'conta') {
+      // Contagem pequena: vizinhos inteiros, sem repetir e sem negativo.
+      v = exato;
+      const cand = [v, v + 1, Math.max(0, v - 1), v + 2, Math.max(0, v - 2), v + 3];
+      opts = [...new Set(cand)].slice(0, 4);
+    } else {
+      /* TODAS as alternativas na MESMA granularidade, inclusive a certa. Arredondar só as
+         erradas deixava a resposta certa sendo a única não-redonda — pra venda de 94.735 as
+         opções saíam 94.735 / 110.000 / 80.000 / 120.000 e se acertava pela forma do número,
+         sem saber o resultado. Três dígitos significativos mantêm as quatro parecidas e ainda
+         distinguem bem (94.700 contra 106.100). O valor exato segue guardado pro gabarito. */
+      const digitos = String(Math.round(Math.abs(exato))).length;
+      const gran = Math.pow(10, Math.max(0, digitos - 3));
+      const naGran = x => Math.round(x / gran) * gran;
+      v = naGran(exato);
+      opts = [...new Set([v, naGran(exato * 1.12), naGran(exato * 0.89), naGran(exato * 1.27)])];
+    }
+    // Duas opções que o formato mostra igual (R$ 120 e R$ 120,40 com 0 decimais) seriam duas
+    // respostas idênticas na tela, uma certa e uma errada. Só sobrevive a primeira de cada
+    // etiqueta, e a certa nunca é a descartada.
+    const vistas = new Set();
+    opts = opts.filter(o => { const k = p.fmt(o); if (vistas.has(k) && o !== v) return false; vistas.add(k); return true; }).slice(0, 4);
+    if (!opts.includes(v)) opts[0] = v;
+    const ordenadas = opts.sort(() => rnd() - 0.5);
+    return { id: p.id, texto: p.texto, fmt: p.fmt, valor: v, exato,
+             opcoes: ordenadas, correta: ordenadas.indexOf(v) };
+  });
+}
+
+function _fechaToggle() {
+  _fechaAberto = !_fechaAberto;
+  if (!_fechaAberto) { _fechaErro = ''; }
+  _renderFechamentoSemanaHome(true, session, !!masterLoja);
+}
+function _fechaMarcar(idPergunta, idx) {
+  _fechaRespostas[idPergunta] = idx;
+  _renderFechamentoSemanaHome(true, session, !!masterLoja);
+}
+
+/* Identifica quem vai responder ANTES de mostrar as perguntas. A senha é a mesma trava da
+   ciência do mês: sem ela, qualquer um com o celular na mão responderia pela gerência e a
+   medição não valeria nada. */
+async function _fechaEntrar() {
+  if (_fechaSalvando) return;
+  const u = document.getElementById('fecha-user');
+  const p = document.getElementById('fecha-senha');
+  const user = (u && u.value || '').trim();
+  const pass = (p && p.value || '');
+  if (!user || !pass) { _fechaErro = 'Preencha usuário e senha.'; _renderFechamentoSemanaHome(true, session, !!masterLoja); return; }
+  _fechaSalvando = true; _fechaErro = '';
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+  try {
+    const auth = await window.gnFetchJson(`${SB_URL}/rest/v1/rpc/verificar_login`, H, 'fecha:auth', [],
+      { method: 'POST', body: JSON.stringify({ p_nome: user, p_senha: pass, p_app: 'gn-home:fechamento' }) });
+    if (!auth.length) { _fechaErro = 'Usuário ou senha incorretos.'; return; }
+    const cargo = (auth[0].cargo || '').toLowerCase();
+    const chave = FECHA_CARGOS[cargo];
+    // verificar_login é genérico e não filtra cargo — a trava é aqui, explícita.
+    if (!chave) {
+      _fechaErro = `O fechamento é da gerência e da sub-gerência. ${auth[0].nome} está como ${auth[0].cargo || 'sem cargo'}.`;
+      return;
+    }
+    _fechaQuem = { nome: auth[0].nome, cargo, chave };
+    _fechaRespostas = {};
+  } catch (e) {
+    window.gnLogError && window.gnLogError('fecha:entrar', e);
+    _fechaErro = 'Não consegui validar agora. Confere a internet e tenta de novo.';
+  } finally {
+    _fechaSalvando = false;
+    await _renderFechamentoSemanaHome(true, session, !!masterLoja);
+  }
+}
+
+async function _fechaEnviar() {
+  if (_fechaSalvando || !_fechaQuem || !_fechaRel) return;
+  const perguntas = _fechaPerguntasDe(_fechaRel);
+  const faltando = perguntas.filter(q => _fechaRespostas[q.id] == null);
+  if (faltando.length) { _fechaErro = `Falta responder ${faltando.length} pergunta(s).`; _renderFechamentoSemanaHome(true, session, !!masterLoja); return; }
+  _fechaSalvando = true; _fechaErro = '';
+  try {
+    const respostas = perguntas.map(q => {
+      const marcou = _fechaRespostas[q.id];
+      return { id: q.id, marcou: q.opcoes[marcou], correto: q.valor, exato: q.exato,
+               rotuloMarcou: q.fmt(q.opcoes[marcou]), rotuloCorreto: q.fmt(q.valor),
+               certo: marcou === q.correta };
+    });
+    const acertos = respostas.filter(r => r.certo).length;
+    const atual = await _fechaCarregarRespostas(true);
+    if (atual === null) { _fechaErro = 'Sem conexão com o banco. Tente de novo.'; return; }
+    const dados = JSON.parse(JSON.stringify(atual));
+    const sem = _fechaRel.semISO, loja = _fechaRel.loja;
+    dados[sem] = dados[sem] || {};
+    dados[sem][loja] = dados[sem][loja] || {};
+    // `ordem` diz se esta pessoa respondeu antes ou depois de alguém da loja já ter aberto o
+    // relatório: a primeira resposta da loja é a medição limpa, a segunda já pode ter visto
+    // os números na tela de quem respondeu antes.
+    const jaResponderam = Object.keys(dados[sem][loja]).length;
+    dados[sem][loja][_fechaQuem.chave] = {
+      nome: _fechaQuem.nome, cargo: _fechaQuem.cargo, em: new Date().toISOString(),
+      acertos, total: respostas.length, respostas, ordem: jaResponderam + 1,
+      dia_semana: new Date().getDay(),
+    };
+    await _gnLojasUpsert(FECHA_LINHA, dados, _fechaQuem.nome);
+    _fechaAllData = dados;
+  } catch (e) {
+    window.gnLogError && window.gnLogError('fecha:enviar', e);
+    _fechaErro = 'Não consegui registrar agora. Confere a internet e tenta de novo.';
+  } finally {
+    _fechaSalvando = false;
+    await _renderFechamentoSemanaHome(true, session, !!masterLoja);
+  }
+}
+
+async function _renderFechamentoSemanaHome(mostrar, sess, isMasterAtivo) {
+  const el = document.getElementById('fechamento-semana-home-card');
+  if (!el) return;
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  if (!mostrar || !sess || !_fechaJaAbriu()) { el.innerHTML = ''; return; }
+  const loja = (isMasterAtivo && masterLoja) ? masterLoja : sess.loja;
+  if (!LOJAS_LISTA.includes(loja)) { el.innerHTML = ''; return; }
+  if (await _fechaCarregarRespostas() === null) { el.innerHTML = ''; return; }
+  if (!_fechaRel || _fechaRelLoja !== loja) {
+    try { _fechaRel = await _fechaMontarRelatorio(loja); _fechaRelLoja = loja; }
+    catch (e) { window.gnLogError && window.gnLogError('fecha:relatorio', e); el.innerHTML = ''; return; }
+  }
+  const rel = _fechaRel;
+  const semLbl = _fechaBR(rel.semIni) + ' a ' + _fechaBR(rel.semFim);
+  const rGer = _fechaRespostaDe(rel.semISO, loja, 'gerente');
+  const rSub = _fechaRespostaDe(rel.semISO, loja, 'sub');
+  const alguem = rGer || rSub;
+  const completo = rGer && rSub;
+  const cor = completo ? '#059669' : '#B45309';
+
+  const chipResp = (lbl, r) => r
+    ? `<span style="font-size:9.5px;font-weight:700;border-radius:999px;padding:3px 8px;color:#047857;background:rgba(5,150,105,.12);border:1px solid rgba(5,150,105,.3)">✓ ${lbl}: ${r.acertos}/${r.total}</span>`
+    : `<span style="font-size:9.5px;font-weight:700;border-radius:999px;padding:3px 8px;color:#B45309;background:rgba(180,83,9,.12);border:1px solid rgba(180,83,9,.3)">${lbl}: não respondeu</span>`;
+
+  let corpo = '';
+  if (_fechaAberto) {
+    const euJaRespondi = _fechaQuem && _fechaRespostaDe(rel.semISO, loja, _fechaQuem.chave);
+    /* O relatório fica atrás do login de quem JÁ respondeu. Se ele abrisse pra loja assim que
+       o primeiro respondesse, o segundo leria os números na tela antes de responder e a
+       medição dele não valeria nada — era exatamente esse furo que a ordem "pergunta antes do
+       número" existe pra fechar. Cada um entra, responde e então vê. */
+    if (_fechaQuem && !euJaRespondi) {
+      // AS PERGUNTAS VÊM SEM NENHUM NÚMERO DO RELATÓRIO NA TELA — é o que faz isso medir
+      // acompanhamento em vez de leitura.
+      const perguntas = _fechaPerguntasDe(rel);
+      corpo = `<div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(0,0,0,.08)">
+        <div style="font-size:11px;font-weight:800;color:var(--t1)">${esc(_fechaQuem.nome)}, responda sobre a semana ${semLbl}</div>
+        <div style="font-size:10px;color:var(--t3);margin:2px 0 8px;line-height:1.45">O relatório abre depois de responder. Sem consultar: é isso que mostra se o resultado está sendo acompanhado.</div>
+        ${perguntas.map((q, i) => `<div style="margin-bottom:9px">
+          <div style="font-size:11.5px;font-weight:700;color:var(--t1);margin-bottom:5px">${i + 1}. ${esc(q.texto)}</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px">
+            ${q.opcoes.map((o, oi) => {
+              const marcado = _fechaRespostas[q.id] === oi;
+              return `<button onclick="_fechaMarcar('${q.id}',${oi})" style="padding:7px 4px;border-radius:9px;cursor:pointer;font-family:inherit;font-size:11.5px;font-weight:700;
+                border:1px solid ${marcado ? cor : 'rgba(0,0,0,.15)'};background:${marcado ? cor + '22' : 'transparent'};color:var(--t1)">${esc(q.fmt(o))}</button>`;
+            }).join('')}
+          </div></div>`).join('')}
+        ${_fechaErro ? `<div style="font-size:11px;color:var(--txt-red);font-weight:700;margin-bottom:6px">${esc(_fechaErro)}</div>` : ''}
+        <button onclick="_fechaEnviar()" ${_fechaSalvando ? 'disabled' : ''} style="width:100%;padding:10px;border-radius:10px;border:none;cursor:pointer;font-family:inherit;font-size:12px;font-weight:800;background:${cor};color:#fff">${_fechaSalvando ? 'Enviando...' : 'Enviar respostas e ver o relatório'}</button>
+      </div>`;
+    } else if (euJaRespondi) {
+      corpo = _fechaRelatorioHtml(rel, rGer, rSub, _fechaQuem);
+    }
+    if (!_fechaQuem) {
+      const quemFalta = [!rGer ? 'gerente' : null, !rSub ? 'sub-gerente' : null].filter(Boolean);
+      corpo += `<div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(0,0,0,.08)">
+        ${true ? `
+          <div style="font-size:11px;font-weight:800;color:var(--t1);margin-bottom:6px">${quemFalta.length ? 'Entre pra responder' : 'Entre pra ver o relatório'}${quemFalta.length ? ` <span style="font-weight:600;color:var(--t3)">(falta ${esc(quemFalta.join(' e '))})</span>` : ''}</div>
+          <input id="fecha-user" placeholder="Usuário" autocomplete="off" style="width:100%;margin-bottom:5px;padding:8px;border-radius:8px;border:1px solid rgba(0,0,0,.15);font-family:inherit;font-size:12px">
+          <input id="fecha-senha" type="password" placeholder="Senha" style="width:100%;margin-bottom:6px;padding:8px;border-radius:8px;border:1px solid rgba(0,0,0,.15);font-family:inherit;font-size:12px">
+          ${_fechaErro ? `<div style="font-size:11px;color:var(--txt-red);font-weight:700;margin-bottom:6px">${esc(_fechaErro)}</div>` : ''}
+          <button onclick="_fechaEntrar()" ${_fechaSalvando ? 'disabled' : ''} style="width:100%;padding:9px;border-radius:9px;border:none;cursor:pointer;font-family:inherit;font-size:12px;font-weight:800;background:${cor};color:#fff">${_fechaSalvando ? 'Validando...' : 'Entrar'}</button>` : ''}
+      </div>`;
+    }
+  }
+
+  el.innerHTML = `<div style="background:${completo ? 'rgba(5,150,105,.05)' : 'rgba(180,83,9,.05)'};
+    border:1px solid ${completo ? 'rgba(5,150,105,.2)' : 'rgba(180,83,9,.2)'};
+    border-left:3px solid ${cor};border-radius:18px;padding:14px 16px;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05)">
+    <div onclick="_fechaToggle()" style="cursor:pointer;display:flex;align-items:center;gap:8px">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:800;color:var(--t1)">📋 Fechamento da semana ${semLbl}</div>
+        <div style="font-size:10px;color:var(--t3);margin-top:2px">${completo ? 'Gerência e sub já responderam' : 'Toque pra responder e ver o relatório da semana'}</div>
+      </div>
+      <span style="font-size:14px;color:var(--t3)">${_fechaAberto ? '▴' : '▾'}</span>
+    </div>
+    <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:8px">${chipResp('Gerente', rGer)}${chipResp('Sub', rSub)}</div>
+    ${corpo}
+  </div>`;
+}
+
+// O relatório em si — só aparece DEPOIS de alguém responder (ver o comentário do bloco).
+function _fechaRelatorioHtml(rel, rGer, rSub, quem) {
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  const brl = v => 'R$ ' + (v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const kg  = v => v == null ? '—' : v.toLocaleString('pt-BR', { maximumFractionDigits: 2 }) + ' kg';
+  const diff = rel.venda - rel.vendaAnt;
+  const pct = rel.vendaAnt > 0 ? (diff / rel.vendaAnt) * 100 : null;
+  const corD = diff >= 0 ? 'var(--txt-green)' : 'var(--txt-red)';
+  const linha = (lbl, val, obs) => `<div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:4px 0;border-bottom:1px solid rgba(0,0,0,.05)">
+    <span style="font-size:11px;color:var(--t2)">${lbl}</span>
+    <span style="font-size:11.5px;font-weight:800;color:var(--t1);text-align:right">${val}${obs ? `<span style="font-size:9.5px;font-weight:600;color:var(--t3)"> ${obs}</span>` : ''}</span></div>`;
+  const corteLinha = (lbl, c) => linha(lbl, `${kg(c.inicial)} → ${kg(c.final)}`,
+    c.inicial == null ? '(inicial não lançado)' : '');
+
+  const meu = quem ? (quem.chave === 'gerente' ? rGer : rSub) : null;
+  const gabarito = meu && meu.respostas ? `<div style="margin-top:9px;padding:9px 11px;border-radius:10px;background:rgba(0,0,0,.03)">
+    <div style="font-size:11px;font-weight:800;color:var(--t1);margin-bottom:5px">Suas respostas: ${meu.acertos} de ${meu.total}</div>
+    ${meu.respostas.map(r => `<div style="font-size:10.5px;color:var(--t2);line-height:1.5">
+      ${r.certo ? '✅' : '❌'} ${esc(_FECHA_LBL[r.id] || r.id)} — você marcou <b>${esc(String(r.rotuloMarcou != null ? r.rotuloMarcou : r.marcou))}</b>${r.certo ? '' : `, o certo era <b>${esc(String(r.rotuloCorreto != null ? r.rotuloCorreto : r.correto))}</b>`}${(r.exato != null && r.exato !== r.correto) ? ` <span style="color:var(--t3)">(exato: ${esc(String(r.exato.toLocaleString('pt-BR')))})</span>` : ''}
+    </div>`).join('')}</div>` : '';
+
+  return `<div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(0,0,0,.08)">
+    ${gabarito}
+    <div style="font-size:11px;font-weight:800;color:var(--t1);margin:9px 0 4px">Resultado da semana</div>
+    ${linha('Venda (salão + delivery)', brl(rel.venda), `${rel.diasLancados}/7 dias`)}
+    ${linha('Semana anterior', brl(rel.vendaAnt), pct === null ? '' : `<span style="color:${corD}">${diff >= 0 ? '+' : ''}${pct.toFixed(1)}%</span>`)}
+    <div style="font-size:11px;font-weight:800;color:var(--t1);margin:9px 0 4px">Controles</div>
+    ${corteLinha('Carne de sol (início → contagem)', rel.carneSol)}
+    ${corteLinha('Picanha (início → contagem)', rel.picanha)}
+    ${corteLinha('Carne seca', rel.carneSeca)}
+    ${corteLinha('Camarão', rel.camarao)}
+    ${linha('Avarias', brl(rel.avariaRS), rel.avariaQtd ? `${rel.avariaQtd} registro(s)` : 'nada lançado')}
+    ${linha('Utensílio quebrado', rel.utensQuebras ? rel.utensQuebras + ' peça(s)' : '—', rel.utensLancados ? `${rel.utensLancados} lançamento(s)` : 'nada lançado')}
+    ${linha('Peças no controle de utensílio', rel.saldoUtens.length || '—', rel.saldoUtens.length ? '' : 'falta a contagem')}
+    ${linha('Faltas de insumo', rel.faltas || '—')}
+    ${linha('Manutenção em aberto', rel.manutAbertas || '—')}
+    ${linha('Caixas fechados', rel.caixasFechados, `${rel.diasLancados} dia(s) lançado(s)`)}
+    ${rel.lacunas.length ? `<div style="margin-top:9px;padding:9px 11px;border-radius:10px;background:rgba(180,83,9,.08);border:1px solid rgba(180,83,9,.25)">
+      <div style="font-size:11px;font-weight:800;color:#B45309;margin-bottom:3px">⚠️ Faltou lançar na semana</div>
+      ${rel.lacunas.map(l => `<div style="font-size:10.5px;color:var(--t2);line-height:1.5">• ${esc(l)}</div>`).join('')}
+    </div>` : ''}
+  </div>`;
+}
+const _FECHA_LBL = { venda: 'Venda da semana', avaria: 'Avarias em R$', utens: 'Utensílio quebrado',
+  carne_sol: 'Carne de sol no início', picanha: 'Picanha no início', faltas: 'Faltas de insumo' };
+
+/* Card do Painel de Gestão: é aqui que isso vira cobrança. Sem ele, medir quem respondeu
+   exigiria abrir as 11 lojas uma a uma — o mesmo motivo que levou o card da ciência do mês
+   a existir. Maglia fora (CLAUDE.md: não foi citada) e porque não tem usuário cadastrado. */
+function _buildFechamentoSemanalCard() {
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  if (!_fechaAllData || !_fechaJaAbriu()) return '';
+  const { ini, fim } = _fechaSemanaFechada();
+  const semISO = _fechaISO(ini);
+  const lojas = _lojasFatConsolidado(LOJAS_TODAS);
+  if (!lojas.length) return '';
+  const dados = (_fechaAllData[semISO]) || {};
+  const linhaDe = k => dados[k] || {};
+  const completas = lojas.filter(k => linhaDe(k).gerente && linhaDe(k).sub);
+  const nenhuma   = lojas.filter(k => !linhaDe(k).gerente && !linhaDe(k).sub);
+  const tudo = completas.length === lojas.length;
+  // Média de acerto só de quem respondeu — e só da PRIMEIRA resposta de cada loja: a segunda
+  // pode ter visto os números na tela de quem respondeu antes (ver `ordem`).
+  const primeiras = lojas.map(k => {
+    const d = linhaDe(k);
+    const rs = [d.gerente, d.sub].filter(Boolean).sort((a, b) => (a.ordem || 9) - (b.ordem || 9));
+    return rs[0] || null;
+  }).filter(Boolean);
+  const acertos = primeiras.reduce((t, r) => t + (r.acertos || 0), 0);
+  const total   = primeiras.reduce((t, r) => t + (r.total || 0), 0);
+  const pct = total ? Math.round(acertos / total * 100) : null;
+
+  const chip = (k) => {
+    const d = linhaDe(k);
+    const n = (d.gerente ? 1 : 0) + (d.sub ? 1 : 0);
+    const cor = n === 2 ? '#047857' : n === 1 ? '#B45309' : '#DC2626';
+    const bg  = n === 2 ? 'rgba(5,150,105,.12)' : n === 1 ? 'rgba(180,83,9,.12)' : 'rgba(220,38,38,.1)';
+    const det = [d.gerente ? `gerente ${d.gerente.acertos}/${d.gerente.total}` : 'sem gerente',
+                 d.sub ? `sub ${d.sub.acertos}/${d.sub.total}` : 'sem sub'].join(' · ');
+    return `<span title="${esc(det)}" style="font-size:9.5px;font-weight:700;border-radius:999px;padding:3px 8px;white-space:nowrap;
+      color:${cor};background:${bg};border:1px solid ${cor}4d">${n === 2 ? '✓ ' : ''}${esc(LOJA_DISPLAY[k] || k)} ${n}/2</span>`;
+  };
+
+  return `<div style="background:${tudo ? 'rgba(5,150,105,.05)' : 'rgba(180,83,9,.05)'};
+    border:1px solid ${tudo ? 'rgba(5,150,105,.2)' : 'rgba(180,83,9,.2)'};
+    border-left:3px solid ${tudo ? '#059669' : '#B45309'};border-radius:14px;padding:14px 16px;margin:0 0 14px">
+    <div style="font-size:12px;font-weight:800;color:var(--t1);margin-bottom:2px">
+      📋 Fechamento da semana ${_fechaBR(ini)} a ${_fechaBR(fim)} · ${completas.length} de ${lojas.length} lojas completas</div>
+    <div style="font-size:10px;color:var(--t3);margin-bottom:8px;line-height:1.45">
+      Gerente e sub respondem separado, cada um com a própria senha. ${pct === null ? 'Ninguém respondeu ainda.' : `Acerto da primeira resposta de cada loja: <b>${pct}%</b> (${acertos}/${total}).`}
+      ${nenhuma.length ? ` <b>${nenhuma.length} loja(s) sem nenhuma resposta.</b>` : ''}</div>
+    <div style="display:flex;gap:5px;flex-wrap:wrap">${lojas.map(chip).join('')}</div>
+  </div>`;
+}
+
 function _buildCienciaMesCard() {
   const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
   if (!_cienteAllData) return '';
@@ -5188,6 +5663,7 @@ function _refreshPermUI(sess) {
   _renderVendaMesHome(_mostrarCards, sess, isMaster);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
   _renderVisitaSupervisaoHome(_mostrarCards, sess, isMaster);
+  _renderFechamentoSemanaHome(_mostrarCards, sess, isMaster);
   _renderMesAnteriorHome(_mostrarCards, sess, isMaster);
   _renderDocsRHHome(_mostrarCards, sess, isMaster);
   _renderDataComemorativaHome(_mostrarCards, sess, isMaster);
@@ -5431,6 +5907,7 @@ function showHome(sess) {
   _renderVendaMesHome(_mostrarCards, sess, isMaster);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
   _renderVisitaSupervisaoHome(_mostrarCards, sess, isMaster);
+  _renderFechamentoSemanaHome(_mostrarCards, sess, isMaster);
   _renderMesAnteriorHome(_mostrarCards, sess, isMaster);
   _renderDocsRHHome(_mostrarCards, sess, isMaster);
   _renderDataComemorativaHome(_mostrarCards, sess, isMaster);
@@ -8281,6 +8758,7 @@ async function _loadDashAll() {
   // Ciência do mês fechado: sem await no fluxo principal pra não atrasar o painel. Quando
   // chega, só o cartão dela precisa aparecer — por isso redesenha no fim.
   _cienteCarregar(true).then(() => { if (!_dashLoading) renderDashboard(); }).catch(() => {});
+  _fechaCarregarRespostas(true).then(() => { if (!_dashLoading) renderDashboard(); }).catch(() => {});
   const range     = _dashPer==='sem' ? _weekRange(_dashWoff)   : _monthRange(_dashMoff);
   const prevRange = _dashPer==='sem' ? _weekRange(_dashWoff-1) : _monthRange(_dashMoff-1);
   const range2    = _dashPer==='sem' ? _weekRange(_dashWoff-2)  : _monthRange(_dashMoff-2);
@@ -11488,6 +11966,7 @@ function renderDashboard() {
       </div>
       ${_cardSeguro('alertas', _buildAlertasUrgentesCard)}
       ${_cardSeguro('pendencias', _buildPendenciasEssenciaisCard)}
+      ${_cardSeguro('fechamentoSemana', _buildFechamentoSemanalCard)}
       ${_cardSeguro('cienciaMes', _buildCienciaMesCard)}
       ${_cardSeguro('ferias', _buildFeriasUmaSemanaCard)}
       <div id="visitas-hoje-card-holder">${_cardSeguro('visitasHoje', _buildVisitasHojeCard)}</div>
