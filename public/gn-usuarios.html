@@ -215,6 +215,18 @@ main{flex:1;padding:16px;padding-bottom:80px;max-width:600px;margin:0 auto;width
 
     <div class="section">
       <div class="section-hd">
+        <h2>Acessos (quem entrou)</h2>
+        <button class="btn-add" id="btn-refresh-acessos" onclick="carregarAcessos()">↻ Atualizar</button>
+      </div>
+      <div class="search-wrap">
+        <span class="search-icon">🔍</span>
+        <input type="text" id="busca-acessos" placeholder="Filtrar por nome, loja ou app..."/>
+      </div>
+      <div id="lista-acessos" style="font-size:12px;color:var(--mut2)">Carregando...</div>
+    </div>
+
+    <div class="section">
+      <div class="section-hd">
         <h2>Tentativas de login com falha</h2>
         <button class="btn-add" id="btn-refresh-tentativas" onclick="carregarTentativas()">↻ Atualizar</button>
       </div>
@@ -421,7 +433,50 @@ async function iniciarApp() {
   const sbUser = document.getElementById('sb-user');
   if (sbUser) sbUser.textContent = usuarioLogado.nome;
   await carregarUsuarios();
+  await carregarAcessos();
   await carregarTentativas();
+}
+
+// ─── ACESSOS (logins que deram certo) ─────────────────────
+// O outro lado do painel de falhas: gn_login_acessos guarda quem entrou, com que cargo,
+// em que loja, em qual app e quando. Serve pra responder "não fui eu que mexi" — até
+// aqui só existia registro de senha errada, então não havia nada a conferir.
+// Quem grava é a rpc/verificar_login (SECURITY DEFINER, exige a senha certa); a chave
+// pública só lê. Atenção ao ler: o app de loja guarda a sessão por 12h
+// (gn_session_v1), então reabrir o app dentro desse prazo NÃO gera linha nova aqui —
+// a linha marca quando o nome e a senha foram digitados, não cada vez que o app abriu.
+let acessosTerm = "";
+let _acessosTimer = null;
+
+async function carregarAcessos() {
+  const el = document.getElementById("lista-acessos");
+  if (!el) return;
+  el.textContent = "Carregando...";
+  try {
+    // Vírgula e parênteses saem do termo: iriam quebrar a sintaxe do filtro or=(...).
+    const termo = acessosTerm.replace(/[(),*]/g, "").trim();
+    let path = "gn_login_acessos?order=criado_em.desc&limit=60&select=nome,cargo,loja,app,criado_em";
+    if (termo) {
+      const t = encodeURIComponent("*" + termo + "*");
+      path += `&or=(nome.ilike.${t},loja.ilike.${t},app.ilike.${t})`;
+    }
+    const data = await sbFetch(path);
+    if (!data || !data.length) {
+      el.innerHTML = `<div style="padding:12px;color:var(--mut3)">${termo ? "Nenhum acesso com esse filtro." : "Nenhum acesso registrado ainda — o registro passa a valer nos próximos logins."}</div>`;
+      return;
+    }
+    el.innerHTML = data.map(a => {
+      const dt = new Date(a.criado_em);
+      const dtStr = dt.toLocaleDateString("pt-BR") + " " + dt.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+      const cargo = CARGO_LABELS[a.cargo] || a.cargo || "—";
+      return `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--bd)">
+        <div><b style="color:var(--txt)">${esc(a.nome) || "—"}</b> <span style="color:var(--mut2)">· ${esc(cargo)} · ${esc(a.loja) || "—"} · ${esc(a.app) || "—"}</span></div>
+        <div style="color:var(--mut3);white-space:nowrap;margin-left:8px">${dtStr}</div>
+      </div>`;
+    }).join("");
+  } catch(e) {
+    el.innerHTML = `<div style="padding:12px;color:var(--erro)">Erro ao carregar acessos.</div>`;
+  }
 }
 
 // ─── TENTATIVAS DE LOGIN (falhas) ───────────────────────────────────────────
@@ -471,6 +526,14 @@ async function carregarUsuarios() {
 document.getElementById("busca").addEventListener("input", e => {
   buscaTerm = e.target.value.toLowerCase();
   renderizarUsuarios();
+});
+
+// Filtro do painel de acessos: vai no servidor (a lista mostra só os 60 últimos, então
+// filtrar no cliente perderia o acesso mais antigo que o usuário está procurando).
+document.getElementById("busca-acessos").addEventListener("input", e => {
+  acessosTerm = e.target.value;
+  clearTimeout(_acessosTimer);
+  _acessosTimer = setTimeout(carregarAcessos, 350);
 });
 
 const CARGO_LABELS = {
