@@ -3477,9 +3477,11 @@ function _buildPendenciasEssenciaisCard(){
    semana — e o que NÃO foi lançado vira item do relatório e do Painel, que é informação
    melhor que uma pergunta sem gabarito.
 
-   NÃO TRAVA O APP (decisão do dono). A trava de pendência essencial do Check-list bloqueia
-   tudo menos o Guia; usar isso numa terça de manhã atrapalharia a operação e induziria
-   resposta no chute pra liberar a tela. O que cobra é a visibilidade no Painel.
+   TRAVA O APP PRA QUEM DEVE A RESPOSTA (decisão do dono, revendo a anterior). Nasceu sem
+   travar — "insiste, não trava" — e o resultado foi o card parado na tela com "não
+   respondeu" nos dois chips. Agora o gerente e o sub não passam da trava sem responder;
+   o resto da equipe usa a Home normalmente. Ver GATE_ID mais abaixo, inclusive por que ela
+   falha aberto. O Painel continua mostrando quem respondeu e quanto acertou.
 
    Guarda em gn_lojas, linha FECHAMENTO_SEMANAL, no formato
    {semana_inicio: {loja: {gerente:{...}, sub:{...}}}} — 22 respostas por semana, disputa
@@ -3743,7 +3745,15 @@ async function _fechaEnviar() {
   }
 }
 
+// Toda saída deste render passa pela reavaliação da trava — inclusive as que apagam o
+// card (dia errado, loja sem cadastro, dado que não carregou), que são justamente as que
+// TÊM que soltar a trava.
 async function _renderFechamentoSemanaHome(mostrar, sess, isMasterAtivo) {
+  try { await _renderFechamentoSemanaCard(mostrar, sess, isMasterAtivo); }
+  finally { _gateReavaliar(); }
+}
+
+async function _renderFechamentoSemanaCard(mostrar, sess, isMasterAtivo) {
   const el = document.getElementById('fechamento-semana-home-card');
   if (!el) return;
   const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
@@ -3822,6 +3832,137 @@ async function _renderFechamentoSemanaHome(mostrar, sess, isMasterAtivo) {
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:8px">${chipResp('Gerente', rGer)}${chipResp('Sub', rSub)}</div>
     ${corpo}
   </div>`;
+}
+
+/* ── Trava obrigatória do fechamento da semana ──────────────────────────────────────
+   "Deixar sem ser obrigatório faz ninguém olhar ou responder. Tem que aparecer antes de
+   qualquer coisa e só liberar após ser feito." — decisão do dono, que substitui a anterior
+   ("insiste, não trava"): o card ficou semanas na tela com "não respondeu" nos dois chips.
+
+   É SÓ DO FECHAMENTO DA SEMANA. A ciência do mês segue como card normal, sem travar nada —
+   perguntado e confirmado com o dono.
+
+   TRAVA SÓ QUEM DEVE A RESPOSTA, pelo cargo da sessão aberta: gerente e sub. Caixa,
+   estoquista, supervisor e mestre seguem usando a Home — travar a loja inteira pararia a
+   operação por uma pendência que aquela pessoa nem pode resolver.
+
+   FALHA ABERTO, sempre. Se o relatório ou as respostas não carregaram, a trava não aparece:
+   internet ruim não pode trancar a gerência fora do app, e sem relatório não existe nem
+   pergunta pra responder. Por isso cada condição exige o dado JÁ carregado e da loja certa.
+
+   A única porta além de responder é "Não sou eu — sair", que desloga. Sem ela, um aparelho
+   logado como o gerente ficaria inútil pro resto da equipe até ele chegar.
+
+   z-index abaixo do alerta urgente (99999) de propósito: emergência do mestre passa na
+   frente de cobrança de relatório. */
+const GATE_ID = 'gate-obrigatorio';
+const GATE_CARD = 'fechamento-semana-home-card';
+let _gateAtivo  = false;
+let _gateFeito  = false;   // passou pelo "Continuar" nesta sessão
+let _gateViu    = false;   // a trava chegou a aparecer nesta sessão
+let _gateOrigem = null;    // { pai, proximo } de onde o card saiu, pra devolver no lugar
+
+function _gateReset() {
+  _gateFeito = false;
+  _gateViu   = false;
+  _fechaQuem = null;
+  _fechaRespostas = {};
+  _gateLiberar();
+}
+
+// Decide a trava a partir do que JÁ está em memória — nunca dispara requisição própria.
+// Quem chama é o render do card, no fim dele, quando os dados chegaram.
+function _gateReavaliar() {
+  try {
+    if (!session || typeof LOJAS_LISTA === 'undefined') { _gateLiberar(); return; }
+    const sess = session;
+    const isMasterAtivo = sess.loja === 'GERAL' || !!(sess.permissoes || {}).master;
+    const loja = (isMasterAtivo && masterLoja) ? masterLoja : sess.loja;
+    const chave = FECHA_CARGOS[(sess.cargo || '').toLowerCase()];
+    // `_gateViu` segura a trava depois do envio: é ali que o relatório finalmente aparece,
+    // e soltar na hora devolveria a pessoa pra Home sem ela ter lido nada.
+    if (chave && !_gateFeito && LOJAS_LISTA.includes(loja) && _fechaJaAbriu()
+        && _fechaAllData && _fechaRel && _fechaRelLoja === loja
+        && _fechaPerguntasDe(_fechaRel).length
+        && (!_fechaRespostaDe(_fechaRel.semISO, loja, chave) || _gateViu)) { _gateTravar(loja, chave); return; }
+    _gateLiberar();
+  } catch (e) {
+    // Qualquer erro aqui solta a trava: um defeito meu não pode trancar ninguém.
+    window.gnLogError && window.gnLogError('gate:reavaliar', e);
+    _gateLiberar();
+  }
+}
+
+function _gateOverlay() {
+  let ov = document.getElementById(GATE_ID);
+  if (ov) return ov;
+  ov = document.createElement('div');
+  ov.id = GATE_ID;
+  ov.style.cssText = 'position:fixed;inset:0;z-index:9999;background:var(--s1);overflow-y:auto;-webkit-overflow-scrolling:touch';
+  ov.innerHTML = `
+    <div style="max-width:560px;margin:0 auto;padding:14px 0 26px">
+      <div style="padding:4px 16px 12px">
+        <div style="font-size:9px;font-weight:800;letter-spacing:1.6px;text-transform:uppercase;color:var(--t4)">Gigante Nordestino</div>
+        <div id="${GATE_ID}-titulo" style="font-size:16px;font-weight:900;color:var(--t1);margin-top:3px;line-height:1.25"></div>
+        <div id="${GATE_ID}-sub" style="font-size:11.5px;color:var(--t3);margin-top:4px;line-height:1.45"></div>
+      </div>
+      <div id="${GATE_ID}-conteudo"></div>
+      <div style="padding:12px 16px 0;display:flex;flex-direction:column;gap:8px">
+        <button id="${GATE_ID}-continuar" onclick="_gateContinuar()"
+          style="display:none;width:100%;padding:12px;border-radius:12px;border:none;cursor:pointer;font-family:inherit;font-size:13px;font-weight:900;background:#059669;color:#fff">Continuar para o app</button>
+        <button onclick="doLogout()"
+          style="width:100%;padding:10px;border-radius:12px;border:1px solid rgba(0,0,0,.15);cursor:pointer;font-family:inherit;font-size:12px;font-weight:700;background:transparent;color:var(--t3)">Não sou eu — sair</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  return ov;
+}
+
+function _gateTravar(loja, chave) {
+  const ov = _gateOverlay();
+  const holder = document.getElementById(GATE_ID + '-conteudo');
+  const card = document.getElementById(GATE_CARD);
+  if (!card || !holder) return;
+
+  if (!_gateAtivo) {
+    // Guarda de onde o card saiu pra devolver no mesmo lugar quando a trava sair.
+    _gateOrigem = { pai: card.parentNode, proximo: card.nextSibling };
+    holder.appendChild(card);
+    _gateAtivo = true;
+    _gateViu = true;
+    document.body.style.overflow = 'hidden';
+  }
+
+  const jaRespondeu = !!_fechaRespostaDe(_fechaRel.semISO, loja, chave);
+  document.getElementById(GATE_ID + '-titulo').textContent =
+    jaRespondeu ? 'Relatório da semana' : 'Antes de seguir: fechamento da semana';
+  document.getElementById(GATE_ID + '-sub').textContent = jaRespondeu
+    ? 'Leia o resultado da semana. O app libera quando você continuar.'
+    : 'Responda sobre a semana fechada — sem consultar. O relatório abre depois de responder.';
+  // O card tem setinha de recolher; recolhido dentro da trava, a tela ficaria vazia com uma
+  // trava de pé. Reabre sozinho.
+  if (!_fechaAberto) { _fechaAberto = true; _renderFechamentoSemanaHome(true, session, !!masterLoja); }
+  const inp = document.getElementById('fecha-user');
+  if (inp && !inp.value) inp.value = session.nome || '';
+  document.getElementById(GATE_ID + '-continuar').style.display = jaRespondeu ? '' : 'none';
+  ov.scrollTop = 0;
+}
+
+// "Continuar" só aparece com a semana já respondida, então aqui é sempre liberação
+// legítima — não é um "pular".
+function _gateContinuar() {
+  _gateFeito = true;
+  _gateLiberar();
+}
+
+function _gateLiberar() {
+  const card = document.getElementById(GATE_CARD);
+  if (card && _gateOrigem && _gateOrigem.pai) _gateOrigem.pai.insertBefore(card, _gateOrigem.proximo || null);
+  _gateOrigem = null;
+  const ov = document.getElementById(GATE_ID);
+  if (ov) ov.remove();
+  _gateAtivo = false;
+  document.body.style.overflow = '';
 }
 
 // O relatório em si — só aparece DEPOIS de alguém responder (ver o comentário do bloco).
@@ -5797,6 +5938,8 @@ function doLogout() {
   _pararAlertaUrgentePoll();
   _pararPollVisitasHoje();
   session = null; masterLoja = null;
+  // Sem isto, o "já respondeu" de quem saiu valeria pro próximo que entrasse no aparelho.
+  _gateReset();
   document.getElementById('inp-nome').value = '';
   document.getElementById('inp-senha').value = '';
   showLoginScreen();
