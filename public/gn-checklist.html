@@ -1595,19 +1595,23 @@
       <div style="font-size:10px;color:var(--t2);" id="utens-count">0 lançamentos</div>
     </div>
     <div style="display:flex;gap:6px;">
+      <button class="btn-secondary" style="padding:7px 12px;font-size:12px;" onclick="abrirContagemUtensilio()">📋 Contar</button>
       <button class="btn-primary" style="padding:7px 12px;font-size:12px;" onclick="addUtensilio()">+ Registrar</button>
     </div>
   </div>
   <div style="font-size:11px;color:var(--t2);line-height:1.5;margin-bottom:12px;">
     Copo, prato, talher, bandeja: lance aqui o que <b>quebrou</b> e o que está <b>faltando</b>.
     Vai direto pro pessoal de manutenção, e o saldo de cada peça fica no fim desta tela.
+    Use <b>📋 Contar</b> pra informar quantas a loja tem de uma peça sem que nada tenha
+    quebrado — é assim que o controle de uma peça nova começa.
   </div>
+  <div id="utens-contar"></div>
   <div id="utens-novo"></div>
   <div id="utens-lista" style="display:flex;flex-direction:column;gap:8px;"></div>
   <div id="utens-empty" style="text-align:center;padding:34px 20px;color:var(--t2);">
     <div style="font-size:32px;margin-bottom:6px;">🍽️</div>
     <div style="font-size:12px;">Nada lançado ainda</div>
-    <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.45">Toque em <b>+ Registrar</b> pra lançar um copo quebrado ou uma peça que está faltando.</div>
+    <div style="font-size:11px;color:var(--t3);margin-top:4px;line-height:1.45">Toque em <b>📋 Contar</b> pra informar quantas a loja tem de cada peça, ou em <b>+ Registrar</b> pra lançar um copo quebrado ou uma peça que está faltando.</div>
   </div>
   <div id="utens-saldos"></div>
 </div>
@@ -10754,6 +10758,131 @@ function _utensNovoRegistrar(){
   autoSave();
   showToast(`✅ Lançado: ${qtd} ${nome}`);
 }
+/* ── Contagem de peça ────────────────────────────────────────────────────────────────
+   Até aqui o saldo de uma peça só nascia junto de um "Quebrou"/"Faltando": a pergunta de
+   quantas a loja tem em bom estado só existia dentro de lancarUtensilioNoControle. Quem
+   tinha 40 copos inteiros não tinha onde escrever 40, e fazer o inventário pedido pela
+   direção só seria possível inventando uma quebra — manutenção falsa na fila de quem
+   conserta e desconto em cima do número recém-informado.
+
+   Esta é a contagem pura: grava no saldo e NÃO cria manutenção nenhuma.
+
+   A primeira contagem de uma peça é da loja, mesma decisão de sempre (quem está com o copo
+   na mão é quem conta). Mexer num saldo que JÁ existe continua sendo de supervisão, pelo
+   botão "corrigir" — é a trava que impede a loja de reescrever número de controle, a mesma
+   lição da aba Entrada de carnes. */
+let _utensContar = null;
+function abrirContagemUtensilio(){
+  _utensNovo = null;                   // os dois formulários não ficam abertos juntos
+  if(!_utensContar) _utensContar = { nome:'', qtd:'' };
+  renderUtensilios();
+  const i=document.getElementById('utens-contar-nome');
+  if(i){ i.focus(); i.scrollIntoView({block:'center',behavior:'smooth'}); }
+}
+function _utensContarCancelar(){ _utensContar=null; renderUtensilios(); }
+// Mesmo motivo do _utensNovoSet: digitar não redesenha, senão o teclado do celular fecha
+// no meio da palavra.
+function _utensContarSet(campo,val){
+  if(!_utensContar) return;
+  _utensContar[campo]=val;
+  const ok=_utensContarPronto();
+  const b=document.getElementById('utens-contar-ok');
+  if(b){ b.disabled=!ok; b.style.opacity=ok?'':'.45'; }
+  const d=document.getElementById('utens-contar-dica');
+  if(d) d.textContent=_utensContarFalta();
+}
+function _utensContarPronto(){
+  if(!_utensContar) return false;
+  const q=parseFloat(String(_utensContar.qtd).replace(',','.'));
+  return !!String(_utensContar.nome||'').trim() && isFinite(q) && q>=0;
+}
+function _utensContarFalta(){
+  if(!_utensContar) return '';
+  const f=[];
+  if(!String(_utensContar.nome||'').trim()) f.push('qual é a peça');
+  const q=parseFloat(String(_utensContar.qtd).replace(',','.'));
+  if(!isFinite(q)||q<0) f.push('quantas a loja tem');
+  return f.length ? 'Falta dizer '+f.join(' e ')+'.' : '';
+}
+async function _utensContarSalvar(){
+  const falta=_utensContarFalta();
+  if(falta){ showToast('⚠️ '+falta,'error'); return; }
+  const nome=String(_utensContar.nome).trim();
+  const qtd=parseFloat(String(_utensContar.qtd).replace(',','.'));
+  const chave=_utensilioChave(nome);
+  const agora=new Date().toISOString();
+  const quem=(usuarioLogado&&usuarioLogado.nome)||LOJA;
+  let jaExistia=false;
+  try{
+    await _utensiliosGravar(saldos=>{
+      // A trava decide aqui dentro, e não antes, porque _utensiliosGravar acabou de reler a
+      // linha da loja: state.utensiliosSaldo pode estar vazio (a leitura da aba falhou e cai
+      // em {} no catch) ou velho, e aí a loja reescreveria um saldo de verdade justamente
+      // pela porta que a trava existe pra fechar.
+      const existente=saldos[chave];
+      jaExistia=!!existente;
+      if(existente && !_utensilioPodeCorrigir()){
+        const err=new Error('utens_ja_no_controle');
+        err.codigo='utens_ja_no_controle';
+        err.existente=existente;
+        throw err;   // _utensiliosGravar grava DEPOIS do mutator: nada é escrito
+      }
+      const reg=existente||{};
+      reg.nome=nome;
+      reg.qtd=qtd;
+      reg.contado=true;
+      reg.contado_em=agora; reg.contado_por=quem;
+      if(reg.inicial==null){ reg.inicial=qtd; reg.inicial_em=agora; reg.inicial_por=quem; }
+      else reg.corrigido=true;   // supervisão recontando uma peça que já existia
+      reg.atualizado_em=agora; reg.atualizado_por=quem;
+      saldos[chave]=reg;
+      return saldos;
+    });
+    _logAuditoriaChk('CONTAR_UTENSILIO',{peca:nome,qtd,primeira_vez:!jaExistia});
+    _utensContar=null;
+    showToast(jaExistia ? `✅ "${nome}" recontado: ${qtd}.` : `✅ "${nome}" entrou no controle com ${qtd}.`);
+  }catch(e){
+    if(e && e.codigo==='utens_ja_no_controle'){
+      const ex=e.existente||{};
+      showToast('⚠️ "'+(ex.nome||nome)+'" já está no controle, com '+(parseFloat(ex.qtd)||0)+'. Mudar esse número é com a supervisão (botão "corrigir" no fim da tela).','error');
+      renderUtensilios();
+      return;
+    }
+    window.gnLogError && window.gnLogError('checklist:contarUtensilio', e);
+    showToast('⚠️ Não consegui gravar a contagem agora. Tenta de novo.','error');
+  }
+  renderUtensilios();
+}
+function _utensContarHtml(){
+  if(!_utensContar) return '';
+  // Mesma lista de sugestões do outro formulário: a peça escrita de dois jeitos vira duas
+  // no saldo, e é no teclado do celular que isso acontece.
+  const nomes=Object.values(_utensiliosSaldo()).filter(v=>v&&v.nome).map(v=>v.nome);
+  const ok=_utensContarPronto();
+  return `<div class="card p-3" style="border:1.5px solid #047857;background:rgba(5,150,105,.05);margin-bottom:8px;">
+    <div style="font-size:12.5px;font-weight:800;color:var(--txt-green);margin-bottom:4px;">📋 Contar peça</div>
+    <div style="font-size:11px;color:var(--t2);line-height:1.45;margin-bottom:8px;">
+      Quantas a loja tem <b>em bom estado</b>, contadas agora. Não cria manutenção nenhuma.
+    </div>
+    <div style="display:flex;flex-direction:column;gap:7px;">
+      <div><label class="field-label">Qual a peça *</label>
+        <input type="text" id="utens-contar-nome" autocomplete="off" style="font-size:12px;"
+          ${nomes.length?'list="utens-nomes-contar"':''} placeholder="ex.: copo de chopp, prato fundo, garfo"
+          value="${escHtml(_utensContar.nome||'')}" oninput="_utensContarSet('nome',this.value)">
+        ${nomes.length?`<datalist id="utens-nomes-contar">${nomes.map(n=>`<option value="${escHtml(n)}"></option>`).join('')}</datalist>`:''}</div>
+      <div><label class="field-label">Quantas a loja tem *</label>
+        <input type="number" min="0" step="1" inputmode="numeric" style="font-size:12px;" placeholder="ex.: 40"
+          value="${escHtml(_utensContar.qtd||'')}" oninput="_utensContarSet('qtd',this.value)"></div>
+      <div id="utens-contar-dica" style="font-size:11px;color:var(--txt-amber);font-weight:700;min-height:14px;line-height:1.35;">${escHtml(_utensContarFalta())}</div>
+      <div style="display:flex;gap:7px;">
+        <button class="btn-primary" id="utens-contar-ok" style="flex:1;font-size:12px;padding:9px;${ok?'':'opacity:.45'}"
+          ${ok?'':'disabled'} onclick="_utensContarSalvar()">Salvar contagem</button>
+        <button class="btn-secondary" style="font-size:12px;padding:9px 14px;" onclick="_utensContarCancelar()">Cancelar</button>
+      </div>
+    </div>
+  </div>`;
+}
+
 function _utensNovoHtml(){
   if(!_utensNovo) return '';
   // Sugere o que esta loja já lançou antes: "canecão" escrito de três jeitos vira três
@@ -10813,9 +10942,11 @@ function renderUtensilios(){
   }
   const form=document.getElementById('utens-novo');
   if(form) form.innerHTML=_utensNovoHtml();
+  const formC=document.getElementById('utens-contar');
+  if(formC) formC.innerHTML=_utensContarHtml();
   // Com o formulário aberto, o "nada lançado ainda" sumiria atrás dele e ainda mandaria
   // tocar no botão que a pessoa acabou de tocar.
-  if(empty) empty.style.display=(itens.length||_utensNovo)?'none':'block';
+  if(empty) empty.style.display=(itens.length||_utensNovo||_utensContar)?'none':'block';
   lista.innerHTML=itens.map(_manutCardHtml).join('');
 
   // O saldo mora no fim desta tela (antes ficava na Manutenção). É o controle de verdade:
@@ -15342,7 +15473,8 @@ function _abrirAbaPorLink(){
     // Só vale se a troca de aba realmente aconteceu (switchTab sai sem fazer nada quando a
     // trava de pendência está ativa) — senão o formulário abriria atrás do overlay.
     if(_activeTab !== tab) return;
-    if(p.get('novo') === '1' && tab === 'utensilios' && typeof addUtensilio === 'function') addUtensilio();
+    if(tab === 'utensilios' && p.get('contar') === '1' && typeof abrirContagemUtensilio === 'function') abrirContagemUtensilio();
+    else if(p.get('novo') === '1' && tab === 'utensilios' && typeof addUtensilio === 'function') addUtensilio();
   }catch(e){}
 }
 
