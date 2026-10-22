@@ -1171,3 +1171,54 @@ window.gnCmpNome = function (a, b) {
   if (!nb) return -1;
   return na.localeCompare(nb, 'pt-BR', { sensitivity: 'base', numeric: true });
 };
+
+// ── Horas de visita de um supervisor ───────────────────────────────────────────────────
+/* "A quantidade de horas está sendo somada de forma errada. Quando existe a visita remota
+   simultaneamente não é pra somar as horas de cada loja, e sim unificar. Iniciei remoto às
+   8h, entrei presencial às 11h, saí do remoto às 12h e finalizei a presencial às 16h: vale
+   de 8h às 16h."
+
+   Uma sessão remota é gravada como UM REGISTRO POR LOJA, todos com o mesmo horário. Somando
+   duração registro por registro, um acompanhamento de 8h45 em 11 lojas virava 96h. Medido
+   em 19/10/2026: onze remotos 07:20→16:05 mais uma presencial 11:06→18:49 davam ~104 horas
+   num único dia, quando o certo é 07:20→18:49 = 11h29.
+
+   A regra, decidida com o dono: por pessoa e por DIA, do PRIMEIRO acesso ao ÚLTIMO —
+   presencial, remoto, rotina, auditoria, o que for. O deslocamento entre lojas e o intervalo
+   do almoço entram, porque o dia de supervisão é contínuo. Depois soma dia a dia.
+
+   Não é problema só do remoto: supervisor sem nenhuma visita remota também tinha a soma
+   inflada (Anderson, 205,8h → 187,7h), porque uma `auditoria`/`checklist` e a `rotina`
+   cobrem o mesmo horário na mesma loja.
+
+   Fica aqui, no arquivo compartilhado, porque o mesmo número é mostrado em cinco lugares —
+   dois no Home (tela do relatório e texto de WhatsApp/PDF) e três no Check-list — e eles já
+   divergiam entre si: a tela do Home somava só presencial, o relatório somava tudo. */
+window.gnVisitasMinutosPorDia = function (visitas) {
+  const paraMin = (hhmm) => {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm == null ? '' : hhmm).trim());
+    if (!m) return null;            // 'PLAN', ausência (FOLGA/FÉRIAS/VIAGEM_SP) e vazio
+    const h = +m[1], mi = +m[2];
+    return (h > 23 || mi > 59) ? null : h * 60 + mi;
+  };
+  const dias = {};
+  (visitas || []).forEach(v => {
+    if (!v || !v.data) return;
+    const ini = paraMin(v.hora_chegada);
+    const fimLido = paraMin(v.hora_saida);
+    // Visita ainda em andamento (sem hora de saída) não entra: mesmo critério de antes, pra
+    // o número não crescer sozinho enquanto a tela está aberta.
+    if (ini == null || fimLido == null) return;
+    const fim = fimLido < ini ? fimLido + 1440 : fimLido;   // atravessou a meia-noite
+    const d = dias[v.data] || (dias[v.data] = { ini: ini, fim: fim });
+    if (ini < d.ini) d.ini = ini;
+    if (fim > d.fim) d.fim = fim;
+  });
+  const r = {};
+  Object.keys(dias).forEach(dia => { r[dia] = Math.max(0, dias[dia].fim - dias[dia].ini); });
+  return r;
+};
+window.gnVisitasMinutos = function (visitas) {
+  const porDia = window.gnVisitasMinutosPorDia(visitas);
+  return Object.keys(porDia).reduce((t, d) => t + porDia[d], 0);
+};
