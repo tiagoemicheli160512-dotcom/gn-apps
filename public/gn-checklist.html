@@ -11139,8 +11139,12 @@ async function abrirSim5x2(){
   try{
     // O `sexo` vem junto: é ele que dá a conta da folga de domingo. Copiar só nome/setor
     // fazia a aba dizer "ninguém com sexo informado" com a loja inteira preenchida.
+    // `horario` e `horario_dias` vêm junto por causa da impressão dia a dia, que mostra o
+    // horário de cada um. Entram no cenário salvo como o resto da equipe: reabrir meses
+    // depois tem que mostrar o horário daquela época, não o de hoje.
     const funcs = _escalaFuncsAtivos((comissoesWD||{}).funcs||[]).map(f=>({
-      nome:(f.nome||'').trim(), setor:f.setor||'—', turno:f.turno||'', sexo:f.sexo||'' }));
+      nome:(f.nome||'').trim(), setor:f.setor||'—', turno:f.turno||'', sexo:f.sexo||'',
+      horario:f.horario||'', horario_dias:f.horario_dias||null }));
     if(!funcs.length){
       el.innerHTML = '<div style="text-align:center;padding:30px;color:var(--t2);font-size:12px">Nenhum funcionário cadastrado nesta semana — a simulação precisa da equipe pra rodar.</div>';
       return;
@@ -11504,6 +11508,29 @@ async function _sim5x2Excluir(id, nome){
 
    Cada dia é um bloco com page-break-inside:avoid: o dia nunca parte no meio da folha, que
    era a outra metade do "sai quebrado". */
+// Horário daquele DIA. O grid por dia (horario_dias, Seg–Dom, mesmo índice de folgas) é a
+// verdade mais específica e é o que a jornada da simulação já usa; o "horário geral" do
+// cadastro (f.horario, texto livre tipo "15:00-22:00") entra só quando o dia está vazio.
+// Quando os dois existem e divergem, vale o do dia — foi preenchido pra aquele dia.
+function _sim5x2HorarioDoDia(f, d){
+  const hd = (f && f.horario_dias || [])[d];
+  if (hd && hd.entrada && hd.saida) return String(hd.entrada) + '–' + String(hd.saida);
+  return String((f && f.horario) || '').trim();
+}
+
+// Ordem de leitura do dia: quem abre, quem pega a virada, quem fecha. Alfabética poria
+// MANHÃ depois de MISTO, e "Sem turno" no meio de quem tem.
+const _SIM5X2_TURNOS_ORDEM = ['MANHÃ', 'TARDE', 'NOITE', 'MISTO'];
+function _sim5x2TurnoChave(f){
+  const t = String((f && f.turno) || '').trim();
+  return t || 'Sem turno';
+}
+function _sim5x2TurnoOrdem(t){
+  const i = _SIM5X2_TURNOS_ORDEM.indexOf(String(t).toUpperCase());
+  if (i >= 0) return i;
+  return t === 'Sem turno' ? 998 : 900;   // turno fora da lista antes do "sem turno"
+}
+
 function _sim5x2SetorOrdem(setor){
   // Ordem do cadastro (COMISSOES_SETORES), não alfabética: é a ordem em que a loja pensa a
   // equipe. Setor fora da lista vai pro fim, em ordem alfabética, em vez de sumir.
@@ -11518,28 +11545,46 @@ function imprimirEscalaSim5x2(){
   const hr = window.gnSim5x2Horas(funcs, folgas, _sim5x2.perfil, _sim5x2.horasDia);
   const f1h = n => (Math.round(n*10)/10).toString().replace('.', ',');
 
+  // Dentro do dia, o TURNO manda e o setor vem dentro dele — "quem abre hoje de manhã?" é
+  // a pergunta do papel, e turno é o grupo que de fato trabalha junto. O turno deixa de
+  // ser um parêntese repetido em cada nome e vira o cabeçalho, o que ainda abre espaço na
+  // linha pro horário de cada um.
   const porDia = window.GN_SIM5X2_DIAS.map((nomeDia, d) => {
     const trabalham = [], folgam = [];
     funcs.forEach((f, i) => ((folgas[i]||[]).includes(d) ? folgam : trabalham).push(f));
-    const setores = {};
-    trabalham.forEach(f => { const k = String(f.setor || '—'); (setores[k] = setores[k] || []).push(f); });
-    const chaves = Object.keys(setores).sort((a2, b2) =>
-      _sim5x2SetorOrdem(a2) - _sim5x2SetorOrdem(b2) || a2.localeCompare(b2, 'pt-BR'));
-    return { nomeDia, d, trabalham, folgam, setores, chaves };
+    const turnos = {};
+    trabalham.forEach(f => { const t = _sim5x2TurnoChave(f); (turnos[t] = turnos[t] || []).push(f); });
+    const chavesT = Object.keys(turnos).sort((a2, b2) =>
+      _sim5x2TurnoOrdem(a2) - _sim5x2TurnoOrdem(b2) || a2.localeCompare(b2, 'pt-BR'));
+    const grupos = chavesT.map(t => {
+      const setores = {};
+      turnos[t].forEach(f => { const k = String(f.setor || '—'); (setores[k] = setores[k] || []).push(f); });
+      const chaves = Object.keys(setores).sort((a2, b2) =>
+        _sim5x2SetorOrdem(a2) - _sim5x2SetorOrdem(b2) || a2.localeCompare(b2, 'pt-BR'));
+      return { turno: t, qtd: turnos[t].length, setores, chaves };
+    });
+    return { nomeDia, d, trabalham, folgam, grupos };
   });
 
-  const nomeDe = f => esc(f.nome) + (f.turno ? ` <span class="turno">(${esc(f.turno)})</span>` : '');
+  const nomeDe = (f, d) => {
+    const h = _sim5x2HorarioDoDia(f, d);
+    return esc(f.nome) + (h ? ` <span class="hora">${esc(h)}</span>` : '');
+  };
   const blocos = porDia.map(x => `
     <section class="dia">
       <div class="dia-top">
         <h2>${esc(x.nomeDia)}</h2>
         <span class="qtd">${x.trabalham.length} ${x.trabalham.length === 1 ? 'pessoa' : 'pessoas'}</span>
       </div>
-      ${x.chaves.length ? `<table class="setores">${x.chaves.map(k => `
-        <tr>
-          <th>${esc(k)} <span class="n">${x.setores[k].length}</span></th>
-          <td>${x.setores[k].sort((a2,b2)=>String(a2.nome).localeCompare(String(b2.nome),'pt-BR')).map(nomeDe).join(' · ')}</td>
-        </tr>`).join('')}</table>`
+      ${x.grupos.length ? x.grupos.map(g => `
+        <div class="turno-bloco">
+          <div class="turno-top">${esc(g.turno)} <span class="n">${g.qtd}</span></div>
+          <table class="setores">${g.chaves.map(k => `
+            <tr>
+              <th>${esc(k)} <span class="n">${g.setores[k].length}</span></th>
+              <td>${g.setores[k].sort((a2,b2)=>String(a2.nome).localeCompare(String(b2.nome),'pt-BR')).map(f => nomeDe(f, x.d)).join(' · ')}</td>
+            </tr>`).join('')}</table>
+        </div>`).join('')
         : '<div class="vazio">Ninguém escalado neste dia.</div>'}
       ${x.folgam.length ? `<div class="folgam"><b>Folgam:</b> ${x.folgam
         .slice().sort((a2,b2)=>String(a2.nome).localeCompare(String(b2.nome),'pt-BR'))
@@ -11562,7 +11607,10 @@ function imprimirEscalaSim5x2(){
             const ds = (folgas[i]||[]).slice().sort((a3,b3)=>a3-b3).map(d => window.GN_SIM5X2_DIAS_ABREV[d]).join(' e ');
             const pp = hr.porPessoa.find(y => y.i === i);
             const faltando = (folgas[i]||[]).length !== 2;
-            return `<div class="pessoa${faltando ? ' alerta' : ''}">${esc(f.nome)} — folga ${ds || '<b>sem folga</b>'}${
+            const hg = String(f.horario || '').trim();
+            return `<div class="pessoa${faltando ? ' alerta' : ''}">${esc(f.nome)}${
+              f.turno ? ` <span class="hora">${esc(f.turno)}</span>` : ''}${
+              hg ? ` <span class="hora">${esc(hg)}</span>` : ''} — folga ${ds || '<b>sem folga</b>'}${
               (folgas[i]||[]).length !== 2 ? ` <b>(${(folgas[i]||[]).length}/2)</b>` : ''}${
               pp ? ` · ${f1h(pp.semana)}h` : ''}</div>`;
           }).join('')}</td>
@@ -11591,7 +11639,12 @@ function imprimirEscalaSim5x2(){
       table.setores td{vertical-align:top;padding:4px 0;font-size:9.5pt;line-height:1.5;border-bottom:1px solid #f3f4f6}
       /* Nome inteiro: o corte com reticências na tela foi o que motivou esta impressão. */
       table.setores td{word-break:break-word}
-      .turno{color:#888;font-size:8.5pt}
+      .turno-bloco{margin-top:6px}
+      .turno-bloco:first-of-type{margin-top:0}
+      .turno-top{font-size:8.5pt;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:#1A1D23;background:#f3f4f6;border-radius:4px;padding:2px 7px;display:inline-block;margin-bottom:3px}
+      .turno-top .n{font-weight:600;color:#6b7280}
+      /* O horário acompanha o nome sem competir com ele: é conferência, não leitura. */
+      .hora{color:#6b7280;font-size:8.5pt;white-space:nowrap}
       .folgam{font-size:8.5pt;color:#666;margin-top:7px;line-height:1.45}
       .vazio{font-size:9pt;color:#888;padding:4px 0}
       .conferencia .pessoa{font-size:9pt;line-height:1.55}
