@@ -2188,8 +2188,9 @@
 <div id="tab-sim5x2" class="tab-content" style="max-width:640px;margin:0 auto;padding:14px;">
   <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px">
     <div style="font-size:14px;font-weight:700">🧪 Simular escala 5x2</div>
-    <div style="display:flex;gap:6px;flex-shrink:0">
-      <button class="btn-secondary" onclick="imprimirEscalaSim5x2()" style="font-size:10px;padding:5px 10px">🖨️ Escala dia a dia</button>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+      <button class="btn-secondary" onclick="imprimirSemanaSim5x2()" style="font-size:10px;padding:5px 10px">🗓️ Semana numa folha</button>
+      <button class="btn-secondary" onclick="imprimirEscalaSim5x2()" style="font-size:10px;padding:5px 10px">🖨️ Dia a dia</button>
       <button class="btn-secondary" onclick="gerarPDFSim5x2()" style="font-size:10px;padding:5px 10px">📄 Relatório</button>
     </div>
   </div>
@@ -11542,6 +11543,138 @@ function _sim5x2SetorOrdem(setor){
   // equipe. Setor fora da lista vai pro fim, em ordem alfabética, em vez de sumir.
   const i = COMISSOES_SETORES.indexOf(setor);
   return i >= 0 ? i : 900;
+}
+
+/* ── A SEMANA INTEIRA NUMA FOLHA ──────────────────────────────────────────────────────
+   "Tenho que imprimir vários dias em várias folhas; queria imprimir uma semana dentro da
+   mesma página."
+
+   O dia a dia não encolhe: cada dia repete os cabeçalhos de turno e setor, e cada pessoa
+   aparece sete vezes — com a equipe do Norte dá quatro folhas na semana. Pra caber numa só o
+   formato tem que virar: PESSOAS nas linhas, DIAS nas colunas, e cada célula com o horário
+   daquele dia (ou a folga). É a grade de escala que a gerência já conhece, e é compacta por
+   construção — cada nome aparece UMA vez, não sete.
+
+   Deitada (A4 paisagem), porque são sete colunas. O dia a dia continua existindo, pro mural
+   e pra quem precisa do detalhe do turno; este aqui é o da conferência rápida. */
+function imprimirSemanaSim5x2(){
+  if(!_sim5x2){ alert('Abra a simulação primeiro.'); return; }
+  const {funcs, folgas} = _sim5x2;
+  const esc = escHtml;
+  const hr = window.gnSim5x2Horas(funcs, folgas, _sim5x2.perfil, _sim5x2.horasDia);
+  const f1h = n => (Math.round(n*10)/10).toString().replace('.', ',');
+
+  const porSetor = {};
+  funcs.forEach((f, i) => { const k = String(f.setor || '—'); (porSetor[k] = porSetor[k] || []).push({ f, i }); });
+  const chaves = Object.keys(porSetor).sort((a2, b2) =>
+    _sim5x2SetorOrdem(a2) - _sim5x2SetorOrdem(b2) || a2.localeCompare(b2, 'pt-BR'));
+
+  let usouBase = false;
+  const celula = (f, i, d) => {
+    if ((folgas[i]||[]).includes(d)) return '<td class="folga">folga</td>';
+    const h = _sim5x2HorarioDoDia(f, d);
+    if (!h) return '<td>·</td>';
+    if (h.base) usouBase = true;
+    return `<td>${h.base ? '<span class="base">base</span> ' : ''}${esc(h.txt)}</td>`;
+  };
+
+  const corpo = chaves.map(k => `
+    <tr class="setor-linha"><th colspan="9">${esc(k)} <span class="n">${porSetor[k].length}</span></th></tr>
+    ${porSetor[k].sort((a2,b2)=>String(a2.f.nome).localeCompare(String(b2.f.nome),'pt-BR')).map(({f,i}) => {
+      const pp = hr.porPessoa.find(x => x.i === i);
+      const nFolgas = (folgas[i]||[]).length;
+      return `<tr>
+        <th class="pessoa">${esc(f.nome)}${f.turno ? ` <span class="turno">${esc(f.turno)}</span>` : ''}</th>
+        ${window.GN_SIM5X2_DIAS.map((_, d) => celula(f, i, d)).join('')}
+        <td class="tot${nFolgas !== 2 ? ' alerta' : ''}">${pp ? f1h(pp.semana) + 'h' : '—'}${nFolgas !== 2 ? ` · ${nFolgas}/2` : ''}</td>
+      </tr>`;
+    }).join('')}`).join('');
+
+  // A contagem por dia fecha a folha: é o número que diz se a semana está coberta.
+  const rodapeDias = window.GN_SIM5X2_DIAS.map((_, d) =>
+    `<td class="qtd-dia">${funcs.filter((f, i) => !(folgas[i]||[]).includes(d)).length}</td>`).join('');
+
+  /* ── Densidade: a folha é fixa, a equipe não ──────────────────────────────────────
+     As equipes vão de 13 (Guarulhos) a 52 (Nova América), mais uma linha por setor.
+     Com um tamanho de letra fixo, a promessa "a semana numa folha" só valeria pras lojas
+     pequenas. Então a grade aperta sozinha: calcula quanto sobra de altura por linha e
+     escolhe a maior letra que cabe — até um piso, porque abaixo dele ninguém lê no papel.
+     Quando nem o piso resolve (equipe muito grande), a grade segue na folha seguinte com
+     o cabeçalho repetido — e a folha DIZ isso, em vez de prometer uma página só. */
+  const UTIL = 578;      // px de tabela que sobram numa A4 deitada depois do cabeçalho do relatório
+  const COL_NOME = 204;  // px úteis da coluna do nome: 22% da folha, menos o padding e o turno
+  const POR_CHAR = 0.86; // px por caractere, por pt, medido em caixa alta e negrito na fonte do relatório
+  const PX_PT = 1.667;   // altura de uma linha de texto: 1.25 de entrelinha, em px por pt
+  const nLinhas = funcs.length + chaves.length + 2;   // + cabeçalho + rodapé
+  const maiorNome = Math.max(8, ...funcs.map(f => String(f.nome || '').length));
+  const q = n => Math.round(n * 4) / 4;               // de quarto em quarto de ponto
+  const padDe = pt => pt >= 6.5 ? 1.5 : pt >= 6 ? 1 : 0.5;
+  // O nome encolhe um pouco mais que o resto quando é comprido: uma quebra dele vale uma
+  // linha a mais vezes a equipe inteira. Se ainda assim não couber, ele quebra — nunca é
+  // cortado, que era a queixa original da impressão.
+  const nomeDe = pt => Math.max(5, Math.min(pt, q(COL_NOME / (POR_CHAR * maiorNome))));
+  const linhasNomeDe = pt => Math.max(1, Math.ceil(maiorNome / Math.max(1, Math.floor(COL_NOME / (POR_CHAR * nomeDe(pt))))));
+  const alturaDe = pt => Math.max(PX_PT * pt, PX_PT * nomeDe(pt) * linhasNomeDe(pt)) + 2 * padDe(pt) + 1;
+  // A maior letra que ainda cabe — testada de cima pra baixo, não estimada por fórmula.
+  const fonte = [7, 6.75, 6.5, 6.25, 6, 5.75, 5.5].find(pt => alturaDe(pt) * nLinhas <= UTIL) || 5.25;
+  const ptNome = nomeDe(fonte);
+  const umaFolha = alturaDe(fonte) * nLinhas <= UTIL;
+  const pad = padDe(fonte) + 'px ' + (fonte >= 6.5 ? 4 : fonte >= 6 ? 3 : 2) + 'px';
+  // O que é secundário encolhe junto, mas tem piso próprio: no aperto máximo o turno e o
+  // selo "base" ficariam menores que o que se lê numa impressora de loja.
+  const ptMini = Math.max(5, fonte - .5), ptTurno = Math.max(4.75, fonte - 1);
+
+  const html = `
+    <div class="aviso">Rascunho da simulação 5x2 — <b>não altera a escala da loja</b>. Jornada simulada de ${f1h(hr.horasDia)}h por dia.
+      Cada célula é o horário <b>daquele dia</b>${usouBase ? '; onde o dia não foi preenchido aparece o horário <b>base</b> do cadastro, marcado como tal' : ''}.${
+      umaFolha ? '' : ` <b>Equipe de ${funcs.length}</b>: não cabe numa folha só — a grade segue na seguinte, com o cabeçalho repetido.`}</div>
+    <table class="grade">
+      <thead><tr>
+        <th class="pessoa">Pessoa</th>
+        ${window.GN_SIM5X2_DIAS.map((dn, d) => `<th>${esc(window.GN_SIM5X2_DIAS_ABREV[d])}</th>`).join('')}
+        <th class="tot">Semana</th>
+      </tr></thead>
+      <tbody>${corpo}</tbody>
+      <tfoot><tr><th class="pessoa">Na escala</th>${rodapeDias}<td class="tot">${funcs.length} pessoas</td></tr></tfoot>
+    </table>`;
+
+  window.gnRelatorioPDF({
+    titulo: `Escala 5x2 da semana — ${lojaDisp(LOJA)}`,
+    tituloDoc: `Escala 5x2 da semana — ${lojaDisp(LOJA)}`,
+    subtitulo: `simulação · gerado em ${window.gnPdfAgora()}`,
+    html: `<style>
+      /* Deitada: sete colunas de horário não cabem em retrato sem espremer o nome. */
+      @page{size:A4 landscape;margin:1cm}
+      body{padding:10px}
+      /* O cabeçalho padrão do relatório come 1/4 da folha deitada, e aqui a folha É o
+         recurso escasso: a promessa do formato é a semana numa página só. */
+      .marca{margin-bottom:5px}
+      h1{font-size:12pt;margin-bottom:1px}
+      .sub{font-size:7pt;margin-bottom:7px}
+      .footer{font-size:6pt;margin-top:6px;padding-top:4px}
+      .aviso{font-size:7pt;color:#555;border:1px solid #e5e7eb;border-radius:5px;padding:4px 7px;margin-bottom:6px}
+      table.grade{width:100%;border-collapse:collapse;font-size:${fonte}pt;table-layout:fixed}
+      table.grade th,table.grade td{border:1px solid #e5e7eb;padding:${pad};text-align:center;vertical-align:middle;word-break:break-word;line-height:1.25}
+      table.grade thead th{background:#f3f4f6;font-size:${fonte + .5}pt;font-weight:800;text-transform:uppercase;letter-spacing:.3px}
+      /* O nome é a coluna que quebra em duas linhas quando aperta, e uma quebra custa uma
+         linha inteira vezes a equipe toda — por isso ela é a mais larga da grade. */
+      table.grade th.pessoa{width:22%;text-align:left;font-weight:700;font-size:${ptNome}pt}
+      /* Turno na mesma linha do nome, não embaixo, pelo mesmo motivo. */
+      table.grade th.pessoa .turno{font-weight:600;color:#9ca3af;font-size:${ptTurno}pt;letter-spacing:.3px}
+      table.grade td.folga{background:#f9fafb;color:#9ca3af;font-style:italic}
+      table.grade .base{color:#9ca3af;font-size:${ptMini}pt}
+      table.grade th.tot,table.grade td.tot{width:9%;font-weight:700}
+      table.grade td.tot.alerta{color:#b91c1c}
+      table.grade tr.setor-linha th{background:#eef0f3;text-align:left;font-size:${ptMini}pt;font-weight:800;text-transform:uppercase;letter-spacing:.5px;padding:1px 5px;line-height:1.2}
+      table.grade tr.setor-linha .n{font-weight:600;color:#6b7280}
+      table.grade tfoot th,table.grade tfoot td{background:#f3f4f6;font-weight:800}
+      table.grade td.qtd-dia{font-weight:800}
+      /* Linha de pessoa não parte entre folhas quando a equipe não couber numa só. */
+      table.grade tr{page-break-inside:avoid;break-inside:avoid}
+      thead{display:table-header-group}
+    </style>${html}`,
+    rodape: `GN Operações · simulação 5x2 · ${lojaDisp(LOJA)}`,
+  });
 }
 
 function imprimirEscalaSim5x2(){
