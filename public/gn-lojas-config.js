@@ -256,6 +256,9 @@ window.CARGOS_REABRIR          = ['admin','administrador','gerente','sub_gerente
 // — quem responde pela loja — e duplicar o rol é como as duas versões divergem meses
 // depois. É decisão de negócio separada; se um dia diferir, muda aqui.
 window.CARGOS_CANCELAMENTO     = window.CARGOS_REABRIR;
+// Quem assina uma transferência de mesa e a declaração de "dia sem transferência". Mesma
+// faixa do cancelamento hoje — aponta pra lá, em vez de repetir a lista, pela mesma razão.
+window.CARGOS_TRANSFERENCIA    = window.CARGOS_CANCELAMENTO;
 
 // ── MOTIVO DO CANCELAMENTO: CATEGORIA + DETALHE ───────────────────────────
 // Os 28 primeiros cancelamentos registrados deram 28 textos diferentes — agrupar pelo
@@ -317,6 +320,37 @@ window.gnCancelMotivoFalta = function (categoria, detalhe) {
   }
   if (det.length < window.GN_CANCEL_DETALHE_MIN)
     return 'Conte o que aconteceu, com um pouco mais de detalhe.';
+  return '';
+};
+
+// ── TRANSFERÊNCIA DE MESA ─────────────────────────────────────────────────
+// A regra da casa: transferência só vale entre mesas com consumo de verdade — cliente que
+// mudou de lugar, mesas que se juntaram. Usar transferência pra "guardar" um item lançado
+// errado e tentar vender depois é proibido: quando não vende, vira cancelamento tardio e
+// desperdício, e aí já passou do ponto de alguém responder por aquilo.
+//
+// Sem categoria fixa aqui, ao contrário do cancelamento: lá as sete categorias saíram de
+// 28 registros reais, e inventar uma lista antes de existir um único registro seria
+// chutar o eixo do relatório. O mínimo do texto fica, que é o que barra o "erro" de uma
+// palavra; a categoria entra depois, com os motivos que a rede escrever de verdade.
+window.GN_TRANSF_MOTIVO_MIN = 10;
+
+window.gnTransfMotivoFalta = function (motivo) {
+  const det = String(motivo || '').trim();
+  if (!det) return 'Falta o motivo da transferência.';
+  if (det.length < window.GN_TRANSF_MOTIVO_MIN)
+    return 'Diga o motivo da transferência com um pouco mais de detalhe.';
+  return '';
+};
+
+// Mesa de origem e destino não podem ser a mesma: "transferir a mesa 12 pra mesa 12" é
+// registro que não descreve transferência nenhuma.
+window.gnTransfMesasFalta = function (origem, destino) {
+  const o = String(origem || '').trim(), d = String(destino || '').trim();
+  if (!o && !d) return 'Falta a mesa de origem e a de destino.';
+  if (!o) return 'Falta a mesa de origem.';
+  if (!d) return 'Falta a mesa de destino.';
+  if (o.toUpperCase() === d.toUpperCase()) return 'Origem e destino são a mesma mesa.';
   return '';
 };
 window.CARGOS_RH_LIVRE         = ['mestre','supervisor','administrador','compras','admin','gerente']; // sem restrição de horário no GN RH
@@ -491,6 +525,10 @@ window.GN_MEIO_TURNO_FORA = ['MAGLIA'];
 // Mesma regra pro registro de cancelamentos no fechamento de caixa: o pedido não citou a
 // Maglia, então a seção não aparece pra ela.
 window.GN_CANCELAMENTO_FORA = ['MAGLIA'];
+// Transferência de mesa segue a mesma faixa de lojas do cancelamento. A Maglia fica de
+// fora pelo mesmo motivo de lá — e porque a regra foi pedida pras lojas da rede, sem citar
+// ela (ver CLAUDE.md).
+window.GN_TRANSFERENCIA_FORA = ['MAGLIA'];
 // Uma comparação só pras duas listas (e pras próximas): a chave da loja chega com caixa e
 // espaços variando conforme o app, e cada cópia dessa comparação é uma chance de divergir.
 window.gnLojaForaDe = function (lista, loja) {
@@ -503,6 +541,9 @@ window.gnMeioTurnoLiberado = function (loja) {
 };
 window.gnCancelamentoLiberado = function (loja) {
   return !window.gnLojaForaDe(window.GN_CANCELAMENTO_FORA, loja);
+};
+window.gnTransferenciaLiberada = function (loja) {
+  return !window.gnLojaForaDe(window.GN_TRANSFERENCIA_FORA, loja);
 };
 // A lista de status que a tela oferece, já sem o que não vale pra aquela loja.
 window.gnStatusDaLoja = function (lista, loja) {
