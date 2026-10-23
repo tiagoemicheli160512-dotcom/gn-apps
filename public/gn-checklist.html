@@ -2188,7 +2188,10 @@
 <div id="tab-sim5x2" class="tab-content" style="max-width:640px;margin:0 auto;padding:14px;">
   <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px">
     <div style="font-size:14px;font-weight:700">🧪 Simular escala 5x2</div>
-    <button class="btn-secondary" onclick="gerarPDFSim5x2()" style="font-size:10px;padding:5px 10px">📄 Relatório</button>
+    <div style="display:flex;gap:6px;flex-shrink:0">
+      <button class="btn-secondary" onclick="imprimirEscalaSim5x2()" style="font-size:10px;padding:5px 10px">🖨️ Escala dia a dia</button>
+      <button class="btn-secondary" onclick="gerarPDFSim5x2()" style="font-size:10px;padding:5px 10px">📄 Relatório</button>
+    </div>
   </div>
   <div style="font-size:11px;color:var(--t2);line-height:1.45;margin-bottom:10px">
     Rascunho pra testar o 5x2 antes de valer. <b>Não mexe na escala</b> — nada daqui chega
@@ -11487,6 +11490,117 @@ async function _sim5x2Excluir(id, nome){
 }
 
 // Relatório — mesmo padrão dos outros (gnRelatorioPDFTexto, em gn-lojas-config.js).
+/* ── IMPRESSÃO DA ESCALA, DIA A DIA ───────────────────────────────────────────────────
+   "Quando vou imprimir, queria que tivesse como imprimir a escala no formato dia a dia, se
+   for o caso por setor — tipo cozinha, salão, copa. Pois sai quebrado."
+
+   O que saía quebrado era a TELA impressa pelo navegador: a linha de cada pessoa é um nome
+   seguido de sete botõezinhos de dia, e no papel ela vira uma faixa estreita que não cabe
+   em retrato — o nome sai cortado ("FELIPE BORGES DA…") e a página sai deitada.
+
+   Aqui a leitura é a outra: o dia manda, e dentro dele vem o setor com quem trabalha. É a
+   pergunta que a gerência faz de fato ao olhar a escala — "quem eu tenho na cozinha na
+   quinta?" — e cabe em retrato, porque nome é texto corrido, não coluna.
+
+   Cada dia é um bloco com page-break-inside:avoid: o dia nunca parte no meio da folha, que
+   era a outra metade do "sai quebrado". */
+function _sim5x2SetorOrdem(setor){
+  // Ordem do cadastro (COMISSOES_SETORES), não alfabética: é a ordem em que a loja pensa a
+  // equipe. Setor fora da lista vai pro fim, em ordem alfabética, em vez de sumir.
+  const i = COMISSOES_SETORES.indexOf(setor);
+  return i >= 0 ? i : 900;
+}
+
+function imprimirEscalaSim5x2(){
+  if(!_sim5x2){ alert('Abra a simulação primeiro.'); return; }
+  const {funcs, folgas} = _sim5x2;
+  const esc = escHtml;
+  const hr = window.gnSim5x2Horas(funcs, folgas, _sim5x2.perfil, _sim5x2.horasDia);
+  const f1h = n => (Math.round(n*10)/10).toString().replace('.', ',');
+
+  const porDia = window.GN_SIM5X2_DIAS.map((nomeDia, d) => {
+    const trabalham = [], folgam = [];
+    funcs.forEach((f, i) => ((folgas[i]||[]).includes(d) ? folgam : trabalham).push(f));
+    const setores = {};
+    trabalham.forEach(f => { const k = String(f.setor || '—'); (setores[k] = setores[k] || []).push(f); });
+    const chaves = Object.keys(setores).sort((a2, b2) =>
+      _sim5x2SetorOrdem(a2) - _sim5x2SetorOrdem(b2) || a2.localeCompare(b2, 'pt-BR'));
+    return { nomeDia, d, trabalham, folgam, setores, chaves };
+  });
+
+  const nomeDe = f => esc(f.nome) + (f.turno ? ` <span class="turno">(${esc(f.turno)})</span>` : '');
+  const blocos = porDia.map(x => `
+    <section class="dia">
+      <div class="dia-top">
+        <h2>${esc(x.nomeDia)}</h2>
+        <span class="qtd">${x.trabalham.length} ${x.trabalham.length === 1 ? 'pessoa' : 'pessoas'}</span>
+      </div>
+      ${x.chaves.length ? `<table class="setores">${x.chaves.map(k => `
+        <tr>
+          <th>${esc(k)} <span class="n">${x.setores[k].length}</span></th>
+          <td>${x.setores[k].sort((a2,b2)=>String(a2.nome).localeCompare(String(b2.nome),'pt-BR')).map(nomeDe).join(' · ')}</td>
+        </tr>`).join('')}</table>`
+        : '<div class="vazio">Ninguém escalado neste dia.</div>'}
+      ${x.folgam.length ? `<div class="folgam"><b>Folgam:</b> ${x.folgam
+        .slice().sort((a2,b2)=>String(a2.nome).localeCompare(String(b2.nome),'pt-BR'))
+        .map(f => esc(f.nome)).join(' · ')}</div>` : '<div class="folgam">Ninguém de folga neste dia.</div>'}
+    </section>`).join('');
+
+  // A lista por pessoa fica no FIM, não no lugar do dia a dia: serve pra conferir "fulano
+  // está com as duas folgas?", que é outra pergunta.
+  const porSetorPessoa = {};
+  funcs.forEach((f, i) => { const k = String(f.setor || '—'); (porSetorPessoa[k] = porSetorPessoa[k] || []).push({f, i}); });
+  const chavesP = Object.keys(porSetorPessoa).sort((a2, b2) =>
+    _sim5x2SetorOrdem(a2) - _sim5x2SetorOrdem(b2) || a2.localeCompare(b2, 'pt-BR'));
+  const porPessoa = `
+    <section class="dia conferencia">
+      <div class="dia-top"><h2>Conferência por pessoa</h2><span class="qtd">${funcs.length} ${funcs.length === 1 ? 'pessoa' : 'pessoas'}</span></div>
+      <table class="setores">${chavesP.map(k => `
+        <tr>
+          <th>${esc(k)} <span class="n">${porSetorPessoa[k].length}</span></th>
+          <td>${porSetorPessoa[k].sort((a2,b2)=>String(a2.f.nome).localeCompare(String(b2.f.nome),'pt-BR')).map(({f,i}) => {
+            const ds = (folgas[i]||[]).slice().sort((a3,b3)=>a3-b3).map(d => window.GN_SIM5X2_DIAS_ABREV[d]).join(' e ');
+            const pp = hr.porPessoa.find(y => y.i === i);
+            const faltando = (folgas[i]||[]).length !== 2;
+            return `<div class="pessoa${faltando ? ' alerta' : ''}">${esc(f.nome)} — folga ${ds || '<b>sem folga</b>'}${
+              (folgas[i]||[]).length !== 2 ? ` <b>(${(folgas[i]||[]).length}/2)</b>` : ''}${
+              pp ? ` · ${f1h(pp.semana)}h` : ''}</div>`;
+          }).join('')}</td>
+        </tr>`).join('')}</table>
+    </section>`;
+
+  const html = `
+    <div class="aviso">Rascunho da simulação 5x2 — <b>não altera a escala da loja</b>. Jornada simulada de ${f1h(hr.horasDia)}h por dia.</div>
+    ${blocos}
+    ${porPessoa}`;
+
+  window.gnRelatorioPDF({
+    titulo: `Escala 5x2 dia a dia — ${lojaDisp(LOJA)}`,
+    tituloDoc: `Escala 5x2 dia a dia — ${lojaDisp(LOJA)}`,
+    subtitulo: `simulação · gerado em ${window.gnPdfAgora()}`,
+    html: `<style>
+      .aviso{font-size:9pt;color:#555;border:1px solid #e5e7eb;border-radius:6px;padding:8px 10px;margin-bottom:14px}
+      /* O dia inteiro numa folha só: partir a cozinha da quinta ao meio é o "sai quebrado". */
+      .dia{page-break-inside:avoid;break-inside:avoid;border:1px solid #e5e7eb;border-radius:8px;padding:10px 12px;margin-bottom:10px}
+      .dia-top{display:flex;align-items:baseline;justify-content:space-between;border-bottom:1px solid #eee;padding-bottom:5px;margin-bottom:6px}
+      .dia h2{font-size:12pt;font-weight:800;margin:0}
+      .dia .qtd{font-size:8.5pt;color:#888;white-space:nowrap}
+      table.setores{width:100%;border-collapse:collapse;margin:0}
+      table.setores th{width:26%;text-align:left;vertical-align:top;padding:4px 8px 4px 0;font-size:8.5pt;font-weight:800;text-transform:uppercase;letter-spacing:.3px;color:#444;border:0}
+      table.setores th .n{font-weight:600;color:#9aa0a6}
+      table.setores td{vertical-align:top;padding:4px 0;font-size:9.5pt;line-height:1.5;border-bottom:1px solid #f3f4f6}
+      /* Nome inteiro: o corte com reticências na tela foi o que motivou esta impressão. */
+      table.setores td{word-break:break-word}
+      .turno{color:#888;font-size:8.5pt}
+      .folgam{font-size:8.5pt;color:#666;margin-top:7px;line-height:1.45}
+      .vazio{font-size:9pt;color:#888;padding:4px 0}
+      .conferencia .pessoa{font-size:9pt;line-height:1.55}
+      .conferencia .pessoa.alerta{color:#b91c1c}
+    </style>${html}`,
+    rodape: `GN Operações · simulação 5x2 · ${lojaDisp(LOJA)}`,
+  });
+}
+
 function gerarPDFSim5x2(){
   if(!_sim5x2){ alert('Abra a simulação primeiro.'); return; }
   const {funcs, folgas, perfil} = _sim5x2;
