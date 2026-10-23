@@ -1233,6 +1233,59 @@ select option { background: var(--graf2); color: var(--txt); }
            dois, o caixa não fecha. -->
       <div id="semCancelBox"></div>
     </div>
+    <!-- Transferências de mesa. Mesmo desenho do cancelamento (lança assinado com senha, ou
+         alguém assina que não houve), porque o problema é o mesmo: sem resposta obrigatória,
+         o que não é lançado some.
+
+         A regra da casa, que explica por que isto virou obrigatório: transferência só vale
+         entre mesas com consumo de verdade. Usar transferência pra "guardar" um item lançado
+         errado e tentar vender depois é proibido — quando não vende, vira cancelamento tardio
+         e desperdício, e aí já passou do ponto de alguém responder por aquilo. -->
+    <div class="secao" id="secTransf">
+      <h3>Transferências de mesa</h3>
+      <div style="font-size:11px;color:var(--mut);margin:-4px 0 10px;line-height:1.45">
+        Só entre mesas com consumo de verdade. Transferir item lançado errado pra vender depois é proibido.
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Mesa de origem</label>
+          <input id="transfOrigem" type="text" inputmode="text" placeholder="Ex: 12">
+        </div>
+        <div class="form-group">
+          <label>Mesa de destino</label>
+          <input id="transfDestino" type="text" inputmode="text" placeholder="Ex: 14">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Motivo da transferência</label>
+          <input id="transfMotivo" type="text" placeholder="Ex: cliente mudou de mesa com o consumo">
+        </div>
+      </div>
+      <!-- Nome + senha, igual ao cancelamento: o nome gravado é o que a validação devolve,
+           não o que foi digitado. -->
+      <div class="form-row">
+        <div class="form-group">
+          <label>Quem autorizou</label>
+          <input id="transfAutorNome" type="text" placeholder="Usuário de quem autorizou" autocomplete="off" autocapitalize="off">
+        </div>
+        <div class="form-group">
+          <label>Senha</label>
+          <input id="transfAutorSenha" type="password" placeholder="Senha" autocomplete="off">
+        </div>
+        <button class="btn-add" onclick="addTransferencia()">+</button>
+      </div>
+      <div class="err-txt" id="transfMsg"></div>
+      <div class="dez-box" style="margin-top:8px">
+        <div>
+          <div class="dlabel">Transferências lançadas</div>
+          <div style="font-size:15px;font-weight:bold;color:var(--txt);margin-top:2px" id="transfQtd">0</div>
+        </div>
+      </div>
+      <div id="listaTransf"></div>
+      <!-- Dia sem transferência: mesma ideia do "dia sem cancelamento". Silêncio não fecha. -->
+      <div id="semTransfBox"></div>
+    </div>
     <div class="secao">
       <h3>Observação</h3>
       <div class="form-group" style="margin-bottom:8px">
@@ -1420,7 +1473,7 @@ const _exigeJustificativa = cat => SAIDAS_COM_JUSTIFICATIVA.includes(cat);
 const _semJustificativa = s => _exigeJustificativa(s.categoria) &&
   !(s.justificativa && s.justificativa.trim().length >= JUSTIFICATIVA_MIN);
 
-const S = { user: null, loja: null, turnoSel: null, fech: null, comprovantes: [], saidas: [], supr: [], notas10: [], cancel: [], bandAtiva: null, modoConsulta: false, confAtual: null, _saidasFechId: null };
+const S = { user: null, loja: null, turnoSel: null, fech: null, comprovantes: [], saidas: [], supr: [], notas10: [], cancel: [], transf: [], bandAtiva: null, modoConsulta: false, confAtual: null, _saidasFechId: null };
 
 const LOJA_CHK_MAP = Object.fromEntries(GN_LOJAS.map(l=>[l.userKey,l.chkKey]));
 const LOJA_COM_MAP = Object.fromEntries(GN_LOJAS.map(l=>[l.userKey,l.comKey]));
@@ -1744,16 +1797,18 @@ async function abrirCaixa() {
 async function carregarFilhos() {
   const fid = S.fech.id;
   const comKey = LOJA_COM_MAP[S.loja] || S.loja;
-  const [c, s, n, d, lojaConf, cancel] = await Promise.all([
+  const [c, s, n, d, lojaConf, cancel, transf] = await Promise.all([
     sb(`gn_caixa_comprovante?fechamento_id=eq.${fid}&select=*&order=criado_em`),
     sb(`gn_caixa_despesa?fechamento_id=eq.${fid}&select=*&order=criado_em`),
     sb(`gn_caixa_suprimento?fechamento_id=eq.${fid}&select=*&order=criado_em`),
     sb(`gn_caixa_gorjeta?fechamento_id=eq.${fid}&select=*&order=criado_em`),
     sb(`gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`).catch(() => null),
     sb(`gn_caixa_cancelamento?fechamento_id=eq.${fid}&select=*&order=criado_em`).catch(() => []),
+    sb(`gn_caixa_transferencia?fechamento_id=eq.${fid}&select=*&order=criado_em`).catch(() => []),
   ]);
   S.comprovantes = c || []; S.saidas = s || []; S.supr = n || []; S.notas10 = d || [];
   S.cancel = cancel || [];
+  S.transf = transf || [];
   S._saidasFechId = fid;
   const conferencias = lojaConf?.[0]?.all_data?.caixa_conferencias || {};
   S.confAtual = conferencias[fid] || null;
@@ -1781,16 +1836,18 @@ async function refreshCaixaVivo() {
   if (!S.fech || S.modoConsulta) return;
   try {
     const fid = S.fech.id;
-    const [f, c, s, n, d, cancel] = await Promise.all([
+    const [f, c, s, n, d, cancel, transf] = await Promise.all([
       sb(`gn_caixa_fechamento?id=eq.${fid}&select=*`),
       sb(`gn_caixa_comprovante?fechamento_id=eq.${fid}&select=*&order=criado_em`),
       sb(`gn_caixa_despesa?fechamento_id=eq.${fid}&select=*&order=criado_em`),
       sb(`gn_caixa_suprimento?fechamento_id=eq.${fid}&select=*&order=criado_em`),
       sb(`gn_caixa_gorjeta?fechamento_id=eq.${fid}&select=*&order=criado_em`),
       sb(`gn_caixa_cancelamento?fechamento_id=eq.${fid}&select=*&order=criado_em`).catch(() => null),
+      sb(`gn_caixa_transferencia?fechamento_id=eq.${fid}&select=*&order=criado_em`).catch(() => null),
     ]);
     // Lançamento ainda na fila offline não pode ser varrido pelo que voltou do servidor.
     if (cancel) S.cancel = cancel.concat(S.cancel.filter(x => x._pendente));
+    if (transf) S.transf = transf.concat(S.transf.filter(x => x._pendente));
     if (f && f.length) {
       const statusMudou = S.fech.status !== f[0].status;
       S.fech = f[0];
@@ -2092,6 +2149,18 @@ function renderTudo() {
     $('cancelQtd').textContent = String(S.cancel.length);
     $('cancelTotal').textContent = money(cancelTotal());
     renderSemCancelamento();
+  }
+
+  const listaTransf = $('listaTransf');
+  if (listaTransf) {
+    const secT = $('secTransf');
+    if (secT) secT.style.display = transferenciaExigida() ? '' : 'none';
+    listaTransf.innerHTML = S.transf.length ? S.transf.slice().reverse().map(x =>
+      `<div class="linha-item" style="flex-wrap:wrap"><div class="desc">Mesa ${escHtmlCx(x.mesa_origem || '—')} → mesa ${escHtmlCx(x.mesa_destino || '—')}<small>${escHtmlCx(x.motivo || '—')} · autorizado por ${escHtmlCx(x.autorizado_por || '—')}</small></div>
+      <div class="val">${_pend(x)}</div>${S.modoConsulta ? '' : `<button class="del" onclick="excluir('gn_caixa_transferencia','${x.id}','transf')">✕</button>`}</div>`).join('')
+      : '<div class="vazio">Nenhuma transferência.</div>';
+    $('transfQtd').textContent = String(S.transf.length);
+    renderSemTransferencia();
   }
 
   $('suprFundoTotal').textContent = money(fundo());
@@ -2403,7 +2472,8 @@ function renderPreFechamento() {
     const temJust = semJustCount === 0;
     const cancelSemFoto = cancelamentosSemFoto().length;
     const temCancel = !cancelamentoPendente() && cancelSemFoto === 0;
-    const allOk = temValor && temRepique && temSistema && temFotoSistema && temFotos && temBuffet && temJust && temCancel && isFechado;
+    const temTransf = !transferenciaPendente();
+    const allOk = temValor && temRepique && temSistema && temFotoSistema && temFotos && temBuffet && temJust && temCancel && temTransf && isFechado;
     const semFotoCount = S.saidas.filter(s => !s.foto || s.foto.trim() === '').length;
     preChk.innerHTML = `<div style="background:var(--graf3);border:1px solid ${allOk?'var(--ok)':'var(--linha)'};border-radius:8px;padding:10px 14px;margin-bottom:12px">
       <div style="font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Pré-fechamento</div>
@@ -2417,6 +2487,9 @@ function renderPreFechamento() {
           cancelSemFoto > 0 ? `Cancelamentos: ${cancelSemFoto} sem foto do cupom`
           : S.cancel.length > 0 ? `Cancelamentos lançados (${S.cancel.length})`
           : 'Cancelamentos do dia respondidos') : ''}
+      ${transferenciaExigida() ? ck(temTransf,
+          S.transf.length > 0 ? `Transferências de mesa lançadas (${S.transf.length})`
+          : 'Transferências de mesa do dia respondidas') : ''}
       ${S.saidas.some(x => _exigeJustificativa(x.categoria))
         ? ck(temJust, semJustCount > 0 ? `Justificativa do extra (${semJustCount} sem)` : 'Justificativa do extra')
         : ''}
@@ -2669,6 +2742,11 @@ async function fecharCaixa() {
   const semFoto = cancelamentosSemFoto();
   if (semFoto.length)
     erros.push(`• Cancelamentos: ${semFoto.length === 1 ? 'falta a foto do cupom de 1 cancelamento' : `faltam as fotos de ${semFoto.length} cancelamentos`} (toque no 📷 ao lado de cada um)`);
+  // Mesma regra do cancelamento: ou a transferência está lançada, ou alguém assina que não
+  // houve nenhuma. A transferência usada pra esconder erro é justamente a que ninguém
+  // lançaria por vontade própria.
+  if (transferenciaPendente())
+    erros.push('• Transferências de mesa: lance as transferências do dia ou confirme "dia sem transferência" com o responsável');
   // Buffet/rodízio: feijoada trava em toda loja que usa buffet (nos dias em que é
   // servida), rodízio só nas lojas de GN_BUFFET_OBRIGATORIO. Zero é resposta válida
   // (não vendeu nenhum) — o que trava é o campo em branco, igual ao repique.
@@ -3227,6 +3305,20 @@ function _txtCancelamentos() {
   return `CANCELAMENTOS (${S.cancel.length})\n${linhas}\n  Total: ${money(cancelTotal())}`;
 }
 
+// Bloco das transferências de mesa pros relatórios — mesma razão do de cancelamentos:
+// sem isto, mesa de origem/destino, motivo e quem autorizou ficariam só na tela de quem
+// lançou, e não chegariam a quem confere.
+function _txtTransferencias() {
+  if (!transferenciaExigida()) return '';
+  if (!S.transf.length) {
+    return semTransferenciaDeclarada()
+      ? `\n━━━━━━━━━━━━━\nTRANSFERÊNCIAS DE MESA\n  Dia sem transferência (declarado por ${S.fech.sem_transferencia_por})`
+      : '\n━━━━━━━━━━━━━\nTRANSFERÊNCIAS DE MESA\n  Nenhuma lançada — e sem declaração de "dia sem transferência"';
+  }
+  const linhas = S.transf.map(x => `  Mesa ${x.mesa_origem || '—'} → mesa ${x.mesa_destino || '—'} — ${x.motivo || '—'} (aut.: ${x.autorizado_por || '—'})`).join('\n');
+  return `\n━━━━━━━━━━━━━\nTRANSFERÊNCIAS DE MESA (${S.transf.length})\n${linhas}`;
+}
+
 function _buildTextoCaixa(fromDb) {
   // fromDb=true lê o valor encontrado direto de S.fech.total_real (persistido no fechar)
   // em vez do input #valorEncontrado — usado pra reimprimir um fechamento do histórico,
@@ -3237,7 +3329,7 @@ function _buildTextoCaixa(fromDb) {
   const difTxt = Math.abs(dif) < 0.01 ? 'Conferido ✓' : (dif > 0 ? `Sobra ${money(Math.abs(dif))}` : `Falta ${money(Math.abs(dif))}`);
   const cart = ENTRADAS.filter(b => !NAO_CARTAO.includes(b.k) && totEntradaK(b.k) > 0)
     .map(b => `  ${b.k}: ${money(totEntradaK(b.k))}`).join('\n');
-  return `GN CAIXA — ${S.loja}\n${S.fech.data.split('-').reverse().join('/')} · ${S.turnoSel}\n━━━━━━━━━━━━━\nRESUMO\nEntradas: ${money(totEntradas())}\niFood: ${money(ifoodVal())}  Online: ${money(onlineVal())}\nDelivery: ${money(deliveryVal())}\nRepique: ${money(repiqueVal())}\nVenda Salão: ${money(vendaSalao())}\nSaídas: ${money(totSaidas())}\nTOTAL GERAL: ${money(totalGeral())}\nVALOR LÍQUIDO: ${money(totLiquido())}\nTotal real: ${money(real)}\n➡ ${difTxt}\n━━━━━━━━━━━━━\nCARTÕES\n${cart || '  —'}\nTotal cartões: ${money(totCartoes())}\n━━━━━━━━━━━━━\nFundo: ${money(fundo())} (notas ${money(suprNotas())} / dinh ${money(suprDinheiro())})\n━━━━━━━━━━━━━\nNOTAS SEM 10%\nValor das notas: ${money(notasTotal())}\n10% não cobrado: ${money(repique())}\n━━━━━━━━━━━━━\n${_txtCancelamentos()}`;
+  return `GN CAIXA — ${S.loja}\n${S.fech.data.split('-').reverse().join('/')} · ${S.turnoSel}\n━━━━━━━━━━━━━\nRESUMO\nEntradas: ${money(totEntradas())}\niFood: ${money(ifoodVal())}  Online: ${money(onlineVal())}\nDelivery: ${money(deliveryVal())}\nRepique: ${money(repiqueVal())}\nVenda Salão: ${money(vendaSalao())}\nSaídas: ${money(totSaidas())}\nTOTAL GERAL: ${money(totalGeral())}\nVALOR LÍQUIDO: ${money(totLiquido())}\nTotal real: ${money(real)}\n➡ ${difTxt}\n━━━━━━━━━━━━━\nCARTÕES\n${cart || '  —'}\nTotal cartões: ${money(totCartoes())}\n━━━━━━━━━━━━━\nFundo: ${money(fundo())} (notas ${money(suprNotas())} / dinh ${money(suprDinheiro())})\n━━━━━━━━━━━━━\nNOTAS SEM 10%\nValor das notas: ${money(notasTotal())}\n10% não cobrado: ${money(repique())}\n━━━━━━━━━━━━━\n${_txtCancelamentos()}${_txtTransferencias()}`;
 }
 function enviarWhats() {
   if (S.fech && S.fech.status !== 'FECHADO') {
@@ -3249,7 +3341,7 @@ function enviarWhats() {
   const difTxt = Math.abs(dif) < 0.01 ? 'Conferido ✓' : (dif > 0 ? `Sobra ${money(Math.abs(dif))}` : `Falta ${money(Math.abs(dif))}`);
   const cart = ENTRADAS.filter(b => !NAO_CARTAO.includes(b.k) && totEntradaK(b.k) > 0)
     .map(b => `  ${b.k}: ${money(totEntradaK(b.k))}`).join('\n');
-  const t = `*GN CAIXA — ${S.loja}*\n${S.fech.data.split('-').reverse().join('/')} · ${S.turnoSel}\n━━━━━━━━━━━━━\n*RESUMO*\nEntradas: ${money(totEntradas())}\niFood: ${money(ifoodVal())}  Online: ${money(onlineVal())}\nDelivery: ${money(deliveryVal())}\nRepique: ${money(repiqueVal())}\nVenda Salão: ${money(vendaSalao())}\nSaídas: ${money(totSaidas())}\n*TOTAL GERAL: ${money(totalGeral())}*\n*VALOR LÍQUIDO: ${money(totLiquido())}*\nTotal real: ${money(real)}\n➡ ${difTxt}\n━━━━━━━━━━━━━\n*CARTÕES*\n${cart || '  —'}\nTotal cartões: ${money(totCartoes())}\n━━━━━━━━━━━━━\nFundo: ${money(fundo())} (notas ${money(suprNotas())} / dinh ${money(suprDinheiro())})\n━━━━━━━━━━━━━\n*NOTAS SEM 10%*\nValor das notas: ${money(notasTotal())}\n10% não cobrado: ${money(repique())}\n━━━━━━━━━━━━━\n*${_txtCancelamentos()}*`;
+  const t = `*GN CAIXA — ${S.loja}*\n${S.fech.data.split('-').reverse().join('/')} · ${S.turnoSel}\n━━━━━━━━━━━━━\n*RESUMO*\nEntradas: ${money(totEntradas())}\niFood: ${money(ifoodVal())}  Online: ${money(onlineVal())}\nDelivery: ${money(deliveryVal())}\nRepique: ${money(repiqueVal())}\nVenda Salão: ${money(vendaSalao())}\nSaídas: ${money(totSaidas())}\n*TOTAL GERAL: ${money(totalGeral())}*\n*VALOR LÍQUIDO: ${money(totLiquido())}*\nTotal real: ${money(real)}\n➡ ${difTxt}\n━━━━━━━━━━━━━\n*CARTÕES*\n${cart || '  —'}\nTotal cartões: ${money(totCartoes())}\n━━━━━━━━━━━━━\nFundo: ${money(fundo())} (notas ${money(suprNotas())} / dinh ${money(suprDinheiro())})\n━━━━━━━━━━━━━\n*NOTAS SEM 10%*\nValor das notas: ${money(notasTotal())}\n10% não cobrado: ${money(repique())}\n━━━━━━━━━━━━━\n*${_txtCancelamentos()}*${_txtTransferencias()}`;
   window.open('https://wa.me/?text=' + encodeURIComponent(t), '_blank');
 }
 function gerarPDF(texto, titulo) {
@@ -3284,8 +3376,12 @@ function imprimirMapaCaixa(fromDb) {
 // somente-leitura e faz o poll de 30s — refreshCaixaVivo — ignorar essa troca), imprime,
 // e devolve S ao que estava antes, sem alterar a tela em que o usuário está.
 async function reimprimirDoHome(id) {
+  // cancel/transf entram no guardado junto com o resto: carregarFilhos troca os dois, e
+  // sem devolvê-los a tela em que a pessoa estava ficaria com os lançamentos do caixa que
+  // ela só mandou reimprimir.
   const antes = { fech: S.fech, turnoSel: S.turnoSel, modoConsulta: S.modoConsulta,
-    comprovantes: S.comprovantes, saidas: S.saidas, supr: S.supr, notas10: S.notas10 };
+    comprovantes: S.comprovantes, saidas: S.saidas, supr: S.supr, notas10: S.notas10,
+    cancel: S.cancel, transf: S.transf };
   try {
     const rows = await sb(`gn_caixa_fechamento?id=eq.${id}&select=*`);
     if (!rows || !rows.length) { toast('Caixa não encontrado.'); return; }
@@ -4042,7 +4138,7 @@ function _cancelFalta(valor, motivo, autor, senha, categoria) {
 // exatamente o registro que o dono não quer — melhor dizer que precisa de rede do que
 // gravar um nome que ninguém validou. O fechamento já exige rede pelas fotos, então não
 // é um caminho novo de trava.
-async function _verificarAssinatura(nome, senha, contexto) {
+async function _verificarAssinatura(nome, senha, contexto, cargos) {
   if (!nome) return { erro: 'Falta o usuário.' };
   if (!senha) return { erro: 'Falta a senha.' };
   let rows;
@@ -4054,7 +4150,7 @@ async function _verificarAssinatura(nome, senha, contexto) {
   }
   if (!rows || !rows.length) return { erro: 'Usuário ou senha incorretos.' };
   const u = rows[0];
-  if (!gnCargoEm(u.cargo, window.CARGOS_CANCELAMENTO)) {
+  if (!gnCargoEm(u.cargo, cargos || window.CARGOS_CANCELAMENTO)) {
     return { erro: `${u.nome} não tem cargo para assinar isso. (${u.cargo})` };
   }
   return { u };
@@ -4088,6 +4184,140 @@ async function addCancelamento() {
     // em cima dele. Os campos ficam preenchidos pra tentar de novo.
     if (window.gnLogError) window.gnLogError('caixa:addCancelamento', e);
     $('cancelMsg').textContent = 'Não consegui gravar o cancelamento — tente de novo.';
+  }
+}
+
+/* ── TRANSFERÊNCIA DE MESA ────────────────────────────────────────────────────────────
+   "Precisamos colocar também as transferências. Não se deve ter, a não ser que seja de
+   fato entre mesas com consumo, e não quando existe um erro, pra tentar passar depois o
+   item — que gera um cancelamento tardio se não conseguir vender, e desperdício. É
+   expressamente proibido."
+
+   Mesmo desenho do cancelamento, e pela mesma razão: sem resposta obrigatória, o que não é
+   lançado some. A transferência usada pra esconder erro é justamente a que ninguém lança
+   por vontade própria — então ou ela está lançada, ou alguém assina que não houve nenhuma.
+
+   Sem valor e sem foto, ao contrário do cancelamento: a transferência não move dinheiro no
+   fechamento (o consumo continua na conta de alguém) e não tem cupom próprio pra
+   fotografar. O que ela precisa responder é de onde saiu, pra onde foi, por quê e quem
+   autorizou. */
+function transferenciaExigida() { return window.gnTransferenciaLiberada ? window.gnTransferenciaLiberada(S.loja) : true; }
+function semTransferenciaDeclarada() { return !!(S.fech && S.fech.sem_transferencia_por); }
+function transferenciaPendente() {
+  return transferenciaExigida() && S.transf.length === 0 && !semTransferenciaDeclarada();
+}
+
+function renderSemTransferencia() {
+  const box = $('semTransfBox');
+  if (!box) return;
+  // Com transferência lançada não há o que declarar — e o botão na tela só convidaria a
+  // gravar uma contradição.
+  if (S.transf.length > 0) { box.innerHTML = ''; return; }
+  if (semTransferenciaDeclarada()) {
+    const quando = S.fech.sem_transferencia_em
+      ? new Date(S.fech.sem_transferencia_em).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+      : '';
+    box.innerHTML = `<div style="background:rgba(22,163,74,.12);border:1px solid var(--ok);border-radius:8px;padding:10px 13px;margin-top:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <div style="flex:1;min-width:0;font-size:12px;color:var(--txt)">
+        <b>✓ Dia sem transferência de mesa</b><br>
+        <span style="color:var(--mut);font-size:11px">Declarado por ${escHtmlCx(S.fech.sem_transferencia_por)}${quando ? ' · ' + quando : ''}</span>
+      </div>
+      ${S.modoConsulta || S.fech.status === 'FECHADO' ? '' : `<button class="del" onclick="desfazerSemTransferencia()" title="Desfazer">✕</button>`}
+    </div>`;
+    return;
+  }
+  if (S.modoConsulta) { box.innerHTML = ''; return; }
+  box.innerHTML = `<div style="background:rgba(234,179,8,.1);border:1px solid var(--ouro);border-radius:8px;padding:10px 13px;margin-top:8px">
+    <div style="font-size:12px;color:var(--txt);margin-bottom:8px">
+      Não houve transferência de mesa hoje? Então alguém precisa assinar isso — o caixa não fecha sem resposta.
+    </div>
+    <div class="form-row" style="margin-bottom:0">
+      <div class="form-group">
+        <label>Responsável</label>
+        <input id="semTransfResp" type="text" placeholder="Usuário" autocomplete="off" autocapitalize="off" value="${escHtmlCx((S.user && S.user.nome) || '')}">
+      </div>
+      <div class="form-group">
+        <label>Senha</label>
+        <input id="semTransfSenha" type="password" placeholder="Senha" autocomplete="off">
+      </div>
+      <button class="btn-add" style="background:var(--ouro)" onclick="declararSemTransferencia()" title="Confirmar dia sem transferência">✓</button>
+    </div>
+    <div class="err-txt" id="semTransfMsg"></div>
+  </div>`;
+}
+
+async function declararSemTransferencia() {
+  const resp = ($('semTransfResp')?.value || '').trim();
+  const senha = $('semTransfSenha')?.value || '';
+  if (S.transf.length > 0) { $('semTransfMsg').textContent = 'Já existe transferência lançada neste dia.'; return; }
+  const { u, erro } = await _verificarAssinatura(resp, senha, 'gn-caixa:sem-transferencia', window.CARGOS_TRANSFERENCIA);
+  if (erro) { $('semTransfMsg').textContent = erro; return; }
+  const body = { sem_transferencia_por: u.nome, sem_transferencia_em: new Date().toISOString() };
+  try {
+    await sb(`gn_caixa_fechamento?id=eq.${S.fech.id}`, { method: 'PATCH', prefer: 'return=minimal', body });
+    Object.assign(S.fech, body);
+    renderTudo(); renderPreFechamento(); toast('Dia sem transferência assinado por ' + u.nome);
+  } catch (e) {
+    // Sem fila offline, mesma razão do cancelamento: destravar o fechamento em cima de algo
+    // que não gravou é o pior dos dois mundos.
+    if (window.gnLogError) window.gnLogError('caixa:declararSemTransferencia', e);
+    $('semTransfMsg').textContent = 'Não consegui registrar — tente de novo.';
+  }
+}
+
+async function desfazerSemTransferencia() {
+  const body = { sem_transferencia_por: null, sem_transferencia_em: null };
+  try {
+    await sb(`gn_caixa_fechamento?id=eq.${S.fech.id}`, { method: 'PATCH', prefer: 'return=minimal', body });
+  } catch (e) {
+    _pfEnqueue({ tempId: uuid(), realId: S.fech.id, tabela: 'gn_caixa_fechamento', method: 'PATCH', body });
+  }
+  Object.assign(S.fech, body);
+  renderTudo(); renderPreFechamento();
+}
+
+// Mesa, mesa, motivo e assinatura: os quatro são obrigatórios porque é a falta de qualquer
+// um deles que transforma o registro em nada — "transferiu" sem dizer de onde, pra onde ou
+// por quê é o mesmo registro inútil que o cancelamento sem motivo era.
+function _transfFalta(origem, destino, motivo, autor, senha) {
+  const mesasErro  = window.gnTransfMesasFalta ? window.gnTransfMesasFalta(origem, destino) : '';
+  const motivoErro = window.gnTransfMotivoFalta ? window.gnTransfMotivoFalta(motivo) : (motivo ? '' : 'Falta o motivo.');
+  const f = [];
+  if (!autor) f.push('quem autorizou');
+  if (!senha) f.push('a senha de quem autorizou');
+  const partes = [];
+  if (mesasErro) partes.push(mesasErro);
+  if (motivoErro) partes.push(motivoErro);
+  if (f.length) partes.push('Falta preencher ' + (f.length > 1 ? f.slice(0, -1).join(', ') + ' e ' + f[f.length - 1] : f[0]) + '.');
+  return partes.join(' ');
+}
+
+async function addTransferencia() {
+  const origem  = $('transfOrigem').value.trim();
+  const destino = $('transfDestino').value.trim();
+  const motivo  = $('transfMotivo').value.trim();
+  const nome    = $('transfAutorNome').value.trim();
+  const senha   = $('transfAutorSenha').value;
+  const falta = _transfFalta(origem, destino, motivo, nome, senha);
+  $('transfMsg').textContent = falta;
+  if (falta) return;
+  const { u, erro } = await _verificarAssinatura(nome, senha, 'gn-caixa:transferencia', window.CARGOS_TRANSFERENCIA);
+  if (erro) { $('transfMsg').textContent = erro; return; }
+  const body = { fechamento_id: S.fech.id, mesa_origem: origem, mesa_destino: destino, motivo, autorizado_por: u.nome };
+  try {
+    const row = await sb('gn_caixa_transferencia', { method: 'POST', prefer: 'return=representation', body });
+    S.transf.push(row[0]);
+    $('transfOrigem').value = ''; $('transfDestino').value = ''; $('transfMotivo').value = '';
+    $('transfAutorNome').value = ''; $('transfAutorSenha').value = '';
+    // "Dia sem transferência" e uma transferência lançada não podem coexistir.
+    if (semTransferenciaDeclarada()) await desfazerSemTransferencia();
+    renderTudo(); toast('Transferência registrada por ' + u.nome);
+  } catch (e) {
+    // Sem fila offline, igual ao cancelamento: a senha foi conferida, mas o registro não
+    // gravou. Enfileirar deixaria na tela uma transferência que pode nunca existir no
+    // banco, e o caixa fecharia em cima dela. Os campos ficam preenchidos pra tentar de novo.
+    if (window.gnLogError) window.gnLogError('caixa:addTransferencia', e);
+    $('transfMsg').textContent = 'Não consegui gravar a transferência — tente de novo.';
   }
 }
 
