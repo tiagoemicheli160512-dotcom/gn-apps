@@ -1235,7 +1235,7 @@ async function _renderVisitaSupervisaoHome(mostrar, sess, isMasterAtivo) {
   const seg = new Date(hoje); seg.setDate(seg.getDate() - ((seg.getDay()+6)%7));
   const dom = new Date(seg); dom.setDate(dom.getDate()+6);
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
-  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_chk_visitas?loja=eq.${encodeURIComponent(chkKey)}&data=gte.${iso(seg)}&data=lte.${iso(dom)}&select=visitante,cargo,data,hora_chegada,hora_saida`, H, 'visitaSupHome:rows', []);
+  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_chk_visitas?loja=eq.${encodeURIComponent(chkKey)}&data=gte.${iso(seg)}&data=lte.${iso(dom)}&select=visitante,cargo,data,hora_chegada,hora_saida,tipo_visita`, H, 'visitaSupHome:rows', []);
   if (!rows.length) { el.innerHTML = ''; return; }
 
   const rowsHoje = rows.filter(r => r.data === hojeISO);
@@ -1245,18 +1245,29 @@ async function _renderVisitaSupervisaoHome(mostrar, sess, isMasterAtivo) {
       andamento: { cor:'#22c55e', ico:'🟢', label:'Em andamento' },
       concluida: { cor:'#4ade80', ico:'✅', label:'Concluída' },
     };
+    // "Pode dar a entender que foram duas presenciais." O acesso remoto aparecia igualzinho
+    // a quem foi à loja — mesma linha, mesmo horário, mesma cor. Ele conta como
+    // acompanhamento, mas NÃO é presença física (ver TIPO_VISITA_REMOTO), e no card da
+    // própria loja essa diferença é o assunto inteiro.
     const itens = rowsHoje.map(r => {
       const status = r.hora_chegada === 'PLAN' ? 'planejada' : !r.hora_saida ? 'andamento' : 'concluida';
       const si = STATUS_INFO[status];
       const horaTxt = status === 'planejada' ? '' : ` · ${r.hora_chegada}${r.hora_saida ? ' → ' + r.hora_saida : ''}`;
-      return `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-top:1px solid rgba(0,0,0,.06)">
-        <span style="font-size:11px;font-weight:700;color:var(--t1)">${esc(r.visitante||'—')}${r.cargo?` <span style="font-weight:400;color:var(--t3)">· ${esc(r.cargo)}</span>`:''}</span>
+      return `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid rgba(0,0,0,.06)">
+        <span style="font-size:11px;font-weight:700;color:var(--t1);min-width:0">${esc(r.visitante||'—')}${r.cargo?` <span style="font-weight:400;color:var(--t3)">· ${esc(r.cargo)}</span>`:''}${_visSeloHtml(r)}</span>
         <span style="font-size:10px;font-weight:700;color:${si.cor};white-space:nowrap">${si.ico} ${si.label}${horaTxt}</span>
       </div>`;
     }).join('');
+    const nRemotas = rowsHoje.filter(_visEhRemoto).length;
+    const rodape = nRemotas && nRemotas === rowsHoje.length
+      ? '<div style="font-size:10px;color:var(--t3);margin-top:6px;line-height:1.4">Só acesso remoto hoje — ninguém da supervisão esteve na loja.</div>'
+      : nRemotas
+        ? `<div style="font-size:10px;color:var(--t3);margin-top:6px;line-height:1.4">${nRemotas === 1 ? '1 delas é acesso remoto' : nRemotas + ' delas são acesso remoto'}, sem presença na loja.</div>`
+        : '';
     el.innerHTML = `<div style="background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.2);border-left:3px solid #22c55e;border-radius:18px;padding:14px 16px;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05)">
       <div style="font-size:12px;font-weight:800;color:var(--t1)">📍 Visita de supervisão hoje</div>
       ${itens}
+      ${rodape}
     </div>`;
     return;
   }
@@ -1265,13 +1276,20 @@ async function _renderVisitaSupervisaoHome(mostrar, sess, isMasterAtivo) {
   // em outro dia), priorizando visita real sobre planejada quando existem as duas.
   const DIAS_SEM = ['Domingo','Segunda','Terça','Quarta','Quinta','Sexta','Sábado'];
   const fmtDia = dISO => { const d = new Date(dISO+'T12:00:00'); return DIAS_SEM[d.getDay()]+' ('+String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+')'; };
+  // Semana sem visita hoje: "já teve visita essa semana" dito por causa de um acesso
+  // remoto é a mesma confusão do card de hoje, só que pior — ali a frase afirma cobertura
+  // que ninguém deu. Presencial manda; só remoto é dito com outras palavras; nada real,
+  // mostra o planejado.
   const jaVisitada = rows.filter(r => r.hora_chegada !== 'PLAN');
+  const presenciais = jaVisitada.filter(r => !_visEhRemoto(r));
   const planejadas = rows.filter(r => r.hora_chegada === 'PLAN');
   const usar = jaVisitada.length ? jaVisitada : planejadas;
-  const tituloLinha = jaVisitada.length ? 'Já teve visita essa semana:' : 'Visita planejada pra essa semana:';
+  const tituloLinha = presenciais.length ? 'Já teve visita essa semana:'
+    : jaVisitada.length ? 'Só teve acesso remoto essa semana:'
+    : 'Visita planejada pra essa semana:';
   const ico = jaVisitada.length ? '✅' : '📅';
-  const itens = usar.map(r => `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-top:1px solid rgba(0,0,0,.06)">
-      <span style="font-size:11px;font-weight:700;color:var(--t1)">${esc(r.visitante||'—')}${r.cargo?` <span style="font-weight:400;color:var(--t3)">· ${esc(r.cargo)}</span>`:''}</span>
+  const itens = usar.map(r => `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid rgba(0,0,0,.06)">
+      <span style="font-size:11px;font-weight:700;color:var(--t1);min-width:0">${esc(r.visitante||'—')}${r.cargo?` <span style="font-weight:400;color:var(--t3)">· ${esc(r.cargo)}</span>`:''}${_visSeloHtml(r)}</span>
       <span style="font-size:10px;font-weight:700;color:var(--t3);white-space:nowrap">${ico} ${fmtDia(r.data)}</span>
     </div>`).join('');
   el.innerHTML = `<div style="background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.2);border-left:3px solid #22c55e;border-radius:18px;padding:14px 16px;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05)">
@@ -7178,6 +7196,12 @@ function _renderVisitasSupContent() {
 // não passa pela captura de localização no registro.
 const TIPO_VISITA_REMOTO = 'remoto';
 function _visEhRemoto(v) { return !!v && v.tipo_visita === TIPO_VISITA_REMOTO; }
+// O selo "💻 Remoto" que o relatório e o Painel já usam, num lugar só — o card da loja
+// passou a precisar do mesmo, e três cópias do mesmo <span> é como elas divergem.
+function _visSeloHtml(v) {
+  if (!_visEhRemoto(v)) return '';
+  return ` <span style="font-size:9px;font-weight:800;color:#4f46e5;background:rgba(99,102,241,.14);border-radius:6px;padding:2px 6px;margin-left:4px;white-space:nowrap">💻 Remoto</span>`;
+}
 
 function _renderVisRelatorioTab() {
   const chipsSupervisor = _visSupChipsHtml();
@@ -7303,7 +7327,7 @@ function _renderVisRelatorioTab() {
       return `<div style="padding:8px 0;border-bottom:1px solid rgba(0,0,0,.06)">
         <div style="display:flex;justify-content:space-between;align-items:center">
           <div>
-            <div style="font-size:12px;font-weight:700;color:var(--t1)">${LOJA_DISPLAY[_normLoja(v.loja)]||v.loja}${_visEhRemoto(v)?` <span style="font-size:9px;font-weight:800;color:#4f46e5;background:rgba(99,102,241,.14);border-radius:6px;padding:2px 6px;margin-left:4px;white-space:nowrap">💻 Remoto</span>`:''}</div>
+            <div style="font-size:12px;font-weight:700;color:var(--t1)">${LOJA_DISPLAY[_normLoja(v.loja)]||v.loja}${_visSeloHtml(v)}</div>
             <div style="font-size:10px;color:var(--t3)">${v.data.split('-').reverse().join('/')} · ${v.hora_chegada}${v.hora_saida?' → '+v.hora_saida:' (em andamento)'}</div>
           </div>
           <div style="font-size:11px;color:var(--t3)">${dur?_fmtDuracao(dur):''}</div>
@@ -7621,7 +7645,7 @@ function _visCalDetalheHtml(dataStr) {
     const emAndamento = !v.hora_saida;
     html += `<div style="border-left:3px solid ${COR_LOJA[_normLoja(v.loja)]||'#888'};padding:8px 10px;margin-bottom:8px;background:var(--fill-sutil);border-radius:0 8px 8px 0">
       <div style="display:flex;align-items:center;justify-content:space-between">
-        <div style="font-size:12px;font-weight:700;color:var(--t1)">${LOJA_DISPLAY[_normLoja(v.loja)]||v.loja}${_visEhRemoto(v)?` <span style="font-size:9px;font-weight:800;color:#4f46e5;background:rgba(99,102,241,.14);border-radius:6px;padding:2px 6px;margin-left:4px;white-space:nowrap">💻 Remoto</span>`:''}</div>
+        <div style="font-size:12px;font-weight:700;color:var(--t1)">${LOJA_DISPLAY[_normLoja(v.loja)]||v.loja}${_visSeloHtml(v)}</div>
         <button onclick="_visExcluirRealToggle('${v.id}')" style="background:none;border:none;color:var(--t4);font-size:12px;cursor:pointer;padding:2px 4px" title="Excluir (senha mestra)">✕</button>
       </div>
       <div style="font-size:11px;color:var(--t3);margin-top:2px">${_visEhRemoto(v)?'💻':'📍'} ${v.hora_chegada} → ${v.hora_saida||'em andamento'}${dur?' · '+_fmtDuracao(dur):''}</div>
