@@ -55,6 +55,23 @@ um dia a partir de dia+mês chutando o ano. Quem consome: `gn-checklist.html`, `
 dando o mesmo índice). No banco, `gn_repique_calendario` espelha esse calendário e é
 conferida por md5 contra o arquivo.
 
+## Horário do funcionário — base e diário divergem de propósito
+
+Cada funcionário tem dois campos de horário no cadastro da escala, e eles **não** são a
+mesma informação:
+
+- `horario` — o **horário base** do contrato, texto livre (`"15:00-22:00"`).
+- `horario_dias` — o grid **por dia**, segunda a domingo, mesmo índice de `dias` e das
+  folgas (`[{entrada, saida}, …]`). É o que a pessoa realmente faz naquele dia.
+
+A rede usa **banco de horas**: a base é a referência e o diário é o que vale, então os dois
+divergem em vários dias de propósito — é assim que a hora a mais ou a menos entra no banco.
+Divergência aqui **não é erro de cadastro**, e nenhuma tela deve "corrigir" um pelo outro.
+
+Quem mostra horário usa o do **dia**; quando aquele dia não foi preenchido e sobra só a
+base, a tela tem que dizer que é base (ver `_sim5x2HorarioDoDia` em `gn-checklist.html`).
+Mostrar a base como se fosse o dia é o erro que o banco de horas torna provável.
+
 ## Workflow de PR
 
 Commits vão pra branch `claude/repository-migrations-7xps6s`, PR em draft até o usuário
