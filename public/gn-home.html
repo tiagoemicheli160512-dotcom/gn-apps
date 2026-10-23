@@ -915,6 +915,8 @@ let _dashBhCfg        = null; // {chkKey: {periodo_inicio, salariosSetor}}
 let _dashBhMesesRows  = null; // [{loja(chkKey), mes, registros:[{nome,horas,obs}]}]
 let _dashCancelPer    = null; // {lojaKey: [{data,valor,motivo,autor,foto}]} — do período do Painel
 let _dashDeclPer      = null; // {lojaKey: {caixas, declarados, abertos, responsaveis:[]}} — "dia sem cancelamento"
+let _dashTransfPer    = null; // {lojaKey: [{data,origem,destino,motivo,autor,foto}]} — transferências de mesa
+let _dashDeclTransfPer = null; // o mesmo de _dashDeclPer, pro "dia sem transferência"
 let _dashFeriasGerencia = null; // {lojaKey: [{id, usuarioId, nome, cargo, inicio, fim}]} — períodos de férias (gn_lojas.all_data.ferias_gerencia)
 let _dashFeriasLoading = false;
 let _dashFeriasAno = new Date().getFullYear();
@@ -8713,7 +8715,31 @@ function _raioxMapearCancel(rows) {
 // Conta por CAIXA, não por dia: um dia pode ter dois turnos, cada um com seu fechamento e
 // sua própria assinatura. Dizer "2 dias declarados" quando foram os dois turnos do mesmo
 // dia seria inventar um dia que não existiu.
-function _raioxMapearDecl(rows) {
+// Transferências de mesa do período, da mesma linha de fechamento que já trazia os
+// cancelamentos — nenhuma consulta nova.
+function _raioxMapearTransf(rows) {
+  const porLoja = {};
+  (rows || []).forEach(fech => {
+    const lk = _normLoja(fech.loja);
+    if (!LOJAS_LISTA.includes(lk)) return;
+    const ts = Array.isArray(fech.gn_caixa_transferencia) ? fech.gn_caixa_transferencia
+             : (fech.gn_caixa_transferencia ? [fech.gn_caixa_transferencia] : []);
+    ts.forEach(t => {
+      if (!t) return;
+      (porLoja[lk] = porLoja[lk] || []).push({
+        data: fech.data, origem: t.mesa_origem || '', destino: t.mesa_destino || '',
+        motivo: t.motivo || '', autor: t.autorizado_por || '', foto: t.foto || null,
+      });
+    });
+  });
+  return porLoja;
+}
+
+// `campoPor`/`campoEm` existem porque a declaração de "não houve" tem duas versões na mesma
+// linha do fechamento — cancelamento e transferência — e a leitura é idêntica.
+function _raioxMapearDecl(rows, campoPor, campoEm) {
+  campoPor = campoPor || 'sem_cancelamento_por';
+  campoEm  = campoEm  || 'sem_cancelamento_em';
   const porLoja = {};
   (rows || []).forEach(fech => {
     const lk = _normLoja(fech.loja);
@@ -8724,16 +8750,16 @@ function _raioxMapearDecl(rows) {
     // "sem resposta em 14/10 e 16/10" dá. Guarda o turno junto porque um dia pode ter
     // dois fechamentos, e faltar um deles não é faltar o dia inteiro.
     const marca = { data: fech.data, turno: fech.turno || '' };
-    if (!fech.sem_cancelamento_por) { d.datasFalta.push(marca); return; }
+    if (!fech[campoPor]) { d.datasFalta.push(marca); return; }
     d.declarados++;
-    const nome = String(fech.sem_cancelamento_por).trim();
+    const nome = String(fech[campoPor]).trim();
     // O nome viaja junto com a DATA, não só na lista de responsáveis da loja. Sem isso o
     // card dizia "confirmado por Cassia, Augusto em 2 de 5 caixas" — dá pra saber que
     // dois caixas foram respondidos, mas não QUAIS, nem quem respondeu cada um. Nova
     // América tinha 15/10 (Cassia) e 16/10 (Augusto) e as duas datas não apareciam.
     d.datasOk.push(Object.assign({ por: nome }, marca));
     if (nome && !d.responsaveis.includes(nome)) d.responsaveis.push(nome);
-    if (fech.sem_cancelamento_em && (!d.quando || fech.sem_cancelamento_em > d.quando)) d.quando = fech.sem_cancelamento_em;
+    if (fech[campoEm] && (!d.quando || fech[campoEm] > d.quando)) d.quando = fech[campoEm];
   });
   return porLoja;
 }
@@ -9048,7 +9074,7 @@ async function _loadDashAll() {
       // Cancelamentos do período, aninhados no fechamento porque a DATA mora no
       // fechamento e não no cancelamento — mesma forma da consulta de funcionário extra
       // em _renderMesAnteriorHome.
-      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${range.dates[0]}&data=lte.${range.dates[range.dates.length-1]}&select=loja,data,turno,status,sem_cancelamento_por,sem_cancelamento_em,gn_caixa_cancelamento(valor,motivo,motivo_categoria,autorizado_por,foto)`, H, 'dash:cancelRows', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${range.dates[0]}&data=lte.${range.dates[range.dates.length-1]}&select=loja,data,turno,status,sem_cancelamento_por,sem_cancelamento_em,sem_transferencia_por,sem_transferencia_em,gn_caixa_cancelamento(valor,motivo,motivo_categoria,autorizado_por,foto),gn_caixa_transferencia(mesa_origem,mesa_destino,motivo,autorizado_por,foto)`, H, 'dash:cancelRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?status=eq.FECHADO&data=gte.${from30}&select=id,loja,data,turno`, H, 'dash:caixaFechadosRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_alertas_urgentes?order=criado_em.desc&limit=50&select=id,loja,criado_por,criado_em,resolvido,resolvido_por,resolvido_em,motivo,cargos`, H, 'dash:alertasUrgentesRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_chk_visitas?data=gte.${from14}&data=lt.${hoje}&select=loja,data,hora_chegada`, H, 'dash:visitasPassadasRows', []),
@@ -9307,6 +9333,8 @@ async function _loadDashAll() {
     _dashBhMesesRows  = bhMesesRows || [];
     _dashCancelPer = _raioxMapearCancel(cancelRows);
     _dashDeclPer   = _raioxMapearDecl(cancelRows);
+    _dashTransfPer = _raioxMapearTransf(cancelRows);
+    _dashDeclTransfPer = _raioxMapearDecl(cancelRows, 'sem_transferencia_por', 'sem_transferencia_em');
     const spark={}; LOJAS_LISTA.forEach(k=>{spark[k]=[(fat3[k]||0),(fat2[k]||0),(fatPrv[k]||0),(fatCur[k]||0)];});
     _dashSparkData=spark;
     _dashAlertasUrgentes = alertasUrgentesRows || [];
@@ -9325,6 +9353,7 @@ async function _loadDashAll() {
     _dashCaixaSemConferencia=_dashCaixaSemConferencia||{};
     _dashComissoesAll=_dashComissoesAll||[]; _dashLojasAll=_dashLojasAll||[];
     _dashBhCfg=_dashBhCfg||{}; _dashBhMesesRows=_dashBhMesesRows||[]; _dashCancelPer=_dashCancelPer||{}; _dashDeclPer=_dashDeclPer||{};
+    _dashTransfPer=_dashTransfPer||{}; _dashDeclTransfPer=_dashDeclTransfPer||{};
     _dashVisitasHoje=_dashVisitasHoje||{};
     _dashAlertasUrgentes=_dashAlertasUrgentes||[];
     _dashPendenciasEssenciais=_dashPendenciasEssenciais||{};
@@ -11572,10 +11601,13 @@ function _buildCancelPanel() {
   </div>`;
 
   if (!d.qtd) {
+    // As transferências entram TAMBÉM nesta saída: semana sem nenhum cancelamento é
+    // justamente quando a aba sumia inteira — e transferência não depende de ter havido
+    // cancelamento pra existir.
     return _reportBtnsRowHtml('Cancel') + kpis +
       `<div class="att-item"><div><div class="att-nm">Nenhuma nota cancelada em ${esc(periodo)}</div>
         <div class="att-rs">Nenhuma das ${d.nLojas} lojas lançou cancelamento neste período.</div></div></div>`
-      + _cancelSemNadaHtml(d);
+      + _cancelSemNadaHtml(d) + _buildTransfPanelHtml();
   }
 
   const blocos = d.lojas.map(l => `
@@ -11594,14 +11626,131 @@ function _buildCancelPanel() {
                 style="width:46px;height:46px;border-radius:7px;flex-shrink:0;background:var(--fill-sutil);border:1px dashed var(--b2);display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;color:var(--t4);text-align:center;line-height:1.2">sem<br>foto</div>`}
         <div style="flex:1;min-width:0">
           ${c.motivo_categoria ? `<div style="font-size:9px;font-weight:800;color:var(--t3);letter-spacing:.3px;text-transform:uppercase;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.motivo_categoria)}</div>` : ''}
-          <div style="font-size:11.5px;font-weight:700;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.motivo) || '—'}</div>
+          <!-- O motivo é texto livre e QUEBRA a linha, em vez de ser cortado com "…".
+               Cortado, a única forma de ler o que a loja escreveu era abrir o app Caixa e
+               reabrir o fechamento — que é o oposto do que esta tela existe pra fazer. A
+               categoria acima segue cortada: ela vem de lista fixa e é curta. -->
+          <div style="font-size:11.5px;font-weight:700;color:var(--t1);white-space:normal;overflow-wrap:anywhere;line-height:1.35">${esc(c.motivo) || '—'}</div>
           <div style="font-size:9.5px;color:var(--t3)">${dm(c.data)} · autorizado por ${esc(c.autor) || '—'}</div>
         </div>
         <div style="font-size:12px;font-weight:800;color:var(--t1);font-variant-numeric:tabular-nums;white-space:nowrap">${_fmtBRL(c.valor)}</div>
       </div>`).join('')}
     </div>`).join('');
 
-  return _reportBtnsRowHtml('Cancel') + kpis + _cancelPorCategoriaHtml(d) + blocos + _cancelSemNadaHtml(d);
+  return _reportBtnsRowHtml('Cancel') + kpis + _cancelPorCategoriaHtml(d) + blocos + _cancelSemNadaHtml(d)
+       + _buildTransfPanelHtml();
+}
+
+/* ── TRANSFERÊNCIAS DE MESA, na mesma aba ──────────────────────────────────────────────
+   "Quero colocar esse relatório junto com os cancelamentos no painel de gestão, igual
+   temos dos cancelamentos."
+
+   Mesma fonte, mesma viagem: as transferências vêm penduradas na MESMA linha de
+   gn_caixa_fechamento que já trazia os cancelamentos, então o Painel não faz consulta
+   nova por causa disto.
+
+   Sem total em R$, ao contrário do cancelamento: transferência não move dinheiro — o
+   consumo continua na conta de alguém. O que importa aqui é quantas, de onde pra onde, por
+   quê, quem autorizou e se tem a foto da comanda. */
+function _transfMacroDados() {
+  const porLoja = _dashTransfPer || {};
+  // Mesma razão da lista do cancelamento: a Maglia não usa o controle, então não pode cair
+  // em "não teve nenhuma" — não é que não teve, é que a função não existe pra ela.
+  const lojasDaRegra = LOJAS_LISTA.filter(k => !window.gnTransferenciaLiberada || window.gnTransferenciaLiberada(k));
+  const lojas = lojasDaRegra
+    .map(k => {
+      const itens = (porLoja[k] || []).slice().sort((a, b) => String(b.data).localeCompare(String(a.data)));
+      return { k, nome: LOJA_DISPLAY[k] || k, itens, semFoto: itens.filter(t => !t.foto).length };
+    })
+    .filter(l => l.itens.length)
+    .sort((a, b) => b.itens.length - a.itens.length || a.nome.localeCompare(b.nome, 'pt-BR'));
+  return {
+    lojas,
+    qtd: lojas.reduce((a, l) => a + l.itens.length, 0),
+    semFoto: lojas.reduce((a, l) => a + l.semFoto, 0),
+    semTransf: lojasDaRegra.filter(k => !(porLoja[k] || []).length).map(k => {
+      const d = (_dashDeclTransfPer || {})[k] || { caixas: 0, declarados: 0, abertos: 0, responsaveis: [] };
+      const estado = !d.caixas ? 'sem_caixa'
+        : d.declarados === 0 ? 'sem_info'
+        : d.declarados < d.caixas ? 'parcial'
+        : 'declarado';
+      return { k, nome: LOJA_DISPLAY[k] || k, estado, ...d };
+    }).sort((a, b2) => {
+      const ordem = { sem_info: 0, parcial: 1, sem_caixa: 2, declarado: 3 };
+      return ordem[a.estado] - ordem[b2.estado] || a.nome.localeCompare(b2.nome, 'pt-BR');
+    }),
+    nLojas: lojasDaRegra.length,
+  };
+}
+
+function _buildTransfPanelHtml() {
+  if (!_dashTransfPer) return '';
+  const d = _transfMacroDados();
+  const esc = s2 => window.escapeHtml(String(s2 == null ? '' : s2));
+  const dm = iso => String(iso || '').slice(8, 10) + '/' + String(iso || '').slice(5, 7);
+  const titulo = `<div style="font-size:9px;font-weight:800;color:var(--t4);letter-spacing:1.2px;text-transform:uppercase;margin:16px 0 8px">
+    Transferências de mesa · ${d.qtd} no período</div>`;
+
+  if (!d.qtd) {
+    return titulo + `<div class="att-item"><div><div class="att-nm">Nenhuma transferência de mesa no período</div>
+      <div class="att-rs">Nenhuma das ${d.nLojas} lojas lançou transferência.</div></div></div>`
+      + _transfSemNadaHtml(d);
+  }
+
+  const blocos = d.lojas.map(l => `
+    <div style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid #4F46E5;border-radius:14px;padding:12px 14px;margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:6px">
+        <div style="font-size:13px;font-weight:800;color:var(--t1);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.nome)}</div>
+        <div style="font-size:13px;font-weight:800;color:#4F46E5;white-space:nowrap">${l.itens.length} transf.</div>
+      </div>
+      ${l.semFoto ? `<div style="font-size:10px;color:var(--txt-amber);margin-bottom:4px">${l.semFoto} sem foto da comanda</div>` : ''}
+      ${l.itens.map(t => `<div style="display:flex;gap:9px;padding:7px 0;border-top:1px solid var(--b1)">
+        ${t.foto
+          ? `<img src="${esc(t.foto)}" alt="Comanda da transferência" loading="lazy"
+                style="width:46px;height:46px;border-radius:7px;object-fit:cover;flex-shrink:0;cursor:pointer;background:var(--fill-sutil)"
+                onclick="_cancelMacroAbrirFoto('${esc(t.foto)}')" title="Toque para ampliar">`
+          : `<div title="Lançada antes da foto da comanda passar a ser exigida"
+                style="width:46px;height:46px;border-radius:7px;flex-shrink:0;background:var(--fill-sutil);border:1px dashed var(--b2);display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;color:var(--t4);text-align:center;line-height:1.2">sem<br>foto</div>`}
+        <div style="flex:1;min-width:0">
+          <div style="font-size:9px;font-weight:800;color:var(--t3);letter-spacing:.3px;text-transform:uppercase">Mesa ${esc(t.origem) || '—'} → mesa ${esc(t.destino) || '—'}</div>
+          <!-- Quebra a linha pelo mesmo motivo do motivo do cancelamento: é texto que a
+               loja escreveu, e cortar obriga a abrir o app Caixa pra ler. -->
+          <div style="font-size:11.5px;font-weight:700;color:var(--t1);white-space:normal;overflow-wrap:anywhere;line-height:1.35">${esc(t.motivo) || '—'}</div>
+          <div style="font-size:9.5px;color:var(--t3)">${dm(t.data)} · autorizado por ${esc(t.autor) || '—'}</div>
+        </div>
+      </div>`).join('')}
+    </div>`).join('');
+
+  return titulo + blocos + _transfSemNadaHtml(d);
+}
+
+function _transfSemNadaHtml(d) {
+  if (!d.semTransf.length) return '';
+  const esc = s2 => window.escapeHtml(String(s2 == null ? '' : s2));
+  const nomes = l => l.responsaveis.length ? l.responsaveis.map(esc).join(', ') : '—';
+  const cx = n => n + ' caixa' + (n === 1 ? '' : 's');
+  const todos = l => (l.datasOk || []).concat(l.datasFalta || []);
+  const frase = l => {
+    const periodo = _cancelPeriodoDatas(l.datasOk);
+    const faltam = _cancelDatas(l.datasFalta, todos(l));
+    if (l.estado === 'declarado') return `Confirmado por <b style="color:var(--t1)">${nomes(l)}</b> · ${cx(l.declarados)}${periodo ? `, ${periodo}` : ''}`;
+    if (l.estado === 'parcial')   return `Confirmado em <b style="color:var(--t1)">${_cancelDatas(l.datasOk, todos(l), esc)}</b> · ${l.declarados} de ${cx(l.caixas)}.<br><b style="color:var(--txt-amber)">Sem resposta em ${faltam}</b>`;
+    if (l.estado === 'sem_info')  return `${cx(l.caixas)} fechado${l.caixas === 1 ? '' : 's'} sem ninguém confirmar que não houve transferência.<br><b style="color:var(--txt-amber)">Sem resposta em ${faltam}</b>`;
+    return 'Nenhum caixa fechado no período';
+  };
+  return `<div style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid var(--txt-green);border-radius:14px;padding:12px 14px;margin-bottom:10px">
+    <div style="font-size:9px;font-weight:800;color:var(--t4);letter-spacing:1.2px;text-transform:uppercase;margin-bottom:7px">
+      Sem transferência · ${d.semTransf.length} loja${d.semTransf.length === 1 ? '' : 's'}</div>
+    ${d.semTransf.map(l => {
+      const e = _CANCEL_ESTADO[l.estado];
+      return `<div style="display:flex;gap:8px;padding:6px 0;border-top:1px solid var(--b1)">
+        <span style="color:${e.cor};font-weight:800;font-size:12px;flex-shrink:0;width:12px;text-align:center">${e.ico}</span>
+        <div style="min-width:0;flex:1">
+          <div style="font-size:11.5px;font-weight:700;color:var(--t1)">${esc(l.nome)}</div>
+          <div style="font-size:9.5px;color:var(--t3);line-height:1.4">${frase(l)}</div>
+        </div></div>`;
+    }).join('')}
+  </div>`;
 }
 
 // Agrupamento por categoria — o ganho de ter separado categoria e detalhe. Antes os 28
@@ -11749,6 +11898,7 @@ function _cancelRelatorioTexto(wpp) {
   if (!d.qtd) {
     msg += `Nenhuma das ${d.nLojas} lojas lançou cancelamento neste período.\n`;
     msg += _cancelRelatorioSemNada(d, wpp);
+    msg += _transfRelatorioTexto(wpp);   // mesma razão da tela: não depende do cancelamento
     return { msg, titulo: `Notas canceladas — ${periodo}` };
   }
   msg += `${b(`Total: ${_fmtBRL(d.valor)}`)} em ${d.qtd} nota${d.qtd === 1 ? '' : 's'}, ${d.lojas.length} loja${d.lojas.length === 1 ? '' : 's'}\n`;
@@ -11779,7 +11929,44 @@ function _cancelRelatorioTexto(wpp) {
   });
   msg += _cancelRelatorioSemNada(d, wpp);
   if (d.semFoto) msg += `\n${i('As notas sem foto foram lançadas antes da foto do cupom passar a ser exigida.')}\n`;
+  msg += _transfRelatorioTexto(wpp);
   return { msg, titulo: `Notas canceladas — ${periodo}` };
+}
+
+// As transferências entram no MESMO relatório exportado, porque estão na mesma tela: um
+// PDF que mostrasse só metade do que a aba mostra viraria uma segunda versão dos fatos.
+function _transfRelatorioTexto(wpp) {
+  if (!_dashTransfPer) return '';
+  const d = _transfMacroDados();
+  const b = t => wpp ? `*${t}*` : t;
+  const cx = n => n + ' caixa' + (n === 1 ? '' : 's');
+  let msg = `\n${wpp ? '🔄 ' : ''}${b('TRANSFERÊNCIAS DE MESA')}\n`;
+  if (!d.qtd) msg += `Nenhuma das ${d.nLojas} lojas lançou transferência no período.\n`;
+  else {
+    msg += `${d.qtd} transferência${d.qtd === 1 ? '' : 's'} em ${d.lojas.length} loja${d.lojas.length === 1 ? '' : 's'}`;
+    msg += d.semFoto ? ` · ${d.semFoto} sem foto da comanda\n` : '\n';
+    d.lojas.forEach(l => {
+      msg += `\n${wpp ? '📍 ' : ''}${b(l.nome)} (${l.itens.length})\n`;
+      l.itens.forEach(t => {
+        const dia = String(t.data || '').slice(8, 10) + '/' + String(t.data || '').slice(5, 7);
+        msg += `   Mesa ${t.origem || '—'} → ${t.destino || '—'} — ${t.motivo || '—'} · ${t.autor || '—'} · ${dia}${t.foto ? '' : ' · sem foto'}\n`;
+      });
+    });
+  }
+  if (d.semTransf.length) {
+    const porEstado = e => d.semTransf.filter(l => l.estado === e);
+    const decl = porEstado('declarado').concat(porEstado('parcial'));
+    if (decl.length) {
+      msg += `\n${wpp ? '✅ ' : ''}${b('Sem transferência no período:')}\n`;
+      decl.forEach(l => { msg += `   ${l.nome} — confirmado por ${l.responsaveis.join(', ') || '—'} (${l.declarados} de ${cx(l.caixas)})\n`; });
+    }
+    const semInfo = porEstado('sem_info');
+    if (semInfo.length) {
+      msg += `\n${wpp ? '⚠ ' : ''}${b('Fechou sem ninguém confirmar (transferência):')}\n`;
+      semInfo.forEach(l => { msg += `   ${l.nome} — ${cx(l.caixas)}\n`; });
+    }
+  }
+  return msg;
 }
 // No relatório a loja que não teve cancelamento vale tanto quanto a que teve: é ela que
 // responde "e as outras?". Com o nome de quem confirmou, vira uma afirmação com dono; sem
@@ -12210,7 +12397,7 @@ function renderDashboard() {
       <div class="dash-tabs">
         <button class="dash-tab${_dashTab==='fat'?' on':''}" onclick="_setDashTab('fat')">↓ Faturamento</button>
         <button class="dash-tab${_dashTab==='att'?' on':''}" onclick="_setDashTab('att')">⚠ Atenção</button>
-        <button class="dash-tab${_dashTab==='cancel'?' on':''}" onclick="_setDashTab('cancel')">🧾 Cancelamentos</button>
+        <button class="dash-tab${_dashTab==='cancel'?' on':''}" onclick="_setDashTab('cancel')">🧾 Cancel. e transf.</button>
         <button class="dash-tab${_dashTab==='ferias'?' on':''}" onclick="_setDashTab('ferias')">🏖 Férias</button>
         <button class="dash-tab${_dashTab==='xadrez'?' on':''}" onclick="_setDashTab('xadrez')">🔀 Xadrez</button>
         <button class="dash-tab${_dashTab==='bi'?' on':''}" onclick="_setDashTab('bi')">📊 BI</button>
