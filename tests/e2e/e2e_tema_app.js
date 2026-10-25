@@ -4,6 +4,9 @@
 //
 //   APP=gn-manutencao node e2e_tema_app.js
 //
+// @modelo — nao e suite solta: sem APP= nao ha o que medir. O corredor pula arquivos com
+// esta marca e diz por que, em vez de conta-los como vermelho.
+//
 // O que ele protege é o que o usuário já me ensinou na prática:
 //   - não basta o botão EXISTIR: tem que estar tocável na largura do celular (eu já
 //     entreguei um botão que só existia no computador);

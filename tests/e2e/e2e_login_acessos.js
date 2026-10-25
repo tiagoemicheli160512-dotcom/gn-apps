@@ -128,6 +128,6 @@ async function montar(page, opts = {}) {
 
   await browser.close();
   console.log('\n' + ARQ);
-  console.log('ok=' + ok + ' falhas=' + fail);
+  console.log(ok + ' ok, ' + fail + ' falhou');
   process.exit(fail ? 1 : 0);
 })();

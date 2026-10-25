@@ -6,6 +6,7 @@
      node tests/run.js foto validade   roda as que casam com algum dos termos
      node tests/run.js --lista         só lista, não roda
      node tests/run.js --paralelo 2    quantas de cada vez (padrão 1)
+     node tests/run.js --reguas        gera os arquivos de comparação do origin/main
 
    Cada suíte é um processo próprio que sobe o seu Chromium e termina com código 0 quando
    passa. O corredor não interpreta o conteúdo: lê a última linha "N ok, M falhou" e o
@@ -22,21 +23,47 @@ const iPar = args.indexOf('--paralelo');
 const paralelo = iPar >= 0 ? Math.max(1, parseInt(args[iPar + 1] || '1', 10)) : 1;
 const termos = args.filter((a, i) => !a.startsWith('--') && !(iPar >= 0 && i === iPar + 1));
 
+// Várias suítes medem REGRESSÃO contra a versão que está no origin/main, e sem o arquivo de
+// comparação não têm contra o que medir. Cada uma recebe o seu em public/_base_<X>.html;
+// `--reguas` gera todos de uma vez, que é o que faltava pra isso rodar num clone novo.
+const REGUAS = [
+  ['_base_chk.html',          'gn-checklist.html'],
+  ['_base_home.html',         'gn-home.html'],
+  ['_base_lojas.html',        'gn-lojas.html'],
+  ['_base_gn-comissoes.html', 'gn-comissoes.html'],
+];
+if (args.includes('--reguas')) {
+  const { execFileSync } = require('child_process');
+  let ruim = 0;
+  for (const [alvo, fonte] of REGUAS) {
+    try {
+      // maxBuffer explícito: gn-checklist.html passa de 1 MB e estourava o padrão de 1 MB
+      // do execFileSync com ENOBUFS — um erro que não diz nada sobre o que aconteceu.
+      fs.writeFileSync(CAMINHOS.pub(alvo),
+        execFileSync('git', ['-C', CAMINHOS.RAIZ, 'show', 'origin/main:public/' + fonte],
+                     { maxBuffer: 256 * 1024 * 1024 }));
+      console.log('✓ ' + alvo.padEnd(24) + ' de origin/main:public/' + fonte);
+    } catch (e) { ruim++; console.log('✗ ' + alvo.padEnd(24) + String(e.message).split('\n')[0]); }
+  }
+  process.exit(ruim ? 1 : 0);
+}
+
 const dir = path.join(__dirname, 'e2e');
 let suites = fs.readdirSync(dir).filter(f => f.startsWith('e2e_') && f.endsWith('.js')).sort();
 if (termos.length) suites = suites.filter(f => termos.some(t => f.includes(t)));
 
+// Modelo parametrizado (@modelo) não é suíte solta: roda uma vez por app, com APP=.
+// Contá-lo como vermelho por falta de parâmetro seria ruído que ninguém vai ler.
+const modelos = suites.filter(f => /@modelo/.test(fs.readFileSync(path.join(dir, f), 'utf8')));
+suites = suites.filter(f => !modelos.includes(f));
+
 if (!suites.length) { console.error('nenhuma suíte casa com: ' + termos.join(' ')); process.exit(2); }
 if (soLista) { suites.forEach(s => console.log(s)); process.exit(0); }
-
-// Várias suítes medem regressão contra a versão do origin/main. Sem o arquivo elas falham
-// — e avisam como criá-lo. O corredor diz de uma vez, no começo, em vez de deixar
-// descobrir uma por uma.
-for (const [rotulo, arq] of [['_base_chk.html', CAMINHOS.BASE_CHK], ['_base_home.html', CAMINHOS.BASE_HOME]]) {
-  if (!fs.existsSync(arq)) {
-    console.log('· aviso: ' + rotulo + ' não existe — as suítes que comparam com o origin/main vão falhar.');
-    console.log('  crie com: git -C ' + CAMINHOS.RAIZ + ' show origin/main:public/' + rotulo.replace('_base_', 'gn-').replace('chk', 'checklist') + ' > ' + arq);
-  }
+modelos.forEach(m => console.log('· pulada: ' + m + ' — modelo parametrizado, roda com APP=<app>'));
+const semRegua = REGUAS.filter(([alvo]) => !fs.existsSync(CAMINHOS.pub(alvo)));
+if (semRegua.length) {
+  console.log('· faltam ' + semRegua.length + ' arquivo(s) de comparação: ' + semRegua.map(r => r[0]).join(', '));
+  console.log('  as suítes que medem regressão vão falhar. Gere todos com:  node tests/run.js --reguas\n');
 }
 
 const inicio = Date.now();
