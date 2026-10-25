@@ -11685,8 +11685,78 @@ function _buildCancelPanel() {
       </div>`).join('')}
     </div>`).join('');
 
-  return _reportBtnsRowHtml('Cancel') + kpis + _cancelPorCategoriaHtml(d) + blocos + _cancelSemNadaHtml(d)
-       + _buildTransfPanelHtml();
+  return _reportBtnsRowHtml('Cancel') + kpis + _cancelPorCategoriaHtml(d) + _cancelRankingHtml(d)
+       + blocos + _cancelSemNadaHtml(d) + _buildTransfPanelHtml();
+}
+
+/* ── RANKING DAS LOJAS, do melhor pro pior ─────────────────────────────────────────────
+   "Podemos colocar as lojas com mais cancelamento em ordem do melhor pro pior, embaixo
+   desse relatório que aparece dos motivos."
+
+   A ordem é por % DO FATURAMENTO, não por reais. Em reais a loja maior aparece como a pior
+   só por ser maior: R$ 1.500 em quem fatura 300 mil é metade do estrago de R$ 800 em quem
+   fatura 80 mil. Os dois números ficam na linha, então dá pra conferir a conta.
+
+   Entram na lista as lojas que cancelaram E as que fecharam o período com TODOS os caixas
+   assinados dizendo que não houve — essas são zero de verdade, e zero é o melhor lugar do
+   ranking. Ficam de fora as que não assinaram ou não fecharam caixa: o zero delas não foi
+   verificado, e colocá-las no topo premiaria justamente quem não respondeu. */
+function _cancelRankingLinhas(d) {
+  const fat = _dashFat || {};
+  const linhas = d.lojas.map(l => ({
+    nome: l.nome, qtd: l.itens.length, valor: l.valor, fat: fat[l.k] || 0, zerada: false,
+  })).concat(
+    (d.semCancel || []).filter(l => l.estado === 'declarado').map(l => ({
+      nome: l.nome, qtd: 0, valor: 0, fat: fat[l.k] || 0, zerada: true,
+    }))
+  );
+  linhas.forEach(l => { l.pct = l.fat > 0 ? (l.valor / l.fat) * 100 : null; });
+  // Sem faturamento no período não dá pra calcular o %, e chutar zero jogaria a loja pro
+  // topo como se fosse a melhor. Elas vão pro fim, ordenadas pelo que dá pra saber.
+  return linhas.sort((a2, b2) => {
+    if (a2.pct === null && b2.pct === null) return a2.valor - b2.valor;
+    if (a2.pct === null) return 1;
+    if (b2.pct === null) return -1;
+    return a2.pct - b2.pct;
+  });
+}
+
+function _cancelRankingHtml(d) {
+  const esc = s => window.escapeHtml(String(s == null ? '' : s));
+  const linhas = _cancelRankingLinhas(d);
+  if (linhas.length < 2) return '';   // uma loja só não é ranking
+  const pior = Math.max(...linhas.map(l => l.pct || 0)) || 1;
+  // Quem ficou de fora não é tudo a mesma coisa, e o rodapé não pode juntar: uma loja que
+  // fechou o caixa e ninguém assinou tem um zero NÃO CONFERIDO (é cobrança); uma que não
+  // fechou caixa nenhum não tem o que declarar ainda (não é cobrança de ninguém).
+  const naoAssinou = (d.semCancel || []).filter(l => l.estado === 'sem_info' || l.estado === 'parcial').length;
+  const semCaixa   = (d.semCancel || []).filter(l => l.estado === 'sem_caixa').length;
+  const rodape = [
+    naoAssinou ? `${naoAssinou} loja${naoAssinou === 1 ? '' : 's'} ficou de fora com zero NÃO conferido: fechou caixa sem ninguém assinar que não houve cancelamento` : '',
+    semCaixa ? `${semCaixa} sem caixa fechado no período` : '',
+  ].filter(Boolean).join('; ');
+
+  return `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:12px 14px;margin-bottom:10px">
+    <div style="font-size:10px;font-weight:800;color:var(--t3);letter-spacing:.5px;margin-bottom:2px">LOJAS — DO MELHOR PRO PIOR</div>
+    <div style="font-size:9.5px;color:var(--t4);margin-bottom:9px">por % do faturamento do período</div>
+    ${linhas.map((l, i) => `
+      <div style="margin-bottom:7px">
+        <div style="display:flex;justify-content:space-between;gap:10px;font-size:11.5px;align-items:baseline">
+          <span style="color:var(--t1);font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+            <span style="color:var(--t4);font-weight:700;font-variant-numeric:tabular-nums">${i + 1}º</span>
+            ${esc(l.nome)}<span style="color:var(--t3);font-weight:400"> · ${l.qtd} nota${l.qtd === 1 ? '' : 's'}</span>
+          </span>
+          <span style="white-space:nowrap;font-variant-numeric:tabular-nums">
+            <span style="color:${l.zerada ? 'var(--txt-green)' : 'var(--t1)'};font-weight:800">${l.pct === null ? '—' : l.pct.toFixed(2).replace('.', ',') + '%'}</span>
+            <span style="color:var(--t3);font-weight:600"> · ${_fmtBRL(l.valor)}</span>
+          </span>
+        </div>
+        <div style="height:4px;border-radius:3px;background:var(--fill-sutil);margin-top:3px;overflow:hidden">
+          <div style="height:100%;width:${l.pct === null ? 0 : Math.max(2, Math.round(l.pct / pior * 100))}%;background:${l.zerada ? 'var(--txt-green)' : '#E8580A'};border-radius:3px"></div>
+        </div>
+      </div>`).join('')}
+    ${rodape ? `<div style="font-size:9.5px;color:var(--t4);margin-top:8px;line-height:1.4">${esc(rodape)}. Ver abaixo.</div>` : ''}
+  </div>`;
 }
 
 /* ── TRANSFERÊNCIAS DE MESA, na mesma aba ──────────────────────────────────────────────
@@ -11965,6 +12035,16 @@ function _cancelRelatorioTexto(wpp) {
   if (_catLinhas.length > 1) {
     msg += `\n${b('Por categoria:')}\n`;
     _catLinhas.forEach(c => { msg += `   ${c.cat}: ${_fmtBRL(c.valor)} (${c.qtd})\n`; });
+  }
+  // O mesmo ranking da tela. O que o painel mostra e o que o relatório manda têm que ser a
+  // mesma coisa — relatório que conta uma história diferente da tela é como não ter nenhum.
+  const _rk = _cancelRankingLinhas(d);
+  if (_rk.length > 1) {
+    msg += `\n${b('Lojas, do melhor pro pior')} ${i('(% do faturamento)')}\n`;
+    _rk.forEach((l, ix) => {
+      const pct = l.pct === null ? '—' : l.pct.toFixed(2).replace('.', ',') + '%';
+      msg += `   ${ix + 1}º ${l.nome}: ${pct} · ${_fmtBRL(l.valor)} (${l.qtd})\n`;
+    });
   }
   msg += '\n';
   d.lojas.forEach((l, ix) => {
