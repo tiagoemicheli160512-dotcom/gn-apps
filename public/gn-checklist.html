@@ -9495,15 +9495,69 @@ function _marcarConclusao(grupo){
   state.concluidoEm[grupo] = new Date().toISOString();
   return true;
 }
+// Quanto tempo separa duas pontas, em texto curto pro selo de 10px. Devolve '' quando a
+// conta não fecha — e isso é o caso NORMAL aqui: dos 321 dias já registrados, nenhum tem
+// hora de início, porque a coluna nasceu depois deles. Pra esses dias a tela continua
+// mostrando só a hora de conclusão, como sempre mostrou; estimar a duração deles seria
+// pior que não mostrar nada.
+//
+// Também cala no negativo e no absurdo. Uma seção é de um dia só, então mais de 24h (ou
+// menos de zero) não é um check-list que levou aquilo: é relógio de aparelho errado, ou um
+// dia que já estava concluído antes da coluna existir e só agora recebeu um toque — e aí o
+// início fica DEPOIS do fim. Mostrar "-3h" ou "19h" como duração do check-list é exatamente
+// o tipo de número que ninguém confere e todo mundo repete.
+function _duracaoTexto(ini, fim){
+  if(!ini || !fim) return '';
+  const a = Date.parse(ini), b = Date.parse(fim);
+  if(isNaN(a) || isNaN(b)) return '';
+  const ms = b - a;
+  if(ms < 0 || ms >= 86400000) return '';
+  // Piso, não arredondamento: 90s tem que ler "1min", não "2min" — o número nunca diz mais
+  // tempo do que houve. E com piso o "<1min" passa a significar literalmente menos de um
+  // minuto (com arredondamento, 45s já lia "1min" e o aviso nunca aparecia).
+  const min = Math.floor(ms / 60000);
+  if(min < 1) return '<1min';
+  if(min < 60) return min + 'min';
+  const h = Math.floor(min / 60), m = min % 60;
+  return m ? h + 'h' + String(m).padStart(2, '0') : h + 'h';
+}
+// O selo de cada seção no resumo. Três estados, e os três aparecem de verdade na rede:
+//   ✅ 11:18 · 18min  — fechou, e as duas pontas existem: a duração é medida, não estimada;
+//   ✅ 11:18          — fechou, mas o dia é anterior à hora de início (os 321 já gravados);
+//   ⏱ 13:27 · 18min  — começou e ainda não fechou. Esse ramo é o que faz a duração aparecer
+//                        HOJE: sem ele, só se veria algo no primeiro dia que fechar com as
+//                        duas pontas, e a tela ficaria igual ao que era.
 function _selo(grupo){
-  const iso = state.concluidoEm[grupo];
-  if(!iso) return '';
-  const hora = _horaDoISO(iso);
-  const fora = _foraDaJanela(grupo, iso);
+  const fim = state.concluidoEm[grupo];
+  const ini = (state.iniciadoEm || {})[grupo];
+  if(!fim){
+    if(!ini) return '';
+    const dec = _duracaoTexto(ini, new Date().toISOString());
+    return `<span data-dur-ini="${escHtml(ini)}" title="Começou às ${_horaDoISO(ini)} e ainda não fechou" style="font-size:10px;font-weight:700;color:var(--t2);">⏱ ${_horaDoISO(ini)}<span data-dur-txt>${dec ? ' · ' + escHtml(dec) : ''}</span></span>`;
+  }
+  const hora = _horaDoISO(fim);
+  const dur  = _duracaoTexto(ini, fim);
+  const sufixo = dur ? ' · ' + escHtml(dur) : '';
+  const quanto = dur ? ' · levou ' + dur : '';
+  const fora = _foraDaJanela(grupo, fim);
   const j = CHECKLIST_JANELA[grupo];
   return fora
-    ? `<span title="Fora do horário (${j.label})" style="font-size:10px;font-weight:700;color:var(--txt-amber);">⏰ ${hora}</span>`
-    : `<span style="font-size:10px;font-weight:700;color:#15803d;">✅ ${hora}</span>`;
+    ? `<span title="Fora do horário (${j.label})${quanto}" style="font-size:10px;font-weight:700;color:var(--txt-amber);">⏰ ${hora}${sufixo}</span>`
+    : `<span title="Concluído às ${hora}${quanto}" style="font-size:10px;font-weight:700;color:#15803d;">✅ ${hora}${sufixo}</span>`;
+}
+// O "· 18min" da seção em andamento tem que andar. Parado, ele congela na hora do último
+// toque e passa a dizer na tela um número que já não é verdade — e justamente na seção em
+// que a pessoa está olhando pra saber se está demorando.
+//
+// Reescreve SÓ o texto dos selos em andamento, de propósito: chamar updateSummary() de
+// relógio faria ele carimbar conclusão e disparar save a cada volta.
+function _tickDuracoes(){
+  document.querySelectorAll('[data-dur-ini]').forEach(n => {
+    const alvo = n.querySelector('[data-dur-txt]');
+    if(!alvo) return;
+    const dec = _duracaoTexto(n.getAttribute('data-dur-ini'), new Date().toISOString());
+    alvo.textContent = dec ? ' · ' + dec : '';
+  });
 }
 
 // ── Fechar o dia ───────────────────────────────────────────────────────────────────────
@@ -9525,7 +9579,8 @@ function _resumoDoDia(){
     const iso = state.concluidoEm[g.key];
     const hora = iso ? _horaDoISO(iso) : '';
     const fora = _foraDaJanela(g.key, iso);
-    return { label:g.label, done, total, completo: total>0 && done>=total, hora, fora };
+    const dur  = _duracaoTexto((state.iniciadoEm || {})[g.key], iso);
+    return { label:g.label, done, total, completo: total>0 && done>=total, hora, fora, dur };
   });
   const fat = (state.vendaSalao||0)+(state.vendaDelivery||0);
   return { linhas, fat, pendentes: linhas.filter(l=>!l.completo) };
@@ -9533,7 +9588,8 @@ function _resumoDoDia(){
 async function _fecharDia(){
   const r = _resumoDoDia();
   const txt = r.linhas.map(l=>{
-    const marca = l.completo ? (l.fora ? '⏰ '+l.hora+' (fora do horário)' : '✅ '+(l.hora||'ok')) : '⚠️ faltam '+(l.total-l.done);
+    const quanto = l.completo && l.dur ? ' · levou '+l.dur : '';
+    const marca = l.completo ? (l.fora ? '⏰ '+l.hora+' (fora do horário)' : '✅ '+(l.hora||'ok'))+quanto : '⚠️ faltam '+(l.total-l.done);
     return '  • '+l.label+': '+l.done+'/'+l.total+'  '+marca;
   }).join('\n');
   const aviso = r.pendentes.length
@@ -17663,6 +17719,8 @@ function calcUsarTotal(){
 
 setInterval(()=>saveAll(),30000);
 setInterval(()=>refreshManutStatus(),30000);
+// Faz andar o tempo decorrido da seção em andamento (ver _tickDuracoes).
+setInterval(()=>_tickDuracoes(),30000);
 // Avisa antes de fechar a aba se ainda tiver edição de Funcionários/Gorjetas esperando
 // pra sincronizar (ex.: rede caiu bem no momento do flush) — sem isso a edição some
 // de vez, já que só existe em memória até o próximo flush bem-sucedido.
