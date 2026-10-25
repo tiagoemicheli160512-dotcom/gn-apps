@@ -60,6 +60,19 @@ suites = suites.filter(f => !modelos.includes(f));
 if (!suites.length) { console.error('nenhuma suíte casa com: ' + termos.join(' ')); process.exit(2); }
 if (soLista) { suites.forEach(s => console.log(s)); process.exit(0); }
 modelos.forEach(m => console.log('· pulada: ' + m + ' — modelo parametrizado, roda com APP=<app>'));
+
+// Cada suíte sobe um Chromium inteiro. Acima de ~metade dos núcleos, elas passam a
+// disputar CPU e aparecem vermelhas que NÃO são defeito: a cada corrida é outra suíte, e
+// todas passam quando rodam sozinhas. Medido nesta máquina de 4 núcleos, em quatro
+// corridas com --paralelo 2: 0, 3, 2 e 1 vermelhas, sempre em suítes diferentes.
+// O aviso existe pra ninguém perder a tarde atrás de um vermelho que é da máquina.
+const nucleos = require('os').cpus().length;
+if (paralelo > Math.max(1, Math.floor(nucleos / 2))) {
+  console.log('· atenção: --paralelo ' + paralelo + ' em ' + nucleos + ' núcleo(s).');
+  console.log('  Cada suíte sobe um Chromium; acima da metade dos núcleos aparecem vermelhas');
+  console.log('  por disputa de CPU, não por defeito. Confirme qualquer vermelha rodando a');
+  console.log('  suíte sozinha antes de investigar.\n');
+}
 const semRegua = REGUAS.filter(([alvo]) => !fs.existsSync(CAMINHOS.pub(alvo)));
 if (semRegua.length) {
   console.log('· faltam ' + semRegua.length + ' arquivo(s) de comparação: ' + semRegua.map(r => r[0]).join(', '));
