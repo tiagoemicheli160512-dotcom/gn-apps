@@ -17,7 +17,14 @@ const check = (n, c) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ? ok++ :
   const page = await ctx.newPage();
   const erros = [];
   page.on('pageerror', e => erros.push(String(e)));
-  page.on('console', m => { if (m.type() === 'error') erros.push('console: ' + m.text()); });
+  page.on('console', m => {
+    if (m.type() !== 'error') return;
+    // "Failed to load resource" e REDE, nao erro de JS: sob carga (130 navegadores numa
+    // corrida) um recurso esgota retry e isso virava "erro de JS ao carregar a pagina",
+    // mandando procurar defeito onde nao ha. O que interessa aqui e excecao do app.
+    if (/Failed to load resource|ERR_|net::|favicon/i.test(m.text())) return;
+    erros.push('console: ' + m.text());
+  });
 
   await page.goto('file://' + HOME);
   await page.waitForFunction(() => { try { return typeof _relModalHtml === 'function'; } catch (e) { return false; } }, { timeout: 20000 });

@@ -35,8 +35,15 @@ const COTA = `(() => {
   };
 })()`;
 
-async function abrir(browser, arq) {
+async function abrir(browser, arq, vars) {
   const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 430, height: 950 } });
+  // Esta era a ÚNICA suíte sem isto, e era a causa dos timeouts dela sob carga: sem a
+  // versão da página no localStorage, o Check-list se recarrega sozinho com ?v=<versão>
+  // pra furar cache, e a espera corre com essa segunda navegação. O waitForTimeout(1500)
+  // logo abaixo era a tentativa antiga de contornar — agora o recarregamento nem acontece.
+  // A chave é minúscula e nenhum degrau da limpeza de cota casa com ela (os prefixos são
+  // gn_chk4_* e gn_mestra_*), então não interfere no que esta suíte mede.
+  await ctx.addInitScript(() => { try { localStorage.setItem('gn_chk_page_ver', '9999'); } catch (e) {} });
   await ctx.route('**/rest/v1/**', r => r.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
   const page = await ctx.newPage();
   const erros = [];
@@ -47,10 +54,18 @@ async function abrir(browser, arq) {
   // qualquer `let` do topo ainda está em temporal dead zone.
   await page.waitForLoadState('load');
   await page.waitForTimeout(1500);
-  await page.waitForFunction(() => {
-    try { return typeof window.gnGuardar === 'function' && document.readyState === 'complete'; }
-    catch (e) { return false; }
-  }, { timeout: 25000 });
+  // gnGuardar vem de um <script src> próprio e existe cedo; readyState 'complete' diz que
+  // os RECURSOS carregaram, não que o <script> inline de 1 MB do app terminou de executar.
+  // Sob carga, o evaluate mais abaixo caía em "Cannot access 'LOJA' before initialization".
+  //
+  // As variáveis vêm de QUEM CHAMA porque esta função abre apps diferentes: LOJA existe no
+  // Check-list e não na Home, e esperar por ela lá dá timeout — foi o que aconteceu quando
+  // eu cravei a lista aqui dentro.
+  // 60s, nao os 25 do padrao: o Check-list tem 1,1 MB de <script> inline e, quando varias
+  // suites rodam juntas, 25s nao bastam pra ele TERMINAR de executar. Timeout curto aqui
+  // vira vermelho que nao e defeito — e o vermelho que nao e defeito e o que faz todo
+  // mundo parar de olhar.
+  await CAMINHOS.esperarApp(page, vars || [], ['gnGuardar'], 60000);
   await page.evaluate(COTA);
   return { ctx, page, erros };
 }
@@ -178,7 +193,7 @@ async function abrir(browser, arq) {
 
   // ── 7. O LOGIN do Check-list não trava mais com a cota cheia ─────────────────────
   // Era o pior caso: o setItem da sessão estourava e levava junto tudo o que vinha depois.
-  const c = await abrir(browser, 'gn-checklist.html');
+  const c = await abrir(browser, 'gn-checklist.html', ['LOJA']);
   const login = await c.page.evaluate(() => {
     localStorage.clear();
     LOJA = 'Bangu';   // binding lexical: window.LOJA criaria outra variável, sem efeito
