@@ -3324,15 +3324,44 @@ let carneTabAtiva = 'inicial';
 // e a referencia morria no aparelho.
 const _fotoPendente = new Set();
 function _chaveFoto(grupo, setor, idx){ return grupo + '|' + setor + '|' + idx; }
+function _marcarFotoPendente(chave, campo){ _fotoPendente.add(chave + '#' + campo); }
+// Os pares de campo de foto que um registro pode ter. O primeiro e a URL; o segundo e o
+// que so faz sentido junto com ela e tem que viajar colado:
+//   fotoBase64 + fotoName  — item do check-list (o campo guarda URL desde a migracao);
+//   valFoto    + valFotoEm — foto do setor na aba Validades. O DIA importa: a tela cobra
+//                            foto de hoje, entao URL e dia separados fariam ela pedir foto
+//                            nova tendo uma, ou aceitar a de ontem como se fosse de hoje;
+//   foto                   — despesa, que nao tem par.
+// Medido no banco, por pasta do Storage: validades 584 fotos sem nenhuma linha apontando
+// (45% das enviadas), checklist-manutencao 11 (18%), checklist-despesas 6 de 7.
+const CAMPOS_FOTO = [['fotoBase64','fotoName'], ['valFoto','valFotoEm'], ['foto',null]];
 // A regra da foto, uma so, usada nos DOIS merges (o de carregar e o de salvar): o lado
 // que NAO tem foto nunca apaga o lado que TEM. A excecao e a intencao deste aparelho
 // enquanto o servidor nao confirma — e por isso que a exclusao tambem entra em
 // _fotoPendente: sem ela, apagar uma foto seria desfeito pela proxima sincronizacao.
 function _fotoDoMerge(local, serv, chave){
-  const l = (local && local.fotoBase64) || '';
-  if(_fotoPendente.has(chave) || l)
-    return { fotoBase64: l, fotoName: (local && local.fotoName) || '' };
-  return { fotoBase64: (serv && serv.fotoBase64) || '', fotoName: (serv && serv.fotoName) || '' };
+  const out = {};
+  CAMPOS_FOTO.forEach(([url, par]) => {
+    const temLocal = local && (url in local), temServ = serv && (url in serv);
+    if(!temLocal && !temServ) return;          // nenhum lado tem este campo: nao inventa
+    const l = (local && local[url]) || '';
+    const lado = (_fotoPendente.has(chave + '#' + url) || l) ? local : serv;
+    out[url] = (lado && lado[url]) || '';
+    if(par) out[par] = (lado && lado[par]) || '';
+  });
+  return out;
+}
+// Listas (manutencao, faltas, despesas) casam pelo id, nao por posicao: a posicao muda
+// quando outro aparelho acrescenta ou remove um item, e casar por ela trocaria a foto de
+// dono — pior que perder.
+function _mesclarListaFoto(listaServ, listaLocal, grupo){
+  if(!Array.isArray(listaServ)) return listaServ;
+  const porId = new Map((Array.isArray(listaLocal) ? listaLocal : []).map(x => [x && x.id, x]));
+  return listaServ.map(sv => {
+    const lc = porId.get(sv && sv.id);
+    if(!lc || typeof lc !== 'object' || typeof sv !== 'object') return sv;
+    return { ...sv, ..._fotoDoMerge(lc, sv, _chaveFoto(grupo, 'lista', sv.id)) };
+  });
 }
 // Janela de horário de cada check-list. Declarada aqui em cima, e não perto do uso, porque
 // renderAll() roda no boot e chama updateSummary() -> _selo(), que já lê isto.
@@ -3899,8 +3928,10 @@ function addDespesaFoto(id, input){
     if(!d) return;
     const fotoAntiga = d.foto;
     d.foto = url;
+    _marcarFotoPendente(_chaveFoto('despesas','lista',d.id), 'foto');
     autoSave();
     renderDespesas();
+    await saveAll();
     if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
   });
 }
@@ -3994,8 +4025,10 @@ function onFotoDinhCaixa(input){
     const fotoAntiga = idx>=0 ? state.despesas[idx].foto : null;
     if(idx>=0) state.despesas[idx].foto = url;
     else state.despesas.push({id:'__foto_dinheiro__', _tipo:'foto_dinheiro', foto:url, valor:0, descricao:''});
+    _marcarFotoPendente(_chaveFoto('despesas','lista','__foto_dinheiro__'), 'foto');
     autoSave();
     renderLivroCaixa();
+    await saveAll();
     if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
   });
 }
@@ -4010,8 +4043,10 @@ function onFotoDespCaixa(despId, input){
     if(!d) return;
     const fotoAntiga = d.foto;
     d.foto = url;
+    _marcarFotoPendente(_chaveFoto('despesas','lista',d.id), 'foto');
     autoSave();
     renderLivroCaixa();
+    await saveAll();
     if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
   });
 }
@@ -5938,12 +5973,21 @@ async function saveAll(opts){
       return false;
     }
     const _mesclarObjChk = (local, serv) => ({ ...(serv && typeof serv==='object' && !Array.isArray(serv) ? serv : {}), ...(local||{}) });
-    const _mesclarArrChk = (local, serv, deletedIds) => {
+    const _mesclarArrChk = (local, serv, deletedIds, grupo) => {
       const localArr = Array.isArray(local) ? local : [];
       const servArr = Array.isArray(serv) ? serv : [];
       const idsLocais = new Set(localArr.map(x=>x&&x.id));
       const soDoServ = servArr.filter(x=>x && !idsLocais.has(x.id) && !(deletedIds && deletedIds.has(x.id)));
-      return [...localArr, ...soDoServ];
+      // O item deste aparelho continua vencendo, como vencia — menos na foto, que segue
+      // _fotoDoMerge. Antes, um item que existe dos dois lados era gravado inteiro na
+      // versao local, levando junto a foto que o outro aparelho tinha acabado de tirar.
+      const porIdServ = new Map(servArr.map(x => [x && x.id, x]));
+      const mesclados = localArr.map(lc => {
+        const sv = grupo ? porIdServ.get(lc && lc.id) : null;
+        if(!sv || typeof lc !== 'object' || typeof sv !== 'object') return lc;
+        return { ...lc, ..._fotoDoMerge(lc, sv, _chaveFoto(grupo, 'lista', lc.id)) };
+      });
+      return [...mesclados, ...soDoServ];
     };
     // Os tres grupos do check-list mesclam ITEM a item, nao setor a setor. Setor a setor,
     // o setor inteiro deste aparelho substituia o do servidor: medido, a foto que o outro
@@ -5976,11 +6020,11 @@ async function saveAll(opts){
       state.supervisao = _mesclarObjChk(state.supervisao, _servRow.supervisao);
       state.supervisaoCozinha = _mesclarObjChk(state.supervisaoCozinha, _servRow.supervisao_cozinha);
       state.auditoriasPadrao = _mesclarObjChk(state.auditoriasPadrao, _servRow.auditorias_padrao);
-      state.faltas = _mesclarArrChk(state.faltas, _servRow.faltas, _pendingDelChk.faltas);
+      state.faltas = _mesclarArrChk(state.faltas, _servRow.faltas, _pendingDelChk.faltas, 'faltas');
       state.retiradas = _mesclarArrChk(state.retiradas, _servRow.retiradas, _pendingDelChk.retiradas);
       state.entradasManuais = _mesclarArrChk(state.entradasManuais, _servRow.entradas_manuais, _pendingDelChk.entradasManuais);
       state.faltasFuncionarios = _mesclarArrChk(state.faltasFuncionarios, _servRow.faltas_funcionarios, null);
-      state.despesas = _mesclarArrChk(state.despesas, _servRow.despesas, _pendingDelChk.despesas);
+      state.despesas = _mesclarArrChk(state.despesas, _servRow.despesas, _pendingDelChk.despesas, 'despesas');
     }
     // Quais pendências este envio leva. Não dá pra limpar o conjunto inteiro no sucesso:
     // o tick de 30s pode estar em voo quando a pessoa tira uma foto, e aí ele liberaria a
@@ -6231,8 +6275,11 @@ function mergeState(rows){
       });
     }
   });
-  if(rows.faltas && rows.faltas.length) state.faltas=rows.faltas;
-  if(rows.manutencao && rows.manutencao.length) state.manutencao=rows.manutencao;
+  // O servidor continua mandando na lista inteira, como mandava — menos nas fotos que
+  // este aparelho acabou de mexer, que vinham junto no atropelo. Medido: 11 fotos de
+  // manutencao no Storage sem nenhuma linha apontando pra elas.
+  if(rows.faltas && rows.faltas.length) state.faltas=_mesclarListaFoto(rows.faltas, state.faltas, 'faltas');
+  if(rows.manutencao && rows.manutencao.length) state.manutencao=_mesclarListaFoto(rows.manutencao, state.manutencao, 'manutencao');
   if(rows.faltas_funcionarios) state.faltasFuncionarios=rows.faltas_funcionarios;
   // Hora de conclusão: o servidor manda quando outro aparelho concluiu primeiro. Fica a
   // PRIMEIRA hora de cada grupo — quem concluiu antes é a resposta certa pra "a que horas
@@ -7090,7 +7137,16 @@ function onFuncDocChange(input){
       wd.funcs[capIdx].docs[capTipo]=url;
       return wd;
     });
-    showToast('📷 Documento salvo');
+    // A fila de Gorjetas so esvazia sozinha a cada 25s. O aviso do beforeunload segura a
+    // maior parte, mas nao o app morto pelo sistema nem a aba fechada a forca — e a
+    // imagem ja esta no Storage, so faltando a linha apontar pra ela. Medido: 4 das 74
+    // enviadas pra comissoes-docs-func ficaram sem ninguem apontando.
+    // Esvaziar aqui e seguro: flushComissoesOps e reentrante (encadeia no que estiver em
+    // voo) e, numa falha de rede, devolve a operacao pra fila e tenta de novo em 10s.
+    await flushComissoesOps();
+    showToast(comissoesOpsQueue.length
+      ? '📷 Documento guardado — sobe quando a conexão voltar.'
+      : '📷 Documento salvo');
     if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
   });
 }
@@ -8935,17 +8991,28 @@ async function _valFoto(stateKey, setor, idx, area, input) {
     const d = _itemChk(stateKey, setor, idx);
     d.valFoto = url;
     d.valFotoEm = state.data;
+    _marcarFotoPendente(_chaveFoto(stateKey, setor, idx), 'valFoto');
     autoSave();
     _valRedesenhar(area);
-    showToast('✓ Foto do setor salva.', 'success');
+    // Ate aqui a referencia so ia ao servidor no tick de 30s, e o toast ja dizia "salva".
+    // E a aba Validades e onde mais se perdeu: 584 das 1306 enviadas ficaram no Storage
+    // sem nenhuma linha apontando pra elas.
+    const noServidor = await saveAll({ silencioso: true });
+    showToast(noServidor
+      ? '✓ Foto do setor salva no servidor.'
+      : '✓ Foto do setor guardada neste aparelho — sobe quando a conexão voltar.',
+      noServidor ? 'success' : 'info');
   });
 }
 
-function _valApagarFoto(stateKey, setor, idx, area) {
+async function _valApagarFoto(stateKey, setor, idx, area) {
   const d = _itemChk(stateKey, setor, idx);
   d.valFoto = ''; d.valFotoEm = '';
+  // Pendente tambem no apagar: sem isto a exclusao seria desfeita pela sincronizacao.
+  _marcarFotoPendente(_chaveFoto(stateKey, setor, idx), 'valFoto');
   autoSave();
   _valRedesenhar(area);
+  await saveAll();
 }
 
 async function _valAdicionar(area) {
@@ -9289,7 +9356,7 @@ function handleFoto(stateKey, setor, idx, input){
     const fotoAntiga = state[stateKey][setor][idx].fotoBase64;
     state[stateKey][setor][idx].fotoBase64=url;
     state[stateKey][setor][idx].fotoName=file.name;
-    _fotoPendente.add(_chaveFoto(stateKey, setor, idx));
+    _marcarFotoPendente(_chaveFoto(stateKey, setor, idx), 'fotoBase64');
     autoSave();
     // Rerenderiza o item inteiro para mostrar botão excluir
     renderSetorItems(stateKey, setor);
@@ -9316,7 +9383,13 @@ function handleFotoManut(id, input){
     const m=state.manutencao.find(m=>m.id===id);
     if(m){
       const fotoAntiga=m.fotoBase64;
-      m.fotoBase64=url;m.fotoName=input.files[0].name;autoSave();renderManutencao();
+      m.fotoBase64=url;m.fotoName=input.files[0].name;
+      _marcarFotoPendente(_chaveFoto('manutencao','lista',m.id), 'fotoBase64');
+      autoSave();renderManutencao();
+      // Sem silencioso de proposito: este caminho nunca teve toast proprio, entao quem
+      // avisa continua sendo o "Salvo no servidor!" do saveAll — e o indicador de sincronia
+      // marca offline sozinho quando nao sobe.
+      await saveAll();
       if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
     }
   });
@@ -12510,7 +12583,7 @@ async function deleteFotoChecklist(stateKey, setor, idx){
   // A exclusão entra em pendente pelo mesmo motivo que a foto nova: enquanto o servidor
   // não confirma, a intenção deste aparelho é que vale. Sem isto, _fotoDoMerge veria
   // "local vazio, servidor com foto" e traria a foto de volta na próxima sincronização.
-  _fotoPendente.add(_chaveFoto(stateKey, setor, idx));
+  _marcarFotoPendente(_chaveFoto(stateKey, setor, idx), 'fotoBase64');
   autoSave();
   // Re-renderizar apenas o item
   renderSetorItems(stateKey, setor);
@@ -12521,12 +12594,15 @@ async function deleteFotoChecklist(stateKey, setor, idx){
     : '🗑 Foto removida aqui — a remoção sobe quando a conexão voltar.','info');
 }
 
-function deleteFotoManut(id){
+async function deleteFotoManut(id){
   if(!confirm('Excluir esta foto?')) return;
   const m=state.manutencao.find(m=>m.id===id);
   if(m){
     const fotoAntiga=m.fotoBase64;
-    m.fotoBase64='';m.fotoName='';autoSave();renderManutencao();
+    m.fotoBase64='';m.fotoName='';
+    _marcarFotoPendente(_chaveFoto('manutencao','lista',m.id), 'fotoBase64');
+    autoSave();renderManutencao();
+    await saveAll({ silencioso: true });
     if(fotoAntiga) window.gnDeleteFotoStorage(SB_URL, SB_KEY, fotoAntiga);
   }
   showToast('🗑 Foto removida','info');
