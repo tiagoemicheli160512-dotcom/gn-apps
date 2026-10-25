@@ -3212,9 +3212,10 @@ let state = {
   banda:{nome:'',valor:0,consumo:0,qtd_couvert:0},
   vendas:{},
   checklist:{}, abertura:{}, fechamento:{},
-  // Hora em que cada check-list foi concluído e o fecho do dia — ver CHECKLIST_JANELA
-  // e _fecharDia(). O app já sabia SE foi feito; agora sabe se foi feito na hora.
-  concluidoEm:{}, diaFechadoEm:'', diaFechadoPor:'',
+  // Hora em que cada check-list começou e foi concluído, e o fecho do dia — ver
+  // CHECKLIST_JANELA e _fecharDia(). O app já sabia SE foi feito; depois passou a saber se
+  // foi feito na hora; com o par iniciadoEm/concluidoEm passa a saber quanto DUROU.
+  iniciadoEm:{}, concluidoEm:{}, diaFechadoEm:'', diaFechadoPor:'',
   obs_abertura:'', obs_checklist:'', obs_fechamento:'',
   faltasFuncionarios:[], faltas:[], manutencao:[], manutOficial:[],
   supervisao: {
@@ -5890,7 +5891,7 @@ async function saveAll(){
     let _servRow = null, _caixaTemDados = false;
     try {
       const { data, error: eServ } = await sb.from('checklist_diario')
-        .select('dinheiro_caixa,checklist,abertura,fechamento,faltas,retiradas,entradas_manuais,despesas,supervisao,supervisao_cozinha,auditorias_padrao,faltas_funcionarios,concluido_em,dia_fechado_em,dia_fechado_por')
+        .select('dinheiro_caixa,checklist,abertura,fechamento,faltas,retiradas,entradas_manuais,despesas,supervisao,supervisao_cozinha,auditorias_padrao,faltas_funcionarios,iniciado_em,concluido_em,dia_fechado_em,dia_fechado_por')
         .eq('data_operacao', state.data).eq('loja', LOJA).maybeSingle();
       if (eServ) throw eServ;
       _servRow = data;
@@ -5952,6 +5953,7 @@ async function saveAll(){
       supervisao_cozinha: state.supervisaoCozinha,
       auditorias_padrao: state.auditoriasPadrao,
       checklist_pct: calcChecklistPct(),
+      iniciado_em: state.iniciadoEm,
       concluido_em: state.concluidoEm,
       dia_fechado_em: state.diaFechadoEm || null,
       dia_fechado_por: state.diaFechadoPor || null
@@ -6179,6 +6181,14 @@ function mergeState(rows){
       if(remoto && (!local || remoto<local)) state.concluidoEm[g]=remoto;
     });
   }
+  // Hora de início: mesma regra, e pelo mesmo motivo. Se o celular do salão começou a
+  // abertura às 8h10 e o do caixa tocou no primeiro item às 9h, quem começou foi o de 8h10.
+  if(rows.iniciado_em && typeof rows.iniciado_em==='object'){
+    Object.keys(rows.iniciado_em).forEach(g=>{
+      const remoto=rows.iniciado_em[g], local=state.iniciadoEm[g];
+      if(remoto && (!local || remoto<local)) state.iniciadoEm[g]=remoto;
+    });
+  }
   if(rows.dia_fechado_em && !state.diaFechadoEm){
     state.diaFechadoEm=rows.dia_fechado_em;
     state.diaFechadoPor=rows.dia_fechado_por||'';
@@ -6365,7 +6375,7 @@ async function onDataChange(val){
   // Zera só dados do DIA — carnes (stateWeek) não são afetadas
   state.data=val;
   state.checklist={}; state.abertura={}; state.fechamento={};
-  state.concluidoEm={}; state.diaFechadoEm=''; state.diaFechadoPor='';
+  state.iniciadoEm={}; state.concluidoEm={}; state.diaFechadoEm=''; state.diaFechadoPor='';
   state.obs_abertura=''; state.obs_checklist=''; state.obs_fechamento='';
   state.faltas=[]; state.manutencao=[]; state.faltasFuncionarios=[];
   state.vendaSalao=0; state.vendaDelivery=0; state.repique=0; state.dinheiroCaixa=0;
@@ -9102,6 +9112,7 @@ function _limparProblemaSeNeutro(stateKey, setor, idx){
 function toggleNaoConforme(stateKey, setor, idx){
   const d = _itemChk(stateKey, setor, idx);
   d.naoConforme = !d.naoConforme;
+  _marcarInicio(stateKey);
   if(d.naoConforme){
     d.checked = false;                                  // os dois são exclusivos
     const cb=document.getElementById(`chk-${stateKey}_${setor}-${idx}`);
@@ -9150,6 +9161,7 @@ function toggleCheck(stateKey, setor, idx, el){
     }
   }
   d.checked = el.checked;
+  _marcarInicio(stateKey);
   if(el.checked){
     d.naoConforme = false;                              // marcar conforme tira o não conforme
     const btn=document.getElementById(`nc-${stateKey}_${setor}-${idx}`);
@@ -9459,6 +9471,22 @@ function _foraDaJanela(grupo, iso){
   if(isNaN(d)) return false;
   const h = d.getHours() + d.getMinutes()/60;
   return j.madrugada ? (h > j.ateHora && h < 12) : (h > j.ateHora);
+}
+// Registra a hora do PRIMEIRO item avaliado do grupo. É o par do _marcarConclusao: com os
+// dois, dá pra dizer quanto tempo o check-list leva de verdade — antes só dava pra dizer a
+// que horas ele terminou, e qualquer número de duração era chute.
+//
+// O carimbo mora no TOQUE, não no render do resumo: o resumo roda ao abrir o app com o dia
+// já preenchido, e ali ele gravaria a hora em que a pessoa ABRIU o app como se fosse a hora
+// em que ela começou. Começar é avaliar um item, e isso só acontece no toggle.
+//
+// Nunca reescreve: desmarcar tudo e recomeçar não apaga a hora em que se começou.
+const GRUPOS_COM_HORA = ['abertura','checklist','fechamento'];
+function _marcarInicio(grupo){
+  if(GRUPOS_COM_HORA.indexOf(grupo) < 0) return false;
+  if(!state.iniciadoEm || state.iniciadoEm[grupo]) return false;
+  state.iniciadoEm[grupo] = new Date().toISOString();
+  return true;
 }
 // Registra a hora na PRIMEIRA vez que o grupo fecha 100%. Nunca reescreve: desmarcar um
 // item e marcar de novo não muda a que horas o check-list ficou pronto.
