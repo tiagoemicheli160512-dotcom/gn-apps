@@ -19,10 +19,9 @@ const check = (n, c) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ? ok++ :
   for (let t = 1; ; t++) {
     await page.goto('file://' + PEDIDOS);
     try {
-      await page.waitForFunction(() => {
-        try { return typeof fecharModal === 'function' && typeof _triosNovoModal === 'function'; }
-        catch (e) { return false; }
-      }, { timeout: 25000 });
+      // As duas sao declaracoes de funcao, icadas: existem antes dos `let` de topo. O
+      // evaluate logo abaixo mexe em S, que e um deles — por isso S entra na espera.
+      await CAMINHOS.esperarApp(page, ['S'], ['fecharModal', '_triosNovoModal']);
       break;
     } catch (e) { if (t >= 3) { console.log('FALHOU: app Pedidos não carregou'); falhou++; break; } }
   }

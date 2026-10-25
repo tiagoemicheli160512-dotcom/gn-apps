@@ -36,9 +36,10 @@ async function lista(page, regs, funcs, meses) {
   for (let t = 1; t <= 3 && !pronto; t++) {
     await page.goto('file://' + CHK);
     try {
-      await page.waitForFunction(() => {
-        try { return typeof _bhTodosFuncionarios === 'function'; } catch (e) { return false; }
-      }, null, { timeout: 25000 });
+      // Esperar so pela funcao nao bastava: ela e icada e ja existe no inicio do script.
+      // Sob carga, o evaluate seguinte caia em "Cannot access '_bhRegistros' before
+      // initialization" — corrida, nao defeito do app.
+      await CAMINHOS.esperarApp(page, ['_bhRegistros', 'LOJA'], ['_bhTodosFuncionarios']);
       pronto = true;
     } catch (e) { /* retry */ }
   }

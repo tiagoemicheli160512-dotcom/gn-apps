@@ -59,6 +59,23 @@ contraprova no próprio cabeçalho, em comentário.
 Morrer calada — por fixture faltando, por timeout — foi a forma mais comum de um vermelho
 passar por verde aqui.
 
+## Esperar o app carregar: use `esperarApp`
+
+Declaração de função é **içada**. `typeof minhaFuncao === 'function'` fica verdadeiro no
+instante em que o `<script>` começa — muito antes dos `let` de topo serem avaliados. Quem
+espera só por função e em seguida **lê** uma variável cai em `Cannot access 'X' before
+initialization`, e só **sob carga**, porque é corrida. Isso já mordeu quatro suítes desta
+base, cada uma com um nome diferente no erro, e cada vez custou uma investigação inteira.
+
+Espere pela leitura das variáveis que você vai usar:
+
+```js
+await CAMINHOS.esperarApp(page, ['LOJA', '_bhRegistros'], ['_bhTodosFuncionarios']);
+```
+
+Primeiro as variáveis, depois as funções. Ler é o que prova que a declaração foi
+alcançada.
+
 ## As fixtures têm nomes fictícios
 
 `tests/fixtures/*.json` saiu do banco de produção, mas os nomes de funcionário foram

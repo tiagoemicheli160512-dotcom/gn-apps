@@ -32,7 +32,9 @@ const num = (t) => parseFloat(String(t).replace(/\./g, '').replace(',', '.')) ||
   await page.goto('file://' + ARQ);
   // TABS é const avaliado na ordem, no fim do bloco — declaração de função é içada e
   // existe com o script ainda no meio da execução.
-  await page.waitForFunction(() => { try { return typeof TABS === 'object' && TABS !== null; } catch (e) { return false; } }, { timeout: 15000 });
+  // TABS sozinho nao prova que o script terminou — LOJA e selecionarLoja sao usados logo
+  // abaixo e vinham depois. Sob carga isso virava timeout no reload.
+  await CAMINHOS.esperarApp(page, ['TABS', 'LOJA'], ['selecionarLoja'], 15000);
   await page.waitForTimeout(500);
   await page.evaluate(() => {
     try { if (!LOJA) selecionarLoja('BANGU', 'Bangu'); } catch (e) {}
@@ -124,7 +126,9 @@ const num = (t) => parseFloat(String(t).replace(/\./g, '').replace(',', '.')) ||
   await page.selectOption(`${cel(1, 0)} .turno-sel`, 'NOITE');
   await page.waitForTimeout(350);
   await page.reload();
-  await page.waitForFunction(() => { try { return typeof TABS === 'object' && TABS !== null; } catch (e) { return false; } }, { timeout: 15000 });
+  // TABS sozinho nao prova que o script terminou — LOJA e selecionarLoja sao usados logo
+  // abaixo e vinham depois. Sob carga isso virava timeout no reload.
+  await CAMINHOS.esperarApp(page, ['TABS', 'LOJA'], ['selecionarLoja'], 15000);
   await page.waitForTimeout(800);
   await page.evaluate(() => { try { setTab('funcs'); state.expanded = { 0: true, 1: true }; render(); } catch (e) {} });
   await page.waitForTimeout(400);
