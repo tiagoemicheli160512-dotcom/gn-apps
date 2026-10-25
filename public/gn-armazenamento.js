@@ -61,13 +61,23 @@
   function _sufixoLoja(loja) { return String(loja || '').replace(/\s+/g, '_'); }
 
   // Tira as fotos em base64 de uma cópia do dia, devolvendo o JSON enxuto — ou null quando
-  // não havia foto nenhuma (aí não adianta regravar).
+  // não havia base64 nenhum (aí não adianta regravar).
+  //
+  // SÓ o base64. Quando esta limpeza foi escrita, a foto ERA o campo — 33 a 117 kB cada, e
+  // tirar valia muito. Depois da migração pro Storage o campo guarda uma URL de 116
+  // caracteres: apagar não abre espaço nenhum e destrói a única pista de onde a imagem
+  // está. Medido, com a cópia preservada pelos outros degraus: a URL virava '' e o arquivo
+  // no Storage ficava sem ninguém apontando pra ele.
+  //
+  // O gêmeo desta limpeza, dentro do autoSave do gn-checklist.html, já foi corrigido —
+  // este módulo tem a própria cópia e tinha ficado de fora.
   function _semFotos(txt) {
     var st;
     try { st = JSON.parse(txt); } catch (_) { return null; }
     if (!st || typeof st !== 'object') return null;
     var achou = false;
-    var limpar = function (it) { if (it && it.fotoBase64) { it.fotoBase64 = ''; achou = true; } };
+    var ehBase64 = function (v) { return typeof v === 'string' && v.indexOf('data:') === 0; };
+    var limpar = function (it) { if (it && ehBase64(it.fotoBase64)) { it.fotoBase64 = ''; achou = true; } };
     (st.manutencao || []).forEach(limpar);
     ['checklist', 'abertura', 'fechamento'].forEach(function (k) {
       var sec = st[k] || {};
