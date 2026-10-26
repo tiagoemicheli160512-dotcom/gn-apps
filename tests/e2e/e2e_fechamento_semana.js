@@ -47,6 +47,12 @@ const CENARIO_COM_LACUNAS = {
 
 async function abrir(browser, cen, respostasIniciais) {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 900 } });
+  // Terça, fixada. O app esconde o fechamento de semana na SEGUNDA (é o dia do pedido e da
+  // contagem), então esta suíte passava de terça a domingo e ficava vermelha toda segunda —
+  // foi o que derrubou o CI na virada de domingo pra segunda. 20/10 é da mesma semana em
+  // que ela vinha passando, então só o dia deixa de ser sorteado pelo calendário.
+  await CAMINHOS.fixarRelogio(ctx, '2026-10-20T10:00:00');
+
   const escritas = [];
   let respostas = JSON.parse(JSON.stringify(respostasIniciais || {}));
   await ctx.route('**/rest/v1/**', r => {

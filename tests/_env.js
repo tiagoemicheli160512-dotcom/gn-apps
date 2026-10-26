@@ -64,8 +64,24 @@ async function esperarApp(page, variaveis, funcoes, tempoMs) {
   }, { vars: variaveis || [], fns: funcoes || [] }, { timeout: tempoMs || 25000 });
 }
 
+/* Fixa o dia que a página vê.
+
+   O app muda de comportamento por dia da semana: o card de fechamento de semana não
+   aparece na SEGUNDA, que é o dia do pedido e da contagem. Suíte que depende do card
+   renderizado passa de terça a domingo e fica vermelha toda segunda — foi exatamente o que
+   derrubou três delas na primeira execução do CI, à meia-noite de domingo pra segunda.
+
+   Vermelha que não é defeito é o que faz todo mundo parar de olhar pro CI. Fixando o dia,
+   a suíte passa a medir o comportamento que ela quer medir, em vez de medir que dia é hoje.
+
+   setFixedTime, e não install(): as datas passam a responder o instante escolhido, mas os
+   temporizadores continuam correndo — senão as próprias esperas das suítes travavam.      */
+async function fixarRelogio(ctx, iso) {
+  await ctx.clock.setFixedTime(new Date(iso));
+}
+
 module.exports = {
-  RAIZ, PUBLICO, FIXTURES, CHROMIUM, TMP, BASE_CHK, BASE_HOME, esperarApp,
+  RAIZ, PUBLICO, FIXTURES, CHROMIUM, TMP, BASE_CHK, BASE_HOME, esperarApp, fixarRelogio,
   pub: n => path.join(PUBLICO, n),
   fix: n => path.join(FIXTURES, n),
 };
