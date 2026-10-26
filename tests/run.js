@@ -122,5 +122,39 @@ function rodar(nome) {
       if (r.semResumo) r.saida.split('\n').filter(Boolean).slice(-3).forEach(l => console.log('      ' + l.slice(0, 160)));
     });
   }
+
+  // No CI, o log do job fica num armazenamento que nem toda ferramenta alcança — e CI que
+  // falha sem dizer POR QUE é quase inútil: foi exatamente o que aconteceu na primeira
+  // execução deste workflow, que só deu "Process completed with exit code 1". O resumo do
+  // job aparece na própria interface do PR e na API, então é por aqui que a falha se conta.
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    const l = [];
+    l.push('## Suítes e2e', '');
+    l.push(`**${resultados.length}** suíte(s) · **${totalOk}** verificações ok · ` +
+           `**${totalRuim}** falharam · ${Math.round((Date.now() - inicio) / 1000)}s`, '');
+    if (!ruins.length) {
+      l.push('Tudo verde.');
+    } else {
+      l.push(`### ${ruins.length} com problema`, '');
+      ruins.forEach(r => {
+        l.push(`<details><summary><code>${r.nome}</code> — ` +
+               (r.semResumo ? 'não imprimiu o resumo' : `${r.falhou} falhou`) +
+               ` (${r.seg}s)</summary>`, '');
+        l.push('```');
+        // As linhas FALHOU dizem o que quebrou; as últimas dizem como morreu quando nem
+        // chegou a imprimir resumo. Cortado pra o resumo do job não estourar o limite.
+        const falhas = r.saida.split('\n').filter(x => /^FALHOU/.test(x)).slice(0, 8);
+        falhas.forEach(x => l.push(x.slice(0, 200)));
+        if (r.semResumo) {
+          if (falhas.length) l.push('…');
+          r.saida.split('\n').filter(Boolean).slice(-12).forEach(x => l.push(x.slice(0, 200)));
+        }
+        l.push('```', '</details>', '');
+      });
+    }
+    try { fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, l.join('\n') + '\n'); }
+    catch (e) { console.log('(não consegui escrever o resumo do job: ' + e.message + ')'); }
+  }
+
   process.exit(ruins.length ? 1 : 0);
 })();
