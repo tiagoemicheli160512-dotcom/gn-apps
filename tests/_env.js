@@ -11,11 +11,23 @@ const RAIZ     = path.resolve(__dirname, '..');
 const PUBLICO  = path.join(RAIZ, 'public');
 const FIXTURES = path.join(__dirname, 'fixtures');
 
-// O Chromium do contêiner vem pré-instalado neste caminho; em outra máquina, aponte com
-// GN_CHROMIUM. Vazio faz o Playwright usar o navegador que ele mesmo baixou.
+/* Qual Chromium usar.
+
+   Três lugares, três respostas, e a escolha é automática:
+
+   - contêiner de desenvolvimento: tem um Chromium pré-instalado em /opt/pw-browsers, e é
+     ele que se usa — a versão do Playwright do projeto nem sempre casa com ela, então
+     deixar o Playwright resolver sozinho aqui dá "Executable doesn't exist";
+   - CI: não existe esse caminho, então devolve undefined e o executablePath nem é passado
+     — o Playwright usa o que o `playwright install` acabou de baixar, que casa por
+     construção;
+   - qualquer outra máquina: GN_CHROMIUM manda, e `GN_CHROMIUM=` (vazio) força o padrão.
+
+   undefined, e não string vazia: com '' o Playwright ainda entra na resolução própria.    */
+const CHROMIUM_CONTEINER = '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
 const CHROMIUM = process.env.GN_CHROMIUM !== undefined
-  ? process.env.GN_CHROMIUM
-  : '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
+  ? (process.env.GN_CHROMIUM || undefined)
+  : (fs.existsSync(CHROMIUM_CONTEINER) ? CHROMIUM_CONTEINER : undefined);
 
 // Saída descartável (prints, PDFs gerados no meio do teste).
 const TMP = process.env.GN_TMP || path.join(os.tmpdir(), 'gn-testes');
