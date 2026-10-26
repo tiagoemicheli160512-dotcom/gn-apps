@@ -80,8 +80,48 @@ async function fixarRelogio(ctx, iso) {
   await ctx.clock.setFixedTime(new Date(iso));
 }
 
+/* Reload que não perde o que o app já tinha guardado.
+
+   Sob file:// o Chromium nem sempre devolve a mesma partição de armazenamento depois de um
+   reload: as últimas escritas de localStorage somem. Não é alguém apagando — grampeei
+   Storage.prototype.removeItem/clear e deu ZERO remoção em 18 recarregamentos. Medido neste
+   contêiner, com o mesmo roteiro: por file:// perdeu em 1 de 6 e em 3 de 10; servido por
+   http://localhost, 12 de 12 limpos. Então é o navegador, e só no file:// — quem usa pelo
+   Vercel (https) não passa por isso.
+
+   e2e_tema_escuro já tinha batido nisso e resolveu pra UMA chave conhecida (gn_tema, reposta
+   por addInitScript). Aqui vale pra qualquer coisa que o APP tenha gravado, que é o caso de
+   quem recarrega pra ver se a tela volta do armazenamento: o dado é escrito pelo app, a
+   suíte não sabe a chave nem o conteúdo de antemão.
+
+   Não afrouxa a verificação. O que se cobra do app é LER o que está guardado e remontar a
+   tela, e isso continua sendo exercido igual; se o app parar de gravar, o retrato sai vazio
+   e a verificação falha do mesmo jeito. Já a GRAVAÇÃO quem confere é a suíte, olhando o
+   localStorage antes de recarregar — isso não se terceiriza pro navegador.
+
+   Cada chamada acrescenta um script de inicialização ao page, e eles rodam na ordem em que
+   foram adicionados, então o retrato mais novo vence. Chamar duas vezes é seguro; só não
+   sirva pra testar REMOÇÃO de chave, porque um retrato antigo a traria de volta.          */
+async function recarregarPreservando(page) {
+  const guardado = await page.evaluate(() => {
+    const o = {};
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k != null) o[k] = localStorage.getItem(k);
+      }
+    } catch (e) {}
+    return o;
+  });
+  await page.addInitScript(dados => {
+    try { Object.keys(dados).forEach(k => localStorage.setItem(k, dados[k])); } catch (e) {}
+  }, guardado);
+  await page.reload();
+}
+
 module.exports = {
   RAIZ, PUBLICO, FIXTURES, CHROMIUM, TMP, BASE_CHK, BASE_HOME, esperarApp, fixarRelogio,
+  recarregarPreservando,
   pub: n => path.join(PUBLICO, n),
   fix: n => path.join(FIXTURES, n),
 };

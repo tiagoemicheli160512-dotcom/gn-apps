@@ -163,9 +163,16 @@ function rodar(nome) {
     // Anotação não aceita quebra de linha crua; o GitHub exige estes escapes.
     const esc = s => String(s).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
     ruins.forEach(r => {
+      const linhas = r.saida.split('\n');
+      // Quem morre calada precisa dizer ATE ONDE chegou, nao so como morreu: a ultima
+      // verificacao que passou e a que falhou localizam o ponto da morte no roteiro. Sem
+      // isso a anotacao dava um locator sem contexto e a investigacao comecava do zero —
+      // custou uma rodada inteira atras de uma suite que falhava depois do reload.
       const motivo = r.semResumo
-        ? r.saida.split('\n').filter(Boolean).slice(-6)
-        : r.saida.split('\n').filter(x => /^FALHOU/.test(x)).slice(0, 6);
+        ? [].concat(
+            linhas.filter(x => /^(OK|FALHOU):/.test(x)).slice(-3),
+            linhas.filter(Boolean).slice(-6))
+        : linhas.filter(x => /^FALHOU/.test(x)).slice(0, 6);
       console.log('::error title=' + esc(r.nome) + '::' +
                   esc((r.semResumo ? 'não imprimiu o resumo\n' : r.falhou + ' falhou\n') +
                       motivo.map(x => x.slice(0, 200)).join('\n')));
