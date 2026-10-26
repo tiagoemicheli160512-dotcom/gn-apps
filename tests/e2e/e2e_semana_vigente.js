@@ -105,7 +105,12 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
   // ══ 8. A semana não fica mais gravada ════════════════════════════════════════════
   await page.evaluate(a => setSemIdx(a - 5, true), ATUAL);
   await page.waitForTimeout(200);
-  await page.reload();
+  // Preservando: sob file:// o localStorage às vezes não sobrevive ao reload (ver
+  // recarregarPreservando em tests/_env.js). Aqui isso fazia a verificação passar À TOA —
+  // sem o que foi gravado, abrir na semana vigente é o único resultado possível, e um app
+  // que voltasse a gravar o semIdx passaria igual. Com o retrato reposto, a verificação
+  // volta a medir o que diz medir.
+  await CAMINHOS.recarregarPreservando(page);
   await page.waitForFunction(() => { try { return typeof calcSemIdxAtual === 'function' && typeof state === 'object'; }
     catch (e) { return false; } }, { timeout: 30000 });
   await page.waitForTimeout(400);

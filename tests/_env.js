@@ -11,11 +11,23 @@ const RAIZ     = path.resolve(__dirname, '..');
 const PUBLICO  = path.join(RAIZ, 'public');
 const FIXTURES = path.join(__dirname, 'fixtures');
 
-// O Chromium do contêiner vem pré-instalado neste caminho; em outra máquina, aponte com
-// GN_CHROMIUM. Vazio faz o Playwright usar o navegador que ele mesmo baixou.
+/* Qual Chromium usar.
+
+   Três lugares, três respostas, e a escolha é automática:
+
+   - contêiner de desenvolvimento: tem um Chromium pré-instalado em /opt/pw-browsers, e é
+     ele que se usa — a versão do Playwright do projeto nem sempre casa com ela, então
+     deixar o Playwright resolver sozinho aqui dá "Executable doesn't exist";
+   - CI: não existe esse caminho, então devolve undefined e o executablePath nem é passado
+     — o Playwright usa o que o `playwright install` acabou de baixar, que casa por
+     construção;
+   - qualquer outra máquina: GN_CHROMIUM manda, e `GN_CHROMIUM=` (vazio) força o padrão.
+
+   undefined, e não string vazia: com '' o Playwright ainda entra na resolução própria.    */
+const CHROMIUM_CONTEINER = '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
 const CHROMIUM = process.env.GN_CHROMIUM !== undefined
-  ? process.env.GN_CHROMIUM
-  : '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
+  ? (process.env.GN_CHROMIUM || undefined)
+  : (fs.existsSync(CHROMIUM_CONTEINER) ? CHROMIUM_CONTEINER : undefined);
 
 // Saída descartável (prints, PDFs gerados no meio do teste).
 const TMP = process.env.GN_TMP || path.join(os.tmpdir(), 'gn-testes');
@@ -52,8 +64,64 @@ async function esperarApp(page, variaveis, funcoes, tempoMs) {
   }, { vars: variaveis || [], fns: funcoes || [] }, { timeout: tempoMs || 25000 });
 }
 
+/* Fixa o dia que a página vê.
+
+   O app muda de comportamento por dia da semana: o card de fechamento de semana não
+   aparece na SEGUNDA, que é o dia do pedido e da contagem. Suíte que depende do card
+   renderizado passa de terça a domingo e fica vermelha toda segunda — foi exatamente o que
+   derrubou três delas na primeira execução do CI, à meia-noite de domingo pra segunda.
+
+   Vermelha que não é defeito é o que faz todo mundo parar de olhar pro CI. Fixando o dia,
+   a suíte passa a medir o comportamento que ela quer medir, em vez de medir que dia é hoje.
+
+   setFixedTime, e não install(): as datas passam a responder o instante escolhido, mas os
+   temporizadores continuam correndo — senão as próprias esperas das suítes travavam.      */
+async function fixarRelogio(ctx, iso) {
+  await ctx.clock.setFixedTime(new Date(iso));
+}
+
+/* Reload que não perde o que o app já tinha guardado.
+
+   Sob file:// o Chromium nem sempre devolve a mesma partição de armazenamento depois de um
+   reload: as últimas escritas de localStorage somem. Não é alguém apagando — grampeei
+   Storage.prototype.removeItem/clear e deu ZERO remoção em 18 recarregamentos. Medido neste
+   contêiner, com o mesmo roteiro: por file:// perdeu em 1 de 6 e em 3 de 10; servido por
+   http://localhost, 12 de 12 limpos. Então é o navegador, e só no file:// — quem usa pelo
+   Vercel (https) não passa por isso.
+
+   e2e_tema_escuro já tinha batido nisso e resolveu pra UMA chave conhecida (gn_tema, reposta
+   por addInitScript). Aqui vale pra qualquer coisa que o APP tenha gravado, que é o caso de
+   quem recarrega pra ver se a tela volta do armazenamento: o dado é escrito pelo app, a
+   suíte não sabe a chave nem o conteúdo de antemão.
+
+   Não afrouxa a verificação. O que se cobra do app é LER o que está guardado e remontar a
+   tela, e isso continua sendo exercido igual; se o app parar de gravar, o retrato sai vazio
+   e a verificação falha do mesmo jeito. Já a GRAVAÇÃO quem confere é a suíte, olhando o
+   localStorage antes de recarregar — isso não se terceiriza pro navegador.
+
+   Cada chamada acrescenta um script de inicialização ao page, e eles rodam na ordem em que
+   foram adicionados, então o retrato mais novo vence. Chamar duas vezes é seguro; só não
+   sirva pra testar REMOÇÃO de chave, porque um retrato antigo a traria de volta.          */
+async function recarregarPreservando(page) {
+  const guardado = await page.evaluate(() => {
+    const o = {};
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k != null) o[k] = localStorage.getItem(k);
+      }
+    } catch (e) {}
+    return o;
+  });
+  await page.addInitScript(dados => {
+    try { Object.keys(dados).forEach(k => localStorage.setItem(k, dados[k])); } catch (e) {}
+  }, guardado);
+  await page.reload();
+}
+
 module.exports = {
-  RAIZ, PUBLICO, FIXTURES, CHROMIUM, TMP, BASE_CHK, BASE_HOME, esperarApp,
+  RAIZ, PUBLICO, FIXTURES, CHROMIUM, TMP, BASE_CHK, BASE_HOME, esperarApp, fixarRelogio,
+  recarregarPreservando,
   pub: n => path.join(PUBLICO, n),
   fix: n => path.join(FIXTURES, n),
 };

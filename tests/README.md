@@ -8,11 +8,24 @@ um PR. Este diretório existe pra isso deixar de ser verdade.
 ## Rodar
 
 ```bash
-node tests/run.js                  # todas (~40 min)
+node tests/run.js                  # todas, uma de cada vez
 node tests/run.js foto validade    # só as que casam com algum termo
-node tests/run.js --paralelo 3     # 3 de cada vez
+node tests/run.js --paralelo 2     # 2 de cada vez
+node tests/run.js --reguas         # gera os arquivos de comparação do origin/main
 node tests/run.js --lista          # só lista
 ```
+
+### `--paralelo` e vermelha que não é defeito
+
+Cada suíte sobe um **Chromium inteiro**. Acima de ~metade dos núcleos da máquina elas
+disputam CPU e aparecem vermelhas que não são defeito nenhum: a cada corrida é **outra**
+suíte, e todas passam quando rodam sozinhas.
+
+Medido numa máquina de 4 núcleos, quatro corridas com `--paralelo 2`: 0, 3, 2 e 1
+vermelhas — sempre em suítes diferentes. As mesmas suítes, sozinhas, passam 100%.
+
+**Antes de investigar qualquer vermelha, rode aquela suíte sozinha.** Se ela passar, era a
+máquina. O corredor avisa quando o `--paralelo` está alto pro número de núcleos.
 
 Uma suíte isolada roda sozinha, e é assim que se investiga uma falha — ela imprime o
 nome de cada verificação:

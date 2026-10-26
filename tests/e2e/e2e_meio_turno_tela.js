@@ -125,7 +125,21 @@ const num = (t) => parseFloat(String(t).replace(/\./g, '').replace(',', '.')) ||
   await page.waitForTimeout(250);
   await page.selectOption(`${cel(1, 0)} .turno-sel`, 'NOITE');
   await page.waitForTimeout(350);
-  await page.reload();
+
+  // A GRAVAÇÃO é contrato do app e se confere aqui, direto no localStorage: setWD grava na
+  // hora em gn_<LOJA>_allData. Antes isso só era cobrado de lado, pelo que aparecia depois
+  // do reload — e aí quem falhava era o navegador, não o app (ver recarregarPreservando).
+  const gravado = await page.evaluate(() => {
+    try {
+      const ad = JSON.parse(localStorage.getItem(`gn_${LOJA}_allData`) || 'null');
+      const wd = ad && ad[String(state.semIdx)];
+      return wd && wd.funcs && wd.funcs[1] && wd.funcs[1].turnos ? wd.funcs[1].turnos[0] : null;
+    } catch (e) { return 'erro: ' + e.message; }
+  });
+  check('o turno vai pro localStorage na hora, não só pra memória',
+    gravado === 'NOITE', 'no localStorage: ' + JSON.stringify(gravado));
+
+  await CAMINHOS.recarregarPreservando(page);
   // TABS sozinho nao prova que o script terminou — LOJA e selecionarLoja sao usados logo
   // abaixo e vinham depois. Sob carga isso virava timeout no reload.
   await CAMINHOS.esperarApp(page, ['TABS', 'LOJA'], ['selecionarLoja'], 15000);

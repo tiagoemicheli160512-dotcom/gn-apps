@@ -41,6 +41,12 @@ const RESPOSTAS = { '2026-10-12': {
 
 async function abrir(browser, { falharRelatorio } = {}) {
   const ctx = await browser.newContext({ viewport:{width:390,height:900} });
+  // Terça, fixada. O app esconde o fechamento de semana na SEGUNDA (é o dia do pedido e da
+  // contagem), então esta suíte passava de terça a domingo e ficava vermelha toda segunda —
+  // foi o que derrubou o CI na virada de domingo pra segunda. 20/10 é da mesma semana em
+  // que ela vinha passando, então só o dia deixa de ser sorteado pelo calendário.
+  await CAMINHOS.fixarRelogio(ctx, '2026-10-20T10:00:00');
+
   const pedidos = [];
   await ctx.route('**/rest/v1/**', r => {
     const req = r.request(), url = req.url(), m = req.method();
