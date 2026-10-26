@@ -486,6 +486,11 @@
        cancelado nem quem autorizou. -->
   <div id="cancel-ontem-home-card"></div>
 
+  <!-- A loja na rede: o % de cancelamento do mês e a posição entre as 11. Fica colado no
+       card de ontem porque é o mesmo assunto visto de longe — aquele é o caso do dia, este
+       é se a loja está melhorando ou não. -->
+  <div id="cancel-rede-home-card"></div>
+
   <!-- Aviso de eleição — acima do card de venda de propósito: é o primeiro recado do mês -->
   <div id="eleicoes-escala-home-card"></div>
 
@@ -5820,6 +5825,217 @@ async function _renderCancelamentosOntemHome(mostrar, sess, isMasterAtivo) {
   }
 }
 
+
+/* ── CANCELAMENTO: A LOJA NA REDE ──────────────────────────────────────────────────────
+   "Colocar um card no app home lojas, informando o percentual de cancelamento e venda e
+   apontando qual a posição da loja na rede, para alertar sobre a necessidade de atuar nos
+   cancelamentos."
+
+   O ranking já existe no Painel de Gestão, mas o Painel é de supervisor e mestre. Aqui o
+   número chega em quem fecha o caixa — a mesma plateia do card de ontem, logo acima.
+
+   Período próprio, de propósito: o do Painel segue o seletor (semana/mês) de quem está
+   olhando, e um número que muda de significado conforme o botão que o outro apertou não
+   serve pra cobrar ninguém. Aqui é sempre o mês corrente, cortado em
+   CANCEL_CONTROLE_DESDE_HOME.
+
+   Por que o corte: medido no banco em 26/10/2026, o primeiro cancelamento lançado na rede é
+   de 15/10. Com o mês inteiro no denominador, o numerador cobre metade do período e o % sai
+   pela metade — Itaquera aparecia com 1,05% quando o número honesto é 2,86%. A ORDEM não
+   muda (o numerador é o mesmo pra todas), mas o número discutido com o gerente muda muito.
+   De novembro em diante o corte não faz nada.
+
+   Cobertura antes do elogio: % baixo é "cancelou pouco" OU "não lançou". Havendo caixa
+   fechado sem lançamento e sem assinatura, o card cobra em vez de parabenizar. Medido hoje:
+   zero nas 11 lojas desde 15/10.
+
+   A Maglia fica fora pelo mesmo motivo do card de ontem: não usa o controle.              */
+const CANCEL_CONTROLE_DESDE_HOME = '2026-10-15'; // 1º cancelamento lançado na rede
+const CANCEL_REDE_CARGOS = PRA_HOJE_CARGOS;      // mesma plateia do "Pra fazer hoje"
+const CANCEL_REDE_TENTATIVAS = 2;      // uma insistência; mais que isso vira teimosia
+const CANCEL_REDE_ESPERA_MS = 10000;   // tempo pra a rajada de abertura da Home drenar
+let _cancelRedeHome = null, _cancelRedeHomeChave = '', _cancelRedeHomeIndo = false;
+
+function _cancelRedeHomePeriodo() {
+  const iso = d => d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+  const hoje = new Date();
+  const primeiro = iso(new Date(hoje.getFullYear(), hoje.getMonth(), 1));
+  const cortado = primeiro < CANCEL_CONTROLE_DESDE_HOME;
+  return { de: cortado ? CANCEL_CONTROLE_DESDE_HOME : primeiro, ate: iso(hoje), cortado };
+}
+
+async function _cancelRedeHomeBuscar() {
+  const per = _cancelRedeHomePeriodo();
+  const chave = per.de + '|' + per.ate;
+  if (_cancelRedeHome && _cancelRedeHomeChave === chave) return _cancelRedeHome;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  // Teto de tempo. As duas consultas são baratas — medidas direto no banco, 0,43s e 0,44s,
+  // 8 kB e 20 kB. O que não é barato é a largada da Home: ela dispara ~40 chamadas ao abrir,
+  // e acima do limite de conexões do navegador as últimas ficam na fila. Medido aqui, uma
+  // delas não voltou em 120s. Sem teto, o card fica "Carregando" pra sempre, que é pior que
+  // dizer que não deu: some a chance de a pessoa tentar de novo.
+  const corta = new AbortController();
+  const relogio = setTimeout(() => corta.abort(), 20000);
+  let fatRows, fechRows;
+  try {
+    [fatRows, fechRows] = await Promise.all([
+      window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${per.de}&data_operacao=lte.${per.ate}` +
+        `&select=loja,venda_salao,venda_delivery`, H, 'cancelRede:fat', null, { signal: corta.signal }),
+      // Aninhado no fechamento porque a DATA mora nele, não no cancelamento — mesma forma da
+      // consulta do Painel (dash:cancelRows).
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${per.de}&data=lte.${per.ate}` +
+        `&select=loja,data,status,sem_cancelamento_por,gn_caixa_cancelamento(valor)`, H, 'cancelRede:fech', null,
+        { signal: corta.signal }),
+    ]);
+  } finally { clearTimeout(relogio); }
+  // gnFetchJson devolve o padrão quando falha; com null dá pra distinguir falha de vazio, e
+  // um card que afirma 0% sobre uma consulta que não voltou seria pior que card nenhum.
+  if (!fatRows || !fechRows) throw new Error('consulta do card de cancelamento não voltou');
+
+  const lojas = {};
+  LOJAS_LISTA.forEach(k => {
+    if (window.gnCancelamentoLiberado && !window.gnCancelamentoLiberado(k)) return;
+    lojas[k] = { k, nome: LOJA_DISPLAY[k] || k, fat: 0, cancelado: 0, notas: 0, fechados: 0, emBranco: 0 };
+  });
+  (fatRows || []).forEach(r => {
+    const k = _normLoja(r.loja);
+    if (!lojas[k]) return;
+    lojas[k].fat += (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0);
+  });
+  (fechRows || []).forEach(r => {
+    const k = _normLoja(r.loja);
+    if (!lojas[k]) return;
+    const cs = r.gn_caixa_cancelamento || [];
+    lojas[k].notas += cs.length;
+    cs.forEach(c => { lojas[k].cancelado += (parseFloat(c.valor) || 0); });
+    if (r.status !== 'FECHADO') return;   // caixa aberto ainda pode lançar
+    lojas[k].fechados++;
+    if (!cs.length && !r.sem_cancelamento_por) lojas[k].emBranco++;
+  });
+
+  // Sem faturamento no período não dá pra calcular o % — fica fora da ordem, em vez de
+  // entrar como 0% e virar a primeira colocada. Mesma regra do ranking do Painel.
+  const ordem = Object.values(lojas).filter(l => l.fat > 0)
+    .map(l => { l.pct = l.cancelado / l.fat * 100; return l; })
+    .sort((a, b) => a.pct - b.pct);
+  const somaCanc = ordem.reduce((s, l) => s + l.cancelado, 0);
+  const somaFat  = ordem.reduce((s, l) => s + l.fat, 0);
+  _cancelRedeHome = {
+    per, lojas, ordem,
+    // Ponderada pelo faturamento, e não a média das porcentagens: uma loja de 63 mil e
+    // outra de 300 mil não podem pesar igual. É a mesma conta do total do Painel.
+    redePct: somaFat > 0 ? somaCanc / somaFat * 100 : null,
+  };
+  _cancelRedeHomeChave = chave;
+  return _cancelRedeHome;
+}
+
+// Caixa no formato do card, pro "carregando" e pro "não deu". Card que nasce vazio e some
+// quando a consulta falha é indistinguível de card que não existe.
+function _cancelRedeHomeCaixa(texto) {
+  return `<div style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid var(--t4);border-radius:18px;padding:14px 16px;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05)">
+    <div style="font-size:12px;font-weight:800;color:var(--t1);margin-bottom:3px">🧾 Cancelamento na rede</div>
+    <div style="font-size:10.5px;color:var(--t3)">${texto}</div>
+  </div>`;
+}
+
+function _cancelRedeHomeHtml(d, loja) {
+  const eu = d.lojas[loja];
+  if (!eu) return '';
+  const pc = v => v.toFixed(2).replace('.', ',') + '%';
+  const dm = iso => String(iso).slice(8,10) + '/' + String(iso).slice(5,7);
+  const pos = d.ordem.findIndex(l => l.k === loja) + 1;
+  const n = d.ordem.length;
+  // Cor pelo terço: verde no melhor, vermelho no pior. Sem posição, neutro — não há o que
+  // elogiar nem cobrar.
+  const cor = !pos ? 'var(--t4)'
+    : pos <= n / 3 ? 'var(--txt-green)'
+    : pos > n * 2 / 3 ? 'var(--txt-red)'
+    : 'var(--txt-amber)';
+
+  const linhaPos = !pos
+    ? `<div style="font-size:11px;color:var(--t3)">Sem faturamento lançado no período — sem posição na rede.</div>`
+    : `<div style="font-size:11.5px;color:var(--t2)">
+         <b style="color:${cor};font-weight:800">${pos}º de ${n}</b> na rede${d.redePct !== null
+           ? ` · rede em <b style="font-variant-numeric:tabular-nums">${pc(d.redePct)}</b>` : ''}
+       </div>`;
+
+  // A cobrança vem ANTES do elogio: com caixa em branco o % está subestimado, e dizer
+  // "você está bem" sobre um número incompleto é pior que não dizer nada.
+  const cobertura = eu.emBranco > 0
+    ? `<div style="font-size:10px;color:var(--txt-amber);margin-top:8px;line-height:1.45">
+         ⚠️ ${eu.emBranco} caixa${eu.emBranco > 1 ? 's' : ''} fechou sem lançar cancelamento e sem ninguém
+         assinar que não houve — enquanto isso, este percentual está subestimado.</div>`
+    : `<div style="font-size:10px;color:var(--t4);margin-top:8px;line-height:1.45">${eu.fechados > 0
+         ? `Todos os ${eu.fechados} caixas fechados no período têm cancelamento lançado ou assinatura de que não houve.`
+         : 'Nenhum caixa fechado no período.'}</div>`;
+
+  return `<div onclick="navTo('gn-caixa.html')" style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid ${cor};border-radius:18px;padding:14px 16px;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05);cursor:pointer">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px">
+      <div style="font-size:12px;font-weight:800;color:var(--t1)">🧾 Cancelamento na rede</div>
+      <div style="font-size:10px;font-weight:800;color:var(--t4);flex-shrink:0;font-variant-numeric:tabular-nums">${dm(d.per.de)} a ${dm(d.per.ate)}</div>
+    </div>
+    <div style="display:flex;align-items:baseline;gap:8px;margin:6px 0 4px">
+      <div style="font-size:26px;font-weight:800;color:${cor};font-variant-numeric:tabular-nums;line-height:1">${eu.fat > 0 ? pc(eu.pct) : '—'}</div>
+      <div style="font-size:10px;color:var(--t3)">do faturamento</div>
+    </div>
+    ${linhaPos}
+    <div style="font-size:10.5px;color:var(--t3);margin-top:5px;font-variant-numeric:tabular-nums">
+      ${_fmtBRL(eu.cancelado)} cancelados · ${eu.notas} nota${eu.notas === 1 ? '' : 's'}${eu.fat > 0 ? ` · de ${_fmtBRL(eu.fat)} vendidos` : ''}
+    </div>
+    ${cobertura}
+    ${d.per.cortado ? `<div style="font-size:9px;color:var(--t4);margin-top:6px;line-height:1.4">
+      O período começa em ${dm(CANCEL_CONTROLE_DESDE_HOME)}, quando o controle de cancelamento entrou no ar:
+      somar os dias anteriores ao faturamento cortaria este percentual quase pela metade.</div>` : ''}
+  </div>`;
+}
+
+async function _renderCancelRedeHome(mostrar, sess, isMasterAtivo) {
+  const el = document.getElementById('cancel-rede-home-card');
+  if (!el) return;
+  const cargo = (sess && sess.cargo || '').toLowerCase();
+  const ehMestreNaLoja = isMasterAtivo && masterLoja;
+  if (!mostrar || !sess || (!CANCEL_REDE_CARGOS.includes(cargo) && !ehMestreNaLoja)) { el.innerHTML = ''; return; }
+  const loja = ehMestreNaLoja ? masterLoja : sess.loja;
+  if (!LOJAS_LISTA.includes(loja)) { el.innerHTML = ''; return; }
+  if (window.gnCancelamentoLiberado && !window.gnCancelamentoLiberado(loja)) { el.innerHTML = ''; return; }
+
+  const per = _cancelRedeHomePeriodo();
+  if (_cancelRedeHome && _cancelRedeHomeChave === (per.de + '|' + per.ate)) {
+    el.innerHTML = _cancelRedeHomeHtml(_cancelRedeHome, loja);
+    return;
+  }
+  el.innerHTML = _cancelRedeHomeCaixa('Carregando os números da rede…');
+  if (_cancelRedeHomeIndo) return;
+  _cancelRedeHomeIndo = true;
+  // Insiste UMA vez antes de desistir. A Home dispara 44 consultas ao abrir, 38 ao mesmo
+  // tempo no pico — medido aqui, a rajada leva ~60s pra drenar, e as duas do card são só
+  // mais duas na fila. As consultas em si são baratas (0,43s e 0,44s medidas direto no
+  // banco): o que falta é vez. A segunda tentativa pega a fila já vazia.
+  // Este card mora abaixo da dobra, então esperar não custa nada a ninguém.
+  try {
+    let d = null, ultimoErro = null;
+    for (let tentativa = 1; tentativa <= CANCEL_REDE_TENTATIVAS && !d; tentativa++) {
+      try { d = await _cancelRedeHomeBuscar(); }
+      catch (e) {
+        ultimoErro = e;
+        try { window.gnLogError && window.gnLogError('home:cancelRede#' + tentativa, e); } catch (_) {}
+        if (tentativa < CANCEL_REDE_TENTATIVAS) {
+          await new Promise(r => setTimeout(r, CANCEL_REDE_ESPERA_MS));
+        }
+      }
+    }
+    const el2 = document.getElementById('cancel-rede-home-card');
+    if (!el2) return;
+    el2.innerHTML = d
+      ? _cancelRedeHomeHtml(d, loja)
+      : _cancelRedeHomeCaixa('Não deu pra carregar agora. Abra de novo daqui a pouco.');
+    if (!d && ultimoErro) { /* já registrado acima, por tentativa */ }
+  } finally {
+    _cancelRedeHomeIndo = false;
+  }
+}
+
 // ── Sino de notificações no cabeçalho ──────────────────────────────────────
 // Ponto único e sempre visível (não depende de rolar a tela) pro que já é
 // calculado em outros lugares: os alertas do Painel de Gestão consolidado
@@ -5934,6 +6150,7 @@ function _refreshPermUI(sess) {
   const _mostrarCards = (!isMaster || !!masterLoja) && !_ehCargoModuloUnico(sess);
   _renderPraHojeHome(_mostrarCards, sess, isMaster);
   _renderCancelamentosOntemHome(_mostrarCards, sess, isMaster);
+  _renderCancelRedeHome(_mostrarCards, sess, isMaster);
   _renderAvisoEleicoesHome(_mostrarCards, sess, isMaster);
   _renderVendaMesHome(_mostrarCards, sess, isMaster);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
@@ -6180,6 +6397,7 @@ function showHome(sess) {
   const _mostrarCards = (!isMaster || !!masterLoja) && !_ehCargoModuloUnico(sess);
   _renderPraHojeHome(_mostrarCards, sess, isMaster);
   _renderCancelamentosOntemHome(_mostrarCards, sess, isMaster);
+  _renderCancelRedeHome(_mostrarCards, sess, isMaster);
   _renderAvisoEleicoesHome(_mostrarCards, sess, isMaster);
   _renderVendaMesHome(_mostrarCards, sess, isMaster);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
