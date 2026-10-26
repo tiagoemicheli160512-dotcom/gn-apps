@@ -11532,6 +11532,252 @@ function _buildBarrisSemanalPanel(){
     ${linhas}`;
 }
 
+
+/* ── ABA 🥩 CARNES ─────────────────────────────────────────────────────────────────────
+   "Temos no app estoque e pedido a aba carne, precisava trazer essa aba pro app home
+   painel de gestão (...) para que eu possa gerar os relatórios dali diretamente, mantendo
+   o padrão da aba, e ter o padrão de selecionar por loja ou selecionar todas de uma vez,
+   como na foto do barril."
+
+   Conteúdo igual ao do app Pedidos (início + compras − contagem = venda estimada);
+   seleção e relatórios iguais aos do Barris (checkbox por loja, nenhuma marcada = todas,
+   WhatsApp / PDF / PDF no Whats).
+
+   ── A pergunta junto do pedido: "por que algumas lojas sobem certinho e outras não" ───
+   Medido no banco em 26/10/2026, semana 19/10–25/10: as 4 lojas com contagem gravada
+   (Boulevard, Campo Grande, Caxias, Nova América) tiveram a linha escrita entre 13h27 e
+   14h52 de hoje; as 7 sem contagem foram escritas entre 25/10 21h e 26/10 03h — ou seja,
+   na virada da semana, antes de alguém contar. Nenhum dado se perdeu no caminho: a linha
+   da semana nasce com o `inicial` e o `contagem_final` só entra quando a loja de fato
+   conta, na segunda. "Não subiu" e "ainda não contaram" são a mesma coisa vista de fora.
+
+   O mecanismo, pra quem for mexer nisto depois: a contagem de 2ª é lançada na aba Carnes
+   do CHECK-LIST como `contagem_final` da semana que começa naquela segunda. Ao salvar, o
+   app copia o valor pro `inicial` daquela semana, limpa o `contagem_final` dela e só então
+   PROPAGA o valor como `contagem_final` da semana ANTERIOR — que é a que fecha. Ou seja: a
+   semana passada só ganha contagem quando a loja faz o fechamento de 2ª no Check-list. Fez
+   tarde, fecha tarde; não fez, fica zerada pra sempre. E a propagação é condicionada a já
+   existir linha da semana anterior (`if(prevRow)` em gn-checklist.html): não existindo, o
+   valor é descartado em silêncio.
+
+   Por isso esta aba separa os dois estados em vez de mostrar tela vazia, que era o que o
+   app Pedidos fazia e o que criava a dúvida. Semanas inteiras ficaram sem contagem e
+   ninguém viu: 05/10 fechou com 6 lojas em zero, e Guarulhos aparece zerada em 4 das 7
+   semanas medidas.
+
+   Também marca o `inicial` ausente: sem ele a venda estimada é só a contagem invertida, e
+   na semana 12/10 cinco lojas gravaram contagem com inicial zerado.                     */
+// Reaproveita CARNES_DEF_HOME e DIAS_SEMANA_HOME, já declarados lá em cima pro card
+// "Documentos & Carnes" da Home — são os mesmos 4 cortes e os mesmos 7 dias. Declarar de
+// novo aqui derrubava o arquivo inteiro: `const` repetido é SyntaxError, e com o script
+// inteiro num bloco só nada depois carregava.
+
+let _carnesGerData = null, _carnesGerLoaded = false, _carnesGerOff = 0;
+let _carnesRelatorioLojasFiltro = [];
+
+// Abre na semana PASSADA, igual ao app Pedidos: a contagem da semana corrente ainda está
+// sendo feita, e abrir nela mostraria tudo vazio pra todo mundo.
+function _carnesSemanaIni(off) {
+  const d = new Date();
+  const dia = d.getDay();                       // 0=dom
+  d.setDate(d.getDate() - ((dia + 6) % 7));     // segunda desta semana
+  d.setDate(d.getDate() - 7 + (off || 0) * 7);  // semana passada, mais a navegação
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+const _carnesISO = d => d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+const _carnesDM  = iso => String(iso).slice(8,10) + '/' + String(iso).slice(5,7);
+
+async function _loadCarnesGerencia() {
+  _carnesGerLoaded = false; _carnesGerData = null;
+  const ini = _carnesSemanaIni(_carnesGerOff);
+  const fim = new Date(ini.getTime() + 6 * 864e5);
+  const iniISO = _carnesISO(ini), fimISO = _carnesISO(fim);
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  // Intervalo, não a segunda exata: há linhas gravadas com semana_inicio em outro dia da
+  // semana (sábado, domingo, terça, sexta) e em algumas delas essa é a ÚNICA linha da
+  // semana — pegando só a segunda, a loja inteira sumia. Mesmo cuidado do app Pedidos.
+  const rows = await window.gnFetchJson(
+    `${SB_URL}/rest/v1/checklist_carnes?semana_inicio=gte.${iniISO}&semana_inicio=lte.${fimISO}` +
+    `&select=loja,semana_inicio,carnes,updated_at&order=updated_at.desc`,
+    H, 'carnesGerencia', null);
+  if (!rows) { _carnesGerLoaded = true; _carnesGerData = { erro: true, iniISO, fimISO }; renderDashboard(); return; }
+
+  const porLoja = {};
+  // Maglia não tem aba Carnes no Check-list (CLAUDE.md / ABAS_FORA_MAGLIA), então ela
+  // apareceria como "nunca lançou" todo santo dia — uma cobrança falsa.
+  LOJAS_LISTA.filter(k => k !== 'MAGLIA')
+    .forEach(k => { porLoja[k] = { k, carnes: null, semana_inicio: null, updated_at: null }; });
+  (rows || []).forEach(r => {
+    const k = _normLoja(r.loja);
+    if (!porLoja[k] || !r.carnes) return;
+    const atual = porLoja[k];
+    // A da segunda ganha; no empate, a mais recente (a consulta já vem por updated_at desc).
+    const melhor = !atual.carnes
+      || (r.semana_inicio === iniISO && atual.semana_inicio !== iniISO);
+    if (melhor) { atual.carnes = r.carnes; atual.semana_inicio = r.semana_inicio; atual.updated_at = r.updated_at; }
+  });
+  _carnesGerData = { porLoja, iniISO, fimISO };
+  _carnesGerLoaded = true;
+  renderDashboard();
+}
+
+// Conta de um corte. Devolve null em `contagem` quando a loja não lançou — null e zero não
+// são a mesma coisa aqui: zero é "contei e não tinha", null é "ninguém contou".
+function _carnesDoCorte(carnes, key) {
+  const d = (carnes || {})[key] || {};
+  const n = v => { const x = parseFloat(v); return isFinite(x) ? x : 0; };
+  const temContagem = d.contagem_final !== undefined && d.contagem_final !== null && String(d.contagem_final).trim() !== '';
+  const inicial = n(d.inicial);
+  const entradas = DIAS_SEMANA_HOME.reduce((a, dia) => a + n(d['ent_' + dia]), 0);
+  const contagem = temContagem ? n(d.contagem_final) : null;
+  return {
+    inicial, entradas, contagem,
+    temInicial: d.inicial !== undefined && d.inicial !== null && String(d.inicial).trim() !== '' && inicial > 0,
+    venda: contagem === null ? null : inicial + entradas - contagem,
+  };
+}
+function _carnesLojaContou(d) {
+  if (!d || !d.carnes) return false;
+  return CARNES_DEF_HOME.some(c => _carnesDoCorte(d.carnes, c.key).contagem !== null);
+}
+
+function _carnesFiltroLojaToggle(key, marcado) {
+  _carnesRelatorioLojasFiltro = marcado
+    ? [..._carnesRelatorioLojasFiltro.filter(k => k !== key), key]
+    : _carnesRelatorioLojasFiltro.filter(k => k !== key);
+}
+function _carnesLojaFiltroHtml(porLoja) {
+  const chaves = Object.keys(porLoja).sort((a,b)=>(LOJA_DISPLAY[a]||a).localeCompare(LOJA_DISPLAY[b]||b));
+  const checks = chaves.map(k => `<label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--t2);cursor:pointer">
+      <input type="checkbox" value="${k}" ${_carnesRelatorioLojasFiltro.includes(k)?'checked':''} onchange="_carnesFiltroLojaToggle('${k}',this.checked)">
+      ${LOJA_DISPLAY[k]||k}
+    </label>`).join('');
+  return `<div style="margin-bottom:8px">
+    <label style="font-size:10px;color:var(--t3);font-weight:700;display:block;margin-bottom:4px">Relatório de (marque 1+ lojas; nenhuma marcada = todas):</label>
+    <div style="display:flex;flex-wrap:wrap;gap:6px 14px;padding:8px 10px;background:var(--s1);border:1px solid rgba(0,0,0,.08);border-radius:8px">${checks}</div>
+  </div>`;
+}
+function _carnesLojasDoRelatorio(porLoja) {
+  const todas = Object.keys(porLoja);
+  const validas = _carnesRelatorioLojasFiltro.filter(k => todas.includes(k));
+  return validas.length ? validas : todas;
+}
+function _carnesNavSemana(dir) {
+  const novo = _carnesGerOff + dir;
+  if (novo > 0) return;              // não existe contagem de semana futura
+  _carnesGerOff = novo;
+  _loadCarnesGerencia();
+  renderDashboard();
+}
+
+function _buildCarnesPanel() {
+  const reportBtns = _reportBtnsRowHtml('Carnes');
+  if (!_carnesGerLoaded || !_carnesGerData) return reportBtns + _skelPanel(4);
+  if (_carnesGerData.erro) {
+    return reportBtns + `<div style="font-size:12px;color:var(--t3);padding:14px">Não deu pra carregar a contagem de carnes agora. Troque de aba e volte.</div>`;
+  }
+  const { porLoja, iniISO, fimISO } = _carnesGerData;
+  const kg = v => (Math.round(v * 10) / 10).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+
+  const chaves = Object.keys(porLoja).sort((a,b)=>(LOJA_DISPLAY[a]||a).localeCompare(LOJA_DISPLAY[b]||b));
+  const semContagem = chaves.filter(k => !_carnesLojaContou(porLoja[k]));
+
+  const navHtml = `<div style="display:flex;align-items:center;justify-content:center;gap:12px;background:var(--s2);border:1px solid var(--b1);border-radius:12px;padding:8px 10px;margin-bottom:10px">
+    <button onclick="_carnesNavSemana(-1)" style="background:none;border:1px solid rgba(0,0,0,.15);border-radius:8px;color:var(--t2);font-size:14px;padding:2px 10px;cursor:pointer;font-family:inherit">‹</button>
+    <div style="text-align:center">
+      <div style="font-size:11px;font-weight:800;color:var(--t1);letter-spacing:.5px">${_carnesDM(iniISO)} – ${_carnesDM(fimISO)}</div>
+      <div style="font-size:9.5px;color:var(--t4)">${_carnesGerOff === 0 ? 'semana passada' : 'semana fechada'}</div>
+    </div>
+    <button onclick="_carnesNavSemana(1)" ${_carnesGerOff >= 0 ? 'disabled style="opacity:.3;' : 'style="'}background:none;border:1px solid rgba(0,0,0,.15);border-radius:8px;color:var(--t2);font-size:14px;padding:2px 10px;cursor:pointer;font-family:inherit">›</button>
+  </div>`;
+
+  // Quem não contou vem em cima e com nome: é o que pede ação, e foi exatamente o que
+  // ficava invisível quando a tela só mostrava vazio.
+  const avisoHtml = semContagem.length
+    ? `<div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:12px;padding:11px 14px;margin-bottom:10px">
+        <div style="font-size:12px;font-weight:800;color:var(--txt-red);margin-bottom:3px">⚠ ${semContagem.length} de ${chaves.length} lojas ainda não lançaram a contagem</div>
+        <div style="font-size:10.5px;color:var(--t2);line-height:1.5">${semContagem.map(k => LOJA_DISPLAY[k]||k).join(' · ')}</div>
+        <div style="font-size:9.5px;color:var(--t4);margin-top:5px">A contagem fecha na segunda, pelo app Lojas. Sem ela não há venda estimada — o dado não se perdeu, ele não foi lançado.</div>
+      </div>`
+    : `<div style="background:rgba(22,163,74,.08);border:1px solid rgba(22,163,74,.25);border-radius:12px;padding:10px 14px;margin-bottom:10px;font-size:11.5px;color:var(--txt-green);font-weight:700">✅ As ${chaves.length} lojas lançaram a contagem desta semana.</div>`;
+
+  const linhas = chaves.map(k => {
+    const d = porLoja[k];
+    const contou = _carnesLojaContou(d);
+    const cor = COR_LOJA[k] || '#b81a1a';
+    const quando = d.updated_at ? new Date(d.updated_at).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }) : null;
+    const cortesHtml = CARNES_DEF_HOME.map(c => {
+      const r = _carnesDoCorte(d.carnes, c.key);
+      if (r.contagem === null) {
+        return `<div style="display:flex;justify-content:space-between;gap:8px;font-size:10.5px;color:var(--t4);padding:3px 0;border-top:1px dashed rgba(0,0,0,.08)">
+          <span>${c.icon} ${c.label}</span><span>sem contagem</span></div>`;
+      }
+      const avisoIni = r.temInicial ? '' : ` <span style="color:var(--txt-amber);font-weight:700" title="Sem estoque inicial, a venda estimada é só a contagem invertida">⚠ sem inicial</span>`;
+      return `<div style="padding:4px 0;border-top:1px dashed rgba(0,0,0,.08)">
+        <div style="display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--t1);font-weight:700">
+          <span>${c.icon} ${c.label}${avisoIni}</span>
+          <span style="color:var(--txt-green);font-variant-numeric:tabular-nums">${kg(r.venda)} kg</span>
+        </div>
+        <div style="font-size:9.5px;color:var(--t3);font-variant-numeric:tabular-nums">início ${kg(r.inicial)} + compras ${kg(r.entradas)} − contagem ${kg(r.contagem)}</div>
+      </div>`;
+    }).join('');
+    return `<div style="background:var(--s2);border:1px solid rgba(0,0,0,.08);border-left:3px solid ${cor};border-radius:12px;padding:11px 14px;margin-bottom:8px;box-shadow:0 1px 3px rgba(0,0,0,.06)">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px">
+        <div style="font-size:12px;font-weight:800;color:var(--t1)">${LOJA_DISPLAY[k]||k}</div>
+        <div style="font-size:10px;font-weight:700;color:${contou ? '#16a34a' : '#dc2626'}">${contou ? '✅ contou' + (quando ? ' · ' + quando : '') : '⚠ não lançou'}</div>
+      </div>
+      ${cortesHtml}
+    </div>`;
+  }).join('');
+
+  return _carnesLojaFiltroHtml(porLoja) + reportBtns + navHtml + `<div style="font-size:11px;color:var(--t4);margin-bottom:10px">
+      Contagem de carnes da semana fechada — lançada na segunda pela loja, na aba Contagem do app Lojas.<br>
+      A venda estimada é <b>início + compras − contagem</b>; sem contagem lançada ela não existe.</div>
+    ${avisoHtml}${linhas}`;
+}
+
+// ── Relatórios da aba 🥩 Carnes (mesmo padrão de gerarWpp/gerarPDF/enviarPDF...Wpp) ───
+function _carnesRelatorioTexto(wpp) {
+  if (!_carnesGerLoaded || !_carnesGerData || _carnesGerData.erro) return null;
+  const { porLoja, iniISO, fimISO } = _carnesGerData;
+  const kg = v => (Math.round(v * 10) / 10).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  const b = s => wpp ? '*' + s + '*' : s;
+  const lojas = _carnesLojasDoRelatorio(porLoja).sort((a,b2)=>(LOJA_DISPLAY[a]||a).localeCompare(LOJA_DISPLAY[b2]||b2));
+  const tituloFiltro = lojas.length < Object.keys(porLoja).length
+    ? ' — ' + lojas.map(k => LOJA_DISPLAY[k]||k).join(', ') : '';
+  let msg = `${wpp ? '🥩 ' : ''}${b('CONTROLE DE CARNES' + tituloFiltro)}\nSemana ${_carnesDM(iniISO)} a ${_carnesDM(fimISO)}\n`;
+  const naoContaram = [];
+  lojas.forEach(k => {
+    const d = porLoja[k];
+    msg += `\n${wpp ? '🏪 ' : ''}${b(LOJA_DISPLAY[k]||k)}\n`;
+    if (!_carnesLojaContou(d)) { msg += `  ⚠ Não lançou a contagem desta semana\n`; naoContaram.push(LOJA_DISPLAY[k]||k); return; }
+    CARNES_DEF_HOME.forEach(c => {
+      const r = _carnesDoCorte(d.carnes, c.key);
+      if (r.contagem === null) { msg += `  ${c.label}: sem contagem\n`; return; }
+      msg += `  ${c.label}: ${kg(r.venda)} kg vendidos\n`;
+      msg += `    início ${kg(r.inicial)} + compras ${kg(r.entradas)} - contagem ${kg(r.contagem)}${r.temInicial ? '' : '  (sem inicial)'}\n`;
+    });
+  });
+  if (naoContaram.length) msg += `\n${b('Sem contagem lançada')}: ${naoContaram.join(', ')}\n`;
+  return { msg, titulo: 'Controle de Carnes' + tituloFiltro };
+}
+function gerarWppCarnes() {
+  const r = _carnesRelatorioTexto(true);
+  if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  window.open('https://wa.me/?text=' + encodeURIComponent(r.msg), '_blank');
+}
+function gerarPDFCarnes() {
+  const r = _carnesRelatorioTexto(false);
+  if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  gerarPDF(r.msg, r.titulo);
+}
+async function enviarPDFCarnesWpp() {
+  const r = _carnesRelatorioTexto(false);
+  if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  await _compartilharPdfWpp(r.msg, r.titulo);
+}
+
 // ── Relatórios da aba 🍺 Barris (mesmo padrão de gerarWpp/gerarPDF/enviarPDF...Wpp já
 // usado em Xadrez/Férias/Alertas — ver _reportBtnsRowHtml) ────────────────────────────
 function _barrisSemRelatorioTexto(){
@@ -12709,6 +12955,9 @@ function renderDashboard() {
   } else if (_dashTab==='barris') {
     content = _buildBarrisSemanalPanel();
 
+  } else if (_dashTab==='carnes') {
+    content = _buildCarnesPanel();
+
   } else if (_dashTab==='dre') {
     content = _buildDreRedePanel();
 
@@ -12753,10 +13002,11 @@ function renderDashboard() {
         <button class="dash-tab${_dashTab==='xadrez'?' on':''}" onclick="_setDashTab('xadrez')">🔀 Xadrez</button>
         <button class="dash-tab${_dashTab==='bi'?' on':''}" onclick="_setDashTab('bi')">📊 BI</button>
         <button class="dash-tab${_dashTab==='barris'?' on':''}" onclick="_setDashTab('barris')">🍺 Barris</button>
+        <button class="dash-tab${_dashTab==='carnes'?' on':''}" onclick="_setDashTab('carnes')">🥩 Carnes</button>
         <button class="dash-tab${_dashTab==='dre'?' on':''}" onclick="_setDashTab('dre')">💰 DRE</button>
         <button class="dash-tab${_dashTab==='metas'?' on':''}" onclick="_setDashTab('metas')">⚙ Metas</button>
       </div>
-      ${(_dashTab!=='metas'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris'&&_dashTab!=='dre')?periodRow:''}
+      ${(_dashTab!=='metas'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris'&&_dashTab!=='carnes'&&_dashTab!=='dre')?periodRow:''}
       ${content}
     </div>`;
   _updateHdrBell();
@@ -12768,6 +13018,7 @@ function _setDashTab(t){
   if(t==='ferias'&&!_dashEquipeUsuarios) _loadFeriasEquipe();
   if(t==='xadrez'&&!_xadrezMovsLoaded) _loadXadrezPendente();
   if(t==='barris'&&!_barrisSemGerenciaLoaded) _loadBarrisSemanalGerencia();
+  if(t==='carnes'&&!_carnesGerLoaded) _loadCarnesGerencia();
   renderDashboard();
 }
 function _navToAtt(){ const el=document.getElementById('dash-section'); if(el)el.scrollIntoView({behavior:'smooth'}); _setDashTab('att'); }
