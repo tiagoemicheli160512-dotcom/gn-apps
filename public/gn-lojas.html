@@ -9164,6 +9164,12 @@ function render() {
         </div>`;
       })()}
 
+      <!-- Preenchido por _cancelRedeCardHome(): depende de consulta, então nasce vazio.
+           Fica DEPOIS dos alertas operacionais (estoque crítico, ruptura, entrega, nota) —
+           aqueles só aparecem quando há problema e precisam vir primeiro; este é placar e
+           aparece sempre. -->
+      <div id="cancelRedeCard"></div>
+
       ${!lojaForcada ? `<div>
         <div class="sec-label">Outras lojas</div>
         <div class="lojas-grid">
@@ -11403,6 +11409,212 @@ function render() {
     html2 += `<button onclick="goTab('transf')" style="margin-top:8px;width:100%;background:rgba(245,158,11,.3);border:1px solid rgba(245,158,11,.5);border-radius:10px;padding:7px 0;color:var(--txt-amber);font-size:12px;font-weight:700">Ver Empréstimos →</button></div>`;
     el.innerHTML = html2;
   }, 50);
+
+  /* Cancelamento da loja na rede, na Home */
+  if (tab === "home") setTimeout(_cancelRedeCardHome, 60);
+}
+
+
+
+/* ═══════════ CANCELAMENTO — A LOJA NA REDE ═══════════════════════════════════════════
+   Pedido do dono: "colocar um card no app home lojas, informando o percentual de
+   cancelamento e venda e apontando qual a posição da loja na rede, para alertar sobre a
+   necessidade de atuar nos cancelamentos."
+
+   O ranking já existe no Painel de Gestão (_cancelRankingLinhas em gn-home.html), mas lá
+   quem olha é a supervisão. Aqui o número chega em quem pode agir no dia seguinte.
+
+   ── Por que o período começa no controle, e não no dia 1º ──────────────────────────────
+   O % é (cancelado ÷ faturamento) do período, e o Painel usa o mês corrente inteiro.
+   Medido no banco em 26/10/2026: o primeiro cancelamento lançado na rede é de 15/10, e os
+   14 caixas "em branco" que cada loja tinha no mês eram todos de 1 a 14/10 — de antes de o
+   controle existir. Com o mês inteiro no denominador, o numerador cobre só metade do
+   período, e o % sai pela metade: Itaquera aparecia com 1,05% quando o número honesto é
+   2,86%.
+
+   A ORDEM do ranking não muda com isso (o numerador é o mesmo pra todas), mas o NÚMERO na
+   tela muda muito — e é o número que vai ser discutido com o gerente. Então o período é
+   max(1º do mês, CANCEL_CONTROLE_DESDE). De novembro em diante o corte não faz nada.
+
+   ── E a cobertura ─────────────────────────────────────────────────────────────────────
+   Um % baixo significa duas coisas opostas: cancelou pouco, ou não lançou. Então o card
+   conta os caixas que fecharam SEM lançamento e SEM assinatura de "não houve" — tendo
+   algum, o % está subestimado e o card diz isso em vez de dar parabéns. Medido hoje: zero
+   em todas as 11 lojas desde 15/10, ou seja, a rede está lançando.
+
+   A Maglia não entra: ela não usa o controle de cancelamento (GN_CANCELAMENTO_FORA, em
+   gn-lojas-config.js), então o card não existe pra ela — mostrar "0%" afirmaria uma coisa
+   falsa, e posição na rede não faria sentido pra quem está fora da regra.                */
+const CANCEL_CONTROLE_DESDE = '2026-10-15'; // 1º cancelamento lançado na rede; antes disso não há o que medir
+
+let _cancelRede      = null;  // resultado do período, pra não refazer a consulta a cada render()
+let _cancelRedeChave = '';    // período que o cache representa
+let _cancelRedeIndo  = false; // consulta em voo
+
+// A chave da loja chega de um jeito em cada tabela: checklist_diario usa o chkKey
+// ("Nova América"), gn_caixa_fechamento usa o userKey ("NOVA AMERICA"). O mapa sai do
+// GN_LOJAS, a fonte canônica, em vez de uma normalização escrita à mão — era justamente
+// um upper() à mão que partia a Nova América em duas lojas quando eu medi isto.
+const _CANCEL_CHAVE_LOJA = (function () {
+  const m = {};
+  (window.GN_LOJAS || []).forEach(function (l) {
+    [l.userKey, l.chkKey, l.comKey, l.lojaSlug].forEach(function (v) {
+      if (v) m[String(v).trim().toUpperCase()] = l.userKey;
+    });
+  });
+  return m;
+})();
+function _cancelLojaKey(n) { return _CANCEL_CHAVE_LOJA[String(n || '').trim().toUpperCase()] || null; }
+
+function _cancelRedePeriodo() {
+  const hoje = new Date();
+  const primeiro = wkKey(new Date(hoje.getFullYear(), hoje.getMonth(), 1));
+  const cortado = primeiro < CANCEL_CONTROLE_DESDE;
+  return { de: cortado ? CANCEL_CONTROLE_DESDE : primeiro, ate: wkKey(hoje), cortado: cortado };
+}
+
+async function _cancelRedeBuscar() {
+  const per = _cancelRedePeriodo();
+  const chave = per.de + '|' + per.ate;
+  if (_cancelRede && _cancelRedeChave === chave) return _cancelRede;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const pega = async function (url, tag) {
+    const r = await fetch(url, { headers: H });
+    if (!r.ok) throw new Error(tag + ': HTTP ' + r.status);
+    return await r.json();
+  };
+  const [fatRows, fechRows] = await Promise.all([
+    pega(`${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${per.de}&data_operacao=lte.${per.ate}` +
+         `&select=loja,venda_salao,venda_delivery`, 'cancelRede:fat'),
+    // Os cancelamentos vêm aninhados no fechamento porque a DATA mora no fechamento, não
+    // no cancelamento — mesma forma da consulta do Painel (dash:cancelRows).
+    pega(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${per.de}&data=lte.${per.ate}` +
+         `&select=loja,data,status,sem_cancelamento_por,gn_caixa_cancelamento(valor)`, 'cancelRede:fech'),
+  ]);
+
+  const lojas = {};
+  (window.GN_LOJAS || []).forEach(function (l) {
+    if (window.gnCancelamentoLiberado && !window.gnCancelamentoLiberado(l.userKey)) return;
+    lojas[l.userKey] = { k: l.userKey, nome: l.display, fat: 0, cancelado: 0, notas: 0, fechados: 0, emBranco: 0 };
+  });
+
+  (fatRows || []).forEach(function (r) {
+    const k = _cancelLojaKey(r.loja);
+    if (!k || !lojas[k]) return;
+    lojas[k].fat += (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0);
+  });
+
+  (fechRows || []).forEach(function (r) {
+    const k = _cancelLojaKey(r.loja);
+    if (!k || !lojas[k]) return;
+    const cs = r.gn_caixa_cancelamento || [];
+    lojas[k].notas += cs.length;
+    cs.forEach(function (c) { lojas[k].cancelado += (parseFloat(c.valor) || 0); });
+    if (r.status !== 'FECHADO') return;   // caixa aberto ainda pode lançar
+    lojas[k].fechados++;
+    // Em branco: fechou, não lançou nada e ninguém assinou que não houve. É o que torna
+    // um % baixo não confiável — e o que o card precisa cobrar antes de elogiar.
+    if (!cs.length && !r.sem_cancelamento_por) lojas[k].emBranco++;
+  });
+
+  // Sem faturamento no período não dá pra calcular o %, e chutar zero jogaria a loja pro
+  // topo como se fosse a melhor — mesma regra do ranking do Painel: fica fora da ordem.
+  const ordem = Object.values(lojas).filter(function (l) { return l.fat > 0; })
+    .map(function (l) { l.pct = l.cancelado / l.fat * 100; return l; })
+    .sort(function (a, b) { return a.pct - b.pct; });
+  const somaCanc = ordem.reduce(function (s, l) { return s + l.cancelado; }, 0);
+  const somaFat  = ordem.reduce(function (s, l) { return s + l.fat; }, 0);
+
+  _cancelRede = {
+    per: per, lojas: lojas, ordem: ordem,
+    // Média da rede ponderada pelo faturamento — é a mesma conta do total do Painel, e não
+    // a média das porcentagens, que daria peso igual a uma loja de 60 mil e outra de 300 mil.
+    redePct: somaFat > 0 ? somaCanc / somaFat * 100 : null,
+  };
+  _cancelRedeChave = chave;
+  return _cancelRede;
+}
+
+function _cancelRedeHtml(d) {
+  const eu = d.lojas[loja];
+  if (!eu) return '';
+  const fR  = function (v) { return Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
+  const pc  = function (v) { return v.toFixed(2).replace('.', ',') + '%'; };
+  const dm  = function (iso) { return String(iso).slice(8, 10) + '/' + String(iso).slice(5, 7); };
+  const pos = d.ordem.findIndex(function (l) { return l.k === loja; }) + 1;
+  const n   = d.ordem.length;
+
+  // Cor pelo terço em que a loja está: verde no melhor, vermelho no pior. Sem posição
+  // (loja sem faturamento lançado), fica neutro — não há o que elogiar nem cobrar.
+  const tom = !pos ? { c: 'var(--t2)',          rgb: '100,116,139' }
+            : pos <= n / 3 ? { c: 'var(--txt-green)', rgb: '16,185,129' }
+            : pos > n * 2 / 3 ? { c: 'var(--txt-red)',   rgb: '239,68,68' }
+            : { c: 'var(--txt-amber)', rgb: '245,158,11' };
+
+  const periodo = `${dm(d.per.de)} a ${dm(d.per.ate)}`;
+  const linhaPos = !pos
+    ? `<div style="font-size:11px;color:var(--t3)">Sem faturamento lançado no período — sem posição na rede.</div>`
+    : `<div style="font-size:11px;color:var(--t2)">
+         <b style="color:${tom.c};font-weight:800">${pos}º de ${n}</b> na rede
+         ${d.redePct !== null ? ` · rede em <b style="font-variant-numeric:tabular-nums">${pc(d.redePct)}</b>` : ''}
+       </div>`;
+
+  // A cobrança vem ANTES do elogio: com caixa em branco o % está subestimado, e dizer
+  // "você está bem" sobre um número incompleto é pior que não dizer nada.
+  const cobertura = eu.emBranco > 0
+    ? `<div style="font-size:10px;color:var(--txt-amber);margin-top:8px;line-height:1.45">
+         ⚠️ ${eu.emBranco} caixa${eu.emBranco > 1 ? 's' : ''} fechou sem lançar cancelamento e sem ninguém
+         assinar que não houve — enquanto isso, este percentual está subestimado.
+       </div>`
+    : `<div style="font-size:10px;color:var(--t3);margin-top:8px;line-height:1.45">
+         ${eu.fechados > 0
+            ? `Todos os ${eu.fechados} caixas fechados no período têm cancelamento lançado ou assinatura de que não houve.`
+            : 'Nenhum caixa fechado no período.'}
+       </div>`;
+
+  return `<div style="background:rgba(${tom.rgb},.1);border:1px solid rgba(${tom.rgb},.3);border-radius:14px;padding:14px">
+    <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap">
+      <div style="font-size:13px;font-weight:800;color:${tom.c}">🧾 Cancelamento</div>
+      <div style="font-size:9.5px;color:var(--t3);font-variant-numeric:tabular-nums">${periodo}</div>
+    </div>
+    <div style="display:flex;align-items:baseline;gap:8px;margin-top:6px">
+      <div style="font-size:26px;font-weight:800;color:${tom.c};font-variant-numeric:tabular-nums;line-height:1">
+        ${eu.fat > 0 ? pc(eu.pct) : '—'}
+      </div>
+      <div style="font-size:10px;color:var(--t3)">do faturamento</div>
+    </div>
+    <div style="margin-top:6px">${linhaPos}</div>
+    <div style="font-size:10.5px;color:var(--t3);margin-top:6px;font-variant-numeric:tabular-nums">
+      R$ ${fR(eu.cancelado)} cancelados · ${eu.notas} nota${eu.notas === 1 ? '' : 's'}
+      ${eu.fat > 0 ? ` · de R$ ${fR(eu.fat)} vendidos` : ''}
+    </div>
+    ${cobertura}
+    ${d.per.cortado ? `<div style="font-size:9px;color:var(--t3);margin-top:6px;line-height:1.4">
+      O período começa em ${dm(CANCEL_CONTROLE_DESDE)}, quando o controle de cancelamento entrou no ar:
+      somar os dias anteriores ao faturamento cortaria este percentual quase pela metade.
+    </div>` : ''}
+  </div>`;
+}
+
+// Preenche o card da Home. Falha de rede não pode derrubar a Home — some o card e segue.
+function _cancelRedeCardHome() {
+  const el = document.getElementById('cancelRedeCard');
+  if (!el) return;
+  if (window.gnCancelamentoLiberado && !window.gnCancelamentoLiberado(loja)) { el.innerHTML = ''; return; }
+  if (!_CANCEL_CHAVE_LOJA[String(loja).trim().toUpperCase()]) { el.innerHTML = ''; return; }  // LOJA TESTE e afins
+  if (_cancelRede && _cancelRedeChave === (_cancelRedePeriodo().de + '|' + _cancelRedePeriodo().ate)) {
+    el.innerHTML = _cancelRedeHtml(_cancelRede);
+    return;
+  }
+  if (_cancelRedeIndo) return;
+  _cancelRedeIndo = true;
+  _cancelRedeBuscar()
+    .then(function (d) {
+      const el2 = document.getElementById('cancelRedeCard');
+      if (el2 && tab === 'home') el2.innerHTML = _cancelRedeHtml(d);
+    })
+    .catch(function (e) { try { window.gnLogError && window.gnLogError('cancelRede', e); } catch (_) {} })
+    .finally(function () { _cancelRedeIndo = false; });
 }
 
 
