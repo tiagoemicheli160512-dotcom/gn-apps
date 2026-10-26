@@ -85,10 +85,14 @@ const FECH = [
     // Espera o card existir de verdade (a 1ª loja ainda passa pela consulta); pra Maglia
     // ele fica vazio de propósito, então quem checa vazio espera por tempo, não por texto.
     try {
+      // "tem conteúdo" não serve como critério: o esqueleto de carregando também tem, e a
+      // espera voltava com ELE em vez do card — foi assim que a verificação de novembro
+      // passou a ler "Carregando os números da rede". O card pronto sempre diz
+      // "do faturamento", com ou sem percentual; o esqueleto nunca.
       await page.waitForFunction(() => {
         const e = document.getElementById('cancelRedeCard');
-        return e && e.innerHTML.trim().length > 50;
-      }, { timeout: 8000 });
+        return e && /do faturamento|Sem faturamento lançado/.test(e.textContent || '');
+      }, { timeout: 12000 });
     } catch (e) { /* deixa a verificação dizer o que faltou */ }
     return await page.evaluate(() => {
       const e = document.getElementById('cancelRedeCard');
@@ -213,6 +217,102 @@ const FECH = [
     lojaAberta.loja === 'MAGLIA' && lojaAberta.forcada === 'MAGLIA', JSON.stringify(lojaAberta));
   check('e aí o card não gasta nenhuma das duas consultas', doCard === 0, 'consultas do card=' + doCard);
   await ctx2.close();
+
+  // ── O card tem que ser ACHÁVEL ──────────────────────────────────────────────────────
+  // Isto nasceu de um defeito real: o card funcionava, e mesmo assim o dono abriu o app e
+  // disse que não tinha aparecido. Medido no arquivo em produção, com sessão de gerente e
+  // tela de 844px: o topo do card caía em 814px (abaixo da dobra) e, até a consulta voltar,
+  // a div ficava VAZIA — 16 segundos de buraco. As duas coisas juntas são indistinguíveis
+  // de "não existe". Passar nos números e falhar aqui é passar no que não importa.
+  const ctx3 = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await CAMINHOS.fixarRelogio(ctx3, '2026-10-26T10:00:00');
+  await ctx3.addInitScript(() => {
+    try {
+      const u = { id: 7, nome: 'Neto', cargo: 'gerente', loja: 'BANGU', permissoes: {}, validado: true };
+      sessionStorage.setItem('gn_usuario', JSON.stringify(u));
+      sessionStorage.setItem('gn_loja_sessao', 'BANGU');
+      localStorage.setItem('gn_session_v1', JSON.stringify(Object.assign({ ts: Date.now() }, u)));
+    } catch (e) {}
+  });
+  // Resposta atrasada de propósito: sem atraso o card já chega pronto e o esqueleto —
+  // que é justamente o que faltava — nunca seria exercido.
+  await ctx3.route('**/rest/v1/**', async r => {
+    const u = r.request().url();
+    if (u.includes('select=loja,venda_salao,venda_delivery')) {
+      await new Promise(res => setTimeout(res, 1500));
+      return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(FAT) });
+    }
+    if (u.includes('gn_caixa_cancelamento(valor)')) {
+      await new Promise(res => setTimeout(res, 1500));
+      return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(FECH) });
+    }
+    return r.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
+  });
+  const p3 = await ctx3.newPage();
+  await p3.goto('file://' + ARQ);
+  await CAMINHOS.esperarApp(p3, ['tab', 'loja'], ['render', '_cancelRedeCardHome'], 30000);
+  // Enquanto a consulta não volta: tem que haver algo na tela dizendo que vem número.
+  await p3.waitForFunction(() => {
+    const e = document.getElementById('cancelRedeCard');
+    return e && e.innerHTML.trim().length > 0;
+  }, { timeout: 10000 }).catch(() => {});
+  const carregando = await p3.evaluate(() => {
+    const e = document.getElementById('cancelRedeCard');
+    return e ? e.textContent.replace(/\s+/g, ' ').trim() : null;
+  });
+  check('enquanto a consulta não volta, o card mostra que está carregando (não um buraco)',
+    /Carregando os números da rede/.test(carregando || ''), 'na tela: ' + JSON.stringify(carregando));
+
+  await p3.waitForFunction(() => {
+    const e = document.getElementById('cancelRedeCard');
+    return e && /% do faturamento/.test(e.textContent || '');
+  }, { timeout: 20000 }).catch(() => {});
+  const pos = await p3.evaluate(() => {
+    const e = document.querySelector('#cancelRedeCard > div');
+    const fluxo = [...document.querySelectorAll('.sec-label')].find(x => /Fluxo da semana/.test(x.textContent || ''));
+    const doc = document.scrollingElement || document.documentElement;
+    const r = e ? e.getBoundingClientRect() : null;
+    return {
+      topo: r ? Math.round(r.top + (doc.scrollTop || 0)) : null,
+      tela: innerHeight,
+      // DOCUMENT_POSITION_FOLLOWING = 4: o Fluxo vem DEPOIS do card.
+      cardAntesDoFluxo: !!(e && fluxo && (e.compareDocumentPosition(fluxo) & 4)),
+    };
+  });
+  check('o card nasce dentro da primeira tela, sem precisar rolar',
+    pos.topo !== null && pos.topo + 60 < pos.tela, JSON.stringify(pos));
+  check('e vem antes do Fluxo da semana, que é o que o empurrava pra fora da dobra',
+    pos.cardAntesDoFluxo, JSON.stringify(pos));
+  await ctx3.close();
+
+  // ── Consulta que falha avisa, em vez de sumir ───────────────────────────────────────
+  const ctx4 = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await CAMINHOS.fixarRelogio(ctx4, '2026-10-26T10:00:00');
+  await ctx4.route('**/rest/v1/**', r => {
+    const u = r.request().url();
+    if (u.includes('select=loja,venda_salao,venda_delivery') || u.includes('gn_caixa_cancelamento(valor)')) {
+      return r.abort('failed');
+    }
+    return r.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
+  });
+  const p4 = await ctx4.newPage();
+  await p4.goto('file://' + ARQ);
+  await CAMINHOS.esperarApp(p4, ['tab', 'loja'], ['render', '_cancelRedeCardHome'], 30000);
+  await p4.evaluate(() => {
+    usuarioAtual = { nome: 'Neto', cargo: 'gerente', loja: 'BANGU' };
+    loja = 'BANGU'; tab = 'home'; render(); _cancelRedeCardHome();
+  });
+  await p4.waitForFunction(() => {
+    const e = document.getElementById('cancelRedeCard');
+    return e && /Não deu pra carregar|% do faturamento/.test(e.textContent || '');
+  }, { timeout: 15000 }).catch(() => {});
+  const falha = await p4.evaluate(() => {
+    const e = document.getElementById('cancelRedeCard');
+    return e ? e.textContent.replace(/\s+/g, ' ').trim() : null;
+  });
+  check('consulta que falha deixa um recado, em vez de o card sumir calado',
+    /Não deu pra carregar agora/.test(falha || ''), 'na tela: ' + JSON.stringify(falha));
+  await ctx4.close();
 
   const reais = erros.filter(e => !/createClient|Failed to fetch|supabase/i.test(e));
   check('nenhum erro de JS', reais.length === 0, reais.slice(0, 3).join(' | '));
