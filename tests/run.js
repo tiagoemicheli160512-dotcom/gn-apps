@@ -156,5 +156,21 @@ function rodar(nome) {
     catch (e) { console.log('(não consegui escrever o resumo do job: ' + e.message + ')'); }
   }
 
+  // O resumo acima só existe na INTERFACE: a API do GitHub não o devolve, então quem está
+  // investigando por fora continua vendo só "exit code 1". Anotação a API devolve — e ela
+  // também aparece em cima do job, que é onde se olha primeiro.
+  if (process.env.GITHUB_ACTIONS && ruins.length) {
+    // Anotação não aceita quebra de linha crua; o GitHub exige estes escapes.
+    const esc = s => String(s).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+    ruins.forEach(r => {
+      const motivo = r.semResumo
+        ? r.saida.split('\n').filter(Boolean).slice(-6)
+        : r.saida.split('\n').filter(x => /^FALHOU/.test(x)).slice(0, 6);
+      console.log('::error title=' + esc(r.nome) + '::' +
+                  esc((r.semResumo ? 'não imprimiu o resumo\n' : r.falhou + ' falhou\n') +
+                      motivo.map(x => x.slice(0, 200)).join('\n')));
+    });
+  }
+
   process.exit(ruins.length ? 1 : 0);
 })();
