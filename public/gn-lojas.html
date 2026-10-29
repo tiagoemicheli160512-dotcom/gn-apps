@@ -6013,11 +6013,46 @@ function abrirModalNovoProdutoPedido() {
 
 function getPedido() { return pedidoAll[lojaKey()] || {}; }
 
+// Campos que são CONTAGEM de estoque (o que a loja pesou/contou), não pedido.
+const CAMPOS_CONTAGEM_PEDIDO = ['cx', 'und', 'atual'];
+
+// `_contado` significa uma coisa só: uma pessoa digitou um número num campo de contagem
+// deste item, NESTA semana (lojaKey já inclui a semana).
+//
+// Existe porque zero contado e item não mexido eram indistinguíveis, e por isso o zero
+// nunca era gravado: as duas portas de confirmarPedido e a de _sincronizarComPedidos
+// barravam qualquer item com contagem 0 e sem pedido. Na segunda seguinte o app buscava a
+// contagem mais recente, achava a de duas semanas atrás e mostrava um número velho no lugar
+// do zero. Medido no banco: 91 linhas com zero em 33.262 (0,27%), 803 linhas entre 0 e 1 —
+// a loja conta quantidade mínima, mas não conseguia registrar zero — e 410 casos de item
+// que pulou exatamente uma semana e voltou, em todas as 11 lojas.
+//
+// Nem o inicializador abaixo nem o `pedidoAll[k][prod.item] = {}` de confirmarPedido (que
+// roda pra TODO item do catálogo em cada confirmação) põem esta marca. É isso que impede o
+// conserto de virar "um zero por item do catálogo toda semana" — zero que ninguém contou
+// dentro do histórico de estoque seria pior que o número velho.
+function _pedidoEhCampoContagem(field) { return CAMPOS_CONTAGEM_PEDIDO.includes(String(field)); }
+
 function setPedidoVal(itemId, field, val) {
   const k = lojaKey();
   if (!pedidoAll[k]) pedidoAll[k] = {};
   if (!pedidoAll[k][itemId]) pedidoAll[k][itemId] = {cx:0, und:0, pedidoCx:0, pedidoUnd:0, obs:''};
   pedidoAll[k][itemId][field] = val;
+  if (_pedidoEhCampoContagem(field)) {
+    const vazio = val === '' || val === null || val === undefined || !isFinite(parseFloat(val));
+    // Apagar o campo desmarca: quem limpou não contou. Só desmarca se os OUTROS campos de
+    // contagem também estiverem vazios, senão limpar "und" apagaria a contagem feita em "cx".
+    if (vazio) {
+      const aindaTem = CAMPOS_CONTAGEM_PEDIDO.some(f => {
+        if (f === field) return false;
+        const v = pedidoAll[k][itemId][f];
+        return v !== '' && v !== null && v !== undefined && isFinite(parseFloat(v));
+      });
+      if (!aindaTem) delete pedidoAll[k][itemId]._contado;
+    } else {
+      pedidoAll[k][itemId]._contado = true;
+    }
+  }
   autoSave();
 }
 
@@ -6707,7 +6742,7 @@ async function _pedSyncFilaProcessar() {
 }
 
 async function _sincronizarComPedidos(produtosSync) {
-  // produtosSync: [{prod, cx, und, pedidoCx, pedidoUnd, fator}]
+  // produtosSync: [{prod, cx, und, pedidoCx, pedidoUnd, fator, contado}]
   await _carregarCatalogo();
   const pedidoDB = await _buscarOuCriarPedidoAtivo();
   const lojaSlug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
@@ -6728,7 +6763,7 @@ async function _sincronizarComPedidos(produtosSync) {
   // descontam venda. Busca uma vez só, fora do loop.
   const estAntHist = await _buscarEstAntPorCatalogo(wkKey(semanaHojeMonday));
 
-  produtosSync.forEach(({ prod, cx, und, pedidoCx, pedidoUnd, fator }) => {
+  produtosSync.forEach(({ prod, cx, und, pedidoCx, pedidoUnd, fator, contado }) => {
     const estoqueAtual = (cx * fator) + und;
     const qtdPedida = (pedidoCx * fator) + pedidoUnd;
     // gn_pedido_itens.qtd_pedida precisa ficar na mesma unidade do Catálogo (a mesma que
@@ -6738,7 +6773,9 @@ async function _sincronizarComPedidos(produtosSync) {
     // Sem essa divisão de volta, o valor_previsto das provisões (qtd × custo — e custo é
     // sempre o preço da caixa, não da unidade avulsa) saía multiplicado pelo fator.
     const qtdPedidaCatalogo = pedidoCx + (pedidoUnd / fator);
-    if (estoqueAtual === 0 && qtdPedida === 0) return;
+    // Contagem zero digitada pela loja VAI pro banco: é o que faz a segunda seguinte
+    // mostrar zero em vez do número de duas semanas atrás (ver _contado em setPedidoVal).
+    if (estoqueAtual === 0 && qtdPedida === 0 && !contado) return;
     const catalogoId = _resolverCatalogoId(prod);
     if (!catalogoId) { naoSincronizados.push(prod.produto); return; }
     const destSinc = mapeamentoPedido[String(prod.item)] || prod.produto.trim().toUpperCase();
@@ -6841,8 +6878,43 @@ async function _syncUlPedidoAposNota(insumosAfetados) {
   } catch(e) {}
 }
 
+// Está um envio rodando agora? A trava precisa ser SINCRONA e entrar antes de qualquer
+// await: o desabilita-botões que existia só rodava depois do flush de 40 ms do input focado
+// — e input focado é exatamente o estado de quem acabou de digitar a quantidade e tocou no
+// botão. Nessa janela um segundo toque entrava. Desabilitar no DOM também não basta porque
+// qualquer render() redesenha os botões habilitados no meio do caminho.
+let _confirmandoPedido = false;
+
 async function confirmarPedido(modo) {
   // modo: 'urgencia' (contagem rápida, envia pedido) | 'final' (fecha semana + Excel)
+
+  // 0. Trava de re-entrância, antes de tudo. Nada de await acima desta linha.
+  if (_confirmandoPedido) {
+    showToast('Já estou enviando — aguarde.', 'warn', 2500);
+    return;
+  }
+  // Uma vez por semana, por tipo: a linha de gn_pedido_envio_semana é a memória disso e
+  // sobrevive a recarregar o app. Sem isto, "uma vez" valia só enquanto a aba ficasse aberta.
+  //
+  // Só vale quando o registro em memória é DESTA semana do calendário. `_envioSemana` é
+  // carregado por _checarUrgenciaPendencia pra a segunda de hoje (_urgSemanaIni) — e um app
+  // deixado aberto atravessando a segunda guardaria o registro da semana passada, o que
+  // bloquearia um envio legítimo da semana nova. Bloquear envio é pior que o duplo envio: a
+  // loja fica sem pedido. Quando a referência não é a de hoje, a trava de re-entrância acima
+  // segue valendo e esta sai do caminho.
+  const _semanaHoje = wkKey(getMonday(new Date()));
+  const _jaEnviado = (_urgSemanaIni === _semanaHoje) ? (_envioSemana || {}) : {};
+  if (modo === 'urgencia' && _jaEnviado.urgencia_em) {
+    showToast('A urgência desta semana já foi enviada. Fale com o Compras pra reabrir.', 'warn', 5000);
+    return;
+  }
+  if (modo === 'final' && _jaEnviado.final_em) {
+    showToast('O pedido desta semana já foi finalizado. Fale com o Compras pra reabrir.', 'warn', 5000);
+    return;
+  }
+  _confirmandoPedido = true;
+
+  try {
 
   // 1. Flush: garantir que o input focado (se houver) já propagou seu valor ao estado
   const activeEl = document.activeElement;
@@ -6851,7 +6923,7 @@ async function confirmarPedido(modo) {
     await new Promise(r => setTimeout(r, 40)); // aguarda oninput/onblur processar
   }
 
-  // 2. Desabilitar botões para evitar duplo clique
+  // 2. Desabilitar botões — feedback visual; a trava de verdade é _confirmandoPedido
   document.querySelectorAll('[onclick*="_abrirPreviaConfirmar"],[onclick*="confirmarPedido"]').forEach(b => { b.disabled = true; b.style.opacity = '0.5'; });
 
   const p = getPedido();
@@ -6897,7 +6969,8 @@ async function confirmarPedido(modo) {
     const qtdBase    = (cx * fator) + und;
     const pedCx      = parseFloat(entry.pedidoCx)  || 0;
     const pedUnd     = parseFloat(entry.pedidoUnd) || 0;
-    if (qtdBase === 0 && pedCx === 0 && pedUnd === 0 && !pedidoAnterior[insumoMapeado || nomeUpper]) return;
+    // `entry._contado` passa: contagem zero digitada pela loja é informação, não ausência.
+    if (qtdBase === 0 && pedCx === 0 && pedUnd === 0 && !entry._contado && !pedidoAnterior[insumoMapeado || nomeUpper]) return;
 
     const destino = insumoMapeado || nomeUpper;
 
@@ -6914,10 +6987,10 @@ async function confirmarPedido(modo) {
     if (insumoMapeado) {
       delete estIniAll[k][nomeUpper];
     }
-    if (qtdBase > 0 || pedCx > 0 || pedUnd > 0) {
+    if (qtdBase > 0 || pedCx > 0 || pedUnd > 0 || entry._contado) {
       atualizados++;
       itensConf.push({ produto: prod.produto, fornecedor: prod.fornecedor || '', cx, und, pedidoCx: pedCx, pedidoUnd: pedUnd });
-      produtosParaSync.push({ prod, cx, und, pedidoCx: pedCx, pedidoUnd: pedUnd, fator });
+      produtosParaSync.push({ prod, cx, und, pedidoCx: pedCx, pedidoUnd: pedUnd, fator, contado: !!entry._contado });
     }
   });
 
@@ -7038,6 +7111,14 @@ async function confirmarPedido(modo) {
   if (modo === 'final') {
     setTimeout(gerarExcelPedido, 400);
   }
+
+  } finally {
+    // Sempre libera, inclusive se algo estourou no meio: uma trava que fica presa num erro
+    // impediria a loja de reenviar depois de corrigir — pior que o duplo envio. A trava
+    // contra reenvio da MESMA semana é a outra, no topo, e essa é persistente.
+    _confirmandoPedido = false;
+    document.querySelectorAll('[onclick*="_abrirPreviaConfirmar"],[onclick*="confirmarPedido"]').forEach(b => { b.disabled = false; b.style.opacity = ''; });
+  }
 }
 
 /* ── PEDIDO — UX helpers ───────────────────────────────── */
@@ -7118,6 +7199,11 @@ function _qtdZeradoLojaChanged(el, itemId, idx) {
 }
 
 function _abrirPreviaConfirmar(modo) {
+  // Dois toques no botão abriam DOIS modais com o mesmo id. A segunda etapa remove
+  // `_pedidoPreviaModal` por getElementById, que devolve só o primeiro — sobrava um modal
+  // na tela com o botão de confirmar vivo, e o segundo toque nele mandava o pedido de novo.
+  // É o caminho do envio duplicado relatado. Um modal por vez, sempre.
+  document.getElementById('_pedidoPreviaModal')?.remove();
   const pedido = getPedido();
   const prods = getProdutosPedidoOrdenados();
   const itens = prods.filter(p => _pedidoPreenchido(pedido[p.item] || {}));
