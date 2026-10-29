@@ -11573,6 +11573,7 @@ function _buildBarrisSemanalPanel(){
 // inteiro num bloco só nada depois carregava.
 
 let _carnesGerData = null, _carnesGerLoaded = false, _carnesGerOff = 0;
+let _triosGerData = null, _triosGerLoaded = false, _triosGerOff = 0;
 let _carnesRelatorioLojasFiltro = [];
 
 // Abre na semana PASSADA, igual ao app Pedidos: a contagem da semana corrente ainda está
@@ -11973,6 +11974,335 @@ function gerarPDFCarnes() {
 }
 async function enviarPDFCarnesWpp() {
   const r = _carnesRelatorioTexto(false);
+  if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  await _compartilharPdfWpp(r.msg, r.titulo);
+}
+
+// ── 🎵 TRIOS — cachê, couvert e saldo por fim de semana ───────────────────────────────
+// O trio toca no fim de semana: na base inteira são 199 apresentações no sábado, 193 no
+// domingo e 8 na sexta. Todas caem na MESMA semana segunda→domingo, então agrupar pela
+// segunda-feira (o mesmo _carnesSemanaIni das carnes) já junta o fim de semana inteiro.
+//
+// DUAS regras da fonte que mudam a conta, e errar qualquer uma inventa número:
+//
+// 1. O COUVERT É LANÇADO UMA VEZ POR DIA, não por apresentação. O Check-list grava no
+//    primeiro registro do dia e ZERA os demais de propósito, pra soma nenhuma contar o
+//    mesmo couvert duas vezes (ver _salvarCouvertBandaHoje em gn-checklist.html). São 28
+//    dias com mais de uma apresentação na base — contando "couver_valor = 0" como couvert
+//    faltando, esses dias viravam cobrança falsa. Por isso o couvert se mede por DIA.
+//
+// 2. FIM DE SEMANA QUE AINDA NÃO ACONTECEU não está sem couvert — está sem ter acontecido.
+//    A agenda vai até 29/11 com o cachê já contratado: dos 193 pares loja-semana da base,
+//    50 são futuros e TODOS sem couvert. Marcá-los seria 50 alarmes falsos.
+//
+// MEDIDO nos 143 pares loja-semana cujo fim de semana já passou (27/07 a 25/10):
+//   12 (8%)  sem couvert em nenhum dia       → informação que falta
+//   30 (21%) com couvert em parte dos dias   → informação que falta em parte
+//   50 (35%) couvert completo e saldo NEGATIVO
+//   51 (36%) couvert completo e saldo positivo
+// Na base inteira: cachê R$ 286.600 contra R$ 183.596 de couvert lançado.
+// Negativo e sem-couvert são DOIS avisos separados, nunca um só: juntar os dois no mesmo
+// vermelho esconderia a diferença entre a loja que gastou mais do que arrecadou e a loja
+// que só não lançou o que arrecadou — e é essa diferença que decide o que fazer.
+const TRIOS_SEMANAS_HISTORICO = 12;
+const TRIO_SLUG_PARA_LOJA = Object.fromEntries(
+  (window.GN_LOJAS || []).filter(l => l.trioSlug).map(l => [l.trioSlug, l.userKey]));
+
+function _triosSegundaDe(iso) {
+  const d = new Date(String(iso) + 'T12:00:00');
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return _carnesISO(d);
+}
+function _triosHojeISO() { return _carnesISO(new Date()); }
+
+function _triosNavSemana(dir) {
+  const novo = _triosGerOff + dir;
+  // +1 é a semana vigente: o fim de semana dela ainda vem, e é onde se vê o cachê já
+  // contratado antes de pagar. Acima disso é semana que a agenda pode ter, mas que não
+  // ajuda a decidir nada hoje.
+  if (novo > 1) return;
+  _triosGerOff = novo;
+  _loadTriosGerencia();
+  renderDashboard();
+}
+
+async function _loadTriosGerencia() {
+  _triosGerLoaded = false; _triosGerData = null;
+  const ini = _carnesSemanaIni(_triosGerOff);
+  const fim = new Date(ini.getTime() + 6 * 864e5);
+  const iniISO = _carnesISO(ini), fimISO = _carnesISO(fim);
+  // O histórico vem na MESMA consulta porque é ele que responde "quais semanas ficaram
+  // negativas ou sem couvert" — a pergunta não é de uma semana só. Cabe numa consulta: a
+  // tabela inteira tem 400 linhas.
+  const histIniISO = _carnesISO(new Date(ini.getTime() - (TRIOS_SEMANAS_HISTORICO - 1) * 7 * 864e5));
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const rows = await window.gnFetchJson(
+    `${SB_URL}/rest/v1/gn_trios_agenda?data=gte.${histIniISO}&data=lte.${fimISO}` +
+    `&select=data,loja,artista,cache,couver_qtd,couver_valor,presenca_confirmada,banda_nao_veio,banda_nao_veio_motivo,horario_inicio` +
+    `&order=data.asc,horario_inicio.asc`, H, 'triosGerencia', null);
+  if (!rows) { _triosGerLoaded = true; _triosGerData = { erro: true, iniISO, fimISO }; renderDashboard(); return; }
+
+  const hoje = _triosHojeISO();
+  // Maglia não usa a aba Banda do Check-list (CLAUDE.md / ABAS_FORA_MAGLIA) e não tem uma
+  // única linha em gn_trios_agenda — listá-la aqui seria cobrar trio de quem não faz trio.
+  const chaves = (LOJAS_LISTA || []).filter(k => k !== 'MAGLIA');
+  const dentro = {}; chaves.forEach(k => { dentro[k] = true; });
+
+  // Primeiro por DIA (é a unidade do couvert), depois por semana.
+  const porDia = {};
+  rows.forEach(r => {
+    const k = TRIO_SLUG_PARA_LOJA[String(r.loja || '').trim().toLowerCase()];
+    if (!k || !dentro[k]) return;
+    const dia = String(r.data).slice(0, 10);
+    const ch = k + '|' + dia;
+    if (!porDia[ch]) porDia[ch] = { k, dia, cache: 0, couver: 0, apres: [], naoVeio: 0, naoVeioCache: 0 };
+    const d = porDia[ch];
+    const cache = parseFloat(r.cache) || 0;
+    const couver = parseFloat(r.couver_valor) || 0;
+    d.cache += cache; d.couver += couver;
+    if (r.banda_nao_veio) { d.naoVeio++; d.naoVeioCache += cache; }
+    d.apresTotal = (d.apresTotal || 0) + 1;
+    d.apres.push({ artista: r.artista || '—', cache, couver, hora: r.horario_inicio || '',
+                   presenca: !!r.presenca_confirmada, naoVeio: !!r.banda_nao_veio,
+                   motivo: r.banda_nao_veio_motivo || '' });
+  });
+
+  const porSemana = {};   // 'loja|segunda' → agregado da semana
+  Object.values(porDia).forEach(d => {
+    const sem = _triosSegundaDe(d.dia);
+    const ch = d.k + '|' + sem;
+    if (!porSemana[ch]) porSemana[ch] = { k: d.k, sem, cache: 0, couver: 0,
+      dias: [], diasValidos: [], diasSemCouver: [], diasSemShow: [], diasFuturos: [],
+      naoVeio: 0, naoVeioCache: 0 };
+    const s = porSemana[ch];
+    s.cache += d.cache; s.couver += d.couver;
+    s.naoVeio += d.naoVeio; s.naoVeioCache += d.naoVeioCache;
+    s.dias.push(d);
+    // O dia em que NENHUMA banda veio não é dia sem couvert: não houve apresentação, então
+    // não há couvert a lançar. Cobrar o lançamento aí é cobrança falsa — e era o que
+    // acontecia com o Norte Shopping no primeiro desenho desta aba.
+    const semShow = d.apresTotal > 0 && d.naoVeio === d.apresTotal;
+    if (semShow) s.diasSemShow.push(d.dia);
+    if (d.dia >= hoje) s.diasFuturos.push(d.dia);
+    else if (semShow) { /* já contado em diasSemShow */ }
+    else { s.diasValidos.push(d.dia); if (d.couver <= 0) s.diasSemCouver.push(d.dia); }
+  });
+  Object.values(porSemana).forEach(s => {
+    s.dias.sort((a, b) => a.dia.localeCompare(b.dia));
+    s.saldo = s.couver - s.cache;
+    // A ordem importa: fim de semana que não chegou vem antes de tudo (não há o que
+    // cobrar), depois a semana em que a banda não veio em nenhum dia (o cachê está
+    // gravado mas o registro não diz se foi pago — não dá pra chamar de prejuízo), e só
+    // então o couvert e o saldo.
+    s.status = s.diasFuturos.length === s.dias.length        ? 'futuro'
+             : s.diasValidos.length === 0                     ? 'naoVeio'
+             : s.diasSemCouver.length === s.diasValidos.length ? 'semCouver'
+             : s.diasSemCouver.length > 0                      ? 'parcial'
+             : s.saldo < 0                                     ? 'negativo'
+             : 'positivo';
+  });
+
+  // As semanas do histórico, da mais antiga pra mais nova, incluindo a navegada.
+  const semanas = [];
+  for (let i = TRIOS_SEMANAS_HISTORICO - 1; i >= 0; i--)
+    semanas.push(_carnesISO(new Date(ini.getTime() - i * 7 * 864e5)));
+
+  _triosGerData = { porSemana, semanas, chaves, iniISO, fimISO, histIniISO, hoje };
+  _triosGerLoaded = true;
+  renderDashboard();
+}
+
+const _TRIOS_STATUS = {
+  negativo:  { cor: 'var(--txt-red)',   fundo: 'rgba(239,68,68,.12)',  borda: 'rgba(239,68,68,.32)',  rotulo: 'negativo' },
+  semCouver: { cor: 'var(--txt-amber)', fundo: 'rgba(245,158,11,.12)', borda: 'rgba(245,158,11,.32)', rotulo: 'sem couvert' },
+  parcial:   { cor: 'var(--txt-amber)', fundo: 'rgba(245,158,11,.08)', borda: 'rgba(245,158,11,.24)', rotulo: 'couvert em parte dos dias' },
+  positivo:  { cor: 'var(--txt-green)', fundo: 'rgba(22,163,74,.10)',  borda: 'rgba(22,163,74,.26)',  rotulo: 'positivo' },
+  naoVeio:   { cor: 'var(--txt-amber)', fundo: 'rgba(245,158,11,.12)', borda: 'rgba(245,158,11,.32)', rotulo: 'banda não veio' },
+  futuro:    { cor: 'var(--t4)',        fundo: 'var(--s2)',            borda: 'var(--b1)',            rotulo: 'ainda não aconteceu' },
+  vazio:     { cor: 'var(--t4)',        fundo: 'var(--s1)',            borda: 'var(--b1)',            rotulo: 'sem trio na agenda' },
+};
+
+function _buildTriosPanel() {
+  const reportBtns = _reportBtnsRowHtml('Trios');
+  if (!_triosGerLoaded || !_triosGerData) return reportBtns + _skelPanel(4);
+  if (_triosGerData.erro) {
+    return reportBtns + `<div style="font-size:12px;color:var(--t3);padding:14px">Não deu pra carregar a agenda dos trios agora. Troque de aba e volte.</div>`;
+  }
+  const { porSemana, semanas, chaves, iniISO, fimISO } = _triosGerData;
+  const ordenadas = chaves.slice().sort((a, b) => (LOJA_DISPLAY[a] || a).localeCompare(LOJA_DISPLAY[b] || b));
+  const daSemana = k => porSemana[k + '|' + iniISO] || null;
+  const st = s => _TRIOS_STATUS[s] || _TRIOS_STATUS.vazio;
+
+  const navHtml = `<div style="display:flex;align-items:center;justify-content:center;gap:12px;background:var(--s2);border:1px solid var(--b1);border-radius:12px;padding:8px 10px;margin-bottom:10px">
+    <button onclick="_triosNavSemana(-1)" style="background:none;border:1px solid rgba(0,0,0,.15);border-radius:8px;color:var(--t2);font-size:14px;padding:2px 10px;cursor:pointer;font-family:inherit">‹</button>
+    <div style="text-align:center">
+      <div style="font-size:11px;font-weight:800;color:var(--t1);letter-spacing:.5px">${_carnesDM(iniISO)} – ${_carnesDM(fimISO)}</div>
+      <div style="font-size:9.5px;color:var(--t4)">${_triosGerOff === 1 ? 'semana vigente — o fim de semana ainda vem' : _triosGerOff === 0 ? 'fim de semana que acabou de passar' : 'semana fechada'}</div>
+    </div>
+    <button onclick="_triosNavSemana(1)" ${_triosGerOff >= 1 ? 'disabled style="opacity:.3;' : 'style="'}background:none;border:1px solid rgba(0,0,0,.15);border-radius:8px;color:var(--t2);font-size:14px;padding:2px 10px;cursor:pointer;font-family:inherit">›</button>
+  </div>`;
+
+  // ── Rede, na semana navegada ───────────────────────────────────────────────────────
+  const comTrio = ordenadas.map(daSemana).filter(Boolean);
+  const totCache = comTrio.reduce((t, s) => t + s.cache, 0);
+  const totCouver = comTrio.reduce((t, s) => t + s.couver, 0);
+  const totNaoVeioCache = comTrio.reduce((t, s) => t + s.naoVeioCache, 0);
+  const saldoRede = totCouver - totCache;
+  const cell = (rotulo, valor, cor, nota) => `<div style="flex:1;min-width:92px">
+    <div style="font-size:9px;font-weight:800;letter-spacing:.8px;text-transform:uppercase;color:var(--t4)">${rotulo}</div>
+    <div style="font-size:15px;font-weight:800;color:${cor};font-variant-numeric:tabular-nums;margin-top:2px">${valor}</div>
+    ${nota ? `<div style="font-size:9px;color:var(--t4);margin-top:1px">${nota}</div>` : ''}
+  </div>`;
+  const resumoHtml = !comTrio.length
+    ? `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:12px;padding:12px 14px;margin-bottom:10px;font-size:11.5px;color:var(--t2)">Nenhum trio na agenda desta semana.</div>`
+    : `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:12px;padding:12px 14px;margin-bottom:10px">
+        <div style="display:flex;gap:12px;flex-wrap:wrap">
+          ${cell('Cachê a pagar', _fmtBRL(totCache), 'var(--t1)', `${comTrio.length} loja${comTrio.length === 1 ? '' : 's'} com trio`)}
+          ${cell('Couvert arrecadado', _fmtBRL(totCouver), 'var(--t1)', '')}
+          ${cell('Saldo', (saldoRede < 0 ? '−' : '') + _fmtBRL(Math.abs(saldoRede)), saldoRede < 0 ? 'var(--txt-red)' : 'var(--txt-green)', 'couvert − cachê')}
+        </div>
+        ${totNaoVeioCache > 0 ? `<div style="font-size:10px;color:var(--txt-amber);margin-top:8px">⚠ O cachê acima inclui ${_fmtBRL(totNaoVeioCache)} de apresentação marcada como "banda não veio" — o registro não diz se esse cachê foi pago ou não.</div>` : ''}
+      </div>`;
+
+  // ── Os dois avisos, separados ──────────────────────────────────────────────────────
+  const negativos = ordenadas.map(daSemana).filter(s => s && s.status === 'negativo');
+  const faltando  = ordenadas.map(daSemana).filter(s => s && (s.status === 'semCouver' || s.status === 'parcial'));
+  const semShow   = ordenadas.map(daSemana).filter(s => s && s.status === 'naoVeio');
+  const bloco = (cor, fundo, borda, titulo, linhas, rodape) => `
+    <div style="background:${fundo};border:1px solid ${borda};border-radius:12px;padding:11px 14px;margin-bottom:10px">
+      <div style="font-size:12px;font-weight:800;color:${cor};margin-bottom:4px">${titulo}</div>
+      <div style="font-size:10.5px;color:var(--t2);line-height:1.6">${linhas}</div>
+      ${rodape ? `<div style="font-size:9.5px;color:var(--t4);margin-top:5px">${rodape}</div>` : ''}
+    </div>`;
+  const avisosHtml =
+    (negativos.length ? bloco('var(--txt-red)', 'rgba(239,68,68,.08)', 'rgba(239,68,68,.25)',
+        `⚠ ${negativos.length} loja${negativos.length === 1 ? '' : 's'} com saldo negativo neste fim de semana`,
+        negativos.map(s => `${LOJA_DISPLAY[s.k] || s.k} <b style="color:var(--txt-red)">−${_fmtBRL(Math.abs(s.saldo))}</b>`).join(' · '),
+        'Couvert lançado em todos os dias: o cachê custou mais do que o couvert arrecadou.') : '') +
+    (faltando.length ? bloco('var(--txt-amber)', 'rgba(245,158,11,.10)', 'rgba(245,158,11,.3)',
+        `⚠ ${faltando.length} loja${faltando.length === 1 ? '' : 's'} sem o couvert lançado`,
+        faltando.map(s => `${LOJA_DISPLAY[s.k] || s.k} <span style="color:var(--t4)">(${s.diasSemCouver.map(_carnesDM).join(', ')})</span>`).join(' · '),
+        'Sem o couvert não há saldo: o dado não é zero, ele não foi lançado — a aba Banda do Check-list é onde entra.') : '') +
+    (semShow.length ? bloco('var(--txt-amber)', 'rgba(245,158,11,.08)', 'rgba(245,158,11,.26)',
+        `⚠ ${semShow.length} loja${semShow.length === 1 ? '' : 's'} em que a banda não veio`,
+        semShow.map(s => `${LOJA_DISPLAY[s.k] || s.k} <span style="color:var(--t4)">(${s.diasSemShow.map(_carnesDM).join(', ')})</span> · cachê ${_fmtBRL(s.cache)}`).join(' · '),
+        'Sem apresentação não há couvert a lançar. O cachê continua gravado na agenda e o registro não diz se foi pago.') : '') +
+    (comTrio.length && !negativos.length && !faltando.length && !semShow.length
+        ? bloco('var(--txt-green)', 'rgba(22,163,74,.08)', 'rgba(22,163,74,.25)',
+            `✅ As ${comTrio.length} lojas com trio lançaram o couvert e fecharam positivas`, 'Nada pendente neste fim de semana.', '') : '');
+
+  // ── Cartão por loja, com as apresentações do fim de semana ─────────────────────────
+  const cardsHtml = ordenadas.map(k => {
+    const s = daSemana(k);
+    const e = st(s ? s.status : 'vazio');
+    const cor = COR_LOJA[k] || '#F97316';
+    if (!s) return `<div style="background:var(--s1);border:1px solid var(--b1);border-left:3px solid ${cor};border-radius:11px;padding:10px 12px;margin-bottom:8px;display:flex;align-items:center;gap:10px">
+      <span style="font-size:12px;font-weight:700;color:var(--t2);flex:1">${LOJA_DISPLAY[k] || k}</span>
+      <span style="font-size:10px;color:var(--t4)">sem trio na agenda</span></div>`;
+    return `<div style="background:var(--s1);border:1px solid var(--b1);border-left:3px solid ${cor};border-radius:11px;padding:11px 12px;margin-bottom:8px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:7px">
+        <span style="font-size:12.5px;font-weight:800;color:var(--t1);flex:1">${LOJA_DISPLAY[k] || k}</span>
+        <span style="font-size:9px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:${e.cor};background:${e.fundo};border:1px solid ${e.borda};border-radius:6px;padding:2px 7px">${e.rotulo}</span>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:7px">
+        ${cell('Cachê', _fmtBRL(s.cache), 'var(--t2)', '')}
+        ${cell('Couvert', s.status === 'futuro' ? '—' : _fmtBRL(s.couver), 'var(--t2)',
+               s.status === 'futuro' ? 'ainda não arrecadado' : s.status === 'naoVeio' ? 'não houve apresentação' : '')}
+        ${(() => {
+          const naoFecha = s.status === 'futuro' || s.status === 'naoVeio' || s.diasSemCouver.length > 0;
+          const nota = s.status === 'naoVeio' ? 'a banda não veio' : s.diasSemCouver.length && s.status !== 'futuro' ? 'falta couvert pra fechar' : '';
+          return cell('Saldo', naoFecha ? '—' : (s.saldo < 0 ? '−' : '') + _fmtBRL(Math.abs(s.saldo)),
+                      naoFecha ? 'var(--t4)' : s.saldo < 0 ? 'var(--txt-red)' : 'var(--txt-green)', nota);
+        })()}
+      </div>
+      <div style="border-top:1px solid var(--b1);padding-top:6px">
+        ${s.dias.map(d => `<div style="display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--t3);padding:2px 0">
+          <span style="font-weight:800;color:var(--t2);min-width:38px">${_carnesDM(d.dia)}</span>
+          <span style="flex:1">${d.apres.map(a => a.artista + (a.naoVeio ? ' <span style="color:var(--txt-red)">(não veio)</span>' : '')).join(' · ')}</span>
+          <span style="font-variant-numeric:tabular-nums;color:var(--t2)">${_fmtBRL(d.cache)}</span>
+          <span style="font-variant-numeric:tabular-nums;min-width:62px;text-align:right;color:${d.dia >= _triosGerData.hoje ? 'var(--t4)' : d.couver > 0 ? 'var(--txt-green)' : 'var(--txt-amber)'}">${d.dia >= _triosGerData.hoje ? '—' : d.couver > 0 ? _fmtBRL(d.couver) : 'sem couvert'}</span>
+        </div>`).join('')}
+      </div>
+    </div>`;
+  }).join('');
+
+  // ── Histórico: é isto que aponta QUAIS semanas ficaram negativas ou sem couvert ────
+  const histHtml = `<div style="margin-top:14px">
+    <div style="font-size:11px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:var(--t2);margin-bottom:3px">Últimas ${TRIOS_SEMANAS_HISTORICO} semanas</div>
+    <div style="font-size:9.5px;color:var(--t4);margin-bottom:8px">Cada quadrado é um fim de semana, do mais antigo pro mais recente. Vermelho: saldo negativo com o couvert todo lançado. Amarelo: couvert faltando em algum dia. Cinza: sem trio na agenda, ou fim de semana que ainda não chegou.</div>
+    ${ordenadas.map(k => {
+      const cels = semanas.map(sem => {
+        const s = porSemana[k + '|' + sem];
+        const e = st(s ? s.status : 'vazio');
+        const t = !s ? `${_carnesDM(sem)}: sem trio na agenda`
+          : `${_carnesDM(sem)}: cachê ${_fmtBRL(s.cache)} · couvert ${s.status === 'futuro' ? 'ainda não arrecadado' : _fmtBRL(s.couver)}` +
+            (s.status === 'futuro' || s.diasSemCouver.length ? ` · ${e.rotulo}` : ` · saldo ${(s.saldo < 0 ? '−' : '') + _fmtBRL(Math.abs(s.saldo))}`);
+        return `<span title="${t.replace(/"/g, '&quot;')}" style="flex:1;height:18px;border-radius:4px;background:${e.fundo};border:1px solid ${e.borda};display:inline-block"></span>`;
+      }).join('');
+      const negs = semanas.filter(sem => (porSemana[k + '|' + sem] || {}).status === 'negativo').length;
+      const falt = semanas.filter(sem => ['semCouver', 'parcial'].includes((porSemana[k + '|' + sem] || {}).status)).length;
+      return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px">
+        <span style="font-size:10.5px;font-weight:700;color:var(--t2);width:104px;flex-shrink:0">${LOJA_DISPLAY[k] || k}</span>
+        <span style="flex:1;display:flex;gap:2px">${cels}</span>
+        <span style="font-size:9.5px;color:var(--t4);width:92px;flex-shrink:0;text-align:right">${negs ? `<span style="color:var(--txt-red)">${negs} neg.</span>` : ''}${negs && falt ? ' · ' : ''}${falt ? `<span style="color:var(--txt-amber)">${falt} s/couv.</span>` : ''}</span>
+      </div>`;
+    }).join('')}
+  </div>`;
+
+  return reportBtns + navHtml + resumoHtml + avisosHtml + cardsHtml + histHtml;
+}
+
+// ── Relatórios da aba 🎵 Trios (mesmo padrão gerarWpp/gerarPDF/enviarPDF...Wpp) ───────
+function _triosRelatorioTexto(wpp) {
+  if (!_triosGerLoaded || !_triosGerData || _triosGerData.erro) return null;
+  const { porSemana, chaves, iniISO, fimISO } = _triosGerData;
+  const b = s => wpp ? '*' + s + '*' : s;
+  const ordenadas = chaves.slice().sort((a, b2) => (LOJA_DISPLAY[a] || a).localeCompare(LOJA_DISPLAY[b2] || b2));
+  let msg = `${wpp ? '🎵 ' : ''}${b('TRIOS — CACHÊ E COUVERT')}\nFim de semana ${_carnesDM(iniISO)} a ${_carnesDM(fimISO)}\n`;
+  const comTrio = ordenadas.map(k => porSemana[k + '|' + iniISO]).filter(Boolean);
+  const totCache = comTrio.reduce((t, s) => t + s.cache, 0);
+  const totCouver = comTrio.reduce((t, s) => t + s.couver, 0);
+  msg += `\nCachê a pagar: ${_fmtBRL(totCache)}\nCouvert arrecadado: ${_fmtBRL(totCouver)}\n`;
+  msg += `Saldo da rede: ${(totCouver - totCache < 0 ? '-' : '') + _fmtBRL(Math.abs(totCouver - totCache))}\n`;
+  const negativos = [], faltando = [], semShow = [];
+  ordenadas.forEach(k => {
+    const s = porSemana[k + '|' + iniISO];
+    if (!s) return;
+    msg += `\n${wpp ? '🏪 ' : ''}${b(LOJA_DISPLAY[k] || k)}\n`;
+    msg += `  Cachê: ${_fmtBRL(s.cache)}\n`;
+    if (s.status === 'futuro') { msg += `  Couvert: ainda não arrecadado (o fim de semana não chegou)\n`; return; }
+    if (s.status === 'naoVeio') {
+      msg += `  ⚠ A banda não veio em ${s.diasSemShow.map(_carnesDM).join(', ')} — sem apresentação não há couvert a lançar\n`;
+      msg += `  O cachê acima segue gravado na agenda; o registro não diz se foi pago\n`;
+      semShow.push(LOJA_DISPLAY[k] || k); return;
+    }
+    msg += `  Couvert: ${_fmtBRL(s.couver)}\n`;
+    if (s.diasSemCouver.length) {
+      msg += `  ⚠ Sem couvert lançado em ${s.diasSemCouver.map(_carnesDM).join(', ')} — sem ele não há saldo\n`;
+      faltando.push(LOJA_DISPLAY[k] || k);
+    } else {
+      msg += `  Saldo: ${(s.saldo < 0 ? '-' : '') + _fmtBRL(Math.abs(s.saldo))}\n`;
+      if (s.saldo < 0) { msg += `  ⚠ Negativo: o cachê custou mais do que o couvert arrecadou\n`; negativos.push(LOJA_DISPLAY[k] || k); }
+    }
+    if (s.naoVeioCache > 0) msg += `  ⚠ Inclui ${_fmtBRL(s.naoVeioCache)} de banda marcada como "não veio"\n`;
+  });
+  if (negativos.length) msg += `\n${b('Saldo negativo')}: ${negativos.join(', ')}\n`;
+  if (faltando.length)  msg += `${b('Sem couvert lançado')}: ${faltando.join(', ')}\n`;
+  if (semShow.length)   msg += `${b('Banda não veio')}: ${semShow.join(', ')}\n`;
+  return { msg, titulo: 'Trios — cachê e couvert' };
+}
+function gerarWppTrios() {
+  const r = _triosRelatorioTexto(true);
+  if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  window.open('https://wa.me/?text=' + encodeURIComponent(r.msg), '_blank');
+}
+function gerarPDFTrios() {
+  const r = _triosRelatorioTexto(false);
+  if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  gerarPDF(r.msg, r.titulo);
+}
+async function enviarPDFTriosWpp() {
+  const r = _triosRelatorioTexto(false);
   if (!r) { alert('Aguarde os dados carregarem.'); return; }
   await _compartilharPdfWpp(r.msg, r.titulo);
 }
@@ -13157,6 +13487,9 @@ function renderDashboard() {
   } else if (_dashTab==='carnes') {
     content = _buildCarnesPanel();
 
+  } else if (_dashTab==='trios') {
+    content = _buildTriosPanel();
+
   } else if (_dashTab==='dre') {
     content = _buildDreRedePanel();
 
@@ -13202,10 +13535,11 @@ function renderDashboard() {
         <button class="dash-tab${_dashTab==='bi'?' on':''}" onclick="_setDashTab('bi')">📊 BI</button>
         <button class="dash-tab${_dashTab==='barris'?' on':''}" onclick="_setDashTab('barris')">🍺 Barris</button>
         <button class="dash-tab${_dashTab==='carnes'?' on':''}" onclick="_setDashTab('carnes')">🥩 Carnes</button>
+        <button class="dash-tab${_dashTab==='trios'?' on':''}" onclick="_setDashTab('trios')">🎵 Trios</button>
         <button class="dash-tab${_dashTab==='dre'?' on':''}" onclick="_setDashTab('dre')">💰 DRE</button>
         <button class="dash-tab${_dashTab==='metas'?' on':''}" onclick="_setDashTab('metas')">⚙ Metas</button>
       </div>
-      ${(_dashTab!=='metas'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris'&&_dashTab!=='carnes'&&_dashTab!=='dre')?periodRow:''}
+      ${(_dashTab!=='metas'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris'&&_dashTab!=='carnes'&&_dashTab!=='trios'&&_dashTab!=='dre')?periodRow:''}
       ${content}
     </div>`;
   _updateHdrBell();
@@ -13218,6 +13552,7 @@ function _setDashTab(t){
   if(t==='xadrez'&&!_xadrezMovsLoaded) _loadXadrezPendente();
   if(t==='barris'&&!_barrisSemGerenciaLoaded) _loadBarrisSemanalGerencia();
   if(t==='carnes'&&!_carnesGerLoaded) _loadCarnesGerencia();
+  if(t==='trios'&&!_triosGerLoaded) _loadTriosGerencia();
   renderDashboard();
 }
 function _navToAtt(){ const el=document.getElementById('dash-section'); if(el)el.scrollIntoView({behavior:'smooth'}); _setDashTab('att'); }

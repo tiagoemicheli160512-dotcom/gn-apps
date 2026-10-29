@@ -6146,7 +6146,10 @@ async function saveAll(opts){
     // histórica com os dados da semana atual, apagando tudo que já estava lá.
     const _carnesTemDados = CARNES_DEF.some(c=>{
       const cd=stateWeek.carnes[c.key]||{};
-      return Object.values(cd).some(v=>v!==''&&v!==undefined&&v!==null&&parseFloat(v)!==0);
+      // autoEntEm e a estampa da rodada da automacao, nao numero da loja: uma semana que
+      // so tem a estampa continua vazia e nao deve virar linha no banco.
+      return Object.entries(cd).some(([k,v])=>k!=='autoEntEm'
+        &&v!==''&&v!==undefined&&v!==null&&parseFloat(v)!==0);
     });
     if(stateWeek.semanaInicio && _carnesTemDados){
       const semanaIniCarnes = stateWeek.semanaInicio;
@@ -6499,15 +6502,61 @@ function _carnesLimposSalvar(){
 function _marcarCarneLimpo(corte, campo){ _carnesLimpos.add(corte+'|'+campo); _carnesLimposSalvar(); }
 function _desmarcarCarneLimpo(corte, campo){ _carnesLimpos.delete(corte+'|'+campo); _carnesLimposSalvar(); }
 
+// Um dia pertence ao BLOCO DA AUTOMACAO quando o que esta em ent_<dia> foi a automacao
+// que pos: igual ao espelho autoEnt_<dia>, ou vazio com o espelho presente (a automacao ja
+// limpou aquele dia). Diferente do espelho e numero digitado a mao — esse e da loja.
+function _entDaAutomacao(obj, d){
+  const a = obj['autoEnt_'+d];
+  if(a===undefined || a===null || a==='') return false;
+  const v = obj['ent_'+d];
+  if(v===undefined || v===null || v==='') return true;
+  return Number(v)===Number(a);
+}
+
 function _mesclarCarnesAntesDeSalvar(carnesServidor){
   const out = {};
   CARNES_DEF.forEach(c=>{
     const doServidor = carnesServidor[c.key] || {};
     const local = stateWeek.carnes[c.key] || {};
     const merged = {...doServidor};
+
+    // ── O bloco da automacao viaja INTEIRO, de quem rodou por ultimo ───────────────
+    // A automacao descobre o dia de cada entrega a partir da fonte (nota casada pelo
+    // numero → hora em que a portaria validou → data programada) e devolve os sete dias
+    // como UMA resposta. Mesclar dia a dia era o que duplicava o recebimento: o aparelho
+    // que ficou com a resposta de antes da validacao (terca, da data programada) devolvia
+    // a terca ao servidor que ja havia trocado pra quarta, e a mesma carne ficava nos dois
+    // dias — os dois com o espelho da automacao, 12 kg virando 24. O marcador de limpeza
+    // nao resolvia: ele vive no localStorage de UM aparelho, entao o outro nunca soube que
+    // aquele dia tinha sido apagado, e os dois ficavam devolvendo o dia um pro outro.
+    // Sem estampa dos dois lados, a mesclagem fica como era (dado antigo nao muda de
+    // comportamento). A estampa vem do relogio do aparelho: relogio adiantado ganha.
+    const emL = String(local.autoEntEm || ''), emS = String(doServidor.autoEntEm || '');
+    const temEstampa = emL !== '' || emS !== '';
+    const blocoDoLocal = emL !== '' && emL > emS;   // ISO: ordem alfabetica = ordem no tempo
+    if(temEstampa && blocoDoLocal){
+      DIAS_SEMANA.forEach(d=>{
+        if(_entDaAutomacao(local, d)){
+          merged['ent_'+d]     = local['ent_'+d]===undefined ? '' : local['ent_'+d];
+          merged['autoEnt_'+d] = local['autoEnt_'+d];
+        }else if(_entDaAutomacao(doServidor, d)){
+          // A resposta nova nao tem fonte nenhuma nesse dia: e o dia que tem que sumir.
+          merged['ent_'+d] = '';
+          delete merged['autoEnt_'+d];
+        }
+      });
+      merged.autoEntEm = emL;
+    }
+
     Object.keys(local).forEach(k=>{
       const v = local[k];
-      if(v!==''&&v!==undefined&&v!==null) merged[k]=v;
+      if(v===''||v===undefined||v===null) return;
+      if(k === 'autoEntEm') return;                 // resolvido junto com o bloco, acima
+      // Campo do bloco da automacao ja foi decidido. Numero digitado a mao nao e do bloco
+      // (difere do espelho) e continua vencendo o servidor, como sempre foi.
+      const m = temEstampa && /^(?:autoEnt|ent)_([a-z]{3})$/.exec(k);
+      if(m && DIAS_SEMANA.indexOf(m[1])>=0 && _entDaAutomacao(local, m[1])) return;
+      merged[k]=v;
     });
     // O que foi apagado de propósito vai apagado, mesmo estando vazio aqui.
     _carnesLimpos.forEach(marca=>{
@@ -10254,6 +10303,10 @@ async function _carregarCarnesAutoLojas(force){
         }
         if(cd['autoEnt_'+d]!==totaisDia[d]){ cd['autoEnt_'+d]=totaisDia[d]; _desmarcarCarneLimpo(c.key,'autoEnt_'+d); changed=true; }
       });
+      // A hora desta rodada. E o que deixa a mesclagem saber qual aparelho tem a resposta
+      // mais nova sobre os dias (ver _mesclarCarnesAntesDeSalvar). Nao liga `changed` por
+      // si: senao todo carregamento de semana gravaria a linha de novo sem nada novo.
+      cd.autoEntEm = new Date().toISOString();
     });
     // autoSave (local) + envio pro servidor — o card de resumo de Carnes na Home lê
     // direto de checklist_carnes, então o valor puxado aqui precisa chegar lá mesmo sem
