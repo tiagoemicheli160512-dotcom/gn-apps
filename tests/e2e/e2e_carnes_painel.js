@@ -48,6 +48,22 @@ const LINHAS = [
               carne_seca: corte(1, 0, 1), camarao: corte(1, 0, 1) } },
 ];
 
+// "Uma loja vendeu 100k e teve saída de 80 kg de carne de sol. Outra também vendeu 100k e
+// teve saída de 150 kg — essa aqui teve uma saída muito discrepante."
+//
+// Os números abaixo são escolhidos pra que o kg cru APONTE A LOJA ERRADA: Bangu sai com
+// 220,7 kg e Nova América com 60,0, mas Bangu vende 110 mil e Nova América 20 mil. Por kg
+// a culpada seria Bangu; por kg/R$ mil é Nova América (3,00 contra 2,00). Se a razão não
+// for ponderada loja por loja, esta suíte quebra.
+const FAT_SEMANA = [
+  { loja: 'Bangu',        venda_salao: '80000', venda_delivery: '30350' },  // 110.350 → 2,00
+  { loja: 'Nova América', venda_salao: '15000', venda_delivery:  '5000' },  //  20.000 → 3,00
+  { loja: 'Caxias',       venda_salao: '60000', venda_delivery:     '0' },  // saída negativa
+  { loja: 'Rancho',       venda_salao: '40000', venda_delivery:     '0' },  // vende, não contou
+  // Guarulhos de fora de propósito: contou 25 kg e não tem faturamento lançado na semana.
+  // Sem venda não há razão — e a tela tem que dizer isso em vez de inventar um número.
+];
+
 (async () => {
   const browser = await chromium.launch({ executablePath: CAMINHOS.CHROMIUM });
   const ctx = await browser.newContext({ viewport: { width: 390, height: 900 } });
@@ -68,13 +84,18 @@ const LINHAS = [
     } catch (e) { if (t >= 4) throw new Error('a Home não carregou'); }
   }
 
-  const montar = (opts) => page.evaluate(async ({ LINHAS, opts }) => {
+  const montar = (opts) => page.evaluate(async ({ LINHAS, FAT, opts }) => {
     const orig = window.gnFetchJson;
     const urls = [];
     window.gnFetchJson = async (url, h, c, fallback) => {
       urls.push(url);
       if (opts.falhar) return fallback;
-      return /checklist_carnes/.test(url) ? LINHAS : [];
+      if (/checklist_carnes/.test(url)) return LINHAS;
+      if (/checklist_diario/.test(url)) {
+        if (opts.falharFat) return fallback;        // só o faturamento cai
+        return opts.semFaturamento ? [] : FAT;
+      }
+      return [];
     };
     _carnesGerLoaded = false; _carnesGerData = null; _carnesGerOff = opts.off || 0;
     _carnesRelatorioLojasFiltro = opts.filtro || [];
@@ -90,9 +111,19 @@ const LINHAS = [
       // título e voltava sem nome nenhum. O bloco certo é o que tem as duas coisas.
       .filter(t => /não lançaram a contagem/.test(t) && /A contagem fecha na segunda/.test(t))
       .sort((a, b) => a.length - b.length)[0] || '';
-    return { txt: el.textContent.replace(/\s+/g, ' ').trim(), html, urls, aviso,
+    // Cada card de loja separado: o nome da loja aparece TAMBÉM nas caixas de seleção lá
+    // em cima, então procurar "Guarulhos … kg por R$ mil" no texto inteiro casava com o
+    // rótulo do filtro e o card da loja seguinte. Mutação confirmou: passava à toa.
+    const cards = {};
+    [...el.querySelectorAll('div')].forEach(dv => {
+      if (!/border-left:\s*3px solid/.test(dv.getAttribute('style') || '')) return;
+      const t = dv.textContent.replace(/\s+/g, ' ').trim();
+      const nome = t.split(/✅|⚠/)[0].trim();
+      if (nome) cards[nome] = t;
+    });
+    return { txt: el.textContent.replace(/\s+/g, ' ').trim(), html, urls, aviso, cards,
              wpp: (typeof _carnesRelatorioTexto === 'function' && _carnesRelatorioTexto(true) || {}).msg || null };
-  }, { LINHAS, opts: opts || {} });
+  }, { LINHAS, FAT: FAT_SEMANA, opts: opts || {} });
 
   const r = await montar({});
 
@@ -155,6 +186,55 @@ const LINHAS = [
   const falha = await montar({ falhar: true });
   check('consulta que falha avisa, em vez de mostrar a rede inteira sem contagem',
     /Não deu pra carregar/.test(falha.txt) && !/não lançaram a contagem/.test(falha.txt), falha.txt.slice(0, 200));
+
+  // ── Venda da semana dentro do card, e a razão que compara loja com loja ─────────────
+  check('o card da loja mostra a venda da semana em reais',
+    /Vendeu R\$ 110\.350,00 na semana/.test(r.txt), (r.txt.match(/Bangu.{0,60}/) || [''])[0]);
+  check('a venda soma salão + delivery (80.000 + 30.350)',
+    /110\.350,00/.test(r.txt), (r.txt.match(/Vendeu[^⚠]{0,40}/) || [''])[0]);
+  check('Bangu: 220,7 kg sobre 110.350 = 2,00 kg por R$ mil',
+    /2,00 kg por R\$ mil/.test(r.txt), (r.txt.match(/220,7 kg.{0,120}/) || [''])[0]);
+  check('Nova América: 60 kg sobre 20.000 = 3,00 kg por R$ mil',
+    /3,00 kg por R\$ mil/.test(r.txt), (r.txt.match(/Nova América.{0,200}/) || [''])[0]);
+  // O ponto inteiro do pedido: a razão tem que inverter o ranking do kg cru.
+  check('a razão aponta Nova América, que sai com MENOS kg mas vende muito menos',
+    (() => {
+      const g = n => { const m = (r.cards[n] || '').match(/Carne de Sol[\s\S]{0,160}?([\d,]+) kg por R\$ mil/); return m ? parseFloat(m[1].replace(',', '.')) : null; };
+      const b = g('Bangu'), na = g('Nova América');
+      return b === 2 && na === 3 && na > b;
+    })(), 'Bangu: ' + (r.cards['Bangu'] || '') + ' || NA: ' + (r.cards['Nova América'] || ''));
+  check('a tela explica o que é kg por R$ mil',
+    /compara duas lojas de tamanhos diferentes/.test(r.txt), r.txt.slice(0, 300));
+  const cardGuarulhos = r.cards['Guarulhos'] || '';
+  check('loja que contou mas não tem faturamento lançado diz isso, sem inventar razão',
+    /sem faturamento lançado na semana/.test(cardGuarulhos)
+      && /35,0 kg/.test(cardGuarulhos)
+      && !/kg por R\$ mil/.test(cardGuarulhos), 'card: ' + cardGuarulhos);
+  // Caxias contou 30 kg sem nada de inicial: 0 + 0 − 30 = −30. Não é número pequeno, é
+  // conta que não fecha, e verde ao lado dos outros esconderia isso.
+  check('saída negativa é marcada como conta que não fecha',
+    /saída negativa: contagem maior que o disponível/.test(r.txt), (r.txt.match(/Caxias.{0,260}/) || [''])[0]);
+
+  // ── O relatório leva os mesmos números da tela ───────────────────────────────────────
+  check('o relatório traz a venda da semana',
+    /Venda da semana: R\$ 110\.350,00/.test(r.wpp || ''), (r.wpp || '').slice(0, 400));
+  check('e a razão junto do kg',
+    /2,00 kg por R\$ mil/.test(r.wpp || ''), (r.wpp || '').slice(0, 400));
+  check('e avisa a saída negativa também no relatório',
+    /saída negativa/.test(r.wpp || ''), (r.wpp || '').slice(0, 700));
+
+  // ── Faturamento é complemento: cair ele não pode levar os kg embora ─────────────────
+  const soFat = await montar({ falharFat: true });
+  check('se só o faturamento falhar, os kg continuam na tela',
+    /220,7 kg/.test(soFat.txt), soFat.txt.slice(0, 300));
+  check('e a tela avisa que a comparação ficou de fora',
+    /comparação kg por R\$ mil fica de fora/.test(soFat.txt.replace(/\u00a0/g, ' ')), soFat.txt.slice(0, 400));
+
+  const semFat = await montar({ semFaturamento: true });
+  check('e sem faturamento nenhum número de razão aparece',
+    !/\d,\d\d kg por R\$ mil/.test(semFat.txt), semFat.txt.slice(0, 300));
+  check('sem faturamento os kg ainda aparecem',
+    /220,7 kg/.test(semFat.txt), semFat.txt.slice(0, 300));
 
   const reais = erros.filter(e => !/createClient|Failed to fetch|supabase/i.test(e));
   check('nenhum erro de JS', reais.length === 0, reais.slice(0, 3).join(' | '));
