@@ -3294,6 +3294,7 @@ function applySemana(inicio, fim){
   state.semanaInicio = inicio;
   state.semanaFim    = fim;
   stateWeek.semanaInicio = inicio;
+  _carnesLimposCarregar();   // o registro de limpezas é por semana (ver _carnesLimpos)
   applySemanaLabels();
   autoSave();
   // Carregar check-list do dia atual, carnes da semana e funcionários de Gorjetas
@@ -3348,6 +3349,11 @@ const CAMPOS_FOTO = [['fotoBase64','fotoName'], ['valFoto','valFotoEm'], ['foto'
 // Vive só na memória — é tirada do que vai pro banco (ver _semMarcaNaoVisto no upsert).
 // Fica aqui, e não junto de initAllStates(), porque o IIFE de boot chama initAllStates()
 // antes daquele ponto do arquivo: `const` em TDZ derrubava o app inteiro no carregamento.
+// Declarado aqui, longe do resto, porque o IIFE de boot chama initAppWithLoja ->
+// applySemana -> _carnesLimposCarregar antes do ponto do arquivo onde este registro
+// e usado: `let` em TDZ derrubaria o app inteiro no carregamento (mesmo caso do
+// MARCA_NAO_VISTO logo abaixo). O que ele significa esta em _mesclarCarnesAntesDeSalvar.
+let _carnesLimpos = new Set();
 const MARCA_NAO_VISTO = '_naoVisto';
 function _fotoDoMerge(local, serv, chave){
   const out = {};
@@ -6159,13 +6165,34 @@ async function saveAll(opts){
         loja: LOJA, carnes: stateWeek.carnes, fat: {...stateWeek.fat, meta: stateWeek.metaSemanal}
       },{onConflict:'semana_inicio,loja'});
       if(e2) throw e2;
+      // A linha subiu com as limpezas aplicadas: o registro cumpriu o papel. Só aqui — numa
+      // falha de rede ele tem que continuar valendo, senão a próxima mesclagem ressuscita o
+      // valor que a loja já tinha apagado.
+      _carnesLimpos = new Set(); _carnesLimposSalvar();
 
       // contagem_final no Fechamento é SEMPRE a contagem de abertura da 2ª-feira:
       // → limpa contagem_final da semana atual (fechamento vem da 2ª seguinte)
       // → copia para inicial da mesma semana (só se inicial estiver vazio)
       // → propaga como contagem_final da semana anterior (fecha o Resumo daquela semana)
+      // A contagem de 2ª é, ao mesmo tempo, o FECHAMENTO da semana que passou e a
+      // ABERTURA da que começa. O bloco abaixo escreve `inicial` da semana que está
+      // carregada na tela — então, com uma semana ANTIGA aberta, ele trocava o estoque de
+      // abertura daquela semana pela contagem de agora e propagava o fechamento pra semana
+      // errada. O resultado fica com `inicial` igual a `contagem_final`, e a saída da
+      // semana vira exatamente o que entrou: um número inventado. Medido: 79 ocorrências
+      // em 8 lojas desde 13/07 — Bangu 19/10 com inicial = fim = 92,3 e "saída" de 179,2,
+      // que é a entrada inteira. É isto que deixa a semana anterior pior que a vigente.
+      //
+      // A contagem pertence à semana cuja segunda é a de hoje. Fora dela, não se mexe em
+      // semana nenhuma: o campo continua gravado (o upsert acima já subiu), só não dispara
+      // a virada. Quem abrir a semana corrente dispara a virada certa.
+      const _semanaCorrenteISO = toISO(getSegundaFeira(new Date()));
+      const _viradaPermitida = semanaIniCarnes === _semanaCorrenteISO;
       const _temContagemFinal = CARNES_DEF.some(c=>(stateWeek.carnes[c.key]?.contagem_final||'')!=='');
-      if(_temContagemFinal){
+      if(_temContagemFinal && !_viradaPermitida){
+        showToast('Contagem salva. A virada da semana só roda na semana corrente — abra a semana atual pra fechar a anterior.','info');
+      }
+      if(_temContagemFinal && _viradaPermitida){
         try{
           // Guarda os valores ANTES de limpar contagem_final
           const _valoresAbertura = {};
@@ -6444,6 +6471,34 @@ function mergeWeekState(rows){
 // entre dois aparelhos editando a mesma semana ao mesmo tempo (ex.: um em Entradas, outro
 // em Contagem): sem isso, o último a salvar apagava silenciosamente os campos que só o
 // outro aparelho tinha carregado em memória.
+// Campos que foram esvaziados DE PROPÓSITO nesta loja/semana, no formato "corte|campo".
+//
+// _mesclarCarnesAntesDeSalvar descarta vazio por um bom motivo: um aparelho que não
+// carregou o campo não pode zerar o que o outro gravou. Só que, por isso, APAGAR nunca
+// chegava ao servidor — nem a mão, nem pela automação. É a causa das entradas duplicadas:
+// quando a entrega muda de dia (programada na terça, conferida na quarta), a automação
+// escreve no dia novo e manda limpar o antigo; o `''` da limpeza era descartado aqui e o
+// valor velho voltava. A mesma carne ficava em dois dias, pra sempre — medido na Pedreira,
+// semana 19/10: uma entrega de 60 kg (NF 1225680) gravada em ent_qua E ent_qui; e na
+// semana 26/10, uma de 120 kg (NF 3668018) em ent_ter E ent_qua.
+//
+// Com o registro, vazio deixa de ser ambíguo: marcado é "apaga lá", não marcado continua
+// sendo "não sei". Persiste no aparelho porque um recarregamento no meio da edição não
+// pode perder a intenção, e é limpo quando o servidor confirma.
+function _carnesLimposKey(){ return 'gn_chk_carnes_limpos_' + String(LOJA).replace(/\s+/g,'_'); }
+function _carnesLimposCarregar(){
+  try{
+    const o = JSON.parse(localStorage.getItem(_carnesLimposKey()) || 'null');
+    _carnesLimpos = new Set(o && o.semana === stateWeek.semanaInicio && Array.isArray(o.campos) ? o.campos : []);
+  }catch(e){ _carnesLimpos = new Set(); }
+}
+function _carnesLimposSalvar(){
+  try{ localStorage.setItem(_carnesLimposKey(),
+    JSON.stringify({ semana: stateWeek.semanaInicio, campos: [..._carnesLimpos] })); }catch(e){}
+}
+function _marcarCarneLimpo(corte, campo){ _carnesLimpos.add(corte+'|'+campo); _carnesLimposSalvar(); }
+function _desmarcarCarneLimpo(corte, campo){ _carnesLimpos.delete(corte+'|'+campo); _carnesLimposSalvar(); }
+
 function _mesclarCarnesAntesDeSalvar(carnesServidor){
   const out = {};
   CARNES_DEF.forEach(c=>{
@@ -6453,6 +6508,15 @@ function _mesclarCarnesAntesDeSalvar(carnesServidor){
     Object.keys(local).forEach(k=>{
       const v = local[k];
       if(v!==''&&v!==undefined&&v!==null) merged[k]=v;
+    });
+    // O que foi apagado de propósito vai apagado, mesmo estando vazio aqui.
+    _carnesLimpos.forEach(marca=>{
+      const [corte, campo] = marca.split('|');
+      if(corte !== c.key) return;
+      // autoEnt_<dia> é espelho da automação: sem fonte por trás ele não deve nem existir,
+      // senão o campo digitado passa a ser confundido com valor da automação.
+      if(/^autoEnt_/.test(campo)) delete merged[campo];
+      else merged[campo] = '';
     });
     out[c.key] = merged;
   });
@@ -10178,16 +10242,17 @@ async function _carregarCarnesAutoLojas(force){
           // sem nada por trás. Limpa o que a automação pôs (e, no 🔄, o que foi digitado),
           // que é o que desfaz a duplicação sem precisar corrigir loja por loja no banco.
           if(force || aindaDaAutomacao){
-            if(!vazio && Number(atual)!==0){ cd['ent_'+d]=''; changed=true; }
-            if(cd['autoEnt_'+d]!==undefined){ delete cd['autoEnt_'+d]; changed=true; }
+            if(!vazio && Number(atual)!==0){ cd['ent_'+d]=''; _marcarCarneLimpo(c.key,'ent_'+d); changed=true; }
+            if(cd['autoEnt_'+d]!==undefined){ delete cd['autoEnt_'+d]; _marcarCarneLimpo(c.key,'autoEnt_'+d); changed=true; }
           }
           return;
         }
         if(force || vazio || aindaDaAutomacao){
           if(Number(atual)!==totaisDia[d]) changed=true;
           cd['ent_'+d]=totaisDia[d];
+          _desmarcarCarneLimpo(c.key,'ent_'+d);   // voltou a ter fonte: não é mais limpeza
         }
-        if(cd['autoEnt_'+d]!==totaisDia[d]){ cd['autoEnt_'+d]=totaisDia[d]; changed=true; }
+        if(cd['autoEnt_'+d]!==totaisDia[d]){ cd['autoEnt_'+d]=totaisDia[d]; _desmarcarCarneLimpo(c.key,'autoEnt_'+d); changed=true; }
       });
     });
     // autoSave (local) + envio pro servidor — o card de resumo de Carnes na Home lê
@@ -10584,6 +10649,10 @@ function updateCarneCampo(carneKey, campoKey, val){
   }
   if(!stateWeek.carnes[carneKey]) stateWeek.carnes[carneKey]={};
   stateWeek.carnes[carneKey][campoKey]=val;
+  // Apagar o campo à mão é intenção, não desconhecimento: sem esta marca o valor do
+  // servidor voltava no próximo save e a correção da loja não durava nada.
+  if(val==='' || val===null || val===undefined) _marcarCarneLimpo(carneKey, campoKey);
+  else _desmarcarCarneLimpo(carneKey, campoKey);
   autoSave();
   _debouncedSaveAll();
 }
