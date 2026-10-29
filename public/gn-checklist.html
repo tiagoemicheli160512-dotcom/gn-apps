@@ -2523,6 +2523,45 @@ const CARNES_ENTRADA_MATCH = {
 };
 // Sub-abas: inicial(2a), entradas(diario), vendas(dom), contagem(dom), resultado(auto)
 const CARNE_TABS = ['contagem','diario','entradas','inicial','resumo','diario_ver'];
+// Quantos dias depois da segunda uma contagem ainda vale como ESTOQUE DE ABERTURA da
+// semana. Segunda feriado joga a contagem pra terça; feriado emendado, pra quarta. Daí em
+// diante não é mais abertura: uma contagem de quinta tem três dias de consumo dentro, e
+// usá-la como inicial inventaria a saída da semana inteira.
+const CARNES_ABERTURA_TOLERANCIA_DIAS = 2;
+// Chaves de controle dentro do objeto da carne — não são número da loja. Precisam ficar
+// de fora de qualquer varredura que decida "esta semana tem dados", senão uma semana que
+// só tem controle vira linha no banco.
+const CARNES_CHAVES_CONTROLE = ['autoEntEm', 'inicialDe'];
+
+// Quando o estoque de abertura veio de outro dia que não a segunda, a tela diz — mostrar
+// a contagem da terça como se fosse a da segunda é o erro que o feriado torna provável, e
+// é invisível: o número está lá, parece certo, e ninguém sabe que o dia é outro.
+function _avisoInicialDeOutroDia(){
+  try{
+    const dias = new Set();
+    CARNES_DEF.forEach(c => {
+      const de = (stateWeek.carnes[c.key]||{}).inicialDe;
+      if(de && de !== stateWeek.semanaInicio) dias.add(de);
+    });
+    if(!dias.size) return '';
+    const lista = [...dias].sort().map(fmtBR).join(', ');
+    return `<div style="background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.32);border-radius:8px;padding:7px 10px;margin-top:7px;font-size:10px;color:var(--t1);">`
+      + `📅 O estoque de abertura veio da contagem de <b>${lista}</b>, não da segunda — a segunda não teve contagem (feriado, normalmente).</div>`;
+  }catch(e){ return ''; }
+}
+
+// A contagem que vale como abertura da semana que começa em `segundaISO`: a da própria
+// segunda, e só na falta dela a do primeiro dia seguinte dentro da tolerância.
+function _contagemDaAbertura(rows, catId, segundaISO){
+  const base = new Date(segundaISO+'T12:00:00');
+  for(let i=0; i<=CARNES_ABERTURA_TOLERANCIA_DIAS; i++){
+    const d = new Date(base.getTime() + i*864e5);
+    const dia = toISO(d);
+    const row = (rows||[]).find(x => x.catalogo_id===catId && x.data_contagem===dia);
+    if(row) return { row, dia, naSegunda: i===0 };
+  }
+  return null;
+}
 const DIAS_SEMANA = ['seg','ter','qua','qui','sex','sab','dom'];
 const DIAS_LABEL  = ['Segunda','Terça','Quarta','Quinta','Sexta','Sábado','Domingo'];
 
@@ -6160,9 +6199,10 @@ async function saveAll(opts){
     // histórica com os dados da semana atual, apagando tudo que já estava lá.
     const _carnesTemDados = CARNES_DEF.some(c=>{
       const cd=stateWeek.carnes[c.key]||{};
-      // autoEntEm e a estampa da rodada da automacao, nao numero da loja: uma semana que
-      // so tem a estampa continua vazia e nao deve virar linha no banco.
-      return Object.entries(cd).some(([k,v])=>k!=='autoEntEm'
+      // Chaves de controle (estampa da automacao, dia de onde veio o inicial) nao sao
+      // numero da loja: uma semana que so tem controle continua vazia e nao deve virar
+      // linha no banco.
+      return Object.entries(cd).some(([k,v])=>CARNES_CHAVES_CONTROLE.indexOf(k)<0
         &&v!==''&&v!==undefined&&v!==null&&parseFloat(v)!==0);
     });
     if(stateWeek.semanaInicio && _carnesTemDados){
@@ -10179,11 +10219,17 @@ async function _carregarCarnesAutoLojas(force){
 
     let contagensRows = [];
     if(idsRelevantes.length){
+      // Intervalo, não as duas segundas exatas: quando a segunda é FERIADO a loja conta na
+      // terça, e a contagem da terça é o estoque de abertura daquela semana. MEDIDO: 32 de
+      // 148 semanas-loja sem contagem na segunda, e nelas o `inicial` fica vazio em 46,7%
+      // contra 17,4% quando houve — o estoque de abertura simplesmente sumia.
+      const dLim = new Date(semanaProxima+'T12:00:00');
+      dLim.setDate(dLim.getDate() + CARNES_ABERTURA_TOLERANCIA_DIAS);
       const {data,error} = await sb.from('gn_contagens_pedido')
         .select('catalogo_id,atual,data_contagem')
         .eq('loja_slug', lojaSlug)
         .in('catalogo_id', idsRelevantes)
-        .in('data_contagem', [semanaIni, semanaProxima]);
+        .gte('data_contagem', semanaIni).lte('data_contagem', toISO(dLim));
       if(error) throw error;
       contagensRows = data||[];
     }
@@ -10224,13 +10270,17 @@ async function _carregarCarnesAutoLojas(force){
       if(!stateWeek.carnes[c.key]) stateWeek.carnes[c.key]={};
       const cd = stateWeek.carnes[c.key];
       const catId = catIds[CARNES_PEDIDO_ITEM_ID[c.key]];
-      const rowIni = contagensRows.find(r=>r.catalogo_id===catId && r.data_contagem===semanaIni);
-      const rowFim = contagensRows.find(r=>r.catalogo_id===catId && r.data_contagem===semanaProxima);
-      if(rowIni){
-        if(force || cd.inicial===undefined || cd.inicial===''){ cd.inicial=parseFloat(rowIni.atual)||0; changed=true; }
-        fechamentoPrev[c.key] = parseFloat(rowIni.atual)||0;
+      const abIni = _contagemDaAbertura(contagensRows, catId, semanaIni);
+      const abFim = _contagemDaAbertura(contagensRows, catId, semanaProxima);
+      if(abIni){
+        if(force || cd.inicial===undefined || cd.inicial===''){ cd.inicial=parseFloat(abIni.row.atual)||0; changed=true; }
+        // De que dia veio o estoque de abertura. A tela TEM que dizer quando não é a
+        // segunda: mostrar a contagem da terça como se fosse a da segunda é o erro que o
+        // feriado torna provável, e ninguém veria na tela que o dia é outro.
+        if(cd.inicialDe !== abIni.dia){ cd.inicialDe = abIni.dia; changed=true; }
+        fechamentoPrev[c.key] = parseFloat(abIni.row.atual)||0;
       }
-      if(rowFim && (force || cd.contagem_final===undefined || cd.contagem_final==='')){ cd.contagem_final=parseFloat(rowFim.atual)||0; changed=true; }
+      if(abFim && (force || cd.contagem_final===undefined || cd.contagem_final==='')){ cd.contagem_final=parseFloat(abFim.row.atual)||0; changed=true; }
 
       // Entrega confirmada manda; a nota de Entrada de Mercadoria é o plano B, pro dia em que
       // a carne chegou fora de uma entrega programada (compra de emergência, por exemplo).
@@ -10396,6 +10446,7 @@ function renderCarnes(){
     c.innerHTML=`<div style="background:rgba(107,155,203,.1);border:1px solid rgba(107,155,203,.25);border-radius:10px;padding:10px 14px;margin-bottom:12px;">
       <div style="font-size:11px;font-weight:700;color:var(--t1);margin-bottom:3px;">📦 Estoque inicial da semana</div>
       <div style="font-size:10px;color:var(--t1);">Preenchido automaticamente pela Contagem de 2ª. Edite só se necessário.</div>
+      ${_avisoInicialDeOutroDia()}
       <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
         <button onclick="importarInicialDaSemanaAnterior()" style="background:#3F6FA8;border:none;border-radius:7px;padding:6px 12px;color:#fff;font-size:11px;font-weight:700;cursor:pointer;">↩️ Reimportar do fechamento anterior</button>
         <button onclick="_carneInicialEditando=true;renderCarnes()" style="background:var(--s5);border:1px solid #555;border-radius:7px;padding:6px 12px;color:var(--t1);font-size:11px;font-weight:700;cursor:pointer;">✏️ Editar</button>
@@ -16357,6 +16408,10 @@ const CARNE_HOJE_TRAVA_DESDE = '2026-09-27';
 // O escalonamento de 1 dia; abaixo deste corte continua valendo a regra antiga (2 dias em
 // branco), pra nunca ficar mais frouxo do que já era.
 const CARNE_HARD_1DIA_DESDE = '2026-09-26';
+// Corte da cobrança do estoque de abertura. Medido antes de ligar: na semana 26/10 as 11
+// lojas contaram na segunda, então a cobrança nasce sem alcançar ninguém — pendência que
+// nasce cobrando a rede inteira é cobrança falsa e ensina a ignorar o aviso.
+const CARNE_ABERTURA_TRAVA_DESDE = '2026-10-26';
 // Mesmo corte, mesmo motivo, agora pro bloqueio escalado de Banda e Escala — confirmado
 // direto no banco antes deste deploy: Rancho tem ~25 funcionários sem horário cadastrado
 // há semanas (gap crônico, gn_comissoes), Boulevard/Caxias/Norte/Pedreira também têm
@@ -16445,6 +16500,54 @@ async function _carneGapNoDia(diasAtras) {
   return { dataAlvo, diaIdx, diaKey, semanaIni, faltando };
 }
 
+// Estoque de ABERTURA da semana — diferente da contagem diária que _checarCarnePendenteOntem
+// cobra. A contagem de 2ª é o que abre a semana, e ela chega aqui sozinha pela automação
+// (ver _carregarCarnesAutoLojas) — mas SÓ quando alguém abre a aba Carne: a automação roda
+// no carregamento da semana, não no servidor. Medido na semana 26/10: as 11 lojas contaram
+// na segunda e a Nova Iguaçu mesmo assim está sem estoque de abertura, porque não tem nem
+// linha de checklist_carnes — ninguém abriu a aba. Dos dois jeitos o conserto é o mesmo:
+// abrir a aba Carne. Se a contagem existe, ela entra sozinha; se não existe, dá pra digitar.
+//
+// Trava LEVE de propósito (sem `hard`): prende a navegação na aba Carne, que é o
+// "direciona pra ela ao abrir", sem o bloqueio total que o couvert tem.
+async function _checarAberturaCarnePendente() {
+  if (LOJA === 'Maglia') return null;
+  if (!_temAcessoAbaChecklist('carnes')) return null;
+  const hoje = new Date();
+  // Segunda ainda é o dia de contar — não há o que cobrar enquanto ela corre.
+  if (hoje.getDay() === 1) return null;
+  const semanaIni = toISO(getSegundaFeira(hoje));
+  if (semanaIni < CARNE_ABERTURA_TRAVA_DESDE) return null;
+  let carnes = null;
+  try {
+    const { data } = await sb.from('checklist_carnes')
+      .select('carnes').eq('semana_inicio', semanaIni).eq('loja', LOJA).maybeSingle();
+    carnes = (data && data.carnes) || null;
+  } catch (e) { return null; }   // falha de rede não trava
+  // Sem linha nenhuma conta como vazio: é o caso de quem nunca abriu a aba.
+  const temAbertura = CARNES_DEF.some(c => {
+    const v = carnes && carnes[c.key] && carnes[c.key].inicial;
+    return v !== '' && v !== undefined && v !== null;
+  });
+  if (temAbertura) return null;
+  return {
+    chave: 'carnes',
+    titulo: '🥩 Estoque de abertura da semana em branco',
+    mensagem: 'A contagem de 2ª ainda não entrou no estoque de abertura desta semana. '
+      + 'Abra a aba Carne: se a loja já contou, o número entra sozinho; se a segunda foi '
+      + 'feriado e a contagem saiu na terça, ela também vale. Na falta das duas, dá pra lançar à mão.',
+    tabAlvo: 'carnes',
+    hard: false,
+    semanaIni,
+    acaoExtra: async () => {
+      if (semanaIni !== stateWeek.semanaInicio) await loadSupabaseWeek(semanaIni);
+      switchTab('carnes', document.querySelector('.tab-btn'));
+      setCarneTab('inicial');
+      renderCarnes();
+    },
+  };
+}
+
 async function _checarCarnePendenteOntem() {
   if (LOJA === 'Maglia') return null;
   if (!_temAcessoAbaChecklist('carnes')) return null;
@@ -16525,8 +16628,11 @@ async function _bandaGapNoDia(diasAtras) {
   } catch (e) { return null; }
   if (!rows.length) return null; // sem apresentação agendada nesse dia, nada a cobrar
   const presencaPendente = rows.some(r => !r.presenca_confirmada && !r.banda_nao_veio);
-  const principal = rows[0];
-  const couvertPendente = !principal.banda_nao_veio && (principal.couver_valor === null || principal.couver_valor === undefined);
+  // Dia em que NENHUMA banda veio não tem couvert a lançar — não houve apresentação.
+  // E a marca só vale vinda de uma apresentação que aconteceu: a linha que não veio pode
+  // ser a primeira do dia, e olhar só pra ela deixaria passar o couvert da que tocou.
+  const houveShow = rows.some(r => !r.banda_nao_veio);
+  const couvertPendente = houveShow && !rows.some(r => r.couver_lancado_em && !r.banda_nao_veio);
   return { dataAlvo, presencaPendente, couvertPendente, pendente: presencaPendente || couvertPendente };
 }
 
@@ -16953,6 +17059,7 @@ async function _atualizarPendenciasEssenciais() {
   try {
     resultados = await Promise.all([
       _checarCarnePendenteOntem(),
+      _checarAberturaCarnePendente(),
       _checarBandaPendenteOntem(),
       _checarEscalaPendenteOntem(),
       _checarBancoHorasPendente(),
@@ -18323,6 +18430,16 @@ function _bandaHojeCalcVal(){
 // Couvert é lançado uma vez só pro dia (não separa por apresentação) — grava no primeiro
 // registro do dia e zera os demais, pra somas em outros relatórios (ex.: Trios/Bandas do
 // app Estoque e Pedidos) não contarem o mesmo couvert duas vezes.
+//
+// `couver_lancado_em` registra o ATO de lançar, separado do valor. A coluna couver_valor
+// tem DEFAULT 0 no banco, então ela NUNCA é nula: a pendência antiga, que cobrava
+// `couver_valor === null`, não podia disparar nunca — 44 dias de show já passados ficaram
+// com couvert zerado e sem cobrança nenhuma. Cobrar por "valor = 0" trocaria um defeito
+// por outro: zero lançado de propósito ficaria indistinguível de zero que ninguém tocou, e
+// a loja sem couvert naquele dia ficaria travada sem saída (mesma armadilha da contagem
+// zero no app Pedido). A marca vai em TODAS as linhas do dia, não só na principal: a
+// principal pode ser uma apresentação que não veio, e aí a cobrança olharia pra linha
+// errada.
 async function _salvarCouvertBandaHoje(){
   const registros = _triosHojeRecords || [];
   if(!registros.length) return;
@@ -18332,15 +18449,16 @@ async function _salvarCouvertBandaHoje(){
   if(btn){ btn.disabled=true; btn.textContent='Salvando...'; }
   try{
     const [principal, ...resto] = registros;
+    const agora = new Date().toISOString();
     const {error} = await sb.from('gn_trios_agenda')
-      .update({ couver_qtd: qtd, couver_valor: valor }).eq('id', principal.id);
+      .update({ couver_qtd: qtd, couver_valor: valor, couver_lancado_em: agora }).eq('id', principal.id);
     if(error) throw error;
     for(const r of resto){
-      await sb.from('gn_trios_agenda').update({ couver_qtd: 0, couver_valor: 0 }).eq('id', r.id);
+      await sb.from('gn_trios_agenda').update({ couver_qtd: 0, couver_valor: 0, couver_lancado_em: agora }).eq('id', r.id);
     }
     _triosHojeRecords = [
-      {...principal, couver_qtd:qtd, couver_valor:valor},
-      ...resto.map(r => ({...r, couver_qtd:0, couver_valor:0})),
+      {...principal, couver_qtd:qtd, couver_valor:valor, couver_lancado_em:agora},
+      ...resto.map(r => ({...r, couver_qtd:0, couver_valor:0, couver_lancado_em:agora})),
     ];
     _triosHojeRecord = _triosHojeRecords[0];
     _renderBandaHoje();
