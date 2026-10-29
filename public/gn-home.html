@@ -12083,7 +12083,7 @@ async function _loadTriosGerencia() {
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
   const rows = await window.gnFetchJson(
     `${SB_URL}/rest/v1/gn_trios_agenda?data=gte.${histIniISO}&data=lte.${fimISO}` +
-    `&select=data,loja,artista,cache,couver_qtd,couver_valor,presenca_confirmada,banda_nao_veio,banda_nao_veio_motivo,horario_inicio` +
+    `&select=data,loja,artista,cache,couver_qtd,couver_valor,couver_lancado_em,presenca_confirmada,banda_nao_veio,banda_nao_veio_motivo,horario_inicio` +
     `&order=data.asc,horario_inicio.asc`, H, 'triosGerencia', null);
   if (!rows) { _triosGerLoaded = true; _triosGerData = { erro: true, per, iniISO, fimISO }; renderDashboard(); return; }
 
@@ -12100,11 +12100,15 @@ async function _loadTriosGerencia() {
     if (!k || !dentro[k]) return;
     const dia = String(r.data).slice(0, 10);
     const ch = k + '|' + dia;
-    if (!porDia[ch]) porDia[ch] = { k, dia, cache: 0, couver: 0, apres: [], naoVeio: 0, naoVeioCache: 0 };
+    if (!porDia[ch]) porDia[ch] = { k, dia, cache: 0, couver: 0, apres: [], naoVeio: 0, naoVeioCache: 0, lancado: false };
     const d = porDia[ch];
     const cache = parseFloat(r.cache) || 0;
     const couver = parseFloat(r.couver_valor) || 0;
     d.cache += cache; d.couver += couver;
+    // O ATO de lançar, não o valor: couver_valor tem DEFAULT 0 no banco, então zero não
+    // distingue "a loja lançou e deu zero" de "ninguém lançou". A marca só conta vinda de
+    // uma apresentação que aconteceu — a que não veio não tem couvert a lançar.
+    if (r.couver_lancado_em && !r.banda_nao_veio) d.lancado = true;
     if (r.banda_nao_veio) { d.naoVeio++; d.naoVeioCache += cache; }
     d.apresTotal = (d.apresTotal || 0) + 1;
     d.apres.push({ artista: r.artista || '—', cache, couver, hora: r.horario_inicio || '',
@@ -12129,7 +12133,7 @@ async function _loadTriosGerencia() {
     if (semShow) s.diasSemShow.push(d.dia);
     if (d.dia >= hoje) s.diasFuturos.push(d.dia);
     else if (semShow) { /* já contado em diasSemShow */ }
-    else { s.diasValidos.push(d.dia); if (d.couver <= 0) s.diasSemCouver.push(d.dia); }
+    else { s.diasValidos.push(d.dia); if (!d.lancado) s.diasSemCouver.push(d.dia); }
   });
   Object.values(porSemana).forEach(s => {
     s.dias.sort((a, b) => a.dia.localeCompare(b.dia));
@@ -12261,11 +12265,11 @@ function _buildTriosPanel() {
   // ── Cartão por loja ───────────────────────────────────────────────────────────────
   // No fim de semana o detalhe é DIA a dia; no mês é fim de semana a fim de semana —
   // listar os ~9 dias corridos de um mês faz o cartão virar uma parede que ninguém lê.
-  const linhaDetalhe = (rotulo, cache, couver, futuro) => `<div style="display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--t3);padding:2px 0">
+  const linhaDetalhe = (rotulo, cache, couver, futuro, faltaLancar) => `<div style="display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--t3);padding:2px 0">
       <span style="font-weight:800;color:var(--t2);min-width:${mes ? 76 : 38}px">${rotulo}</span>
       <span style="flex:1"></span>
       <span style="font-variant-numeric:tabular-nums;color:var(--t2)">${_fmtBRL(cache)}</span>
-      <span style="font-variant-numeric:tabular-nums;min-width:62px;text-align:right;color:${futuro ? 'var(--t4)' : couver > 0 ? 'var(--txt-green)' : 'var(--txt-amber)'}">${futuro ? '—' : couver > 0 ? _fmtBRL(couver) : 'sem couvert'}</span>
+      <span style="font-variant-numeric:tabular-nums;min-width:62px;text-align:right;color:${futuro ? 'var(--t4)' : faltaLancar ? 'var(--txt-amber)' : 'var(--txt-green)'}">${futuro ? '—' : faltaLancar ? 'sem couvert' : _fmtBRL(couver)}</span>
     </div>`;
   const cardsHtml = ordenadas.map(k => {
     const s = daSemana(k);
@@ -12277,12 +12281,13 @@ function _buildTriosPanel() {
     const detalhe = mes
       ? s.fdsemanas.map(w => linhaDetalhe(
           `${_carnesDM(_carnesISO(new Date(new Date(w.sem + 'T12:00:00').getTime() + 5 * 864e5)))}–${_carnesDM(_carnesISO(new Date(new Date(w.sem + 'T12:00:00').getTime() + 6 * 864e5)))}`,
-          w.cache, w.couver, w.dias.every(d => d.dia >= _triosGerData.hoje))).join('')
+          w.cache, w.couver, w.dias.every(d => d.dia >= _triosGerData.hoje),
+          w.dias.some(d => d.dia < _triosGerData.hoje && !d.lancado))).join('')
       : s.dias.map(d => `<div style="display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--t3);padding:2px 0">
           <span style="font-weight:800;color:var(--t2);min-width:38px">${_carnesDM(d.dia)}</span>
           <span style="flex:1">${d.apres.map(a => a.artista + (a.naoVeio ? ' <span style="color:var(--txt-red)">(não veio)</span>' : '')).join(' · ')}</span>
           <span style="font-variant-numeric:tabular-nums;color:var(--t2)">${_fmtBRL(d.cache)}</span>
-          <span style="font-variant-numeric:tabular-nums;min-width:62px;text-align:right;color:${d.dia >= _triosGerData.hoje ? 'var(--t4)' : d.couver > 0 ? 'var(--txt-green)' : 'var(--txt-amber)'}">${d.dia >= _triosGerData.hoje ? '—' : d.couver > 0 ? _fmtBRL(d.couver) : 'sem couvert'}</span>
+          <span style="font-variant-numeric:tabular-nums;min-width:62px;text-align:right;color:${d.dia >= _triosGerData.hoje ? 'var(--t4)' : d.lancado ? 'var(--txt-green)' : 'var(--txt-amber)'}">${d.dia >= _triosGerData.hoje ? '—' : d.lancado ? _fmtBRL(d.couver) : 'sem couvert'}</span>
         </div>`).join('');
     return `<div style="background:var(--s1);border:1px solid var(--b1);border-left:3px solid ${cor};border-radius:11px;padding:11px 12px;margin-bottom:8px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:7px">

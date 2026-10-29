@@ -28,8 +28,13 @@ let ok = 0, falhou = 0;
 const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ? ok++ : falhou++;
   if (!c && extra !== undefined) console.log('      ' + String(extra).slice(0, 400)); };
 
+// couver_lancado_em e o ATO de lancar. couver_valor tem DEFAULT 0 no banco, entao zero
+// nao distingue "a loja lancou e deu zero" de "ninguem lancou" — a fixture reflete isso:
+// valor > 0 vem lancado, zero vem sem a marca, e o caso do zero lancado de proposito se
+// escreve passando couver_lancado_em no extra.
 const ap = (loja, data, cache, couver, extra) => Object.assign(
   { loja, data, cache, couver_valor: couver, couver_qtd: couver ? couver / 10 : 0,
+    couver_lancado_em: couver > 0 ? data + 'T23:30:00.000Z' : null,
     artista: 'Trio ' + loja, horario_inicio: '20:00', presenca_confirmada: true,
     banda_nao_veio: false, banda_nao_veio_motivo: null }, extra || {});
 
@@ -53,6 +58,12 @@ const LINHAS = [
   // Norte Shopping: a banda não veio, e o cachê continua gravado na linha.
   ap('norte_shopping', '2026-10-24', 900, 0,
      { banda_nao_veio: true, presenca_confirmada: false, banda_nao_veio_motivo: 'carro quebrou' }),
+  // Itaquera: lançou o couvert no sábado e DEU ZERO — valor 0 com a marca de lançamento.
+  // É o caso que a regra velha (valor > 0) lia como "não lançou" e cobrava de uma loja que
+  // tinha lançado; e é por existir que o bloqueio não pode ser por valor, senão a loja sem
+  // couvert naquele dia ficaria travada sem saída.
+  ap('itaquera', '2026-10-24', 600, 0, { couver_lancado_em: '2026-10-24T23:30:00.000Z' }),
+  ap('itaquera', '2026-10-25', 600, 1500),
   // Semana VIGENTE: o fim de semana ainda vem.
   ap('pedreira', '2026-10-31', 700, 0),
   ap('pedreira', '2026-11-01', 600, 0),
@@ -189,6 +200,24 @@ const LINHAS = [
     /24\/10/.test(avShow), avShow);
   check('no cartão dela o saldo também não vira número',
     /a banda não veio/.test(p.cards['Norte Shopping'] || ''), p.cards['Norte Shopping'] || '');
+
+  // ══ 3c. ZERO LANÇADO DE PROPÓSITO NÃO É COUVERT FALTANDO ════════════════════════
+  // A coluna couver_valor tem DEFAULT 0 no banco: zero não diz se alguém lançou. Quem
+  // decide é a marca do ato. Medido antes de mexer: NENHUMA linha da base era nula e 44
+  // dias de show já passados estavam zerados — a cobrança do Check-list pedia
+  // `couver_valor === null` e por isso nunca podia disparar.
+  const ita = p.simples['ITAQUERA|2026-10-19'];
+  check('o dia com couvert lançado em zero conta como lançado',
+    ita && ita.diasSemCouver.length === 0, JSON.stringify(ita));
+  check('e a loja fecha o saldo, em vez de ficar sem saldo',
+    ita && ita.status === 'positivo' && ita.saldo === 300, JSON.stringify(ita));
+  check('ela NÃO é cobrada por couvert faltando',
+    !/Itaquera/.test(avFal), avFal);
+  check('e o zero aparece como valor, não como "sem couvert"',
+    /R\$ ?0,00/.test(p.cards['Itaquera'] || ''), (p.cards['Itaquera'] || '').slice(0, 240));
+  // O contrário continua valendo: zero SEM a marca é couvert que ninguém lançou.
+  check('zero sem a marca continua sendo couvert faltando',
+    cax && cax.diasSemCouver.length === 2, JSON.stringify(cax));
 
   // ══ 4. FIM DE SEMANA QUE AINDA NÃO CHEGOU NÃO É COBRANÇA ═════════════════════════
   const v = await montar(1);

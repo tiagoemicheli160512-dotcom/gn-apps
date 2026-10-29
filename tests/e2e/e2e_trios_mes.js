@@ -21,8 +21,13 @@ let ok = 0, falhou = 0;
 const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ? ok++ : falhou++;
   if (!c && extra !== undefined) console.log('      ' + String(extra).slice(0, 400)); };
 
+// couver_lancado_em e o ATO de lancar. couver_valor tem DEFAULT 0 no banco, entao zero
+// nao distingue "a loja lancou e deu zero" de "ninguem lancou" — a fixture reflete isso:
+// valor > 0 vem lancado, zero vem sem a marca, e o caso do zero lancado de proposito se
+// escreve passando couver_lancado_em no extra.
 const ap = (loja, data, cache, couver, extra) => Object.assign(
   { loja, data, cache, couver_valor: couver, couver_qtd: couver ? couver / 10 : 0,
+    couver_lancado_em: couver > 0 ? data + 'T23:30:00.000Z' : null,
     artista: 'Trio ' + loja, horario_inicio: '20:00', presenca_confirmada: true,
     banda_nao_veio: false, banda_nao_veio_motivo: null }, extra || {});
 
