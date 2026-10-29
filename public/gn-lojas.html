@@ -6013,11 +6013,46 @@ function abrirModalNovoProdutoPedido() {
 
 function getPedido() { return pedidoAll[lojaKey()] || {}; }
 
+// Campos que são CONTAGEM de estoque (o que a loja pesou/contou), não pedido.
+const CAMPOS_CONTAGEM_PEDIDO = ['cx', 'und', 'atual'];
+
+// `_contado` significa uma coisa só: uma pessoa digitou um número num campo de contagem
+// deste item, NESTA semana (lojaKey já inclui a semana).
+//
+// Existe porque zero contado e item não mexido eram indistinguíveis, e por isso o zero
+// nunca era gravado: as duas portas de confirmarPedido e a de _sincronizarComPedidos
+// barravam qualquer item com contagem 0 e sem pedido. Na segunda seguinte o app buscava a
+// contagem mais recente, achava a de duas semanas atrás e mostrava um número velho no lugar
+// do zero. Medido no banco: 91 linhas com zero em 33.262 (0,27%), 803 linhas entre 0 e 1 —
+// a loja conta quantidade mínima, mas não conseguia registrar zero — e 410 casos de item
+// que pulou exatamente uma semana e voltou, em todas as 11 lojas.
+//
+// Nem o inicializador abaixo nem o `pedidoAll[k][prod.item] = {}` de confirmarPedido (que
+// roda pra TODO item do catálogo em cada confirmação) põem esta marca. É isso que impede o
+// conserto de virar "um zero por item do catálogo toda semana" — zero que ninguém contou
+// dentro do histórico de estoque seria pior que o número velho.
+function _pedidoEhCampoContagem(field) { return CAMPOS_CONTAGEM_PEDIDO.includes(String(field)); }
+
 function setPedidoVal(itemId, field, val) {
   const k = lojaKey();
   if (!pedidoAll[k]) pedidoAll[k] = {};
   if (!pedidoAll[k][itemId]) pedidoAll[k][itemId] = {cx:0, und:0, pedidoCx:0, pedidoUnd:0, obs:''};
   pedidoAll[k][itemId][field] = val;
+  if (_pedidoEhCampoContagem(field)) {
+    const vazio = val === '' || val === null || val === undefined || !isFinite(parseFloat(val));
+    // Apagar o campo desmarca: quem limpou não contou. Só desmarca se os OUTROS campos de
+    // contagem também estiverem vazios, senão limpar "und" apagaria a contagem feita em "cx".
+    if (vazio) {
+      const aindaTem = CAMPOS_CONTAGEM_PEDIDO.some(f => {
+        if (f === field) return false;
+        const v = pedidoAll[k][itemId][f];
+        return v !== '' && v !== null && v !== undefined && isFinite(parseFloat(v));
+      });
+      if (!aindaTem) delete pedidoAll[k][itemId]._contado;
+    } else {
+      pedidoAll[k][itemId]._contado = true;
+    }
+  }
   autoSave();
 }
 
@@ -6707,7 +6742,7 @@ async function _pedSyncFilaProcessar() {
 }
 
 async function _sincronizarComPedidos(produtosSync) {
-  // produtosSync: [{prod, cx, und, pedidoCx, pedidoUnd, fator}]
+  // produtosSync: [{prod, cx, und, pedidoCx, pedidoUnd, fator, contado}]
   await _carregarCatalogo();
   const pedidoDB = await _buscarOuCriarPedidoAtivo();
   const lojaSlug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
@@ -6728,7 +6763,7 @@ async function _sincronizarComPedidos(produtosSync) {
   // descontam venda. Busca uma vez só, fora do loop.
   const estAntHist = await _buscarEstAntPorCatalogo(wkKey(semanaHojeMonday));
 
-  produtosSync.forEach(({ prod, cx, und, pedidoCx, pedidoUnd, fator }) => {
+  produtosSync.forEach(({ prod, cx, und, pedidoCx, pedidoUnd, fator, contado }) => {
     const estoqueAtual = (cx * fator) + und;
     const qtdPedida = (pedidoCx * fator) + pedidoUnd;
     // gn_pedido_itens.qtd_pedida precisa ficar na mesma unidade do Catálogo (a mesma que
@@ -6738,7 +6773,9 @@ async function _sincronizarComPedidos(produtosSync) {
     // Sem essa divisão de volta, o valor_previsto das provisões (qtd × custo — e custo é
     // sempre o preço da caixa, não da unidade avulsa) saía multiplicado pelo fator.
     const qtdPedidaCatalogo = pedidoCx + (pedidoUnd / fator);
-    if (estoqueAtual === 0 && qtdPedida === 0) return;
+    // Contagem zero digitada pela loja VAI pro banco: é o que faz a segunda seguinte
+    // mostrar zero em vez do número de duas semanas atrás (ver _contado em setPedidoVal).
+    if (estoqueAtual === 0 && qtdPedida === 0 && !contado) return;
     const catalogoId = _resolverCatalogoId(prod);
     if (!catalogoId) { naoSincronizados.push(prod.produto); return; }
     const destSinc = mapeamentoPedido[String(prod.item)] || prod.produto.trim().toUpperCase();
@@ -6932,7 +6969,8 @@ async function confirmarPedido(modo) {
     const qtdBase    = (cx * fator) + und;
     const pedCx      = parseFloat(entry.pedidoCx)  || 0;
     const pedUnd     = parseFloat(entry.pedidoUnd) || 0;
-    if (qtdBase === 0 && pedCx === 0 && pedUnd === 0 && !pedidoAnterior[insumoMapeado || nomeUpper]) return;
+    // `entry._contado` passa: contagem zero digitada pela loja é informação, não ausência.
+    if (qtdBase === 0 && pedCx === 0 && pedUnd === 0 && !entry._contado && !pedidoAnterior[insumoMapeado || nomeUpper]) return;
 
     const destino = insumoMapeado || nomeUpper;
 
@@ -6949,10 +6987,10 @@ async function confirmarPedido(modo) {
     if (insumoMapeado) {
       delete estIniAll[k][nomeUpper];
     }
-    if (qtdBase > 0 || pedCx > 0 || pedUnd > 0) {
+    if (qtdBase > 0 || pedCx > 0 || pedUnd > 0 || entry._contado) {
       atualizados++;
       itensConf.push({ produto: prod.produto, fornecedor: prod.fornecedor || '', cx, und, pedidoCx: pedCx, pedidoUnd: pedUnd });
-      produtosParaSync.push({ prod, cx, und, pedidoCx: pedCx, pedidoUnd: pedUnd, fator });
+      produtosParaSync.push({ prod, cx, und, pedidoCx: pedCx, pedidoUnd: pedUnd, fator, contado: !!entry._contado });
     }
   });
 
