@@ -195,6 +195,60 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
   check('e a semana soma 120, não 240 — a entrega conta uma vez',
     auto.soma === 120, JSON.stringify(auto));
 
+  // ══ 2c. O 🔄 Atualizar conserta uma semana PASSADA ════════════════════════════════
+  // É o caminho de recuperação das 51 duplicatas já gravadas: abrir a semana e atualizar,
+  // em vez de reescrever estoque no banco. Só vale se a reconciliação funcionar fora da
+  // semana corrente — e se a virada NÃO disparar junto, senão consertar a entrada custaria
+  // o estoque inicial daquela semana (o defeito nº 2).
+  const passada = await page.evaluate(async () => {
+    state.semanaInicio = '2026-10-19'; state.semanaFim = '2026-10-25';
+    stateWeek.semanaInicio = '2026-10-19';
+    stateWeek.carnes = {}; CARNES_DEF.forEach(c => { stateWeek.carnes[c.key] = {}; });
+    // O estado corrompido da Pedreira: a MESMA entrega de 60 kg em dois dias, e um
+    // estoque inicial próprio que não pode ser tocado.
+    stateWeek.carnes.carne_sol = { inicial: '204.6', contagem_final: '140.85',
+      ent_qua: '60', autoEnt_qua: '60', ent_qui: '60', autoEnt_qui: '60' };
+    _carnesLimpos = new Set();
+    const CAT = '00000000-0000-0000-0000-000000000207';
+    _carnesCatalogoIds = { 207: CAT, 209: 'x209', 392: 'x392', 237: 'x237' };
+    const resp = (data) => { const o = { data, error: null };
+      const p = { then: (f, r) => Promise.resolve(o).then(f, r) };
+      ['eq','in','gte','lte','order','limit','select'].forEach(m => { p[m] = () => p; });
+      p.maybeSingle = async () => o; p.single = async () => o;
+      return p; };
+    const ups = []; const orig = sb.from;
+    sb.from = t => {
+      if (t === 'gn_provisoes') return { select: () => resp([ { catalogo_id: CAT, data_entrega: '2026-10-21',
+        gn_recebimentos: [ { qtd_recebida: 60, nota_numero: '1225680', validado_em: '2026-10-22T11:22:51Z' } ] } ]) };
+      if (t === 'checklist_carnes') return {
+        upsert: async p2 => { ups.push(JSON.parse(JSON.stringify(p2))); return { error:null }; },
+        select: () => resp(null) };
+      if (t === 'checklist_diario') return { upsert: async () => ({ error:null }),
+        select: () => ({ eq: function(){ return this; }, maybeSingle: async () => ({ data:{ dinheiro_caixa:0 } }) }) };
+      if (t === 'gn_lojas') return { select: () => resp([{ all_data: {} }]) };
+      return { select: () => resp([]), upsert: async () => ({ error:null }) };
+    };
+    try { await _carregarCarnesAutoLojas(true); await saveAll({ silencioso:true }); }
+    finally { sb.from = orig; }
+    const da19 = ups.filter(u => u.semana_inicio === '2026-10-19');
+    const u = da19.length ? da19[da19.length - 1] : null;
+    const cs = u && u.carnes.carne_sol;
+    return { semanas: ups.map(x => x.semana_inicio), cs,
+      soma: cs ? ['seg','ter','qua','qui','sex','sab','dom']
+        .reduce((a, d) => a + (parseFloat(cs['ent_' + d]) || 0), 0) : null };
+  });
+  check('🔄 numa semana passada reconcilia a entrada: 60, não 120',
+    passada.soma === 60, JSON.stringify(passada));
+  check('e sobra um dia só com a entrega',
+    passada.cs && ['seg','ter','qua','qui','sex','sab','dom']
+      .filter(d => (parseFloat(passada.cs['ent_' + d]) || 0) > 0).length === 1, JSON.stringify(passada.cs));
+  check('sem tocar no estoque inicial daquela semana',
+    passada.cs && passada.cs.inicial === '204.6', JSON.stringify(passada.cs));
+  check('sem apagar o fechamento dela',
+    passada.cs && passada.cs.contagem_final === '140.85', JSON.stringify(passada.cs));
+  check('e sem propagar nada pra semana de antes',
+    !passada.semanas.includes('2026-10-12'), JSON.stringify(passada.semanas));
+
   // ══ 3. A virada da semana só roda na semana corrente ═══════════════════════════════
   // Isto é o que produziu as 79 linhas com inicial = contagem_final.
   const virar = (semanaCarregada) => page.evaluate(async ({ semanaCarregada }) => {
