@@ -71,7 +71,7 @@ const LINHAS = [
     try {
       await page.waitForFunction(() => {
         try { return typeof _buildTriosPanel === 'function' && typeof _loadTriosGerencia === 'function'
-               && typeof _triosNavSemana === 'function' && typeof _triosSegundaDe === 'function'
+               && typeof _triosNav === 'function' && typeof _triosSegundaDe === 'function'
                && Array.isArray(LOJAS_LISTA); }
         catch (e) { return false; }
       }, null, { timeout: 20000 });
@@ -84,6 +84,7 @@ const LINHAS = [
     const urls = [];
     window.gnFetchJson = async (url) => { urls.push(url);
       return /gn_trios_agenda/.test(url) ? LINHAS : []; };
+    _triosPer = 'sem';
     _triosGerLoaded = false; _triosGerData = null; _triosGerOff = off;
     try { await _loadTriosGerencia(); } finally { window.gnFetchJson = orig; }
     const html = _buildTriosPanel();
@@ -221,9 +222,10 @@ const LINHAS = [
     const orig = window.gnFetchJson;
     window.gnFetchJson = async (url) => (/gn_trios_agenda/.test(url) ? LINHAS : []);
     try {
-      _triosGerOff = 0; _triosNavSemana(1);  const chegouNaVigente = _triosGerOff;
-      _triosNavSemana(1);                    const passouDaVigente = _triosGerOff;
-      _triosNavSemana(-1); _triosNavSemana(-1); const voltou = _triosGerOff;
+      _triosPer = 'sem';
+      _triosGerOff = 0; _triosNav(1);  const chegouNaVigente = _triosGerOff;
+      _triosNav(1);                    const passouDaVigente = _triosGerOff;
+      _triosNav(-1); _triosNav(-1); const voltou = _triosGerOff;
       await new Promise(r => setTimeout(r, 60));
       return { chegouNaVigente, passouDaVigente, voltou };
     } finally { window.gnFetchJson = orig; }
@@ -233,7 +235,7 @@ const LINHAS = [
   check('e volta pra trás sem trava', nav.voltou === -1, JSON.stringify(nav));
 
   // ══ 8. O HISTÓRICO É O QUE APONTA QUAIS SEMANAS ══════════════════════════════════
-  // _triosNavSemana dispara a carga de verdade (sem o dublê), então o estado fica na
+  // _triosNav dispara a carga de verdade (sem o dublê), então o estado fica na
   // semana errada e com a agenda vazia. Remonta antes de medir — sem isto, as duas
   // verificações abaixo e as do relatório passavam a medir uma tela em branco.
   await montar(0);
@@ -244,12 +246,12 @@ const LINHAS = [
     const d = document.createElement('div'); d.innerHTML = trecho;
     const linhas = [...d.querySelectorAll('div')].filter(x => /width:104px/.test(x.innerHTML));
     const pedLinha = [...d.querySelectorAll('div')].find(x => /Pedreira/.test(x.textContent) && /height:18px/.test(x.innerHTML));
-    return { temHistorico: i >= 0, nLinhas: linhas.length, semanas: TRIOS_SEMANAS_HISTORICO,
+    return { temHistorico: i >= 0, nLinhas: linhas.length, semanas: TRIOS_HISTORICO.sem,
              quadrados: pedLinha ? pedLinha.querySelectorAll('span[title]').length : 0,
              pedTxt: pedLinha ? pedLinha.textContent.replace(/\s+/g, ' ').trim() : '' };
   });
   check('o histórico das últimas semanas aparece', hist.temHistorico === true, JSON.stringify(hist));
-  // Contra o LITERAL 12, não contra TRIOS_SEMANAS_HISTORICO: comparando a tela com a
+  // Contra o LITERAL 12, não contra TRIOS_HISTORICO.sem: comparando a tela com a
   // própria constante da página, encurtar a janela mudava os dois lados e a verificação
   // passava sem medir nada.
   check('com um quadrado por semana das 12 do histórico',

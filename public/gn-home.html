@@ -11573,7 +11573,7 @@ function _buildBarrisSemanalPanel(){
 // inteiro num bloco só nada depois carregava.
 
 let _carnesGerData = null, _carnesGerLoaded = false, _carnesGerOff = 0;
-let _triosGerData = null, _triosGerLoaded = false, _triosGerOff = 0;
+let _triosGerData = null, _triosGerLoaded = false, _triosGerOff = 0, _triosPer = 'sem';
 let _carnesRelatorioLojasFiltro = [];
 
 // Abre na semana PASSADA, igual ao app Pedidos: a contagem da semana corrente ainda está
@@ -11978,10 +11978,10 @@ async function enviarPDFCarnesWpp() {
   await _compartilharPdfWpp(r.msg, r.titulo);
 }
 
-// ── 🎵 TRIOS — cachê, couvert e saldo por fim de semana ───────────────────────────────
+// ── 🎵 TRIOS — cachê, couvert e saldo por fim de semana ou por mês ────────────────────
 // O trio toca no fim de semana: na base inteira são 199 apresentações no sábado, 193 no
 // domingo e 8 na sexta. Todas caem na MESMA semana segunda→domingo, então agrupar pela
-// segunda-feira (o mesmo _carnesSemanaIni das carnes) já junta o fim de semana inteiro.
+// segunda-feira junta o fim de semana inteiro; o mês agrupa os fins de semana dele.
 //
 // DUAS regras da fonte que mudam a conta, e errar qualquer uma inventa número:
 //
@@ -11995,6 +11995,9 @@ async function enviarPDFCarnesWpp() {
 //    A agenda vai até 29/11 com o cachê já contratado: dos 193 pares loja-semana da base,
 //    50 são futuros e TODOS sem couvert. Marcá-los seria 50 alarmes falsos.
 //
+// E uma terceira, que só apareceu depois: DIA EM QUE A BANDA NÃO VEIO não é dia sem
+// couvert. Sem apresentação não há couvert a lançar.
+//
 // MEDIDO nos 143 pares loja-semana cujo fim de semana já passou (27/07 a 25/10):
 //   12 (8%)  sem couvert em nenhum dia       → informação que falta
 //   30 (21%) com couvert em parte dos dias   → informação que falta em parte
@@ -12004,7 +12007,12 @@ async function enviarPDFCarnesWpp() {
 // Negativo e sem-couvert são DOIS avisos separados, nunca um só: juntar os dois no mesmo
 // vermelho esconderia a diferença entre a loja que gastou mais do que arrecadou e a loja
 // que só não lançou o que arrecadou — e é essa diferença que decide o que fazer.
-const TRIOS_SEMANAS_HISTORICO = 12;
+//
+// Histórico: 12 fins de semana (~3 meses) ou 6 meses. Doze MESES seriam oito quadrados
+// cinzas, porque a agenda começa em 27/07 — cinza aqui significa "sem trio", e uma fileira
+// de cinza por falta de passado diria uma coisa que não é verdade.
+const TRIOS_HISTORICO = { sem: 12, mes: 6 };
+const TRIOS_MES_ABREV = ['jan','fev','mar','abr','mai','jun','jul','ago','set','out','nov','dez'];
 const TRIO_SLUG_PARA_LOJA = Object.fromEntries(
   (window.GN_LOJAS || []).filter(l => l.trioSlug).map(l => [l.trioSlug, l.userKey]));
 
@@ -12015,12 +12023,48 @@ function _triosSegundaDe(iso) {
 }
 function _triosHojeISO() { return _carnesISO(new Date()); }
 
-function _triosNavSemana(dir) {
+// A chave do balde: a segunda-feira da semana, ou o dia 1º do mês.
+function _triosChaveDe(iso, per) {
+  return per === 'mes' ? String(iso).slice(0, 7) + '-01' : _triosSegundaDe(iso);
+}
+// Início do período navegado. Os dois zeros querem dizer coisas diferentes de propósito:
+// na semana, off 0 é a que ACABOU de passar (o fim de semana fica no fim dela, então a
+// semana vigente ainda não aconteceu); no mês, off 0 é o mês CORRENTE, que é o que se
+// acompanha enquanto corre.
+function _triosPeriodoIni(per, off) {
+  if (per === 'mes') { const h = new Date(); return new Date(h.getFullYear(), h.getMonth() + (off || 0), 1); }
+  return _carnesSemanaIni(off);
+}
+function _triosPeriodoFim(per, ini) {
+  return per === 'mes' ? new Date(ini.getFullYear(), ini.getMonth() + 1, 0)
+                       : new Date(ini.getTime() + 6 * 864e5);
+}
+function _triosPeriodoAnterior(per, ini, n) {
+  return per === 'mes' ? new Date(ini.getFullYear(), ini.getMonth() - n, 1)
+                       : new Date(ini.getTime() - n * 7 * 864e5);
+}
+// O rótulo da coluna no histórico. Na semana é o SÁBADO, não a segunda: o quadrado é o fim
+// de semana, e é o sábado que aparece nos cartões — rotular com a segunda faria procurar
+// uma data que não está em lugar nenhum da tela.
+function _triosRotuloColuna(chave, per) {
+  const d = new Date(chave + 'T12:00:00');
+  if (per === 'mes') return { topo: String(d.getFullYear()).slice(2), baixo: TRIOS_MES_ABREV[d.getMonth()] };
+  d.setDate(d.getDate() + 5);
+  return { topo: TRIOS_MES_ABREV[d.getMonth()], baixo: String(d.getDate()).padStart(2, '0') };
+}
+
+function _triosSetPer(per) {
+  if (_triosPer === per) return;
+  _triosPer = per;
+  _triosGerOff = 0;     // o offset de semana não quer dizer nada em mês, e vice-versa
+  _loadTriosGerencia();
+  renderDashboard();
+}
+function _triosNav(dir) {
   const novo = _triosGerOff + dir;
-  // +1 é a semana vigente: o fim de semana dela ainda vem, e é onde se vê o cachê já
-  // contratado antes de pagar. Acima disso é semana que a agenda pode ter, mas que não
-  // ajuda a decidir nada hoje.
-  if (novo > 1) return;
+  // Semana: +1 é a vigente, onde se vê o cachê contratado antes de pagar. Mês: 0 já é o
+  // corrente. Acima disso é agenda futura, que não ajuda a decidir nada hoje.
+  if (novo > (_triosPer === 'mes' ? 0 : 1)) return;
   _triosGerOff = novo;
   _loadTriosGerencia();
   renderDashboard();
@@ -12028,19 +12072,20 @@ function _triosNavSemana(dir) {
 
 async function _loadTriosGerencia() {
   _triosGerLoaded = false; _triosGerData = null;
-  const ini = _carnesSemanaIni(_triosGerOff);
-  const fim = new Date(ini.getTime() + 6 * 864e5);
+  const per = _triosPer;
+  const ini = _triosPeriodoIni(per, _triosGerOff);
+  const fim = _triosPeriodoFim(per, ini);
   const iniISO = _carnesISO(ini), fimISO = _carnesISO(fim);
-  // O histórico vem na MESMA consulta porque é ele que responde "quais semanas ficaram
-  // negativas ou sem couvert" — a pergunta não é de uma semana só. Cabe numa consulta: a
-  // tabela inteira tem 400 linhas.
-  const histIniISO = _carnesISO(new Date(ini.getTime() - (TRIOS_SEMANAS_HISTORICO - 1) * 7 * 864e5));
+  // O histórico vem na MESMA consulta porque é ele que responde "quais períodos ficaram
+  // negativos ou sem couvert" — a pergunta não é de um só. Cabe numa consulta: a tabela
+  // inteira tem 400 linhas.
+  const histIniISO = _carnesISO(_triosPeriodoAnterior(per, ini, TRIOS_HISTORICO[per] - 1));
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
   const rows = await window.gnFetchJson(
     `${SB_URL}/rest/v1/gn_trios_agenda?data=gte.${histIniISO}&data=lte.${fimISO}` +
     `&select=data,loja,artista,cache,couver_qtd,couver_valor,presenca_confirmada,banda_nao_veio,banda_nao_veio_motivo,horario_inicio` +
     `&order=data.asc,horario_inicio.asc`, H, 'triosGerencia', null);
-  if (!rows) { _triosGerLoaded = true; _triosGerData = { erro: true, iniISO, fimISO }; renderDashboard(); return; }
+  if (!rows) { _triosGerLoaded = true; _triosGerData = { erro: true, per, iniISO, fimISO }; renderDashboard(); return; }
 
   const hoje = _triosHojeISO();
   // Maglia não usa a aba Banda do Check-list (CLAUDE.md / ABAS_FORA_MAGLIA) e não tem uma
@@ -12048,7 +12093,7 @@ async function _loadTriosGerencia() {
   const chaves = (LOJAS_LISTA || []).filter(k => k !== 'MAGLIA');
   const dentro = {}; chaves.forEach(k => { dentro[k] = true; });
 
-  // Primeiro por DIA (é a unidade do couvert), depois por semana.
+  // Primeiro por DIA (é a unidade do couvert), depois por período.
   const porDia = {};
   rows.forEach(r => {
     const k = TRIO_SLUG_PARA_LOJA[String(r.loja || '').trim().toLowerCase()];
@@ -12067,11 +12112,11 @@ async function _loadTriosGerencia() {
                    motivo: r.banda_nao_veio_motivo || '' });
   });
 
-  const porSemana = {};   // 'loja|segunda' → agregado da semana
+  const porSemana = {};   // 'loja|chave do período' → agregado
   Object.values(porDia).forEach(d => {
-    const sem = _triosSegundaDe(d.dia);
-    const ch = d.k + '|' + sem;
-    if (!porSemana[ch]) porSemana[ch] = { k: d.k, sem, cache: 0, couver: 0,
+    const chv = _triosChaveDe(d.dia, per);
+    const ch = d.k + '|' + chv;
+    if (!porSemana[ch]) porSemana[ch] = { k: d.k, sem: chv, cache: 0, couver: 0,
       dias: [], diasValidos: [], diasSemCouver: [], diasSemShow: [], diasFuturos: [],
       naoVeio: 0, naoVeioCache: 0 };
     const s = porSemana[ch];
@@ -12079,8 +12124,7 @@ async function _loadTriosGerencia() {
     s.naoVeio += d.naoVeio; s.naoVeioCache += d.naoVeioCache;
     s.dias.push(d);
     // O dia em que NENHUMA banda veio não é dia sem couvert: não houve apresentação, então
-    // não há couvert a lançar. Cobrar o lançamento aí é cobrança falsa — e era o que
-    // acontecia com o Norte Shopping no primeiro desenho desta aba.
+    // não há couvert a lançar. Cobrar o lançamento aí é cobrança falsa.
     const semShow = d.apresTotal > 0 && d.naoVeio === d.apresTotal;
     if (semShow) s.diasSemShow.push(d.dia);
     if (d.dia >= hoje) s.diasFuturos.push(d.dia);
@@ -12090,10 +12134,16 @@ async function _loadTriosGerencia() {
   Object.values(porSemana).forEach(s => {
     s.dias.sort((a, b) => a.dia.localeCompare(b.dia));
     s.saldo = s.couver - s.cache;
-    // A ordem importa: fim de semana que não chegou vem antes de tudo (não há o que
-    // cobrar), depois a semana em que a banda não veio em nenhum dia (o cachê está
-    // gravado mas o registro não diz se foi pago — não dá pra chamar de prejuízo), e só
-    // então o couvert e o saldo.
+    // Os fins de semana dentro do período, pro detalhe do cartão no modo mês: listar os
+    // ~9 dias de um mês corrido faz o cartão virar uma parede.
+    const fds = {};
+    s.dias.forEach(d => { const w = _triosSegundaDe(d.dia);
+      if (!fds[w]) fds[w] = { sem: w, cache: 0, couver: 0, dias: [] };
+      fds[w].cache += d.cache; fds[w].couver += d.couver; fds[w].dias.push(d); });
+    s.fdsemanas = Object.values(fds).sort((a, b) => a.sem.localeCompare(b.sem));
+    // A ordem importa: período que não chegou vem antes de tudo (não há o que cobrar),
+    // depois aquele em que a banda não veio em nenhum dia (o cachê está gravado mas o
+    // registro não diz se foi pago), e só então o couvert e o saldo.
     s.status = s.diasFuturos.length === s.dias.length        ? 'futuro'
              : s.diasValidos.length === 0                     ? 'naoVeio'
              : s.diasSemCouver.length === s.diasValidos.length ? 'semCouver'
@@ -12102,47 +12152,64 @@ async function _loadTriosGerencia() {
              : 'positivo';
   });
 
-  // As semanas do histórico, da mais antiga pra mais nova, incluindo a navegada.
+  // Os períodos do histórico, do mais antigo pro mais novo, incluindo o navegado.
   const semanas = [];
-  for (let i = TRIOS_SEMANAS_HISTORICO - 1; i >= 0; i--)
-    semanas.push(_carnesISO(new Date(ini.getTime() - i * 7 * 864e5)));
+  for (let i = TRIOS_HISTORICO[per] - 1; i >= 0; i--)
+    semanas.push(_carnesISO(_triosPeriodoAnterior(per, ini, i)));
 
-  _triosGerData = { porSemana, semanas, chaves, iniISO, fimISO, histIniISO, hoje };
+  _triosGerData = { per, porSemana, semanas, chaves, iniISO, fimISO, histIniISO, hoje };
   _triosGerLoaded = true;
   renderDashboard();
 }
 
+// Os três amarelos eram tons diferentes (.12, .08 e .12) pro mesmo recado da legenda —
+// "couvert faltando". Dois tons do mesmo aviso fazem procurar uma diferença que não
+// existe, e o mais fraco quase some no tema escuro. Um amarelo só, o mais visível.
+const TRIOS_AMBAR = { fundo: 'rgba(245,158,11,.12)', borda: 'rgba(245,158,11,.32)' };
 const _TRIOS_STATUS = {
   negativo:  { cor: 'var(--txt-red)',   fundo: 'rgba(239,68,68,.12)',  borda: 'rgba(239,68,68,.32)',  rotulo: 'negativo' },
-  semCouver: { cor: 'var(--txt-amber)', fundo: 'rgba(245,158,11,.12)', borda: 'rgba(245,158,11,.32)', rotulo: 'sem couvert' },
-  parcial:   { cor: 'var(--txt-amber)', fundo: 'rgba(245,158,11,.08)', borda: 'rgba(245,158,11,.24)', rotulo: 'couvert em parte dos dias' },
+  semCouver: { cor: 'var(--txt-amber)', ...TRIOS_AMBAR, rotulo: 'sem couvert' },
+  parcial:   { cor: 'var(--txt-amber)', ...TRIOS_AMBAR, rotulo: 'couvert em parte dos dias' },
+  naoVeio:   { cor: 'var(--txt-amber)', ...TRIOS_AMBAR, rotulo: 'banda não veio' },
   positivo:  { cor: 'var(--txt-green)', fundo: 'rgba(22,163,74,.10)',  borda: 'rgba(22,163,74,.26)',  rotulo: 'positivo' },
-  naoVeio:   { cor: 'var(--txt-amber)', fundo: 'rgba(245,158,11,.12)', borda: 'rgba(245,158,11,.32)', rotulo: 'banda não veio' },
   futuro:    { cor: 'var(--t4)',        fundo: 'var(--s2)',            borda: 'var(--b1)',            rotulo: 'ainda não aconteceu' },
   vazio:     { cor: 'var(--t4)',        fundo: 'var(--s1)',            borda: 'var(--b1)',            rotulo: 'sem trio na agenda' },
 };
 
 function _buildTriosPanel() {
   const reportBtns = _reportBtnsRowHtml('Trios');
-  if (!_triosGerLoaded || !_triosGerData) return reportBtns + _skelPanel(4);
+  const perBtn = (p, rot) => `<button onclick="_triosSetPer('${p}')" style="flex:1;background:${_triosPer === p ? 'rgba(250,204,21,.14)' : 'var(--s1)'};border:1px solid ${_triosPer === p ? 'rgba(250,204,21,.4)' : 'var(--b1)'};border-radius:9px;padding:6px 10px;color:${_triosPer === p ? 'var(--t1)' : 'var(--t3)'};font-size:11.5px;font-weight:${_triosPer === p ? '800' : '600'};cursor:pointer;font-family:inherit">${rot}</button>`;
+  const perRow = `<div style="display:flex;gap:8px;margin-bottom:10px">${perBtn('sem', 'Fim de semana')}${perBtn('mes', 'Mês')}</div>`;
+  if (!_triosGerLoaded || !_triosGerData) return reportBtns + perRow + _skelPanel(4);
   if (_triosGerData.erro) {
-    return reportBtns + `<div style="font-size:12px;color:var(--t3);padding:14px">Não deu pra carregar a agenda dos trios agora. Troque de aba e volte.</div>`;
+    return reportBtns + perRow + `<div style="font-size:12px;color:var(--t3);padding:14px">Não deu pra carregar a agenda dos trios agora. Troque de aba e volte.</div>`;
   }
-  const { porSemana, semanas, chaves, iniISO, fimISO } = _triosGerData;
+  const { per, porSemana, semanas, chaves, iniISO, fimISO } = _triosGerData;
+  const mes = per === 'mes';
   const ordenadas = chaves.slice().sort((a, b) => (LOJA_DISPLAY[a] || a).localeCompare(LOJA_DISPLAY[b] || b));
   const daSemana = k => porSemana[k + '|' + iniISO] || null;
   const st = s => _TRIOS_STATUS[s] || _TRIOS_STATUS.vazio;
+  const noPeriodo = mes ? 'neste mês' : 'neste fim de semana';
+  const dIni = new Date(iniISO + 'T12:00:00');
+  const tituloPeriodo = mes
+    ? TRIOS_MES_ABREV[dIni.getMonth()].toUpperCase() + '/' + dIni.getFullYear()
+    : `${_carnesDM(iniISO)} – ${_carnesDM(fimISO)}`;
+  const legendaPeriodo = mes
+    ? (_triosGerOff === 0 ? 'mês corrente — em andamento' : 'mês fechado')
+    : (_triosGerOff === 1 ? 'semana vigente — o fim de semana ainda vem'
+       : _triosGerOff === 0 ? 'fim de semana que acabou de passar' : 'semana fechada');
+  const limite = mes ? 0 : 1;
 
   const navHtml = `<div style="display:flex;align-items:center;justify-content:center;gap:12px;background:var(--s2);border:1px solid var(--b1);border-radius:12px;padding:8px 10px;margin-bottom:10px">
-    <button onclick="_triosNavSemana(-1)" style="background:none;border:1px solid rgba(0,0,0,.15);border-radius:8px;color:var(--t2);font-size:14px;padding:2px 10px;cursor:pointer;font-family:inherit">‹</button>
+    <button onclick="_triosNav(-1)" style="background:none;border:1px solid rgba(0,0,0,.15);border-radius:8px;color:var(--t2);font-size:14px;padding:2px 10px;cursor:pointer;font-family:inherit">‹</button>
     <div style="text-align:center">
-      <div style="font-size:11px;font-weight:800;color:var(--t1);letter-spacing:.5px">${_carnesDM(iniISO)} – ${_carnesDM(fimISO)}</div>
-      <div style="font-size:9.5px;color:var(--t4)">${_triosGerOff === 1 ? 'semana vigente — o fim de semana ainda vem' : _triosGerOff === 0 ? 'fim de semana que acabou de passar' : 'semana fechada'}</div>
+      <div style="font-size:11px;font-weight:800;color:var(--t1);letter-spacing:.5px">${tituloPeriodo}</div>
+      <div style="font-size:9.5px;color:var(--t4)">${legendaPeriodo}</div>
     </div>
-    <button onclick="_triosNavSemana(1)" ${_triosGerOff >= 1 ? 'disabled style="opacity:.3;' : 'style="'}background:none;border:1px solid rgba(0,0,0,.15);border-radius:8px;color:var(--t2);font-size:14px;padding:2px 10px;cursor:pointer;font-family:inherit">›</button>
+    <button onclick="_triosNav(1)" ${_triosGerOff >= limite ? 'disabled style="opacity:.3;' : 'style="'}background:none;border:1px solid rgba(0,0,0,.15);border-radius:8px;color:var(--t2);font-size:14px;padding:2px 10px;cursor:pointer;font-family:inherit">›</button>
   </div>`;
 
-  // ── Rede, na semana navegada ───────────────────────────────────────────────────────
+  // ── Rede, no período navegado ──────────────────────────────────────────────────────
   const comTrio = ordenadas.map(daSemana).filter(Boolean);
   const totCache = comTrio.reduce((t, s) => t + s.cache, 0);
   const totCouver = comTrio.reduce((t, s) => t + s.couver, 0);
@@ -12154,7 +12221,7 @@ function _buildTriosPanel() {
     ${nota ? `<div style="font-size:9px;color:var(--t4);margin-top:1px">${nota}</div>` : ''}
   </div>`;
   const resumoHtml = !comTrio.length
-    ? `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:12px;padding:12px 14px;margin-bottom:10px;font-size:11.5px;color:var(--t2)">Nenhum trio na agenda desta semana.</div>`
+    ? `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:12px;padding:12px 14px;margin-bottom:10px;font-size:11.5px;color:var(--t2)">Nenhum trio na agenda ${mes ? 'deste mês' : 'desta semana'}.</div>`
     : `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:12px;padding:12px 14px;margin-bottom:10px">
         <div style="display:flex;gap:12px;flex-wrap:wrap">
           ${cell('Cachê a pagar', _fmtBRL(totCache), 'var(--t1)', `${comTrio.length} loja${comTrio.length === 1 ? '' : 's'} com trio`)}
@@ -12176,22 +12243,30 @@ function _buildTriosPanel() {
     </div>`;
   const avisosHtml =
     (negativos.length ? bloco('var(--txt-red)', 'rgba(239,68,68,.08)', 'rgba(239,68,68,.25)',
-        `⚠ ${negativos.length} loja${negativos.length === 1 ? '' : 's'} com saldo negativo neste fim de semana`,
+        `⚠ ${negativos.length} loja${negativos.length === 1 ? '' : 's'} com saldo negativo ${noPeriodo}`,
         negativos.map(s => `${LOJA_DISPLAY[s.k] || s.k} <b style="color:var(--txt-red)">−${_fmtBRL(Math.abs(s.saldo))}</b>`).join(' · '),
         'Couvert lançado em todos os dias: o cachê custou mais do que o couvert arrecadou.') : '') +
-    (faltando.length ? bloco('var(--txt-amber)', 'rgba(245,158,11,.10)', 'rgba(245,158,11,.3)',
+    (faltando.length ? bloco('var(--txt-amber)', TRIOS_AMBAR.fundo, TRIOS_AMBAR.borda,
         `⚠ ${faltando.length} loja${faltando.length === 1 ? '' : 's'} sem o couvert lançado`,
         faltando.map(s => `${LOJA_DISPLAY[s.k] || s.k} <span style="color:var(--t4)">(${s.diasSemCouver.map(_carnesDM).join(', ')})</span>`).join(' · '),
         'Sem o couvert não há saldo: o dado não é zero, ele não foi lançado — a aba Banda do Check-list é onde entra.') : '') +
-    (semShow.length ? bloco('var(--txt-amber)', 'rgba(245,158,11,.08)', 'rgba(245,158,11,.26)',
+    (semShow.length ? bloco('var(--txt-amber)', TRIOS_AMBAR.fundo, TRIOS_AMBAR.borda,
         `⚠ ${semShow.length} loja${semShow.length === 1 ? '' : 's'} em que a banda não veio`,
         semShow.map(s => `${LOJA_DISPLAY[s.k] || s.k} <span style="color:var(--t4)">(${s.diasSemShow.map(_carnesDM).join(', ')})</span> · cachê ${_fmtBRL(s.cache)}`).join(' · '),
         'Sem apresentação não há couvert a lançar. O cachê continua gravado na agenda e o registro não diz se foi pago.') : '') +
     (comTrio.length && !negativos.length && !faltando.length && !semShow.length
         ? bloco('var(--txt-green)', 'rgba(22,163,74,.08)', 'rgba(22,163,74,.25)',
-            `✅ As ${comTrio.length} lojas com trio lançaram o couvert e fecharam positivas`, 'Nada pendente neste fim de semana.', '') : '');
+            `✅ As ${comTrio.length} lojas com trio lançaram o couvert e fecharam positivas`, `Nada pendente ${noPeriodo}.`, '') : '');
 
-  // ── Cartão por loja, com as apresentações do fim de semana ─────────────────────────
+  // ── Cartão por loja ───────────────────────────────────────────────────────────────
+  // No fim de semana o detalhe é DIA a dia; no mês é fim de semana a fim de semana —
+  // listar os ~9 dias corridos de um mês faz o cartão virar uma parede que ninguém lê.
+  const linhaDetalhe = (rotulo, cache, couver, futuro) => `<div style="display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--t3);padding:2px 0">
+      <span style="font-weight:800;color:var(--t2);min-width:${mes ? 76 : 38}px">${rotulo}</span>
+      <span style="flex:1"></span>
+      <span style="font-variant-numeric:tabular-nums;color:var(--t2)">${_fmtBRL(cache)}</span>
+      <span style="font-variant-numeric:tabular-nums;min-width:62px;text-align:right;color:${futuro ? 'var(--t4)' : couver > 0 ? 'var(--txt-green)' : 'var(--txt-amber)'}">${futuro ? '—' : couver > 0 ? _fmtBRL(couver) : 'sem couvert'}</span>
+    </div>`;
   const cardsHtml = ordenadas.map(k => {
     const s = daSemana(k);
     const e = st(s ? s.status : 'vazio');
@@ -12199,6 +12274,16 @@ function _buildTriosPanel() {
     if (!s) return `<div style="background:var(--s1);border:1px solid var(--b1);border-left:3px solid ${cor};border-radius:11px;padding:10px 12px;margin-bottom:8px;display:flex;align-items:center;gap:10px">
       <span style="font-size:12px;font-weight:700;color:var(--t2);flex:1">${LOJA_DISPLAY[k] || k}</span>
       <span style="font-size:10px;color:var(--t4)">sem trio na agenda</span></div>`;
+    const detalhe = mes
+      ? s.fdsemanas.map(w => linhaDetalhe(
+          `${_carnesDM(_carnesISO(new Date(new Date(w.sem + 'T12:00:00').getTime() + 5 * 864e5)))}–${_carnesDM(_carnesISO(new Date(new Date(w.sem + 'T12:00:00').getTime() + 6 * 864e5)))}`,
+          w.cache, w.couver, w.dias.every(d => d.dia >= _triosGerData.hoje))).join('')
+      : s.dias.map(d => `<div style="display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--t3);padding:2px 0">
+          <span style="font-weight:800;color:var(--t2);min-width:38px">${_carnesDM(d.dia)}</span>
+          <span style="flex:1">${d.apres.map(a => a.artista + (a.naoVeio ? ' <span style="color:var(--txt-red)">(não veio)</span>' : '')).join(' · ')}</span>
+          <span style="font-variant-numeric:tabular-nums;color:var(--t2)">${_fmtBRL(d.cache)}</span>
+          <span style="font-variant-numeric:tabular-nums;min-width:62px;text-align:right;color:${d.dia >= _triosGerData.hoje ? 'var(--t4)' : d.couver > 0 ? 'var(--txt-green)' : 'var(--txt-amber)'}">${d.dia >= _triosGerData.hoje ? '—' : d.couver > 0 ? _fmtBRL(d.couver) : 'sem couvert'}</span>
+        </div>`).join('');
     return `<div style="background:var(--s1);border:1px solid var(--b1);border-left:3px solid ${cor};border-radius:11px;padding:11px 12px;margin-bottom:8px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:7px">
         <span style="font-size:12.5px;font-weight:800;color:var(--t1);flex:1">${LOJA_DISPLAY[k] || k}</span>
@@ -12215,50 +12300,73 @@ function _buildTriosPanel() {
                       naoFecha ? 'var(--t4)' : s.saldo < 0 ? 'var(--txt-red)' : 'var(--txt-green)', nota);
         })()}
       </div>
-      <div style="border-top:1px solid var(--b1);padding-top:6px">
-        ${s.dias.map(d => `<div style="display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--t3);padding:2px 0">
-          <span style="font-weight:800;color:var(--t2);min-width:38px">${_carnesDM(d.dia)}</span>
-          <span style="flex:1">${d.apres.map(a => a.artista + (a.naoVeio ? ' <span style="color:var(--txt-red)">(não veio)</span>' : '')).join(' · ')}</span>
-          <span style="font-variant-numeric:tabular-nums;color:var(--t2)">${_fmtBRL(d.cache)}</span>
-          <span style="font-variant-numeric:tabular-nums;min-width:62px;text-align:right;color:${d.dia >= _triosGerData.hoje ? 'var(--t4)' : d.couver > 0 ? 'var(--txt-green)' : 'var(--txt-amber)'}">${d.dia >= _triosGerData.hoje ? '—' : d.couver > 0 ? _fmtBRL(d.couver) : 'sem couvert'}</span>
-        </div>`).join('')}
-      </div>
+      <div style="border-top:1px solid var(--b1);padding-top:6px">${detalhe}</div>
     </div>`;
   }).join('');
 
-  // ── Histórico: é isto que aponta QUAIS semanas ficaram negativas ou sem couvert ────
+  // ── Histórico: é isto que aponta QUAIS períodos ficaram negativos ou sem couvert ──
+  // A data vai numa linha de cabeçalho alinhada às colunas, não dentro de cada quadrado:
+  // o `title` só aparece no hover e no celular não existe hover, então até aqui não havia
+  // como saber de que fim de semana era um quadrado vermelho. Repetir a data em cada um
+  // dos 132 quadrados não caberia em 390px; no cabeçalho ela aparece uma vez por coluna.
+  const LARG_NOME = 92, LARG_CONT = 84;
+  const cabecalho = `<div style="display:flex;align-items:flex-end;gap:8px;margin-bottom:4px">
+    <span style="width:${LARG_NOME}px;flex-shrink:0"></span>
+    <span style="flex:1;display:flex;gap:2px">${semanas.map((sem, i) => {
+      const r = _triosRotuloColuna(sem, per);
+      // O rótulo de cima (mês na semana, ano no mês) aparece quando MUDA — e sempre na
+      // primeira coluna, senão a fileira começa sem dizer de onde parte. Repetido em
+      // todas, vira ruído: seis "26" iguais não informam nada.
+      const mudou = i === 0 || _triosRotuloColuna(semanas[i - 1], per).topo !== r.topo;
+      return `<span style="flex:1;text-align:center;line-height:1.15">
+        <span style="display:block;font-size:7.5px;color:var(--t4)">${mudou ? r.topo : '&nbsp;'}</span>
+        <span style="display:block;font-size:8.5px;font-weight:700;color:var(--t3);font-variant-numeric:tabular-nums">${r.baixo}</span>
+      </span>`;
+    }).join('')}</span>
+    <span style="width:${LARG_CONT}px;flex-shrink:0"></span>
+  </div>`;
   const histHtml = `<div style="margin-top:14px">
-    <div style="font-size:11px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:var(--t2);margin-bottom:3px">Últimas ${TRIOS_SEMANAS_HISTORICO} semanas</div>
-    <div style="font-size:9.5px;color:var(--t4);margin-bottom:8px">Cada quadrado é um fim de semana, do mais antigo pro mais recente. Vermelho: saldo negativo com o couvert todo lançado. Amarelo: couvert faltando em algum dia. Cinza: sem trio na agenda, ou fim de semana que ainda não chegou.</div>
+    <div style="font-size:11px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:var(--t2);margin-bottom:3px">${mes ? `Últimos ${TRIOS_HISTORICO.mes} meses` : `Últimas ${TRIOS_HISTORICO.sem} semanas`}</div>
+    <div style="font-size:9.5px;color:var(--t4);margin-bottom:8px">Cada quadrado é um ${mes ? 'mês' : 'fim de semana'}, do mais antigo pro mais recente, com a data em cima. Vermelho: saldo negativo com o couvert todo lançado. Amarelo: couvert faltando em algum dia. Cinza: sem trio na agenda, ou ${mes ? 'mês' : 'fim de semana'} que ainda não chegou.</div>
+    ${cabecalho}
     ${ordenadas.map(k => {
       const cels = semanas.map(sem => {
         const s = porSemana[k + '|' + sem];
         const e = st(s ? s.status : 'vazio');
-        const t = !s ? `${_carnesDM(sem)}: sem trio na agenda`
-          : `${_carnesDM(sem)}: cachê ${_fmtBRL(s.cache)} · couvert ${s.status === 'futuro' ? 'ainda não arrecadado' : _fmtBRL(s.couver)}` +
+        const r = _triosRotuloColuna(sem, per);
+        const quando = per === 'mes' ? r.baixo + '/' + r.topo : _carnesDM(sem);
+        const t = !s ? `${quando}: sem trio na agenda`
+          : `${quando}: cachê ${_fmtBRL(s.cache)} · couvert ${s.status === 'futuro' ? 'ainda não arrecadado' : _fmtBRL(s.couver)}` +
             (s.status === 'futuro' || s.diasSemCouver.length ? ` · ${e.rotulo}` : ` · saldo ${(s.saldo < 0 ? '−' : '') + _fmtBRL(Math.abs(s.saldo))}`);
         return `<span title="${t.replace(/"/g, '&quot;')}" style="flex:1;height:18px;border-radius:4px;background:${e.fundo};border:1px solid ${e.borda};display:inline-block"></span>`;
       }).join('');
       const negs = semanas.filter(sem => (porSemana[k + '|' + sem] || {}).status === 'negativo').length;
       const falt = semanas.filter(sem => ['semCouver', 'parcial'].includes((porSemana[k + '|' + sem] || {}).status)).length;
       return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px">
-        <span style="font-size:10.5px;font-weight:700;color:var(--t2);width:104px;flex-shrink:0">${LOJA_DISPLAY[k] || k}</span>
+        <span style="font-size:10.5px;font-weight:700;color:var(--t2);width:${LARG_NOME}px;flex-shrink:0">${LOJA_DISPLAY[k] || k}</span>
         <span style="flex:1;display:flex;gap:2px">${cels}</span>
-        <span style="font-size:9.5px;color:var(--t4);width:92px;flex-shrink:0;text-align:right">${negs ? `<span style="color:var(--txt-red)">${negs} neg.</span>` : ''}${negs && falt ? ' · ' : ''}${falt ? `<span style="color:var(--txt-amber)">${falt} s/couv.</span>` : ''}</span>
+        <span style="font-size:9.5px;color:var(--t4);width:${LARG_CONT}px;flex-shrink:0;text-align:right">${negs ? `<span style="color:var(--txt-red)">${negs} neg.</span>` : ''}${negs && falt ? ' · ' : ''}${falt ? `<span style="color:var(--txt-amber)">${falt} s/couv.</span>` : ''}</span>
       </div>`;
     }).join('')}
   </div>`;
 
-  return reportBtns + navHtml + resumoHtml + avisosHtml + cardsHtml + histHtml;
+  return reportBtns + perRow + navHtml + resumoHtml + avisosHtml + cardsHtml + histHtml;
 }
 
 // ── Relatórios da aba 🎵 Trios (mesmo padrão gerarWpp/gerarPDF/enviarPDF...Wpp) ───────
+// Seguem o período selecionado na tela. No mês o detalhe para no nível da loja: o dia a
+// dia de 11 lojas num mês são ~99 linhas, que no WhatsApp ninguém lê.
 function _triosRelatorioTexto(wpp) {
   if (!_triosGerLoaded || !_triosGerData || _triosGerData.erro) return null;
-  const { porSemana, chaves, iniISO, fimISO } = _triosGerData;
+  const { per, porSemana, chaves, iniISO, fimISO } = _triosGerData;
+  const mes = per === 'mes';
   const b = s => wpp ? '*' + s + '*' : s;
+  const dIni = new Date(iniISO + 'T12:00:00');
+  const periodoTxt = mes
+    ? `Mês ${TRIOS_MES_ABREV[dIni.getMonth()]}/${dIni.getFullYear()}`
+    : `Fim de semana ${_carnesDM(iniISO)} a ${_carnesDM(fimISO)}`;
   const ordenadas = chaves.slice().sort((a, b2) => (LOJA_DISPLAY[a] || a).localeCompare(LOJA_DISPLAY[b2] || b2));
-  let msg = `${wpp ? '🎵 ' : ''}${b('TRIOS — CACHÊ E COUVERT')}\nFim de semana ${_carnesDM(iniISO)} a ${_carnesDM(fimISO)}\n`;
+  let msg = `${wpp ? '🎵 ' : ''}${b('TRIOS — CACHÊ E COUVERT')}\n${periodoTxt}\n`;
   const comTrio = ordenadas.map(k => porSemana[k + '|' + iniISO]).filter(Boolean);
   const totCache = comTrio.reduce((t, s) => t + s.cache, 0);
   const totCouver = comTrio.reduce((t, s) => t + s.couver, 0);
@@ -12270,7 +12378,7 @@ function _triosRelatorioTexto(wpp) {
     if (!s) return;
     msg += `\n${wpp ? '🏪 ' : ''}${b(LOJA_DISPLAY[k] || k)}\n`;
     msg += `  Cachê: ${_fmtBRL(s.cache)}\n`;
-    if (s.status === 'futuro') { msg += `  Couvert: ainda não arrecadado (o fim de semana não chegou)\n`; return; }
+    if (s.status === 'futuro') { msg += `  Couvert: ainda não arrecadado (${mes ? 'o mês não começou' : 'o fim de semana não chegou'})\n`; return; }
     if (s.status === 'naoVeio') {
       msg += `  ⚠ A banda não veio em ${s.diasSemShow.map(_carnesDM).join(', ')} — sem apresentação não há couvert a lançar\n`;
       msg += `  O cachê acima segue gravado na agenda; o registro não diz se foi pago\n`;
@@ -12289,8 +12397,9 @@ function _triosRelatorioTexto(wpp) {
   if (negativos.length) msg += `\n${b('Saldo negativo')}: ${negativos.join(', ')}\n`;
   if (faltando.length)  msg += `${b('Sem couvert lançado')}: ${faltando.join(', ')}\n`;
   if (semShow.length)   msg += `${b('Banda não veio')}: ${semShow.join(', ')}\n`;
-  return { msg, titulo: 'Trios — cachê e couvert' };
+  return { msg, titulo: 'Trios — cachê e couvert · ' + periodoTxt };
 }
+
 function gerarWppTrios() {
   const r = _triosRelatorioTexto(true);
   if (!r) { alert('Aguarde os dados carregarem.'); return; }
