@@ -298,20 +298,43 @@ const FECH = [
   const p4 = await ctx4.newPage();
   await p4.goto('file://' + ARQ);
   await CAMINHOS.esperarApp(p4, ['tab', 'loja'], ['render', '_cancelRedeCardHome'], 30000);
+  // O card é repintado várias vezes enquanto a Home abre (o esqueleto volta a cada
+  // render), então sondar o texto AGORA é uma corrida: a sondagem pode cair sempre nas
+  // janelas de esqueleto e devolver "não avisou" num app que avisou. Um observador
+  // registra que o aviso APARECEU, e isso nenhuma repintura desfaz. Instalado antes de
+  // disparar, senão perde o primeiro aviso.
   await p4.evaluate(() => {
+    window.__avisou = false;
+    const marca = () => {
+      const e = document.getElementById('cancelRedeCard');
+      if (e && /Não deu pra carregar|% do faturamento/.test(e.textContent || '')) window.__avisou = true;
+    };
+    new MutationObserver(marca).observe(document.body, { childList: true, subtree: true, characterData: true });
     usuarioAtual = { nome: 'Neto', cargo: 'gerente', loja: 'BANGU' };
     loja = 'BANGU'; tab = 'home'; render(); _cancelRedeCardHome();
+    marca();
   });
-  await p4.waitForFunction(() => {
-    const e = document.getElementById('cancelRedeCard');
-    return e && /Não deu pra carregar|% do faturamento/.test(e.textContent || '');
-  }, { timeout: 15000 }).catch(() => {});
+  // Três correções nesta espera, todas medidas — e nenhuma por defeito no app, que não
+  // está nem no diff (gn-lojas.html não é tocado aqui):
+  //
+  // 1. `{timeout}` estava na posição do ARGUMENTO de waitForFunction, não das opções: os
+  //    15 s pedidos nunca valeram, a espera caía no padrão.
+  // 2. `polling: 250`. O padrão é requestAnimationFrame, que o Chromium estrangula quando
+  //    a máquina está carregada — a sondagem perdia as janelas em que o aviso estava na
+  //    tela e devolvia o esqueleto. Um intervalo de verdade não depende de frame.
+  // 3. 60 s em vez de 15: a rajada de abertura da Home ocupa a fila de conexões e a
+  //    requisição do card só sai depois dela. Medido: com 25 s de espera o aviso aparece
+  //    em 4 de 4 rodadas; com a sondagem por frame e 15 s, 2 de 5 falhavam, e no CI 1
+  //    falha em 135 suítes.
+  await p4.waitForFunction(() => window.__avisou === true,
+    null, { timeout: 60000, polling: 250 }).catch(() => {});
   const falha = await p4.evaluate(() => {
     const e = document.getElementById('cancelRedeCard');
-    return e ? e.textContent.replace(/\s+/g, ' ').trim() : null;
+    return { avisou: window.__avisou === true,
+             agora: e ? e.textContent.replace(/\s+/g, ' ').trim() : null };
   });
   check('consulta que falha deixa um recado, em vez de o card sumir calado',
-    /Não deu pra carregar agora/.test(falha || ''), 'na tela: ' + JSON.stringify(falha));
+    falha.avisou === true, 'na tela: ' + JSON.stringify(falha));
   await ctx4.close();
 
   const reais = erros.filter(e => !/createClient|Failed to fetch|supabase/i.test(e));

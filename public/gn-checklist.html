@@ -3339,6 +3339,16 @@ const CAMPOS_FOTO = [['fotoBase64','fotoName'], ['valFoto','valFotoEm'], ['foto'
 // que NAO tem foto nunca apaga o lado que TEM. A excecao e a intencao deste aparelho
 // enquanto o servidor nao confirma — e por isso que a exclusao tambem entra em
 // _fotoPendente: sem ela, apagar uma foto seria desfeito pela proxima sincronizacao.
+// Marca das vagas que initAllStates() cria no boot. Elas NÃO são "item desmarcado": são
+// "este aparelho ainda não sabe nada deste item" — o dia do servidor pode não ter chegado
+// (carga lenta, offline, 403) ou nem ter sido pedido ainda. A diferença existe por causa
+// do merge de saveAll(), onde o lado local vence campo por campo: sem distinguir as duas
+// coisas, uma vaga em branco sobrescrevia com `false` o item que outro aparelho já havia
+// marcado, e o dia inteiro voltava pra zero com o toast de "salvo" aparecendo normal.
+// Vive só na memória — é tirada do que vai pro banco (ver _semMarcaNaoVisto no upsert).
+// Fica aqui, e não junto de initAllStates(), porque o IIFE de boot chama initAllStates()
+// antes daquele ponto do arquivo: `const` em TDZ derrubava o app inteiro no carregamento.
+const MARCA_NAO_VISTO = '_naoVisto';
 function _fotoDoMerge(local, serv, chave){
   const out = {};
   CAMPOS_FOTO.forEach(([url, par]) => {
@@ -3676,6 +3686,27 @@ let _carnesAutoCarregado = false; // já tentou puxar do Lojas nesta semana carr
   }
 })();
 
+// Primeiro toque de verdade num item: a partir daqui ele é dado da loja, e o local volta a
+// vencer o servidor normalmente (é assim que DESMARCAR funciona).
+function _tocado(d){ if(d && d[MARCA_NAO_VISTO]) delete d[MARCA_NAO_VISTO]; return d; }
+// Tira a marca de uma árvore grupo→setor→item, sem mexer no original.
+function _semMarcaNaoVisto(grupo){
+  const out={};
+  Object.keys(grupo||{}).forEach(sec=>{
+    const ss=grupo[sec];
+    if(!ss||typeof ss!=='object'||Array.isArray(ss)){ out[sec]=ss; return; }
+    const itens={};
+    Object.keys(ss).forEach(i=>{
+      const it=ss[i];
+      if(!it||typeof it!=='object'||Array.isArray(it)){ itens[i]=it; return; }
+      if(!it[MARCA_NAO_VISTO]){ itens[i]=it; return; }
+      const copia={...it}; delete copia[MARCA_NAO_VISTO]; itens[i]=copia;
+    });
+    out[sec]=itens;
+  });
+  return out;
+}
+
 function initAllStates(){
   [
     {map:SETORES_CHECKLIST, key:'checklist'},
@@ -3685,7 +3716,7 @@ function initAllStates(){
     Object.keys(map).forEach(s=>{
       if(!state[key][s]) state[key][s]={};
       map[s].items.forEach((_,i)=>{
-        if(!state[key][s][i]) state[key][s][i]={checked:false,problema:'',fotoBase64:'',fotoName:''};
+        if(!state[key][s][i]) state[key][s][i]={checked:false,problema:'',fotoBase64:'',fotoName:'',[MARCA_NAO_VISTO]:true};
       });
     });
   });
@@ -6005,8 +6036,23 @@ async function saveAll(opts){
         const itens = {};
         new Set([...Object.keys(ss), ...Object.keys(ls)]).forEach(i => {
           const li = ls[i], si = ss[i];
+          // Chave que não é item — o `_semReservas` do grupo de reservas é um booleano.
+          // Quem TEM a chave manda, e o local na frente: pelo teste antigo esse lado
+          // sempre perdia aqui, então DESMARCAR "não tem reservas hoje" nunca subia, o
+          // true do servidor voltava no save seguinte e o grupo seguia liberado.
+          if(!vale(li) && !vale(si)){
+            itens[i] = Object.prototype.hasOwnProperty.call(ls, i) ? li : si;
+            return;
+          }
           if(!vale(li)){ itens[i] = si; return; }
           if(!vale(si)){ itens[i] = li; return; }
+          // Vaga que este aparelho nunca viu nem ninguém tocou (MARCA_NAO_VISTO) não é um
+          // item desmarcado — é falta de informação. Antes ela vencia, e o `false` dela
+          // apagava o `true` que a loja já tinha marcado em outro aparelho: a Abertura e o
+          // Fechamento inteiros voltavam pra zero sem erro nenhum na tela. Casos medidos:
+          // São Gonçalo 27/10 e Nova Iguaçu 27 e 28/10, todos com iniciado_em zerado no
+          // mesmo save (ver a mesclagem de iniciado_em/concluido_em logo abaixo).
+          if(li[MARCA_NAO_VISTO]){ itens[i] = si; return; }
           itens[i] = { ...si, ...li, ..._fotoDoMerge(li, si, _chaveFoto(grupo, sec, i)) };
         });
         out[sec] = itens;
@@ -6025,6 +6071,22 @@ async function saveAll(opts){
       state.entradasManuais = _mesclarArrChk(state.entradasManuais, _servRow.entradas_manuais, _pendingDelChk.entradasManuais);
       state.faltasFuncionarios = _mesclarArrChk(state.faltasFuncionarios, _servRow.faltas_funcionarios, null);
       state.despesas = _mesclarArrChk(state.despesas, _servRow.despesas, _pendingDelChk.despesas, 'despesas');
+      // Horas de início e conclusão de cada grupo: a cópia do servidor já vinha no SELECT
+      // acima e não era usada — os dois campos eram gravados crus. Um aparelho que ainda
+      // não tinha carregado o dia mandava `{}` e apagava a hora que a loja havia marcado
+      // (São Gonçalo 27/10 e Nova Iguaçu 28/10 ficaram com iniciado_em vazio e a Abertura
+      // zerada no mesmo save). Fica a PRIMEIRA hora de cada grupo, a mesma regra do
+      // mergeState: quem começou/concluiu antes é a resposta certa.
+      const _mesclarHoras = (local, serv) => {
+        const out = { ...(serv && typeof serv === 'object' && !Array.isArray(serv) ? serv : {}) };
+        Object.keys(local || {}).forEach(g => {
+          const l = local[g], r = out[g];
+          if(l && (!r || l < r)) out[g] = l;
+        });
+        return out;
+      };
+      state.iniciadoEm = _mesclarHoras(state.iniciadoEm, _servRow.iniciado_em);
+      state.concluidoEm = _mesclarHoras(state.concluidoEm, _servRow.concluido_em);
     }
     // Quais pendências este envio leva. Não dá pra limpar o conjunto inteiro no sucesso:
     // o tick de 30s pode estar em voo quando a pessoa tira uma foto, e aí ele liberaria a
@@ -6043,7 +6105,12 @@ async function saveAll(opts){
       ...(!_caixaTemDados && { venda_salao: state.vendaSalao, venda_delivery: state.vendaDelivery, repique: state.repique,
         dinheiro_caixa: state.dinheiroCaixa }),
       retiradas: state.retiradas, entradas_manuais: state.entradasManuais, banda: state.banda, vendas: state.vendas,
-      checklist: state.checklist, abertura: state.abertura, fechamento: state.fechamento,
+      // A marca de "não visto" é só de memória: no banco a coluna continua com a mesma
+      // forma de antes. Se ela subisse, voltaria na carga e desmarcar item pararia de
+      // funcionar — o lado local ficaria eternamente sem valer.
+      checklist: _semMarcaNaoVisto(state.checklist),
+      abertura: _semMarcaNaoVisto(state.abertura),
+      fechamento: _semMarcaNaoVisto(state.fechamento),
       faltas: state.faltas, manutencao: state.manutencao,
       faltas_funcionarios: state.faltasFuncionarios,
       supervisao: state.supervisao,
@@ -6269,8 +6336,27 @@ function mergeState(rows){
           // segue _fotoDoMerge. Medido: a foto tirada ha segundos era apagada pela
           // primeira sincronizacao, porque a linha do servidor ainda trazia fotoBase64:''
           // e o spread do lado remoto vinha por ultimo.
-          const _li = state[key][s][i] || {}, _si = rows[key][s][i] || {};
-          state[key][s][i] = { ..._li, ..._si, ..._fotoDoMerge(_li, _si, _chaveFoto(key, s, i)) };
+          const _liRaw = state[key][s][i], _siRaw = rows[key][s][i];
+          const _ehItem = v => v && typeof v === 'object' && !Array.isArray(v);
+          // Chave que não é item. O `_semReservas` do grupo de reservas é um BOOLEANO
+          // guardado junto dos itens, e `_fotoDoMerge` fazia `'fotoBase64' in true` —
+          // TypeError estourado aqui dentro, que abortava mergeState no meio. Tudo depois
+          // do grupo de reservas deixava de ser mesclado: na ordem em que o jsonb devolve
+          // as chaves (sistema, delivery, reservas, pagamento) sobrava de fora o grupo
+          // pagamento, o Fechamento inteiro, iniciado_em e concluido_em. O dia ficava com
+          // as vagas em branco do initAllStates(), e o saveAll seguinte gravava esse
+          // branco por cima do que a loja havia marcado — sem erro na tela e com o "Salvo"
+          // aparecendo normal. É a causa dos dias 27 e 28/10 em São Gonçalo e Nova Iguaçu,
+          // e explica por que foram exatamente os dias em que a loja usou o "não tem
+          // reservas hoje": antes dele, o dia nunca chegava a ter essa chave.
+          if(!_ehItem(_siRaw) || !_ehItem(_liRaw === undefined ? {} : _liRaw)){
+            state[key][s][i] = _siRaw;   // servidor manda, igual ao resto do mergeState
+            return;
+          }
+          const _li = _liRaw || {}, _si = _siRaw;
+          // Chegou o item do servidor: a vaga deixa de ser "não visto" e volta a valer
+          // como dado — é o que faz desmarcar um item continuar subindo depois da carga.
+          state[key][s][i] = _tocado({ ..._li, ..._si, ..._fotoDoMerge(_li, _si, _chaveFoto(key, s, i)) });
         });
       });
     }
@@ -8754,7 +8840,7 @@ function toggleSemReservas(checked){
   const n = (SETORES_ABERTURA.reservas.items||[]).length;
   for(let i=0;i<n;i++){
     if(!state.abertura.reservas[i]) state.abertura.reservas[i]={checked:false,problema:'',fotoBase64:'',fotoName:''};
-    state.abertura.reservas[i].checked = checked;
+    _tocado(state.abertura.reservas[i]).checked = checked;
   }
   autoSave();
   renderSetorItems('abertura','reservas');
@@ -9229,7 +9315,7 @@ function _valIniciar() {
 function _itemChk(stateKey, setor, idx){
   if(!state[stateKey][setor]) state[stateKey][setor]={};
   if(!state[stateKey][setor][idx]) state[stateKey][setor][idx]={checked:false,naoConforme:false,problema:'',fotoBase64:'',fotoName:''};
-  return state[stateKey][setor][idx];
+  return _tocado(state[stateKey][setor][idx]);
 }
 // Descrição e foto só somem quando o item volta pra "não avaliado" — enquanto ele estiver
 // conforme-com-ressalva ou não conforme, o que foi escrito fica.
@@ -9338,6 +9424,7 @@ function toggleProblem(stateKey, setor, idx){
 function updateProblema(stateKey, setor, idx){
   if(!state[stateKey][setor]) state[stateKey][setor]={};
   if(!state[stateKey][setor][idx]) state[stateKey][setor][idx]={};
+  _tocado(state[stateKey][setor][idx]);
   state[stateKey][setor][idx].problema=document.getElementById(`probtxt-${stateKey}_${setor}-${idx}`).value;
   autoSave();
 }
@@ -9353,6 +9440,7 @@ function handleFoto(stateKey, setor, idx, input){
     if(!url) return;
     if(!state[stateKey][setor]) state[stateKey][setor]={};
     if(!state[stateKey][setor][idx]) state[stateKey][setor][idx]={};
+    _tocado(state[stateKey][setor][idx]);
     const fotoAntiga = state[stateKey][setor][idx].fotoBase64;
     state[stateKey][setor][idx].fotoBase64=url;
     state[stateKey][setor][idx].fotoName=file.name;
