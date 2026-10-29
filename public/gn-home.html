@@ -11597,17 +11597,34 @@ async function _loadCarnesGerencia() {
   // Intervalo, não a segunda exata: há linhas gravadas com semana_inicio em outro dia da
   // semana (sábado, domingo, terça, sexta) e em algumas delas essa é a ÚNICA linha da
   // semana — pegando só a segunda, a loja inteira sumia. Mesmo cuidado do app Pedidos.
-  const rows = await window.gnFetchJson(
-    `${SB_URL}/rest/v1/checklist_carnes?semana_inicio=gte.${iniISO}&semana_inicio=lte.${fimISO}` +
-    `&select=loja,semana_inicio,carnes,updated_at&order=updated_at.desc`,
-    H, 'carnesGerencia', null);
+  // A venda da semana vem junto porque a saída de carne só diz algo comparada com ela:
+  // 80 kg numa loja que vendeu 100 mil e 150 kg em outra que vendeu os mesmos 100 mil são
+  // dois casos diferentes, e é esse segundo que precisa de olho.
+  const [rows, fatRows] = await Promise.all([
+    window.gnFetchJson(
+      `${SB_URL}/rest/v1/checklist_carnes?semana_inicio=gte.${iniISO}&semana_inicio=lte.${fimISO}` +
+      `&select=loja,semana_inicio,carnes,updated_at&order=updated_at.desc`,
+      H, 'carnesGerencia', null),
+    window.gnFetchJson(
+      `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${iniISO}&data_operacao=lte.${fimISO}` +
+      `&select=loja,venda_salao,venda_delivery`,
+      H, 'carnesGerencia:fat', null),
+  ]);
   if (!rows) { _carnesGerLoaded = true; _carnesGerData = { erro: true, iniISO, fimISO }; renderDashboard(); return; }
+  // Faturamento é complemento, não requisito: se só ele falhar a aba continua mostrando os
+  // kg, que é o dado principal — e avisa que a razão está de fora.
+  const fatFalhou = !fatRows;
 
   const porLoja = {};
   // Maglia não tem aba Carnes no Check-list (CLAUDE.md / ABAS_FORA_MAGLIA), então ela
   // apareceria como "nunca lançou" todo santo dia — uma cobrança falsa.
   LOJAS_LISTA.filter(k => k !== 'MAGLIA')
-    .forEach(k => { porLoja[k] = { k, carnes: null, semana_inicio: null, updated_at: null }; });
+    .forEach(k => { porLoja[k] = { k, carnes: null, semana_inicio: null, updated_at: null, fat: 0 }; });
+  (fatRows || []).forEach(r => {
+    const k = _normLoja(r.loja);
+    if (!porLoja[k]) return;
+    porLoja[k].fat += (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0);
+  });
   (rows || []).forEach(r => {
     const k = _normLoja(r.loja);
     if (!porLoja[k] || !r.carnes) return;
@@ -11617,7 +11634,7 @@ async function _loadCarnesGerencia() {
       || (r.semana_inicio === iniISO && atual.semana_inicio !== iniISO);
     if (melhor) { atual.carnes = r.carnes; atual.semana_inicio = r.semana_inicio; atual.updated_at = r.updated_at; }
   });
-  _carnesGerData = { porLoja, iniISO, fimISO };
+  _carnesGerData = { porLoja, iniISO, fimISO, fatFalhou };
   _carnesGerLoaded = true;
   renderDashboard();
 }
@@ -11637,6 +11654,14 @@ function _carnesDoCorte(carnes, key) {
     venda: contagem === null ? null : inicial + entradas - contagem,
   };
 }
+// kg por R$ mil de venda. É o número que compara lojas de tamanhos diferentes: sem ele,
+// a loja que mais vende sempre aparece como a que mais gasta carne. Sem faturamento
+// lançado não há razão nenhuma — null, não zero.
+function _carnesRazao(venda, fat) {
+  if (!(fat > 0) || venda === null || venda === undefined) return null;
+  return venda / fat * 1000;
+}
+
 function _carnesLojaContou(d) {
   if (!d || !d.carnes) return false;
   return CARNES_DEF_HOME.some(c => _carnesDoCorte(d.carnes, c.key).contagem !== null);
@@ -11677,8 +11702,9 @@ function _buildCarnesPanel() {
   if (_carnesGerData.erro) {
     return reportBtns + `<div style="font-size:12px;color:var(--t3);padding:14px">Não deu pra carregar a contagem de carnes agora. Troque de aba e volte.</div>`;
   }
-  const { porLoja, iniISO, fimISO } = _carnesGerData;
+  const { porLoja, iniISO, fimISO, fatFalhou } = _carnesGerData;
   const kg = v => (Math.round(v * 10) / 10).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  const razaoTxt = r => r === null ? '' : r.toFixed(2).replace('.', ',') + ' kg por R$ mil';
 
   const chaves = Object.keys(porLoja).sort((a,b)=>(LOJA_DISPLAY[a]||a).localeCompare(LOJA_DISPLAY[b]||b));
   const semContagem = chaves.filter(k => !_carnesLojaContou(porLoja[k]));
@@ -11702,6 +11728,10 @@ function _buildCarnesPanel() {
       </div>`
     : `<div style="background:rgba(22,163,74,.08);border:1px solid rgba(22,163,74,.25);border-radius:12px;padding:10px 14px;margin-bottom:10px;font-size:11.5px;color:var(--txt-green);font-weight:700">✅ As ${chaves.length} lojas lançaram a contagem desta semana.</div>`;
 
+  const avisoFatHtml = fatFalhou
+    ? `<div style="background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.3);border-radius:12px;padding:10px 14px;margin-bottom:10px;font-size:11px;color:var(--t2);line-height:1.5">⚠ Não deu pra carregar o faturamento da semana — os kg abaixo estão certos, mas a comparação <b>kg por R$ mil</b> fica de fora. Troque de aba e volte pra tentar de novo.</div>`
+    : '';
+
   const linhas = chaves.map(k => {
     const d = porLoja[k];
     const contou = _carnesLojaContou(d);
@@ -11714,12 +11744,22 @@ function _buildCarnesPanel() {
           <span>${c.icon} ${c.label}</span><span>sem contagem</span></div>`;
       }
       const avisoIni = r.temInicial ? '' : ` <span style="color:var(--txt-amber);font-weight:700" title="Sem estoque inicial, a venda estimada é só a contagem invertida">⚠ sem inicial</span>`;
+      // Saída negativa não é um número pequeno, é uma conta que não fecha: contaram mais
+      // carne do que entrou. Mostrar em verde ao lado das outras esconderia isso.
+      const neg = r.venda < 0;
+      const razao = _carnesRazao(r.venda, d.fat);
+      const razaoHtml = razao === null ? '' :
+        `<span style="font-size:9.5px;color:var(--t2);font-weight:700;font-variant-numeric:tabular-nums">${razaoTxt(razao)}</span>`;
       return `<div style="padding:4px 0;border-top:1px dashed rgba(0,0,0,.08)">
         <div style="display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--t1);font-weight:700">
           <span>${c.icon} ${c.label}${avisoIni}</span>
-          <span style="color:var(--txt-green);font-variant-numeric:tabular-nums">${kg(r.venda)} kg</span>
+          <span style="color:${neg ? 'var(--txt-amber)' : 'var(--txt-green)'};font-variant-numeric:tabular-nums">${kg(r.venda)} kg</span>
         </div>
-        <div style="font-size:9.5px;color:var(--t3);font-variant-numeric:tabular-nums">início ${kg(r.inicial)} + compras ${kg(r.entradas)} − contagem ${kg(r.contagem)}</div>
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
+          <span style="font-size:9.5px;color:var(--t3);font-variant-numeric:tabular-nums">início ${kg(r.inicial)} + compras ${kg(r.entradas)} − contagem ${kg(r.contagem)}</span>
+          ${razaoHtml}
+        </div>
+        ${neg ? `<div style="font-size:9.5px;color:var(--txt-amber);font-weight:700">⚠ saída negativa: contagem maior que o disponível</div>` : ''}
       </div>`;
     }).join('');
     return `<div style="background:var(--s2);border:1px solid rgba(0,0,0,.08);border-left:3px solid ${cor};border-radius:12px;padding:11px 14px;margin-bottom:8px;box-shadow:0 1px 3px rgba(0,0,0,.06)">
@@ -11727,14 +11767,16 @@ function _buildCarnesPanel() {
         <div style="font-size:12px;font-weight:800;color:var(--t1)">${LOJA_DISPLAY[k]||k}</div>
         <div style="font-size:10px;font-weight:700;color:${contou ? '#16a34a' : '#dc2626'}">${contou ? '✅ contou' + (quando ? ' · ' + quando : '') : '⚠ não lançou'}</div>
       </div>
+      <div style="font-size:10.5px;color:var(--t2);font-weight:700;font-variant-numeric:tabular-nums;margin-bottom:2px">${d.fat > 0 ? '💰 Vendeu ' + _fmtBRL(d.fat) + ' na semana' : '<span style="color:var(--t4);font-weight:400">sem faturamento lançado na semana</span>'}</div>
       ${cortesHtml}
     </div>`;
   }).join('');
 
   return _carnesLojaFiltroHtml(porLoja) + reportBtns + navHtml + `<div style="font-size:11px;color:var(--t4);margin-bottom:10px">
       Contagem de carnes da semana fechada — lançada na segunda pela loja, na aba Contagem do app Lojas.<br>
-      A venda estimada é <b>início + compras − contagem</b>; sem contagem lançada ela não existe.</div>
-    ${avisoHtml}${linhas}`;
+      A venda estimada é <b>início + compras − contagem</b>; sem contagem lançada ela não existe.<br>
+      <b>kg por R$ mil</b> é o que compara duas lojas de tamanhos diferentes: quem vende o dobro sai com mais carne sem estar gastando mais.</div>
+    ${avisoFatHtml}${avisoHtml}${linhas}`;
 }
 
 // ── Relatórios da aba 🥩 Carnes (mesmo padrão de gerarWpp/gerarPDF/enviarPDF...Wpp) ───
@@ -11751,12 +11793,15 @@ function _carnesRelatorioTexto(wpp) {
   lojas.forEach(k => {
     const d = porLoja[k];
     msg += `\n${wpp ? '🏪 ' : ''}${b(LOJA_DISPLAY[k]||k)}\n`;
+    if (d.fat > 0) msg += `  Venda da semana: ${_fmtBRL(d.fat)}\n`;
     if (!_carnesLojaContou(d)) { msg += `  ⚠ Não lançou a contagem desta semana\n`; naoContaram.push(LOJA_DISPLAY[k]||k); return; }
     CARNES_DEF_HOME.forEach(c => {
       const r = _carnesDoCorte(d.carnes, c.key);
       if (r.contagem === null) { msg += `  ${c.label}: sem contagem\n`; return; }
-      msg += `  ${c.label}: ${kg(r.venda)} kg vendidos\n`;
+      const razao = _carnesRazao(r.venda, d.fat);
+      msg += `  ${c.label}: ${kg(r.venda)} kg vendidos${razao === null ? '' : ' (' + razao.toFixed(2).replace('.', ',') + ' kg por R$ mil)'}\n`;
       msg += `    início ${kg(r.inicial)} + compras ${kg(r.entradas)} - contagem ${kg(r.contagem)}${r.temInicial ? '' : '  (sem inicial)'}\n`;
+      if (r.venda < 0) msg += `    ⚠ saída negativa: contagem maior que o disponível\n`;
     });
   });
   if (naoContaram.length) msg += `\n${b('Sem contagem lançada')}: ${naoContaram.join(', ')}\n`;
