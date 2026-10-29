@@ -932,6 +932,34 @@ function getFuncsHerdados(idx) {
   return mkFuncs();
 }
 
+// Última semana ANTES de `idx` que tem algum nome cadastrado, ou -1. É o que getFuncsHerdados
+// usa pra herdar; aqui serve pra poder dizer de qual semana os nomes viriam.
+function semanaAnteriorComNomes(idx) {
+  for(let i=idx-1;i>=0;i--){
+    const wd=state.allData[String(i)];
+    if(wd&&Array.isArray(wd.funcs)&&wd.funcs.some(f=>f&&f.nome&&f.nome.trim())) return i;
+  }
+  return -1;
+}
+// Semana que o app JÁ gravou com as vagas vazias (rastro do defeito acima, antes da
+// correção) não se conserta sozinha na carga, de propósito: a semana pode ser uma já
+// fechada, e aí os nomes herdados entrariam como 7 dias PRESENTE num pagamento que já
+// aconteceu — e `getSaldoAntes` soma semana por semana, então isso mudaria o saldo de todas
+// as semanas seguintes. Quem olha a tela decide, num clique.
+function herdarNomesSemana(){
+  const idx=state.semIdx;
+  const wd={...getWD(idx)};
+  if((wd.funcs||[]).some(f=>f&&f.nome&&f.nome.trim())){ showToast('Esta semana já tem nomes.'); return; }
+  const de=semanaAnteriorComNomes(idx);
+  if(de<0){ showToast('Nenhuma semana anterior tem nomes pra herdar.'); return; }
+  const rot='S'+String(CAL[de]?.num||'?').padStart(2,'0');
+  wd.funcs=getFuncsHerdados(idx);
+  const n=wd.funcs.filter(f=>f.nome&&f.nome.trim()).length;
+  setWD(idx,wd,'Nomes herdados da '+rot);
+  showToast('✓ '+n+' nomes herdados da '+rot);
+  render();
+}
+
 function getWD(idx) {
   const k=String(idx);
   if(!state.allData[k]) {
@@ -943,6 +971,17 @@ function getWD(idx) {
   // meia cota do Jovem Aprendiz (ver GN_GORJETA_JA_METADE_DESDE_SEM). Sempre sobrescreve,
   // pra um valor antigo que tenha sido gravado junto nunca mandar na semana errada.
   const wd={...state.allData[k],semIdx:idx};
+  // Semana criada por FORA deste app não traz `funcs`: o repique do Caixa grava a semana
+  // com só `brutos` (RPC gn_sync_repique_comissoes, que faz jsonb_set em ['brutos'] e mais
+  // nada). Quando esse repique chega ANTES de alguém abrir a semana aqui, a chave já
+  // existe e o `if(!state.allData[k])` lá em cima não herda mais — e o preenchimento
+  // abaixo completava as 80 vagas VAZIAS. A aba Funcionários abria sem nome nenhum, e a
+  // primeira edição gravava essas 80 vagas vazias no servidor, deixando a semana em branco
+  // de vez (Nova Iguaçu, S44: repique de seg/ter/qua lançado, 27 nomes na S43, zero na
+  // S44). Sem a chave `funcs`, ninguém cadastrou ninguém nesta semana: herda, igual a uma
+  // semana nova. Só a ausência da chave entra aqui — uma semana que o app já gravou, mesmo
+  // vazia, fica como está (ver o aviso em renderFuncs).
+  if(!('funcs' in wd)) wd.funcs=getFuncsHerdados(idx);
   if(!wd.funcs||wd.funcs.length<MAX_FUNC) {
     const cur=[...(wd.funcs||[])];
     while(cur.length<MAX_FUNC) cur.push({id:cur.length,nome:'',tipo:'CLT / MENSALISTA',dias:Array(7).fill('PRESENTE')});
@@ -1844,6 +1883,23 @@ function renderFuncs(ct,sem){
       <span style="background:rgba(245,217,138,.1);color:var(--gd);border-radius:20px;padding:3px 10px;font-size:10px;font-weight:700">Total líquido: ${fmtBRL(totalLiqSem)}</span>
     </div>`:''}
     <hr class="div" style="margin-bottom:12px">`;
+  // Semana sem nome nenhum enquanto a anterior tem gente é o sintoma de uma semana gravada
+  // vazia: antes a aba só abria em branco e não dizia nada, e quem olhava não tinha como
+  // saber se o cadastro havia sumido ou se nunca tinha existido. Agora diz de onde os
+  // nomes viriam e deixa trazer num clique — sem fazer isso por conta própria, porque numa
+  // semana já fechada os nomes entrariam como 7 dias PRESENTE num pagamento que já saiu.
+  if(nAtivos===0){
+    const de=semanaAnteriorComNomes(state.semIdx);
+    if(de>=0){
+      const rot='S'+String(CAL[de]?.num||'?').padStart(2,'0');
+      const nDe=(state.allData[String(de)].funcs||[]).filter(f=>f&&f.nome&&f.nome.trim()).length;
+      html+=`<div style="background:var(--rd-bg);border:1px solid var(--rd2);border-radius:10px;padding:12px 14px;margin-bottom:12px">
+        <div style="font-size:12px;font-weight:700;color:var(--rd2);margin-bottom:4px">⚠ Esta semana está sem nenhum funcionário</div>
+        <div style="font-size:11px;color:var(--txt);line-height:1.5;margin-bottom:8px">A ${rot} tem ${nDe} cadastrados. Isso acontece quando a semana foi criada pelo repique do Caixa antes de alguém abri-la aqui — o cadastro não se perdeu, ele não foi herdado.</div>
+        <button onclick="herdarNomesSemana()" style="background:var(--gd);border:none;border-radius:8px;color:#1a1a1a;font-weight:700;font-size:12px;padding:8px 14px;cursor:pointer;font-family:inherit">Trazer os ${nDe} nomes da ${rot}</button>
+      </div>`;
+    }
+  }
   // `pos` é a posição na lista mostrada, não o número da vaga. A vaga (o índice interno)
   // fica com buracos sempre que alguém é excluído, e aí o último da lista aparecia com um
   // número bem maior que o total — dava pra ler como se a loja tivesse gente a mais do que
