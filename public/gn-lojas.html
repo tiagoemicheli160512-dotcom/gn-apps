@@ -6841,8 +6841,43 @@ async function _syncUlPedidoAposNota(insumosAfetados) {
   } catch(e) {}
 }
 
+// Está um envio rodando agora? A trava precisa ser SINCRONA e entrar antes de qualquer
+// await: o desabilita-botões que existia só rodava depois do flush de 40 ms do input focado
+// — e input focado é exatamente o estado de quem acabou de digitar a quantidade e tocou no
+// botão. Nessa janela um segundo toque entrava. Desabilitar no DOM também não basta porque
+// qualquer render() redesenha os botões habilitados no meio do caminho.
+let _confirmandoPedido = false;
+
 async function confirmarPedido(modo) {
   // modo: 'urgencia' (contagem rápida, envia pedido) | 'final' (fecha semana + Excel)
+
+  // 0. Trava de re-entrância, antes de tudo. Nada de await acima desta linha.
+  if (_confirmandoPedido) {
+    showToast('Já estou enviando — aguarde.', 'warn', 2500);
+    return;
+  }
+  // Uma vez por semana, por tipo: a linha de gn_pedido_envio_semana é a memória disso e
+  // sobrevive a recarregar o app. Sem isto, "uma vez" valia só enquanto a aba ficasse aberta.
+  //
+  // Só vale quando o registro em memória é DESTA semana do calendário. `_envioSemana` é
+  // carregado por _checarUrgenciaPendencia pra a segunda de hoje (_urgSemanaIni) — e um app
+  // deixado aberto atravessando a segunda guardaria o registro da semana passada, o que
+  // bloquearia um envio legítimo da semana nova. Bloquear envio é pior que o duplo envio: a
+  // loja fica sem pedido. Quando a referência não é a de hoje, a trava de re-entrância acima
+  // segue valendo e esta sai do caminho.
+  const _semanaHoje = wkKey(getMonday(new Date()));
+  const _jaEnviado = (_urgSemanaIni === _semanaHoje) ? (_envioSemana || {}) : {};
+  if (modo === 'urgencia' && _jaEnviado.urgencia_em) {
+    showToast('A urgência desta semana já foi enviada. Fale com o Compras pra reabrir.', 'warn', 5000);
+    return;
+  }
+  if (modo === 'final' && _jaEnviado.final_em) {
+    showToast('O pedido desta semana já foi finalizado. Fale com o Compras pra reabrir.', 'warn', 5000);
+    return;
+  }
+  _confirmandoPedido = true;
+
+  try {
 
   // 1. Flush: garantir que o input focado (se houver) já propagou seu valor ao estado
   const activeEl = document.activeElement;
@@ -6851,7 +6886,7 @@ async function confirmarPedido(modo) {
     await new Promise(r => setTimeout(r, 40)); // aguarda oninput/onblur processar
   }
 
-  // 2. Desabilitar botões para evitar duplo clique
+  // 2. Desabilitar botões — feedback visual; a trava de verdade é _confirmandoPedido
   document.querySelectorAll('[onclick*="_abrirPreviaConfirmar"],[onclick*="confirmarPedido"]').forEach(b => { b.disabled = true; b.style.opacity = '0.5'; });
 
   const p = getPedido();
@@ -7038,6 +7073,14 @@ async function confirmarPedido(modo) {
   if (modo === 'final') {
     setTimeout(gerarExcelPedido, 400);
   }
+
+  } finally {
+    // Sempre libera, inclusive se algo estourou no meio: uma trava que fica presa num erro
+    // impediria a loja de reenviar depois de corrigir — pior que o duplo envio. A trava
+    // contra reenvio da MESMA semana é a outra, no topo, e essa é persistente.
+    _confirmandoPedido = false;
+    document.querySelectorAll('[onclick*="_abrirPreviaConfirmar"],[onclick*="confirmarPedido"]').forEach(b => { b.disabled = false; b.style.opacity = ''; });
+  }
 }
 
 /* ── PEDIDO — UX helpers ───────────────────────────────── */
@@ -7118,6 +7161,11 @@ function _qtdZeradoLojaChanged(el, itemId, idx) {
 }
 
 function _abrirPreviaConfirmar(modo) {
+  // Dois toques no botão abriam DOIS modais com o mesmo id. A segunda etapa remove
+  // `_pedidoPreviaModal` por getElementById, que devolve só o primeiro — sobrava um modal
+  // na tela com o botão de confirmar vivo, e o segundo toque nele mandava o pedido de novo.
+  // É o caminho do envio duplicado relatado. Um modal por vez, sempre.
+  document.getElementById('_pedidoPreviaModal')?.remove();
   const pedido = getPedido();
   const prods = getProdutosPedidoOrdenados();
   const itens = prods.filter(p => _pedidoPreenchido(pedido[p.item] || {}));
