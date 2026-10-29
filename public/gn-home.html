@@ -939,6 +939,8 @@ let _dashLojasAll     = null; // [{loja(comKey), all_data}] — avariasAll, caix
 let _dashBhCfg        = null; // {chkKey: {periodo_inicio, salariosSetor}}
 let _dashBhMesesRows  = null; // [{loja(chkKey), mes, registros:[{nome,horas,obs}]}]
 let _dashCancelPer    = null; // {lojaKey: [{data,valor,motivo,autor,foto}]} — do período do Painel
+let _dashSem10Per     = null; // {lojaKey: [{data,mesa,garcom,valor,totalDia}]} — notas sem 10%
+let _dashSem10CaixasPer = null; // {lojaKey: nº de caixas FECHADOS no período}
 let _dashDeclPer      = null; // {lojaKey: {caixas, declarados, abertos, responsaveis:[]}} — "dia sem cancelamento"
 let _dashTransfPer    = null; // {lojaKey: [{data,origem,destino,motivo,autor,foto}]} — transferências de mesa
 let _dashDeclTransfPer = null; // o mesmo de _dashDeclPer, pro "dia sem transferência"
@@ -9336,7 +9338,7 @@ async function _loadDashAll() {
       // Cancelamentos do período, aninhados no fechamento porque a DATA mora no
       // fechamento e não no cancelamento — mesma forma da consulta de funcionário extra
       // em _renderMesAnteriorHome.
-      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${range.dates[0]}&data=lte.${range.dates[range.dates.length-1]}&select=loja,data,turno,status,sem_cancelamento_por,sem_cancelamento_em,sem_transferencia_por,sem_transferencia_em,gn_caixa_cancelamento(valor,motivo,motivo_categoria,autorizado_por,foto),gn_caixa_transferencia(mesa_origem,mesa_destino,motivo,autorizado_por,foto)`, H, 'dash:cancelRows', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${range.dates[0]}&data=lte.${range.dates[range.dates.length-1]}&select=loja,data,turno,status,total_sistema,sem_cancelamento_por,sem_cancelamento_em,sem_transferencia_por,sem_transferencia_em,gn_caixa_cancelamento(valor,motivo,motivo_categoria,autorizado_por,foto),gn_caixa_transferencia(mesa_origem,mesa_destino,motivo,autorizado_por,foto),gn_caixa_gorjeta(mesa,garcom,valor)`, H, 'dash:cancelRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?status=eq.FECHADO&data=gte.${from30}&select=id,loja,data,turno`, H, 'dash:caixaFechadosRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_alertas_urgentes?order=criado_em.desc&limit=50&select=id,loja,criado_por,criado_em,resolvido,resolvido_por,resolvido_em,motivo,cargos`, H, 'dash:alertasUrgentesRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_chk_visitas?data=gte.${from14}&data=lt.${hoje}&select=loja,data,hora_chegada`, H, 'dash:visitasPassadasRows', []),
@@ -9596,6 +9598,8 @@ async function _loadDashAll() {
     _dashCancelPer = _raioxMapearCancel(cancelRows);
     _dashDeclPer   = _raioxMapearDecl(cancelRows);
     _dashTransfPer = _raioxMapearTransf(cancelRows);
+    _dashSem10Per  = _raioxMapearSem10(cancelRows);
+    _dashSem10CaixasPer = _raioxMapearCaixasSem10(cancelRows);
     _dashDeclTransfPer = _raioxMapearDecl(cancelRows, 'sem_transferencia_por', 'sem_transferencia_em');
     const spark={}; LOJAS_LISTA.forEach(k=>{spark[k]=[(fat3[k]||0),(fat2[k]||0),(fatPrv[k]||0),(fatCur[k]||0)];});
     _dashSparkData=spark;
@@ -9614,7 +9618,7 @@ async function _loadDashAll() {
     _dashContratosVencendo=_dashContratosVencendo||{}; _dashManutParada=_dashManutParada||{};
     _dashCaixaSemConferencia=_dashCaixaSemConferencia||{};
     _dashComissoesAll=_dashComissoesAll||[]; _dashLojasAll=_dashLojasAll||[];
-    _dashBhCfg=_dashBhCfg||{}; _dashBhMesesRows=_dashBhMesesRows||[]; _dashCancelPer=_dashCancelPer||{}; _dashDeclPer=_dashDeclPer||{};
+    _dashBhCfg=_dashBhCfg||{}; _dashBhMesesRows=_dashBhMesesRows||[]; _dashCancelPer=_dashCancelPer||{}; _dashDeclPer=_dashDeclPer||{}; _dashSem10Per=_dashSem10Per||{}; _dashSem10CaixasPer=_dashSem10CaixasPer||{};
     _dashTransfPer=_dashTransfPer||{}; _dashDeclTransfPer=_dashDeclTransfPer||{};
     _dashVisitasHoje=_dashVisitasHoje||{};
     _dashAlertasUrgentes=_dashAlertasUrgentes||[];
@@ -12735,6 +12739,243 @@ function _cancelMacroDados() {
   };
 }
 
+/* ── 💸 NOTAS SEM 10% ──────────────────────────────────────────────────────────────────
+   "Criar uma aba no painel de gestão para apresentar as informações das notas sem 10%
+    que estão no app Caixa (...) seguindo o mesmo modelo utilizado nas abas de
+    cancelamentos e transferências."
+
+   A nota sem 10% é a mesa que não pagou a taxa de serviço. O que a rede perde é o 10%
+   dela — por isso a tela mostra os dois números, e o 10% em destaque.
+
+   Vem da MESMA consulta que já traz cancelamento e transferência (dash:cancelRows):
+   a tabela é gn_caixa_gorjeta e a data mora no fechamento, então a linha já estava
+   sendo lida. Nenhuma consulta nova.
+
+   MEDIDO na base antes de montar (2.053 notas, 10/07 a 29/10, R$ 424.611):
+     · Maglia não usa o app Caixa — zero fechamentos. Fica fora, e não é lacuna.
+     · Caxias fechou 95 caixas e nunca lançou UMA nota. Boulevard parou em 27/07.
+       Nova Iguaçu lançou 4 notas num único dia. Por isso "sem notas" aqui não é uma
+       coisa só, do mesmo jeito que não é no painel de cancelamento.
+     · 1 nota de R$ 20.396 (Bangu 12/09, mesa 57) num dia cuja venda inteira foi
+       R$ 22.906 — 89% do dia numa mesa só. Contra a média de R$ 206 e o percentil 99
+       de R$ 684, é digitação errada.
+     · 62 fechamentos sem total_sistema lançado: nesses, não há com o que comparar.           */
+const SEM10_FORA = ['MAGLIA'];        // não usa o app Caixa (zero fechamentos na base)
+// A partir de quanto a nota vira "confere isso": metade da venda do dia. Não é veredito —
+// uma nota acima disso significa que OU a nota está errada OU o total do dia está, e a
+// tela diz as duas coisas em vez de escolher uma. Medido: 12 notas passam da metade, e
+// nelas as duas causas aparecem (nota digitada errada E total do dia com o separador de
+// milhar lido como decimal, tipo `10.389` pra R$ 10.389,00).
+const SEM10_FATIA_SUSPEITA = 0.5;
+
+function _sem10LojaDentro(k) { return !SEM10_FORA.includes(k); }
+
+// As notas do período, por loja. Mesma forma de _raioxMapearCancel.
+function _raioxMapearSem10(rows) {
+  const porLoja = {};
+  (rows || []).forEach(fech => {
+    const lk = _normLoja(fech.loja);
+    if (!LOJAS_LISTA.includes(lk) || !_sem10LojaDentro(lk)) return;
+    const ns = Array.isArray(fech.gn_caixa_gorjeta) ? fech.gn_caixa_gorjeta
+             : (fech.gn_caixa_gorjeta ? [fech.gn_caixa_gorjeta] : []);
+    const totalDia = parseFloat(fech.total_sistema) || 0;
+    ns.forEach(n => {
+      if (!n) return;
+      const valor = parseFloat(n.valor) || 0;
+      (porLoja[lk] = porLoja[lk] || []).push({
+        data: fech.data, turno: fech.turno || '', mesa: n.mesa || '', garcom: n.garcom || '',
+        valor, totalDia,
+        // Suspeita, não veredito: ou a nota está errada, ou o total do dia está.
+        suspeita: totalDia > 0 && valor > totalDia * SEM10_FATIA_SUSPEITA,
+        semTotalDia: !(totalDia > 0),
+      });
+    });
+  });
+  return porLoja;
+}
+
+// Quantos caixas a loja fechou no período. É o que separa "não teve nota" de "não
+// lançou": sem caixa fechado não há o que cobrar, com caixa fechado e nenhuma nota há.
+function _raioxMapearCaixasSem10(rows) {
+  const porLoja = {};
+  (rows || []).forEach(fech => {
+    const lk = _normLoja(fech.loja);
+    if (!LOJAS_LISTA.includes(lk) || !_sem10LojaDentro(lk)) return;
+    if (String(fech.status || '').toUpperCase() !== 'FECHADO') return;
+    porLoja[lk] = (porLoja[lk] || 0) + 1;
+  });
+  return porLoja;
+}
+
+function _sem10MacroDados() {
+  const porLoja = _dashSem10Per || {};
+  const caixas = _dashSem10CaixasPer || {};
+  const daRegra = LOJAS_LISTA.filter(_sem10LojaDentro);
+  const lojas = daRegra.map(k => {
+    const itens = (porLoja[k] || []).slice().sort((a, b) =>
+      String(b.data).localeCompare(String(a.data)) || (b.valor || 0) - (a.valor || 0));
+    const valor = itens.reduce((acc, n) => acc + n.valor, 0);
+    return {
+      k, nome: LOJA_DISPLAY[k] || k, itens, valor,
+      dez: valor * 0.10,
+      suspeitas: itens.filter(n => n.suspeita).length,
+      semTotalDia: itens.filter(n => n.semTotalDia).length,
+    };
+  }).filter(l => l.itens.length).sort((a, b) => b.valor - a.valor);
+
+  const valor = lojas.reduce((a, l) => a + l.valor, 0);
+  return {
+    lojas, valor, dez: valor * 0.10,
+    qtd: lojas.reduce((a, l) => a + l.itens.length, 0),
+    suspeitas: lojas.reduce((a, l) => a + l.suspeitas, 0),
+    semTotalDia: lojas.reduce((a, l) => a + l.semTotalDia, 0),
+    nLojas: daRegra.length,
+    // Loja sem nota no período não é uma coisa só — mesma lição do painel de cancelamento.
+    //   'sem_caixa'   — não fechou caixa no período: não há o que lançar
+    //   'nao_lancou'  — fechou caixa e não lançou nenhuma: ou não teve, ou não lançou,
+    //                   e o app não guarda nada que distinga as duas
+    semNota: daRegra.filter(k => !(porLoja[k] || []).length).map(k => ({
+      k, nome: LOJA_DISPLAY[k] || k,
+      caixas: caixas[k] || 0,
+      estado: (caixas[k] || 0) ? 'nao_lancou' : 'sem_caixa',
+    })).sort((a, b) => (b.caixas - a.caixas) || a.nome.localeCompare(b.nome, 'pt-BR')),
+  };
+}
+
+function _buildSem10Panel() {
+  if (!_dashSem10Per) return _skelPanel(3);
+  const d = _sem10MacroDados();
+  const esc = s => window.escapeHtml(String(s == null ? '' : s));
+  const dm = iso => String(iso || '').slice(8, 10) + '/' + String(iso || '').slice(5, 7);
+  const periodo = _dashPer === 'sem' ? _weekRange(_dashWoff).label : _monthRange(_dashMoff).label;
+
+  const kpis = `<div class="kpi-row">
+    <div class="kpi-tile" style="border-left-color:#E8580A">
+      <div class="kpi-tile-lbl">10% não cobrado</div>
+      <div class="kpi-tile-val" style="color:#E8580A">${_fmtBRL(d.dez)}</div>
+      <div class="kpi-tile-sub">é o que a rede deixou de receber</div>
+    </div>
+    <div class="kpi-tile" style="border-left-color:var(--t3)">
+      <div class="kpi-tile-lbl">Valor das notas</div>
+      <div class="kpi-tile-val">${_fmtBRL(d.valor)}</div>
+      <div class="kpi-tile-sub">${d.qtd} nota${d.qtd === 1 ? '' : 's'} · ${d.lojas.length} loja${d.lojas.length === 1 ? '' : 's'}</div>
+    </div>
+  </div>`;
+
+  // Bloco de conferência: o que não dá pra confiar sem alguém olhar.
+  const conferir = (d.suspeitas || d.semTotalDia) ? `
+    <div style="background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.32);border-radius:14px;padding:11px 14px;margin-bottom:10px">
+      <div style="font-size:12px;font-weight:800;color:var(--txt-amber);margin-bottom:4px">⚠ ${d.suspeitas + d.semTotalDia} ${(d.suspeitas + d.semTotalDia) === 1 ? 'lançamento pede conferência' : 'lançamentos pedem conferência'}</div>
+      ${d.suspeitas ? `<div style="font-size:10.5px;color:var(--t2);line-height:1.6">${d.suspeitas} nota${d.suspeitas === 1 ? ' passa' : 's passam'} de metade da venda do dia. Ou a nota está errada, ou o total do dia está — as duas coisas acontecem, e a tela não escolhe uma.</div>` : ''}
+      ${d.semTotalDia ? `<div style="font-size:10.5px;color:var(--t2);line-height:1.6;margin-top:3px">${d.semTotalDia} nota${d.semTotalDia === 1 ? ' está' : 's estão'} em dia sem o total do sistema lançado — sem ele não há com o que comparar.</div>` : ''}
+    </div>` : '';
+
+  if (!d.qtd) {
+    return _reportBtnsRowHtml('Sem10') + kpis +
+      `<div class="att-item"><div><div class="att-nm">Nenhuma nota sem 10% em ${esc(periodo)}</div>
+        <div class="att-rs">Nenhuma das ${d.nLojas} lojas lançou nota neste período.</div></div></div>`
+      + _sem10SemNadaHtml(d);
+  }
+
+  const blocos = d.lojas.map(l => `
+    <div style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid #E8580A;border-radius:14px;padding:12px 14px;margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:2px">
+        <div style="font-size:13px;font-weight:800;color:var(--t1);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.nome)}</div>
+        <div style="font-size:13px;font-weight:800;color:#E8580A;white-space:nowrap;font-variant-numeric:tabular-nums">${_fmtBRL(l.dez)}</div>
+      </div>
+      <div style="font-size:10px;color:var(--t3);margin-bottom:4px">${l.itens.length} nota${l.itens.length === 1 ? '' : 's'} · ${_fmtBRL(l.valor)} em notas${l.suspeitas ? ` · <span style="color:var(--txt-amber)">${l.suspeitas} pra conferir</span>` : ''}</div>
+      ${l.itens.map(n => `<div style="display:flex;gap:9px;align-items:baseline;padding:6px 0;border-top:1px solid var(--b1)">
+        <div style="font-size:9.5px;color:var(--t3);min-width:34px;font-variant-numeric:tabular-nums">${dm(n.data)}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:11.5px;font-weight:700;color:var(--t1);overflow-wrap:anywhere">Mesa ${esc(n.mesa) || '—'}${n.garcom ? ` · ${esc(n.garcom)}` : ''}</div>
+          ${n.suspeita ? `<div style="font-size:9.5px;color:var(--txt-amber)">⚠ ${Math.round(n.valor / n.totalDia * 100)}% da venda do dia — confira a nota e o total do dia</div>`
+            : n.semTotalDia ? `<div style="font-size:9.5px;color:var(--t4)">o total do dia não foi lançado</div>` : ''}
+        </div>
+        <div style="text-align:right;white-space:nowrap">
+          <div style="font-size:12px;font-weight:800;color:var(--t1);font-variant-numeric:tabular-nums">${_fmtBRL(n.valor)}</div>
+          <div style="font-size:9px;color:#E8580A;font-variant-numeric:tabular-nums">10% = ${_fmtBRL(n.valor * 0.10)}</div>
+        </div>
+      </div>`).join('')}
+    </div>`).join('');
+
+  return _reportBtnsRowHtml('Sem10') + kpis + conferir + _sem10RankingHtml(d) + blocos + _sem10SemNadaHtml(d);
+}
+
+// Ranking do melhor pro pior, como no painel de cancelamento: quem menos deixou de
+// cobrar aparece em cima.
+function _sem10RankingHtml(d) {
+  if (d.lojas.length < 2) return '';
+  const ordem = d.lojas.slice().sort((a, b) => a.dez - b.dez);
+  const pior = Math.max(...ordem.map(l => l.dez)) || 1;
+  return `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:12px 14px;margin-bottom:10px">
+    <div style="font-size:11px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:var(--t2);margin-bottom:6px">Ranking · 10% não cobrado</div>
+    ${ordem.map((l, i) => `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+      <span style="font-size:10px;color:var(--t4);width:16px;flex-shrink:0;text-align:right">${i + 1}º</span>
+      <span style="font-size:11px;font-weight:700;color:var(--t2);width:96px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${window.escapeHtml(l.nome)}</span>
+      <span style="flex:1;height:7px;border-radius:4px;background:var(--fill-sutil);overflow:hidden">
+        <span style="display:block;height:100%;width:${Math.max(2, Math.round(l.dez / pior * 100))}%;background:#E8580A"></span></span>
+      <span style="font-size:10.5px;font-weight:800;color:var(--t1);font-variant-numeric:tabular-nums;width:76px;text-align:right;flex-shrink:0">${_fmtBRL(l.dez)}</span>
+    </div>`).join('')}
+  </div>`;
+}
+
+// Quem não lançou nada — e POR QUE, até onde o dado permite dizer.
+function _sem10SemNadaHtml(d) {
+  if (!d.semNota.length) return '';
+  const naoLancou = d.semNota.filter(l => l.estado === 'nao_lancou');
+  const semCaixa  = d.semNota.filter(l => l.estado === 'sem_caixa');
+  const linha = (titulo, lista, rodape, cor) => !lista.length ? '' : `
+    <div style="margin-top:8px">
+      <div style="font-size:10.5px;font-weight:800;color:${cor}">${titulo}</div>
+      <div style="font-size:10.5px;color:var(--t2);line-height:1.6">${lista.map(l =>
+        window.escapeHtml(l.nome) + (l.caixas ? ` <span style="color:var(--t4)">(${l.caixas} caixa${l.caixas === 1 ? '' : 's'})</span>` : '')).join(' · ')}</div>
+      <div style="font-size:9.5px;color:var(--t4);margin-top:2px">${rodape}</div>
+    </div>`;
+  return `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:11px 14px;margin-bottom:10px">
+    <div style="font-size:11px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:var(--t2)">Sem nota no período</div>
+    ${linha('Fechou caixa e não lançou nenhuma', naoLancou,
+        'Pode ser que não tenha havido mesa sem 10% — ou que não esteja sendo lançado. O app não guarda nada que separe as duas, diferente do cancelamento, que tem assinatura de "não houve".', 'var(--txt-amber)')}
+    ${linha('Não fechou caixa no período', semCaixa, 'Não há o que lançar.', 'var(--t3)')}
+  </div>`;
+}
+
+// ── Relatórios da aba 💸 Sem 10% (mesmo padrão gerarWpp/gerarPDF/enviarPDF...Wpp) ────
+function _sem10RelatorioTexto(wpp) {
+  if (!_dashSem10Per) return null;
+  const d = _sem10MacroDados();
+  const b = s => wpp ? '*' + s + '*' : s;
+  const dm = iso => String(iso || '').slice(8, 10) + '/' + String(iso || '').slice(5, 7);
+  const periodo = _dashPer === 'sem' ? _weekRange(_dashWoff).label : _monthRange(_dashMoff).label;
+  let msg = `${wpp ? '💸 ' : ''}${b('NOTAS SEM 10%')}\n${periodo}\n`;
+  msg += `\n10% não cobrado: ${_fmtBRL(d.dez)}\nValor das notas: ${_fmtBRL(d.valor)} (${d.qtd} nota${d.qtd === 1 ? '' : 's'})\n`;
+  d.lojas.forEach(l => {
+    msg += `\n${wpp ? '🏪 ' : ''}${b(LOJA_DISPLAY[l.k] || l.k)}\n`;
+    msg += `  10% não cobrado: ${_fmtBRL(l.dez)}  ·  notas: ${_fmtBRL(l.valor)} (${l.itens.length})\n`;
+    l.itens.forEach(n => {
+      msg += `  ${dm(n.data)} mesa ${n.mesa || '—'}${n.garcom ? ' · ' + n.garcom : ''}: ${_fmtBRL(n.valor)}\n`;
+      if (n.suspeita) msg += `    ⚠ ${Math.round(n.valor / n.totalDia * 100)}% da venda do dia — confira a nota e o total do dia\n`;
+    });
+  });
+  const naoLancou = d.semNota.filter(l => l.estado === 'nao_lancou');
+  if (naoLancou.length) msg += `\n${b('Fechou caixa e não lançou nenhuma')}: ${naoLancou.map(l => l.nome).join(', ')}\n`;
+  return { msg, titulo: 'Notas sem 10% · ' + periodo };
+}
+function gerarWppSem10() {
+  const r = _sem10RelatorioTexto(true);
+  if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  window.open('https://wa.me/?text=' + encodeURIComponent(r.msg), '_blank');
+}
+function gerarPDFSem10() {
+  const r = _sem10RelatorioTexto(false);
+  if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  gerarPDF(r.msg, r.titulo);
+}
+async function enviarPDFSem10Wpp() {
+  const r = _sem10RelatorioTexto(false);
+  if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  await _compartilharPdfWpp(r.msg, r.titulo);
+}
+
 function _buildCancelPanel() {
   if (!_dashCancelPer) return _skelPanel(3);
   const d = _cancelMacroDados();
@@ -13586,6 +13827,9 @@ function renderDashboard() {
   } else if (_dashTab==='cancel') {
     content = _buildCancelPanel();
 
+  } else if (_dashTab==='sem10') {
+    content = _buildSem10Panel();
+
   } else if (_dashTab==='ferias') {
     content = _buildFeriasPanel();
 
@@ -13644,6 +13888,7 @@ function renderDashboard() {
         <button class="dash-tab${_dashTab==='fat'?' on':''}" onclick="_setDashTab('fat')">↓ Faturamento</button>
         <button class="dash-tab${_dashTab==='att'?' on':''}" onclick="_setDashTab('att')">⚠ Atenção</button>
         <button class="dash-tab${_dashTab==='cancel'?' on':''}" onclick="_setDashTab('cancel')">🧾 Cancel. e transf.</button>
+        <button class="dash-tab${_dashTab==='sem10'?' on':''}" onclick="_setDashTab('sem10')">💸 Sem 10%</button>
         <button class="dash-tab${_dashTab==='ferias'?' on':''}" onclick="_setDashTab('ferias')">🏖 Férias</button>
         <button class="dash-tab${_dashTab==='xadrez'?' on':''}" onclick="_setDashTab('xadrez')">🔀 Xadrez</button>
         <button class="dash-tab${_dashTab==='bi'?' on':''}" onclick="_setDashTab('bi')">📊 BI</button>
