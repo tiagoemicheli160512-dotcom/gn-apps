@@ -11600,7 +11600,7 @@ async function _loadCarnesGerencia() {
   // A venda da semana vem junto porque a saída de carne só diz algo comparada com ela:
   // 80 kg numa loja que vendeu 100 mil e 150 kg em outra que vendeu os mesmos 100 mil são
   // dois casos diferentes, e é esse segundo que precisa de olho.
-  const [rows, fatRows] = await Promise.all([
+  const [rows, fatRows, rodRows] = await Promise.all([
     window.gnFetchJson(
       `${SB_URL}/rest/v1/checklist_carnes?semana_inicio=gte.${iniISO}&semana_inicio=lte.${fimISO}` +
       `&select=loja,semana_inicio,carnes,updated_at&order=updated_at.desc`,
@@ -11609,17 +11609,36 @@ async function _loadCarnesGerencia() {
       `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${iniISO}&data_operacao=lte.${fimISO}` +
       `&select=loja,venda_salao,venda_delivery`,
       H, 'carnesGerencia:fat', null),
+    // Rodízios da semana, do fechamento de caixa — a mesma fonte do card de buffet do
+    // Painel (ver byBuffet em _loadDashAll), pra os dois números nunca divergirem.
+    window.gnFetchJson(
+      `${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${iniISO}&data=lte.${fimISO}` +
+      `&select=loja,data,rodizio_inteira,rodizio_meia`,
+      H, 'carnesGerencia:rodizio', null),
   ]);
   if (!rows) { _carnesGerLoaded = true; _carnesGerData = { erro: true, iniISO, fimISO }; renderDashboard(); return; }
   // Faturamento é complemento, não requisito: se só ele falhar a aba continua mostrando os
   // kg, que é o dado principal — e avisa que a razão está de fora.
   const fatFalhou = !fatRows;
+  // Rodízio também é complemento: sem ele os kg continuam na tela.
+  const rodFalhou = !rodRows;
 
   const porLoja = {};
   // Maglia não tem aba Carnes no Check-list (CLAUDE.md / ABAS_FORA_MAGLIA), então ela
   // apareceria como "nunca lançou" todo santo dia — uma cobrança falsa.
   LOJAS_LISTA.filter(k => k !== 'MAGLIA')
-    .forEach(k => { porLoja[k] = { k, carnes: null, semana_inicio: null, updated_at: null, fat: 0 }; });
+    .forEach(k => { porLoja[k] = { k, carnes: null, semana_inicio: null, updated_at: null, fat: 0,
+                                   rodizios: 0, rodizioLancado: false, foraDoBuffet: (window.GN_BUFFET_FORA || []).includes(k) }; });
+  (rodRows || []).forEach(r => {
+    const k = _normLoja(r.loja);
+    if (!porLoja[k] || porLoja[k].foraDoBuffet) return;
+    // Meio rodízio conta como um rodízio inteiro na média de 250 g — decisão do dono.
+    // É também exatamente o `rodizioQtd` que o card de buffet do Painel já mostra
+    // (gnBuffetValores: inteira + meia), então os dois números batem.
+    const n = v => Math.max(0, parseInt(v, 10) || 0);
+    porLoja[k].rodizios += n(r.rodizio_inteira) + n(r.rodizio_meia);
+    if (r.rodizio_inteira != null || r.rodizio_meia != null) porLoja[k].rodizioLancado = true;
+  });
   (fatRows || []).forEach(r => {
     const k = _normLoja(r.loja);
     if (!porLoja[k]) return;
@@ -11634,7 +11653,7 @@ async function _loadCarnesGerencia() {
       || (r.semana_inicio === iniISO && atual.semana_inicio !== iniISO);
     if (melhor) { atual.carnes = r.carnes; atual.semana_inicio = r.semana_inicio; atual.updated_at = r.updated_at; }
   });
-  _carnesGerData = { porLoja, iniISO, fimISO, fatFalhou };
+  _carnesGerData = { porLoja, iniISO, fimISO, fatFalhou, rodFalhou };
   _carnesGerLoaded = true;
   renderDashboard();
 }
@@ -11683,6 +11702,35 @@ function _carnesGradeDia(carnes, key) {
     entrada: num(d['ent_' + dia]),
     inicialNaSegunda: i === 0,
   }));
+}
+
+// Média de carne de sol por rodízio, em kg. Decisão do dono, e meio rodízio conta igual
+// a um inteiro: "manter 250g no meio rodízio também". Fica numa constante porque é um
+// parâmetro de operação, não uma conta — muda sem precisar caçar número solto na tela.
+const CARNE_SOL_POR_RODIZIO_KG = 0.250;
+
+// Quanto da carne de sol que saiu na semana os rodízios explicam, a 250 g cada.
+//
+// MEDIDO antes de escolher como mostrar: em outubro a rede fez 1.089 rodízios, que a 250 g
+// dão 272 kg — e só na semana 19/10 saíram cerca de 1.100 kg de carne de sol. O rodízio
+// responde por algo como 6% do consumo; a carne de sol é vendida sobretudo fora dele
+// (Bangu: 61 rodízios, 15,3 kg esperados, 179,2 kg de saída real).
+//
+// Por isso isto NÃO é apresentado como desvio ("+1.075% acima do esperado" seria o número
+// em toda loja, toda semana — alarme que ninguém olha). É apresentado como PARTICIPAÇÃO:
+// quanto da saída vem do rodízio e quanto vem do resto. Mesma conta que o dono pediu, lida
+// pelo que ela é — e assim uma loja cuja participação foge da das outras aparece.
+//
+// `saida` só existe na semana FECHADA (precisa da contagem de segunda); na semana em
+// andamento devolve só o esperado, em vez de comparar com um número que ainda não existe.
+function _carnesRodizioEsperado(d, saida) {
+  if (!d || d.foraDoBuffet) return null;
+  if (!d.rodizioLancado) return { semLancamento: true };
+  const esperado = d.rodizios * CARNE_SOL_POR_RODIZIO_KG;
+  if (saida === null || saida === undefined || saida <= 0)
+    return { rodizios: d.rodizios, esperado, resto: null, pct: null };
+  return { rodizios: d.rodizios, esperado, resto: saida - esperado,
+           pct: saida > 0 ? esperado / saida * 100 : null };
 }
 
 function _carnesLojaContou(d) {
@@ -11739,7 +11787,7 @@ function _buildCarnesPanel() {
   if (_carnesGerData.erro) {
     return reportBtns + `<div style="font-size:12px;color:var(--t3);padding:14px">Não deu pra carregar a contagem de carnes agora. Troque de aba e volte.</div>`;
   }
-  const { porLoja, iniISO, fimISO, fatFalhou } = _carnesGerData;
+  const { porLoja, iniISO, fimISO, fatFalhou, rodFalhou } = _carnesGerData;
   const kg = v => (Math.round(v * 10) / 10).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
   const razaoTxt = r => r === null ? '' : r.toFixed(2).replace('.', ',') + ' kg por R$ mil';
 
@@ -11784,6 +11832,10 @@ function _buildCarnesPanel() {
       </div>`
     : `<div style="background:rgba(22,163,74,.08);border:1px solid rgba(22,163,74,.25);border-radius:12px;padding:10px 14px;margin-bottom:10px;font-size:11.5px;color:var(--txt-green);font-weight:700">✅ As ${chaves.length} lojas lançaram a contagem desta semana.</div>`;
 
+  const avisoRodHtml = rodFalhou
+    ? `<div style="background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.3);border-radius:12px;padding:10px 14px;margin-bottom:10px;font-size:11px;color:var(--t2);line-height:1.5">⚠ Não deu pra carregar os rodízios da semana — os kg abaixo estão certos, mas a comparação com os ${CARNE_SOL_POR_RODIZIO_KG * 1000} g por rodízio fica de fora.</div>`
+    : '';
+
   const avisoFatHtml = fatFalhou
     ? `<div style="background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.3);border-radius:12px;padding:10px 14px;margin-bottom:10px;font-size:11px;color:var(--t2);line-height:1.5">⚠ Não deu pra carregar o faturamento da semana — os kg abaixo estão certos, mas a comparação <b>kg por R$ mil</b> fica de fora. Troque de aba e volte pra tentar de novo.</div>`
     : '';
@@ -11818,6 +11870,22 @@ function _buildCarnesPanel() {
         ${neg ? `<div style="font-size:9.5px;color:var(--txt-amber);font-weight:700">⚠ saída negativa: contagem maior que o disponível</div>` : ''}
       </div>`;
     }).join('');
+    // Rodízios × 250 g contra a saída real de carne de sol.
+    const rSol = _carnesDoCorte(d.carnes, 'carne_sol');
+    const rod = _carnesRodizioEsperado(d, rSol.venda);
+    const rodHtml = !rod ? ''
+      : rod.semLancamento
+        ? `<div style="margin-top:7px;border-top:1px solid rgba(0,0,0,.10);padding-top:6px;font-size:10px;color:var(--t4)">🍖 Rodízios da semana não lançados no fechamento de caixa — sem comparação com a carne de sol.</div>`
+        : `<div style="margin-top:7px;border-top:1px solid rgba(0,0,0,.10);padding-top:6px">
+            <div style="font-size:10.5px;color:var(--t2);font-weight:700;font-variant-numeric:tabular-nums">🍖 ${rod.rodizios.toLocaleString('pt-BR')} rodízio${rod.rodizios===1?'':'s'} na semana · ${kg(rod.esperado)} kg de carne de sol a ${CARNE_SOL_POR_RODIZIO_KG * 1000} g cada</div>
+            ${rod.resto === null
+              ? `<div style="font-size:9.5px;color:var(--t4)">A saída real fecha na segunda, com a contagem — aí dá pra ver quanto disso é rodízio.</div>`
+              : `<div style="font-size:10px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--t1)">
+                  ${rod.pct === null ? '' : rod.pct.toFixed(0) + '% da saída'} · os outros ${kg(Math.abs(rod.resto))} kg saíram ${rod.resto >= 0 ? 'pelos outros pratos' : 'a menos que o rodízio pedia'}
+                </div>
+                <div style="font-size:9.5px;color:var(--t4)">Meia porção conta como um rodízio. Na rede o rodízio responde por volta de 6% da carne de sol — o que chama atenção é a loja fora dessa faixa.</div>`}
+          </div>`;
+
     // Grade dia a dia: uma linha por corte, uma coluna por dia. É o acompanhamento que o
     // Painel não tinha — antes só dava pra ver o fechamento, depois da semana acabar.
     const gradeHtml = `<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,.10);padding-top:7px">
@@ -11844,6 +11912,7 @@ function _buildCarnesPanel() {
       </div>
       <div style="font-size:10.5px;color:var(--t2);font-weight:700;font-variant-numeric:tabular-nums;margin-bottom:2px">${d.fat > 0 ? '💰 Vendeu ' + _fmtBRL(d.fat) + ' na semana' : '<span style="color:var(--t4);font-weight:400">sem faturamento lançado na semana</span>'}</div>
       ${cortesHtml}
+      ${rodHtml}
       ${gradeHtml}
     </div>`;
   }).join('');
@@ -11851,8 +11920,9 @@ function _buildCarnesPanel() {
   return _carnesLojaFiltroHtml(porLoja) + reportBtns + navHtml + `<div style="font-size:11px;color:var(--t4);margin-bottom:10px">
       Contagem de carnes da semana fechada — lançada na segunda pela loja, na aba Contagem do app Lojas.<br>
       A venda estimada é <b>início + compras − contagem</b>; sem contagem lançada ela não existe.<br>
-      <b>kg por R$ mil</b> é o que compara duas lojas de tamanhos diferentes: quem vende o dobro sai com mais carne sem estar gastando mais.</div>
-    ${avisoFatHtml}${avisoHtml}${linhas}`;
+      <b>kg por R$ mil</b> é o que compara duas lojas de tamanhos diferentes: quem vende o dobro sai com mais carne sem estar gastando mais.<br>
+      <b>🍖 Rodízios × ${CARNE_SOL_POR_RODIZIO_KG * 1000} g</b> diz quanto da carne de sol saiu pelo rodízio e quanto saiu pelo resto do cardápio — na rede o rodízio fica por volta de 6%, então o que chama atenção é a loja fora dessa faixa.</div>
+    ${avisoFatHtml}${avisoRodHtml}${avisoHtml}${linhas}`;
 }
 
 // ── Relatórios da aba 🥩 Carnes (mesmo padrão de gerarWpp/gerarPDF/enviarPDF...Wpp) ───
@@ -11870,6 +11940,14 @@ function _carnesRelatorioTexto(wpp) {
     const d = porLoja[k];
     msg += `\n${wpp ? '🏪 ' : ''}${b(LOJA_DISPLAY[k]||k)}\n`;
     if (d.fat > 0) msg += `  Venda da semana: ${_fmtBRL(d.fat)}\n`;
+    // Rodízios no relatório: o mesmo número da tela, com a mesma média.
+    const rodR = _carnesRodizioEsperado(d, _carnesDoCorte(d.carnes, 'carne_sol').venda);
+    if (rodR && !rodR.semLancamento) {
+      msg += `  ${wpp ? '🍖 ' : ''}${rodR.rodizios.toLocaleString('pt-BR')} rodízios · ${kg(rodR.esperado)} kg de carne de sol a ${CARNE_SOL_POR_RODIZIO_KG * 1000} g cada`;
+      msg += rodR.resto === null
+        ? ` (a saída real fecha na segunda)\n`
+        : `${rodR.pct === null ? '' : ` · ${rodR.pct.toFixed(0)}% da saída de ${kg(_carnesDoCorte(d.carnes,'carne_sol').venda)} kg`}; os outros ${kg(Math.abs(rodR.resto))} kg pelos demais pratos\n`;
+    }
     if (!_carnesLojaContou(d)) { msg += `  ⚠ Não lançou a contagem desta semana\n`; naoContaram.push(LOJA_DISPLAY[k]||k); return; }
     CARNES_DEF_HOME.forEach(c => {
       const r = _carnesDoCorte(d.carnes, c.key);
