@@ -227,6 +227,46 @@ const LINHAS = [
   check('a troca de banda é dita no relatório, em vez de virar desconto',
     /outro trio tocou, o cachê segue devido/.test(rel), rel.slice(0, 1200));
 
+  // ══ 6. NO MÊS, A NOITE SEM BANDA NÃO PODE APAGAR O COUVERT DO FIM DE SEMANA ═════
+  // No modo Mês o detalhe é por FIM DE SEMANA, e a linha inteira dizia "sem couvert"
+  // porque UM dos dias não tinha lançamento — justamente o sábado em que o trio não
+  // chegou. Resultado: os R$ 1.141 que a Pedreira arrecadou no domingo sumiam da tela,
+  // e o fim de semana aparecia como pendência de lançamento que não existe.
+  const m = await page.evaluate(async ({ LINHAS }) => {
+    const orig = window.gnFetchJson;
+    window.gnFetchJson = async (url) => (/gn_trios_agenda/.test(url) ? LINHAS : []);
+    _triosPer = 'mes'; _triosGerLoaded = false; _triosGerData = null; _triosGerOff = 0;
+    try { await _loadTriosGerencia(); } finally { window.gnFetchJson = orig; }
+    const el = document.createElement('div');
+    el.innerHTML = _buildTriosPanel();
+    const cards = {};
+    [...el.querySelectorAll('div')].forEach(dv => {
+      if (!/border-left:\s*3px solid/.test(dv.getAttribute('style') || '')) return;
+      const nome = (dv.querySelector('span') || {}).textContent;
+      if (!nome) return;
+      const linhas = [...dv.querySelectorAll('div')].filter(c => {
+        const sp = c.children;
+        return sp.length === 4 && /^\d{2}\/\d{2}–\d{2}\/\d{2}$/.test((sp[0].textContent || '').trim());
+      }).map(c => [...c.children].map(x => x.textContent.replace(/\s+/g, ' ').trim()));
+      cards[nome.trim()] = { txt: dv.textContent.replace(/\s+/g, ' ').trim(), linhas };
+    });
+    return { cards, txt: el.textContent.replace(/\s+/g, ' ').trim() };
+  }, { LINHAS });
+  const mPed = m.cards['Pedreira'] || { linhas: [], txt: '' };
+  const fds = (mPed.linhas || []).find(l => /10\/10/.test(l[0])) || [];
+  check('no mês, o fim de semana 10–11/10 aparece no detalhe da Pedreira',
+    fds.length === 4, JSON.stringify(mPed.linhas));
+  check('e mostra o couvert que o domingo arrecadou, não "sem couvert"',
+    semNbsp(fds[3]) === 'R$ 1.141,00', JSON.stringify(mPed.linhas));
+  check('com o cachê já descontado na mesma linha',
+    semNbsp(fds[2]) === 'R$ 800,00', JSON.stringify(mPed.linhas));
+  // E a Guarulhos, cujos dois dias arrecadaram, também não pode virar pendência.
+  const mGua = m.cards['Guarulhos'] || { linhas: [], txt: '' };
+  const fdsG = (mGua.linhas || []).find(l => /10\/10/.test(l[0])) || [];
+  check('o fim de semana da troca de banda também mostra o que arrecadou',
+    semNbsp(fdsG[3]) === 'R$ 1.239,00' && semNbsp(fdsG[2]) === 'R$ 1.600,00',
+    JSON.stringify(mGua.linhas));
+
   const reais = erros.filter(e => !/createClient|Failed to fetch|supabase|NetworkError|net::/i.test(e));
   check('nenhum erro de JS', reais.length === 0, reais.slice(0, 3).join(' | '));
   await browser.close();
