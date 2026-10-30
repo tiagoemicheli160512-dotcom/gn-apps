@@ -5765,6 +5765,21 @@ function renderFornecedores() {
       <div class="sec-titulo">Fornecedores <span class="badge badge-r">${lista.length}</span></div>
       <button class="btn-sm btn-orange" onclick="modalNovoFornecedor()">+ Novo</button>
     </div>
+    ${(() => {
+      // Porta de volta pra tela de pendência depois de um "agora não" — senão ela só
+      // reapareceria no próximo acesso, e quem quisesse resolver na hora não teria por onde.
+      const pend = _fornecedoresSemDiaEntrega();
+      if (!pend.length) return '';
+      return `<div style="display:flex;gap:9px;align-items:center;flex-wrap:wrap;padding:9px 11px;margin-bottom:10px;border-radius:9px;
+        background:rgba(220,38,38,.08);border:1px solid rgba(220,38,38,.3);border-left:3px solid #DC2626">
+        <span style="font-size:15px">📅</span>
+        <div style="flex:1;min-width:170px;font-size:11px;color:var(--muted);line-height:1.45">
+          <b style="color:#B91C1C">${pend.length} fornecedor${pend.length === 1 ? '' : 'es'} sem dia de entrega.</b>
+          Sem ele a provisão nasce sem data e não aparece na Prov.ant.
+        </div>
+        <button class="btn-sm btn-orange" onclick="_abrirPendenciaDiasEntrega(true)">Preencher</button>
+      </div>`;
+    })()}
     <div style="display:flex;gap:9px;align-items:center;padding:9px 11px;margin-bottom:10px;border-radius:9px;
       background:rgba(232,133,10,.09);border:1px solid rgba(232,133,10,.35);border-left:3px solid #e8850a">
       <span style="font-size:15px">⚠️</span>
@@ -5783,18 +5798,135 @@ function renderFornecedores() {
   `;
 }
 
-async function toggleDia(fornId, dia) {
-  const idx = S.fornecedores.findIndex(f => f.id === fornId);
-  if (idx < 0) return;
-  const f = S.fornecedores[idx];
-  const dias = [...(f.dias_entrega || [])];
-  const pos = dias.indexOf(dia);
-  if (pos >= 0) dias.splice(pos, 1);
-  else dias.push(dia);
+// ══ FORNECEDOR SEM DIA DE ENTREGA — a tela que pede pro comprador preencher ═════
+//
+// A data de entrega da provisão é CALCULADA a partir dos dias do fornecedor (ver
+// confirmarPedido). Fornecedor sem dia e sem prazo gera a provisão com data_entrega NULL,
+// e aí ela não entra em nenhuma busca por intervalo de datas: sumia da Prov.ant, e some
+// também de tudo que organiza entrega por dia.
+//
+// MEDIDO: 532 das 13.198 provisões vivas (4,0%) estão sem data, e a conta por região
+// explica por que isso apareceu primeiro em São Paulo — lá são 237 de 506 (46,8%), contra
+// 295 de 11.363 (2,6%) no Rio. São 7 fornecedores ativos sem dia e sem prazo: WASAN,
+// DMIC, PMG, PETICO, NOGMIX - JBS, QUENTE e NOGMIX.
+//
+// Consertar na tela (PR da Prov.ant) fez o número voltar a aparecer; isto conserta a
+// ORIGEM. E quem sabe o dia de cada fornecedor é o comprador, não o app — inventar uma
+// data seria pior que não ter. Por isso a tela PERGUNTA, em vez de preencher sozinha.
+//
+// Volta a aparecer a cada abertura enquanto faltar alguém: o "agora não" vive em
+// sessionStorage de propósito. Em localStorage, um toque distraído esconderia pra sempre
+// uma pendência que ninguém mais lembraria de procurar.
+const _DIAS_PEND_KEY = 'gn_pedidos_dias_entrega_adiado';
 
+function _fornecedoresSemDiaEntrega() {
+  return (S.fornecedores || []).filter(f =>
+    f && f.ativo !== false && !((f.dias_entrega || []).length) && f.prazo_dias_min == null);
+}
+
+async function _abrirPendenciaDiasEntrega(forcado) {
+  const forns = _fornecedoresSemDiaEntrega();
+  if (!forns.length) { if (forcado) toast('Todos os fornecedores já têm dia de entrega.', 'ok'); return; }
+  if (!forcado) { try { if (sessionStorage.getItem(_DIAS_PEND_KEY)) return; } catch (e) {} }
+  // Não atropela outro modal aberto — quem está confirmando um pedido não pode ter a tela
+  // trocada no meio.
+  if (!forcado && $('modal-bg') && $('modal-bg').classList.contains('ativo')) return;
+
+  // Quantas provisões de cada um estão sem data HOJE: é o que mostra qual pesa mais.
+  let semData = {};
+  try {
+    const linhas = await _fetchTodasPaginas(() => db.from('gn_provisoes')
+      .select('fornecedor').is('data_entrega', null).neq('status', 'CANCELADO')
+      .in('fornecedor', forns.map(f => f.nome)).order('id'));
+    (linhas || []).forEach(l => { semData[l.fornecedor] = (semData[l.fornecedor] || 0) + 1; });
+  } catch (e) { semData = {}; }
+  S._diasPendSemData = semData;
+  _renderPendenciaDiasEntrega();
+  $('modal-bg').classList.add('ativo');
+}
+
+function _renderPendenciaDiasEntrega() {
+  const forns = _fornecedoresSemDiaEntrega();
+  const semData = S._diasPendSemData || {};
+  // Já resolvidos nesta sessão continuam na lista, em verde: sumir a linha no toque faz o
+  // resto pular na tela e dá a sensação de que alguma coisa se perdeu.
+  const todos = (S._diasPendLista && S._diasPendLista.length)
+    ? S._diasPendLista
+    : (S._diasPendLista = forns.map(f => f.id));
+  const linhas = todos.map(id => (S.fornecedores || []).find(f => f.id === id)).filter(Boolean)
+    .sort((a, b) => (semData[b.nome] || 0) - (semData[a.nome] || 0) || String(a.nome).localeCompare(b.nome));
+  const faltam = linhas.filter(f => !((f.dias_entrega || []).length)).length;
+
+  const corpo = linhas.map(f => {
+    const dias = f.dias_entrega || [];
+    const pronto = dias.length > 0;
+    const n = semData[f.nome] || 0;
+    return `<div style="background:var(--card2);border:1px solid ${pronto ? 'rgba(34,197,94,.45)' : 'var(--border)'};border-radius:var(--rs);padding:10px 12px;margin-bottom:8px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:7px;flex-wrap:wrap">
+        <span style="font-size:13px;font-weight:700;color:var(--text)">${f.nome}</span>
+        <span style="flex:1"></span>
+        <span style="font-size:10.5px;color:${pronto ? '#15803D' : 'var(--muted)'};font-weight:${pronto ? '700' : '400'}">
+          ${pronto ? '✅ ' + dias.join(', ') : (n > 0 ? n + (n === 1 ? ' provisão' : ' provisões') + ' sem data' : 'sem dia definido')}</span>
+      </div>
+      <div class="dias-grid" style="display:flex;gap:5px;flex-wrap:wrap">
+        ${DIAS_SEMANA.map(d => `<button class="dia-btn${dias.includes(d) ? ' on' : ''}"
+          onclick="_pendDiaToggle('${f.id}','${d}')">${d}</button>`).join('')}
+      </div>
+    </div>`;
+  }).join('');
+
+  $('modal-box').innerHTML = `
+    <div class="modal-titulo">📅 Dias de entrega — ${faltam > 0 ? `faltam ${faltam}` : 'tudo preenchido'}</div>
+    <div style="font-size:12px;color:var(--text);line-height:1.5;margin-bottom:6px">
+      Estes fornecedores estão <b>sem dia de entrega no cadastro</b>. Sem ele, a provisão nasce
+      <b>sem data</b> — e aí ela não aparece na <b>Prov.ant</b> nem se organiza por dia de entrega.
+    </div>
+    <div style="font-size:11.5px;color:var(--muted);line-height:1.5;margin-bottom:12px">
+      Matheus: é você que sabe o dia certo de cada um — por isso o app pergunta em vez de
+      chutar uma data. Toque nos dias em que o fornecedor entrega. Salva na hora, e pode
+      marcar mais de um. Dá pra mexer depois na aba <b>Fornecedores</b>.
+    </div>
+    ${corpo}
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn-sm btn-outline" style="flex:1" onclick="_pendDiasAdiar()">Agora não</button>
+      <button class="btn-sm btn-success" style="flex:1" onclick="$('modal-bg').classList.remove('ativo')">Pronto</button>
+    </div>`;
+}
+
+async function _pendDiaToggle(fornId, dia) {
+  const dias = await _alternarDiaEntrega(fornId, dia);
+  if (!dias) return;
+  _renderPendenciaDiasEntrega();
+  if (typeof renderFornecedores === 'function' && S.tab === 'fornecedores') renderFornecedores();
+}
+
+function _pendDiasAdiar() {
+  try { sessionStorage.setItem(_DIAS_PEND_KEY, '1'); } catch (e) {}
+  $('modal-bg').classList.remove('ativo');
+  toast('Combinado — volto a lembrar na próxima vez que o app abrir.', 'ok');
+}
+
+// Liga/desliga um dia e grava. Fica separado porque a tela de pendência (ver
+// _abrirPendenciaDiasEntrega) grava exatamente a mesma coisa — duas cópias da gravação
+// é como uma regra nova passa a valer num lugar e no outro não.
+async function _alternarDiaEntrega(fornId, dia) {
+  const idx = (S.fornecedores || []).findIndex(f => f.id === fornId);
+  if (idx < 0) return null;
+  const dias = [...(S.fornecedores[idx].dias_entrega || [])];
+  const pos = dias.indexOf(dia);
+  if (pos >= 0) dias.splice(pos, 1); else dias.push(dia);
+  // Na ordem da semana, não na de clique: "QUI, SEG" numa lista lida por humano é ruído.
+  dias.sort((x, y) => DIAS_SEMANA.indexOf(x) - DIAS_SEMANA.indexOf(y));
   S.fornecedores[idx].dias_entrega = dias;
-  await db.from('gn_fornecedores_pedido')
+  const { error } = await db.from('gn_fornecedores_pedido')
     .update({ dias_entrega: dias, atualizado_em: new Date().toISOString() }).eq('id', fornId);
+  if (error) { toast('Não deu pra salvar: ' + error.message, 'err'); return null; }
+  return dias;
+}
+
+async function toggleDia(fornId, dia) {
+  const dias = await _alternarDiaEntrega(fornId, dia);
+  if (!dias) return;
 
   // Atualiza só o botão
   const el = document.querySelector(`#forn-${fornId} .dias-grid`);
@@ -8894,6 +9026,9 @@ async function iniciarApp() {
 
   // Verificar entregas atrasadas em background (auto-alerta após 6s)
   setTimeout(_verificarAlertasEntregaAuto, 6000);
+
+  // Fornecedor sem dia de entrega: pergunta na abertura, enquanto faltar alguém.
+  setTimeout(() => { _abrirPendenciaDiasEntrega(false).catch(() => {}); }, 2500);
 
   // Registrar push subscription se já tem permissão
   if ('serviceWorker' in navigator) {
