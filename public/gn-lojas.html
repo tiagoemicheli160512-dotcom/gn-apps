@@ -253,6 +253,8 @@ input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-
 <script src="gn-validade-acesso.js"></script>
 <script src="gn-deploy-update.js"></script>
 <script src="gn-lojas-seed.js"></script>
+<script src="gn-comissoes-calendario.js"></script>
+<script src="gn-presenca.js"></script>
 </head>
 <body>
 
@@ -5931,14 +5933,65 @@ async function _cadastrarItemNoCatalogo(item) {
   return { ok: false };
 }
 
+/* ── REMOVER E RESTAURAR ITEM DO PEDIDO ───────────────────────────────────────────────
+   O 🗑 esconde o item da lista, e por anos essa foi uma PORTA DE UMA VIA só: a lista
+   `pedidoRemovidos` é unida entre todas as lojas no sbPull (um id removido numa loja
+   entra na lista das outras e nunca sai), e não havia nenhuma tela que mostrasse o que
+   estava escondido nem botão que desfizesse. Um clique apagava o item da rede inteira,
+   pra sempre, sem deixar rastro.
+
+   Caso real que trouxe isto à tona: a "Stella 550 ml Cx c/ 24", ativa no catálogo e
+   funcionando normalmente no app Estoque e Pedido, tinha sumido do app Lojas em TODAS as
+   11 lojas — o item 9 estava em pedidoRemovidos de todas elas. Junto dele estava o "Chopp
+   Vinho Barril c/ 50 litros" (1052), também ativo. Os outros três escondidos já estavam
+   inativos no catálogo, então ninguém sentiu falta.
+
+   Duas mudanças: o aviso passa a dizer que vale pra rede inteira, e o que foi escondido
+   fica visível e reversível na própria aba Pedido. */
 function removerItemPedido(id) {
-  if (!confirm('Remover este item da lista de pedido?')) return;
   const idStr = String(id);
+  const prod = (PRODUTOS_PEDIDO || []).find(p => String(p.item) === idStr)
+            || (pedidoCustom || []).find(c => String(c.item) === idStr);
+  const nome = prod ? prod.produto : ('item ' + idStr);
+  // O alcance no aviso: quem clica aqui está escondendo o item de TODAS as lojas, não só
+  // da sua. Sem isso dito, o botão parece uma preferência da loja.
+  if (!confirm('Esconder "' + nome + '" da lista de pedido?\n\n'
+    + 'Vale pra TODAS as lojas da rede, não só pra esta.\n'
+    + 'Dá pra trazer de volta em "itens escondidos", no fim da lista.')) return;
   if (!pedidoRemovidos.includes(idStr)) pedidoRemovidos.push(idStr);
   // Se for item custom, remover da lista custom também
   pedidoCustom = pedidoCustom.filter(c => String(c.item) !== idStr);
   autoSave();
-  showToast("🗑 Item removido da lista de pedido.");
+  showToast("🗑 Item escondido da lista de pedido.");
+  render();
+}
+
+// Os itens escondidos, com nome, pra tela poder mostrar o que sumiu. O nome vem do
+// catálogo já sincronizado (PRODUTOS_PEDIDO continua inteiro — quem filtra é o
+// getProdutosPedidoOrdenados); item custom escondido perdeu o cadastro junto, então
+// sobra o id, que ainda é melhor que uma linha em branco.
+function _pedidoItensEscondidos() {
+  return (pedidoRemovidos || []).map(idStr => {
+    const prod = (PRODUTOS_PEDIDO || []).find(p => String(p.item) === String(idStr));
+    return {
+      id: String(idStr),
+      produto: prod ? prod.produto : null,
+      grupo: prod ? prod.grupo : null,
+      fornecedor: prod ? prod.fornecedor : null,
+      // Item que não está mais no catálogo da região desta loja (ou foi desativado) não
+      // volta pra lista nem se for restaurado — a tela diz isso em vez de prometer.
+      noCatalogo: !!prod,
+    };
+  }).sort((a, b) => (b.noCatalogo - a.noCatalogo) || String(a.produto || a.id).localeCompare(String(b.produto || b.id), 'pt-BR'));
+}
+
+function restaurarItemPedido(id) {
+  const idStr = String(id);
+  const antes = pedidoRemovidos.length;
+  pedidoRemovidos = pedidoRemovidos.filter(r => String(r) !== idStr);
+  if (pedidoRemovidos.length === antes) return;
+  autoSave();
+  showToast("↩️ Item de volta na lista de pedido.");
   render();
 }
 
@@ -10350,6 +10403,32 @@ function render() {
             </button>`).join('')}
         </div>`}
       </div>
+
+      ${(function(){
+        // O que está escondido, e o caminho de volta. Fica fora do card da lista de
+        // propósito: não é item de pedido, é manutenção da lista. Só aparece quando há
+        // algo escondido — numa rede sem remoções, isto não ocupa espaço nenhum.
+        const esc = _pedidoItensEscondidos();
+        if (!esc.length) return '';
+        const linha = e => `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--linha)">
+          <span style="font-size:9px;color:var(--t3);font-family:monospace;width:34px;flex-shrink:0">${e.id}</span>
+          <span style="flex:1;min-width:0;font-size:11.5px;color:${e.noCatalogo?'var(--t1)':'var(--t3)'};overflow-wrap:anywhere">
+            ${e.produto || '(fora do catálogo desta região)'}
+            ${e.noCatalogo && e.grupo ? `<span style="font-size:9.5px;color:var(--t3)"> · ${e.grupo}</span>` : ''}
+          </span>
+          <button onclick="restaurarItemPedido('${e.id}')"
+            style="background:rgba(5,150,105,.14);border:none;border-radius:7px;color:var(--txt-green);font-size:10.5px;font-weight:700;padding:3px 9px;flex-shrink:0;cursor:pointer">↩️ Trazer de volta</button>
+        </div>`;
+        return `<div class="card" style="margin-top:10px">
+          <div style="font-size:11px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--t2)">
+            Itens escondidos da lista · ${esc.length}</div>
+          <div style="font-size:10px;color:var(--t3);line-height:1.5;margin:4px 0 2px">
+            Escondidos pelo 🗑, e vale pra rede inteira — não só pra esta loja. Item que
+            continua ativo no catálogo e some daqui normalmente é engano de clique.
+          </div>
+          ${esc.map(linha).join('')}
+        </div>`;
+      })()}
 
       <!-- Lista de produtos -->
       <div class="card">
