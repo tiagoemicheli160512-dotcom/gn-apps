@@ -553,6 +553,57 @@ window.gnTransferenciaLiberada = function (loja) {
 window.gnSem10Liberado = function (loja) {
   return !window.gnLojaForaDe(window.GN_SEM10_FORA, loja);
 };
+
+// ── PRESENÇA NA LOJA ────────────────────────────────────────────────────────────────
+// Quem confirma, ao entrar no app, que está na loja. Até aqui o plantão da Home apenas
+// DEDUZIA quem estava lá a partir da escala — ninguém confirmava nada, e escala não é
+// presença.
+// Mesma faixa de lojas das outras regras do fechamento: a Maglia fica de fora porque o
+// pedido não citou ela (ver CLAUDE.md).
+window.GN_PRESENCA_FORA = ['MAGLIA'];
+window.gnPresencaLiberada = function (loja) {
+  return !window.gnLojaForaDe(window.GN_PRESENCA_FORA, loja);
+};
+// Só gerente e sub-gerente: é a mesma dupla que o card de plantão já mostra, e um defeito
+// na regra trava no máximo duas pessoas por loja em vez da operação inteira.
+window.CARGOS_PRESENCA = ['gerente', 'sub_gerente'];
+// Quanto antes da entrada e depois da saída ainda conta como "no horário". Sem folga
+// nenhuma, quem chega pra abrir a loja às 14h50 de um turno 15h–23h seria barrado por dez
+// minutos — e quem fica fechando o caixa depois das 23h também. Uma hora de cada lado
+// cobre a abertura e o fechamento sem transformar a trava em formalidade.
+window.GN_PRESENCA_TOLERANCIA_MIN = 60;
+
+// Nome normalizado pra comparação: maiúsculo, sem acento, sem espaço dobrado, e sem o
+// sufixo de função que algumas lojas colam no nome da escala (Boulevard cadastrou
+// "LEANDRO JULIO ELIAS DA COSTA - gerente"). Mesma normalização do _comissoesNormNome do
+// Check-list, mais o sufixo — duas cópias divergindo aqui significa o app não reconhecer
+// a pessoa que ele mesmo gravou.
+window.gnNomeEscalaNorm = function (s) {
+  return String(s == null ? '' : s)
+    .replace(/\s*-\s*(sub[\s-]*gerente|sub|gerente)\s*$/i, '')
+    .trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
+};
+// A pessoa escolheu uma linha da escala pelo nome; semanas depois a loja pode ter
+// renomeado ela. O app já guarda o histórico em _nomesAnteriores quando isso acontece,
+// então o vínculo é conferido contra o nome atual E contra os anteriores. Quando não
+// resolve mais, quem chama pergunta de novo — nunca trava por não reconhecer.
+window.gnEscalaCasaNome = function (func, escalaNome) {
+  if (!func || !escalaNome) return false;
+  const alvo = window.gnNomeEscalaNorm(escalaNome);
+  if (!alvo) return false;
+  if (window.gnNomeEscalaNorm(func.nome) === alvo) return true;
+  return (func._nomesAnteriores || []).some(n => window.gnNomeEscalaNorm(n) === alvo);
+};
+// A linha da escala desta pessoa, ou null. Devolve o índice junto porque quem corrige o
+// horário precisa saber QUAL posição do array mexer.
+window.gnEscalaAchaFunc = function (funcs, escalaNome) {
+  const lista = funcs || [];
+  for (let i = 0; i < lista.length; i++) {
+    if (window.gnEscalaCasaNome(lista[i], escalaNome)) return { func: lista[i], idx: i };
+  }
+  return null;
+};
 // A lista de status que a tela oferece, já sem o que não vale pra aquela loja.
 window.gnStatusDaLoja = function (lista, loja) {
   return window.gnMeioTurnoLiberado(loja) ? lista : lista.filter(s => s !== 'MEIO TURNO');
