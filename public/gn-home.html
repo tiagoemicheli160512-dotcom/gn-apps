@@ -11666,7 +11666,7 @@ async function _loadCarnesGerencia() {
       H, 'carnesGerencia', null),
     window.gnFetchJson(
       `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${iniISO}&data_operacao=lte.${fimISO}` +
-      `&select=loja,venda_salao,venda_delivery`,
+      `&select=loja,data_operacao,venda_salao,venda_delivery`,
       H, 'carnesGerencia:fat', null),
     // Rodízios da semana, do fechamento de caixa — a mesma fonte do card de buffet do
     // Painel (ver byBuffet em _loadDashAll), pra os dois números nunca divergirem.
@@ -11687,6 +11687,7 @@ async function _loadCarnesGerencia() {
   // apareceria como "nunca lançou" todo santo dia — uma cobrança falsa.
   LOJAS_LISTA.filter(k => k !== 'MAGLIA')
     .forEach(k => { porLoja[k] = { k, carnes: null, semana_inicio: null, updated_at: null, fat: 0,
+                                   fatDia: [null, null, null, null, null, null, null],
                                    rodizios: 0, rodizioLancado: false, foraDoBuffet: (window.GN_BUFFET_FORA || []).includes(k) }; });
   (rodRows || []).forEach(r => {
     const k = _normLoja(r.loja);
@@ -11698,10 +11699,25 @@ async function _loadCarnesGerencia() {
     porLoja[k].rodizios += n(r.rodizio_inteira) + n(r.rodizio_meia);
     if (r.rodizio_inteira != null || r.rodizio_meia != null) porLoja[k].rodizioLancado = true;
   });
+  // Os sete dias como TEXTO, pra casar com data_operacao por string. Montar um Date a
+  // partir de "2026-10-29" o lê como meia-noite UTC: num fuso a oeste o getDay() devolve
+  // o dia anterior e a venda do dia inteiro entraria na coluna errada, sem erro nenhum
+  // aparecendo. Com setDate em cima da segunda local isso não acontece.
+  const diasISO = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(ini); d.setDate(d.getDate() + i); return _carnesISO(d);
+  });
   (fatRows || []).forEach(r => {
     const k = _normLoja(r.loja);
     if (!porLoja[k]) return;
-    porLoja[k].fat += (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0);
+    const v = (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0);
+    porLoja[k].fat += v;
+    const i = diasISO.indexOf(String(r.data_operacao || '').slice(0, 10));
+    // Zero NÃO é venda zero: a linha do dia nasce na abertura e a venda só é lançada no
+    // fechamento, então o dia de hoje chega com 0,00 em toda loja que já abriu. Mostrar
+    // isso como "vendeu R$ 0" ao lado da carne que saiu inventaria um rombo todo santo
+    // dia. Medido em 920 dias de semanas já fechadas: 20 (2,2%) ficaram em zero, e todos
+    // são lançamento que faltou — nenhum é loja que vendeu nada.
+    if (i >= 0 && v > 0) porLoja[k].fatDia[i] = v;
   });
   (rows || []).forEach(r => {
     const k = _normLoja(r.loja);
@@ -11945,13 +11961,28 @@ function _buildCarnesPanel() {
                 <div style="font-size:9.5px;color:var(--t4)">Meia porção conta como um rodízio. Na rede o rodízio responde por volta de 6% da carne de sol — o que chama atenção é a loja fora dessa faixa.</div>`}
           </div>`;
 
+    // A venda de cada dia, na mesma grade. É contra ela que se lê a curva da carne: a
+    // coluna que cai muito num dia de venda fraca é o que chama atenção, e sem o dinheiro
+    // do lado a queda sozinha não diz nada. Vem do mesmo checklist_diario que já soma o
+    // total da semana logo acima — uma linha por loja por dia, sem duplicata em 2026 —
+    // então os sete dias fecham exatamente o "Vendeu R$ X na semana" do cabeçalho.
+    //
+    // Reais inteiros, não "R$ 4,4k": a comparação aqui é de um dia com o outro, e dois
+    // dias que diferem em R$ 300 viram o mesmo número arredondado em mil.
+    const fatDia = d.fatDia || [];
+    const vendaLinhaHtml = !fatDia.some(v => v) ? '' : `<tr>
+      <td style="padding:3px 4px;color:var(--t2);font-weight:800;white-space:nowrap;border-top:1px dashed rgba(0,0,0,.07);border-bottom:1px solid rgba(0,0,0,.12)">💰 Venda (R$)</td>
+      ${fatDia.map(v => `<td style="padding:3px 3px;text-align:center;font-variant-numeric:tabular-nums;font-weight:700;border-top:1px dashed rgba(0,0,0,.07);border-bottom:1px solid rgba(0,0,0,.12);color:${v ? 'var(--t1)' : 'var(--t4)'}">${v ? Math.round(v).toLocaleString('pt-BR') : '—'}</td>`).join('')}
+    </tr>`;
+
     // Grade dia a dia: uma linha por corte, uma coluna por dia. É o acompanhamento que o
     // Painel não tinha — antes só dava pra ver o fechamento, depois da semana acabar.
     const gradeHtml = `<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,.10);padding-top:7px">
-      <div style="font-size:9.5px;color:var(--t3);font-weight:700;margin-bottom:4px">CONTAGEM DIA A DIA · <span style="color:var(--t4);font-weight:400">segunda é o estoque inicial; <span style="color:#047857;font-weight:700">+N</span> é o que entrou</span></div>
-      <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:9.5px;width:100%;min-width:300px">
+      <div style="font-size:9.5px;color:var(--t3);font-weight:700;margin-bottom:4px">CONTAGEM DIA A DIA · <span style="color:var(--t4);font-weight:400">segunda é o estoque inicial; <span style="color:#047857;font-weight:700">+N</span> é o que entrou; <span style="color:var(--t2);font-weight:700">💰</span> é a venda daquele dia</span></div>
+      <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:9.5px;width:100%;min-width:360px">
         <tr><th style="text-align:left;padding:2px 4px;color:var(--t3);font-weight:700">Corte</th>
           ${DIAS_LABEL_HOME.map((l,i)=>`<th style="padding:2px 3px;text-align:center;color:${i===0?'var(--t4)':'var(--t3)'};font-weight:700">${l}</th>`).join('')}</tr>
+        ${vendaLinhaHtml}
         ${CARNES_DEF_HOME.map(c => {
           const grade = _carnesGradeDia(d.carnes, c.key);
           return `<tr>
@@ -11963,6 +11994,7 @@ function _buildCarnesPanel() {
           </tr>`;
         }).join('')}
       </table></div>
+      ${!fatDia.some(v => v) ? '' : `<div style="font-size:9px;color:var(--t4);margin-top:4px;line-height:1.45">A venda vem do Check-list, lançada no fechamento do dia — o dia que ainda não fechou aparece como —, não como zero. A contagem é uma leitura de estoque: a queda de uma coluna pra outra é o que saiu <b>entre as duas pesagens</b>, não o que saiu dentro daquele dia exato.</div>`}
     </div>`;
     return `<div style="background:var(--s2);border:1px solid rgba(0,0,0,.08);border-left:3px solid ${cor};border-radius:12px;padding:11px 14px;margin-bottom:8px;box-shadow:0 1px 3px rgba(0,0,0,.06)">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px">
