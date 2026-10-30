@@ -3999,17 +3999,102 @@ function avancarSemana() {
 let SAVE_KEY = "gn_estoque_v1"; // ajustado por loja quando o arquivo é travado (ver patch de loja fixa)
 const APP_VERSION = "2026-06-24-v44"; // ALTERAR a cada nova versão para forçar limpeza de dados antigos
 
-function salvarDados() {
-  try {
-    const payload = {
-      loja, semana: semana.toISOString(),
-      estIniAll, vendasAll, contAll, minAll, lookup, entradasAll, transferAll, fichasCustom, fichasRemoved, insumosCustom, pedidoAll, pedidoCustom, pedidoRemovidos, pedidoRestaurados, fatoresConversao, mapeamentoPedido, avariasAll, devolucoesAll
-    };
-    localStorage.setItem(SAVE_KEY, JSON.stringify(payload));
-    showToast("💾 Dados salvos!");
-  } catch(e) {
-    showToast("⚠️ Erro ao salvar: " + e.message);
+/* ── O QUE VAI PRO NAVEGADOR ───────────────────────────────────────────────────────────
+   "Erro ao salvar: Setting the value of 'gn_estoque_v1' exceeded the quota."
+
+   Visto na Campo Grande e na Bangu, e a causa não é o tamanho de nenhuma loja: o sbPull
+   junta os dados de TODAS as lojas e de TODAS as semanas nas mesmas variáveis
+   (`Object.assign(vendasAll, d.vendasAll)` pra cada linha que chega), e o autoSave
+   gravava esse monte inteiro no localStorage. Só estIniAll tinha poda — vendasAll,
+   contAll, entradasAll, transferAll e pedidoAll cresciam pra sempre. Com 11 lojas e a
+   linha da Bangu sozinha já em ~1 MB no servidor, o limite do navegador (uns 5 MB) cai.
+
+   E o estrago não é só o aviso na tela: cheio, o localStorage para de aceitar QUALQUER
+   gravação. O autoSave engole o erro calado, o app segue com o estado antigo em disco, e
+   no próximo carregamento ele volta do cache velho e REENVIA esse estado pro servidor —
+   foi assim que a Stella voltou a sumir depois de trazida de volta.
+
+   O cache local é rede de proteção pra queda de internet, não arquivo histórico: o
+   servidor tem tudo. Então vai pro navegador só a loja aberta e as últimas semanas. */
+const SAVE_SEMANAS_LOCAIS = 8;
+
+// Poda só os mapas com chave "LOJA|AAAA-MM-DD" — são esses que crescem a cada semana e
+// a cada loja sincronizada, e são eles que enchem o navegador.
+// minAll, avariasAll e devolucoesAll ficam inteiros de propósito: são por loja (sem
+// semana), pequenos, e outras partes do app leem a entrada de OUTRA loja (o pagamento de
+// transferência grava avaria na linha da loja de destino). Podar eles economizaria pouco
+// e mudaria comportamento — não vale.
+function _podarPorLojaSemana(mapa, lojaAtual, corteISO) {
+  const out = {};
+  Object.keys(mapa || {}).forEach(k => {
+    const barra = k.indexOf('|');
+    if (barra < 0) { out[k] = mapa[k]; return; }  // sem semana na chave: mantém
+    if (k.slice(0, barra) !== lojaAtual) return;  // outra loja: o servidor guarda
+    if (k.slice(barra + 1) < corteISO) return;    // semana velha demais
+    out[k] = mapa[k];
+  });
+  return out;
+}
+
+// O payload enxuto pro navegador. `semanas` menor = mais enxuto, usado quando mesmo o
+// corte padrão não couber.
+function _payloadLocal(semanas) {
+  const corte = new Date(getMonday(new Date()).getTime() - semanas * 7 * 86400000);
+  const corteISO = wkKey(corte);
+  const porLoja = m => _podarPorLojaSemana(m, loja, corteISO);
+  return {
+    loja, semana: semana.toISOString(),
+    // Por loja e semana — o que pesa.
+    estIniAll: porLoja(estIniAll), vendasAll: porLoja(vendasAll), contAll: porLoja(contAll),
+    entradasAll: porLoja(entradasAll), transferAll: porLoja(transferAll), pedidoAll: porLoja(pedidoAll),
+    // Inteiros: por loja, pequenos, e lidos pra outras lojas em alguns fluxos.
+    avariasAll, devolucoesAll, minAll,
+    // Configuração da rede: pequena e necessária pra tela funcionar offline.
+    lookup, fichasCustom, fichasRemoved, insumosCustom, pedidoCustom,
+    pedidoRemovidos, pedidoRestaurados, fatoresConversao, mapeamentoPedido, urgenciaTemplate,
+  };
+}
+
+// Grava no navegador cedendo espaço antes de desistir: se não couber com 8 semanas,
+// tenta com 4, 2 e 1. Devolve o que conseguiu, pra quem chamou poder dizer a verdade em
+// vez de mostrar o erro cru do navegador, que não diz a ninguém o que fazer.
+function _gravarLocal() {
+  const tentativas = [SAVE_SEMANAS_LOCAIS, 4, 2, 1];
+  for (let i = 0; i < tentativas.length; i++) {
+    try {
+      localStorage.setItem(SAVE_KEY, JSON.stringify(_payloadLocal(tentativas[i])));
+      return { ok: true, semanas: tentativas[i], reduziu: i > 0 };
+    } catch (e) {
+      // Antes de encolher mais, joga fora o lixo de versões antigas do app, que é o que
+      // costuma estar ocupando espaço sem dono.
+      if (i === 0) { try { _limparCachesAntigos(); } catch (e2) {} }
+    }
   }
+  return { ok: false };
+}
+
+// Chaves de versões antigas do app (gn_estoque_v1__LOJA de uma loja que este aparelho
+// não usa mais, caches de outros apps) — espaço ocupado por dado que ninguém lê.
+function _limparCachesAntigos() {
+  const manter = new Set([SAVE_KEY, 'gn_session_v1', 'gn_nav_loja', 'gn_last_loja', 'gn_home_loja']);
+  Object.keys(localStorage).forEach(k => {
+    if (manter.has(k)) return;
+    if (k.startsWith('gn_estoque_v1')) { try { localStorage.removeItem(k); } catch (e) {} }
+  });
+}
+
+function salvarDados() {
+  const r = _gravarLocal();
+  if (r.ok && !r.reduziu) { showToast("💾 Dados salvos!"); return; }
+  if (r.ok) {
+    showToast("💾 Salvo — guardei as últimas " + r.semanas + " semanas aqui no aparelho.");
+    return;
+  }
+  // Mensagem que diz o que é e o que fazer. O erro cru do navegador ("exceeded the
+  // quota") não dizia nem que os dados estão salvos no servidor, que é a única coisa
+  // que a loja precisa saber pra não entrar em pânico.
+  showToast("⚠️ Memória do navegador cheia. Seus dados ESTÃO salvos no servidor — "
+    + "o que falhou foi só a cópia local. Avise o suporte.");
 }
 
 function carregarDados() {
@@ -4037,15 +4122,17 @@ function carregarDados() {
 
 /* Auto-salvar a cada mudança de estado */
 function autoSave() {
-  try {
-    const payload = {
-      loja, semana: semana.toISOString(),
-      estIniAll, vendasAll, contAll, minAll, lookup, entradasAll, transferAll, fichasCustom, fichasRemoved, insumosCustom, pedidoAll, pedidoCustom, pedidoRemovidos, pedidoRestaurados, fatoresConversao, mapeamentoPedido, avariasAll, devolucoesAll, urgenciaTemplate
-    };
-    localStorage.setItem(SAVE_KEY, JSON.stringify(payload));
-  } catch(e) {}
+  // Falhar aqui não pode parar o envio pro servidor, que é onde o dado de verdade mora —
+  // mas também não pode mais ser silencioso: o cache velho que ficava no disco era
+  // reenviado no carregamento seguinte e desfazia edições já gravadas na nuvem.
+  const r = _gravarLocal();
+  if (!r.ok && !_avisouLocalCheio) {
+    _avisouLocalCheio = true;
+    showToast("⚠️ Memória do navegador cheia — os dados seguem indo pro servidor. Avise o suporte.");
+  }
   sbScheduleSync();
 }
+let _avisouLocalCheio = false;
 
 /* Exportar JSON completo como arquivo */
 function exportarJSON() {
