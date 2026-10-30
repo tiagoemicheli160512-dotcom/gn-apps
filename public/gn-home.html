@@ -945,6 +945,8 @@ let _dashDeclPer      = null; // {lojaKey: {caixas, declarados, abertos, respons
 let _dashTransfPer    = null; // {lojaKey: [{data,origem,destino,motivo,autor,foto}]} — transferências de mesa
 let _dashDeclTransfPer = null; // o mesmo de _dashDeclPer, pro "dia sem transferência"
 let _dashDeclSem10Per = null; // o mesmo de _dashDeclPer, pro "dia sem nota sem 10%"
+let _dashPresencaHoje = null; // [{loja,nome,cargo,estado,hora_confirmacao,...}] — confirmações de hoje
+let _dashCorrecoes    = null; // [{loja,data,nome,entrada_antes,...}] — correções de horário do período
 let _dashFeriasGerencia = null; // {lojaKey: [{id, usuarioId, nome, cargo, inicio, fim}]} — períodos de férias (gn_lojas.all_data.ferias_gerencia)
 let _dashFeriasLoading = false;
 let _dashFeriasAno = new Date().getFullYear();
@@ -5054,7 +5056,13 @@ async function _renderPlantaoHome(mostrar, sess, isMasterAtivo) {
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
   // Sentinela `null` (e não `[]`) pra separar "a busca falhou" de "a loja não tem escala" —
   // com o mesmo `[]` nos dois, a linha sumia igual e não dava pra saber qual era.
-  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'plantaoHome:rows', null);
+  // A escala e as confirmações de presença do dia vêm juntas: a escala diz quem DEVERIA
+  // estar, a confirmação diz quem disse que está. Era a diferença que faltava — esta linha
+  // deduzia a presença e não tinha como saber que estava deduzindo errado.
+  const [rows, presRows] = await Promise.all([
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'plantaoHome:rows', null),
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_presenca_loja?loja=eq.${encodeURIComponent(loja)}&data=eq.${hojeISO}&select=nome,escala_nome,estado,hora_confirmacao,corrigiu_horario`, H, 'plantaoHome:presenca', []),
+  ]);
   if (rows === null) { _plantaoAviso(el, 'Não consegui carregar o plantão agora.', true); return; }
   if (!rows.length) { _plantaoAviso(el, `A loja ${esc(loja)} ainda não tem escala cadastrada.`); return; }
   const allData = (rows[0] && rows[0].all_data) || {};
@@ -5073,12 +5081,35 @@ async function _renderPlantaoHome(mostrar, sess, isMasterAtivo) {
   // Uma linha por PESSOA (não por papel) — com 2 Sub-Gerentes no mesmo dia, juntar os
   // nomes numa linha só com um único "· de folga" no fim ficava ambíguo sobre quem
   // exatamente estava de folga. Cada pessoa agora mostra seu próprio status, empilhadas.
+  // A confirmação da pessoa, se houver. Casada pelo nome da escala que ela mesma escolheu
+  // (gn_usuarios.escala_nome), pela mesma regra que a trava usa — inclusive o histórico de
+  // renome. Casar por outro critério aqui faria as duas telas discordarem sobre quem é quem.
+  const confirmacaoDe = f => (presRows || []).find(p => p.escala_nome && window.gnEscalaCasaNome(f, p.escala_nome)) || null;
+  // O selo da confirmação. Dito em três palavras porque divide a linha com o nome e o
+  // horário, e o que importa é a distinção: confirmou, confirmou fora do previsto, ou
+  // ninguém confirmou nada.
+  const selo = c => {
+    if (!c) return '';
+    const hora = esc(c.hora_confirmacao || '');
+    if (c.estado === 'no_horario') return `<span style="white-space:nowrap;color:#4ade80;font-weight:700">· na loja ${hora}</span>`;
+    if (c.estado === 'fora_de_escala') return `<span style="white-space:nowrap;color:#f59e0b;font-weight:700">· na loja ${hora}, fora da escala</span>`;
+    return `<span style="white-space:nowrap;color:#f59e0b;font-weight:700">· na loja ${hora}, fora do horário</span>`;
+  };
+
   const linhasPapel = (label, icone, setor) => funcs
     .filter(f => (f.setor || '').trim() === setor)
     .map(f => {
       const st = _plantaoStatusFunc(f, diaIdx, agoraHM);
+      const c = confirmacaoDe(f);
+      // Quem confirmou tem a palavra, inclusive contra a escala: o dia em que a escala diz
+      // folga e a pessoa está lá é exatamente o dia que esta linha existe pra mostrar.
+      if (c) {
+        return `<span style="display:flex;flex-wrap:wrap;align-items:center;gap:3px 5px"><span style="width:6px;height:6px;border-radius:50%;background:${c.estado === 'no_horario' ? '#4ade80' : '#f59e0b'};flex-shrink:0"></span><span style="min-width:0">${icone} ${label}: <b>${esc(f.nome)}</b></span>${selo(c)}</span>`;
+      }
       if (st.emPlantao) {
-        return `<span style="display:flex;flex-wrap:wrap;align-items:center;gap:3px 5px"><span style="width:6px;height:6px;border-radius:50%;background:#4ade80;flex-shrink:0"></span><span style="min-width:0">${icone} ${label}: <b>${esc(f.nome)}</b></span><span style="opacity:.65;white-space:nowrap">· ${esc(st.horario)}</span></span>`;
+        // Escalado e dentro do horário, mas sem confirmar: é dedução, e a linha diz isso.
+        // Pintar de verde como antes afirmaria presença que ninguém declarou.
+        return `<span style="display:flex;flex-wrap:wrap;align-items:center;gap:3px 5px"><span style="width:6px;height:6px;border-radius:50%;background:#94a3b8;flex-shrink:0"></span><span style="min-width:0">${icone} ${label}: <b>${esc(f.nome)}</b></span><span style="opacity:.65;white-space:nowrap">· ${esc(st.horario)} · não confirmou</span></span>`;
       }
       if (st.folga) {
         // Rótulo e cor vêm de ESCALA_HOME_STATUS_LABEL/COLOR, as mesmas do card Escala de
@@ -5103,6 +5134,466 @@ async function _renderPlantaoHome(mostrar, sess, isMasterAtivo) {
     return;
   }
   el.innerHTML = `<div style="display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--t1);margin-top:2px">${linhas.join('')}</div>`;
+}
+
+/* ── PRESENÇA NA LOJA ───────────────────────────────────────────────────────────────────
+   "Quero ter uma informação mais precisa de quem está na loja. Ou seja, quando for acessar
+    o aplicativo ele vai precisar confirmar que está na loja."
+
+   O card de plantão aqui em cima DEDUZ quem está na loja a partir da escala. Escala não é
+   presença: ela diz quem deveria estar, e o dia em que isso diverge é justamente o dia em
+   que alguém precisa saber. Esta trava pede a confirmação.
+
+   O QUE TORNOU ISTO DIFÍCIL, e é metade do código abaixo: o login e a escala são cadastros
+   SEPARADOS, sem nenhuma ligação. Medido antes de montar, nos 30 gerentes/subs ativos:
+   `Carol` é `A.CAROLINA OLIVEIRA`, `Felix` é `ANDESON DO NASCIMENTO FELIX`, `Ramos` é
+   `FRANCISCO SILVA RAMOS`, `Thalyta` é `TALITA SILVA SERPA` (grafia diferente). Casar por
+   primeiro nome erraria em 5 dos 30 e — pior — erraria CALADO. Então a primeira vez que a
+   trava aparece, a própria pessoa diz qual linha da escala é a dela, e isso fica gravado
+   em gn_usuarios.escala_nome. Sugestão pré-marcada onde é óbvia; escolha na mão onde não é.
+   Pelo NOME e não pelo id do funcionário: o id é índice de posição e trocou de pessoa em
+   192 dos 860 pares (loja,id) em 6 semanas.
+
+   TRÊS CAMINHOS, depois de resolvida a pessoa:
+     · no horário  → confirma e pronto.
+     · escalado hoje, fora da janela (com GN_PRESENCA_TOLERANCIA_MIN de folga de cada lado)
+       → não libera direto: mostra o que a escala diz, e oferece corrigir o horário de HOJE
+         pro que ela vai fazer de fato. A correção vai pra escala com trilha.
+     · de folga/férias/afastamento → entra, marcado como fora de escala, e isso aparece no
+       Painel. Decisão do dono: folga coberta de última hora acontece toda semana, e travar
+       quem foi chamado pra cobrir deixaria a loja sem gerência no sistema justo no dia
+       atípico.
+
+   FALHA ABERTO, igual à trava do fechamento logo acima: escala que não carregou, semana
+   sem calendário, loja fora da lista, nome que não resolve mais — nada disso trava. Um
+   defeito meu não pode trancar a gerência fora do app.
+
+   SÓ GERENTE E SUB (CARGOS_PRESENCA), SÓ NAS 11 LOJAS (GN_PRESENCA_FORA tira a Maglia), e
+   mestre/supervisor/administrador/compras passam direto, como em todo o resto do app. */
+const PRES_ID = 'gate-presenca';
+let _presAtivo = false;
+let _presDados = null;    // { loja, comKey, idx, diaIdx, funcs, escalaNome, func, fidx, estado, hd, status }
+let _presTela  = 'quem';  // 'quem' | 'confirmar' | 'corrigir'
+let _presOcupado = false;
+let _presErro = '';
+
+function _presHojeISO() {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+function _presChaveLocal(usuarioId, loja) { return 'gn_presenca_' + usuarioId + '_' + loja + '_' + _presHojeISO(); }
+
+// Minutos desde a meia-noite, pra comparar com tolerância sem mexer em string de hora.
+function _presMin(hm) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hm || '').trim());
+  if (!m) return null;
+  const h = +m[1], mi = +m[2];
+  return (h > 23 || mi > 59) ? null : h * 60 + mi;
+}
+// Dentro da janela com folga dos dois lados. O turno que vira a noite (ex.: 18:00–02:00)
+// é o caso que quebra a comparação ingênua — a mesma regra do _dentroDoHorario do plantão,
+// aqui com a tolerância somada.
+function _presDentroDaJanela(agoraHM, entrada, saida, tolMin) {
+  const a = _presMin(agoraHM), e = _presMin(entrada), s = _presMin(saida);
+  if (a == null || e == null || s == null) return false;
+  const tol = tolMin == null ? 0 : tolMin;
+  const ini = (e - tol + 1440) % 1440;
+  const fim = (s + tol) % 1440;
+  if (fim === ini) return true;                    // janela cobriu o dia inteiro
+  return fim < ini ? (a >= ini || a < fim) : (a >= ini && a < fim);
+}
+
+// Quem é cobrado. Fora daqui, nenhuma trava aparece.
+function _presDeveCobrar(sess, isMaster) {
+  if (!sess || isMaster) return false;
+  if (window.CARGOS_MASTER_EQUIV && window.CARGOS_MASTER_EQUIV.includes((sess.cargo||'').toLowerCase())) return false;
+  const cargo = (sess.cargo || '').toLowerCase();
+  if (!(window.CARGOS_PRESENCA || []).includes(cargo)) return false;
+  const loja = sess.loja;
+  if (!loja || !LOJAS_LISTA.includes(loja)) return false;
+  return window.gnPresencaLiberada ? window.gnPresencaLiberada(loja) : true;
+}
+
+async function _presencaChecar(sess, isMaster) {
+  try {
+    if (!_presDeveCobrar(sess, isMaster)) return;
+    const loja = sess.loja, hoje = _presHojeISO();
+    // Já respondeu neste aparelho hoje: nem busca. A linha no banco continua sendo a
+    // verdade — isto só evita perguntar de novo a cada recarga da página.
+    try { if (localStorage.getItem(_presChaveLocal(sess.id, loja)) === '1') return; } catch (e) {}
+
+    const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+    const idx = _escalaHomeSemIdx(hoje);
+    if (idx == null) return;                       // dia sem semana no calendário: não trava
+    const diaIdx = _escalaHomeDiaIdx(hoje);
+    const comKey = LOJA_COM_KEY[loja] || loja;
+
+    const [jaRows, usrRows, escRows] = await Promise.all([
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_presenca_loja?usuario_id=eq.${sess.id}&loja=eq.${encodeURIComponent(loja)}&data=eq.${hoje}&select=id`, H, 'presenca:ja', null),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_usuarios_publico?id=eq.${sess.id}&select=escala_nome`, H, 'presenca:usr', null),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'presenca:escala', null),
+    ]);
+    // Qualquer uma que falhou (null) deixa passar: sem o dado não há pergunta honesta a
+    // fazer, e internet ruim não pode trancar a gerência fora do app.
+    if (jaRows === null || usrRows === null || escRows === null) return;
+    if (jaRows.length) { try { localStorage.setItem(_presChaveLocal(sess.id, loja), '1'); } catch (e) {} return; }
+    if (!escRows.length) return;                   // loja sem escala cadastrada: não trava
+
+    const allData = (escRows[0] && escRows[0].all_data) || {};
+    let funcs;
+    try { funcs = _escalaHomeFuncsAtual(allData, idx); } catch (e) { return; }
+    if (!funcs || !funcs.length) return;
+
+    const escalaNome = (usrRows[0] && usrRows[0].escala_nome) || '';
+    _presDados = {
+      loja, comKey, idx, diaIdx, hoje, funcs, escalaNome,
+      semanaMaterializada: !!allData[String(idx)],
+      func: null, fidx: -1,
+    };
+    const achou = escalaNome && window.gnEscalaAchaFunc ? window.gnEscalaAchaFunc(funcs, escalaNome) : null;
+    if (achou) { _presDados.func = achou.func; _presDados.fidx = achou.idx; }
+    _presTela = achou ? 'confirmar' : 'quem';
+    _presErro = '';
+    _presRender();
+  } catch (e) {
+    // Mesma regra da trava do fechamento: defeito meu solta a trava, nunca prende.
+    if (window.gnLogError) window.gnLogError('presenca:checar', e);
+    _presLiberar();
+  }
+}
+
+// O estado de hoje, a partir da linha da escala já resolvida.
+function _presEstadoDoDia(d) {
+  const status = ((d.func && d.func.dias) || [])[d.diaIdx] || 'PRESENTE';
+  if (!ESCALA_HOME_PRESENTE_SET.has(status)) return { estado: 'fora_de_escala', status, hd: null };
+  const hd = ((d.func && d.func.horario_dias) || [])[d.diaIdx] || null;
+  if (!hd || !hd.entrada || !hd.saida) return { estado: 'sem_horario', status, hd: null };
+  const dentro = _presDentroDaJanela(_horaAgoraHM(), hd.entrada, hd.saida, window.GN_PRESENCA_TOLERANCIA_MIN);
+  return { estado: dentro ? 'no_horario' : 'fora_do_horario', status, hd };
+}
+
+// ── A TELA ─────────────────────────────────────────────────────────────────────────────
+// Mesmo desenho da trava do fechamento (_gateOverlay): tela cheia, z-index abaixo do
+// alerta urgente do mestre, e a mesma porta de saída — "Não sou eu — sair". Sem ela, um
+// aparelho logado como o gerente ficaria inútil pro resto da equipe até ele chegar.
+function _presOverlay() {
+  let ov = document.getElementById(PRES_ID);
+  if (ov) return ov;
+  ov = document.createElement('div');
+  ov.id = PRES_ID;
+  ov.style.cssText = 'position:fixed;inset:0;z-index:9998;background:var(--s1);overflow-y:auto;-webkit-overflow-scrolling:touch';
+  document.body.appendChild(ov);
+  document.body.style.overflow = 'hidden';
+  _presAtivo = true;
+  return ov;
+}
+function _presLiberar() {
+  const ov = document.getElementById(PRES_ID);
+  if (ov) ov.remove();
+  _presAtivo = false;
+  document.body.style.overflow = '';
+}
+
+function _presMoldura(titulo, sub, corpo, botoes) {
+  const esc = s => window.escapeHtml(String(s == null ? '' : s));
+  return `<div style="max-width:560px;margin:0 auto;padding:14px 0 26px">
+    <div style="padding:4px 16px 12px">
+      <div style="font-size:9px;font-weight:800;letter-spacing:1.6px;text-transform:uppercase;color:var(--t4)">Gigante Nordestino</div>
+      <div style="font-size:16px;font-weight:900;color:var(--t1);margin-top:3px;line-height:1.25">${esc(titulo)}</div>
+      <div style="font-size:11.5px;color:var(--t3);margin-top:4px;line-height:1.45">${sub}</div>
+    </div>
+    <div style="padding:0 16px">${corpo}</div>
+    ${_presErro ? `<div style="padding:8px 16px 0;font-size:11.5px;color:var(--err,#dc2626);font-weight:700">${esc(_presErro)}</div>` : ''}
+    <div style="padding:12px 16px 0;display:flex;flex-direction:column;gap:8px">
+      ${botoes}
+      <button onclick="doLogout()" style="width:100%;padding:10px;border-radius:12px;border:1px solid rgba(0,0,0,.15);cursor:pointer;font-family:inherit;font-size:12px;font-weight:700;background:transparent;color:var(--t3)">Não sou eu — sair</button>
+    </div>
+  </div>`;
+}
+const _PRES_BTN = 'width:100%;padding:12px;border-radius:12px;border:none;cursor:pointer;font-family:inherit;font-size:13px;font-weight:900;background:#059669;color:#fff';
+const _PRES_BTN2 = 'width:100%;padding:11px;border-radius:12px;border:1px solid rgba(0,0,0,.15);cursor:pointer;font-family:inherit;font-size:12.5px;font-weight:800;background:var(--s2);color:var(--t1)';
+
+function _presRender() {
+  const d = _presDados;
+  if (!d) { _presLiberar(); return; }
+  const ov = _presOverlay();
+  const esc = s => window.escapeHtml(String(s == null ? '' : s));
+  if (_presTela === 'quem')      { ov.innerHTML = _presTelaQuem(d, esc);      ov.scrollTop = 0; return; }
+  if (_presTela === 'corrigir')  { ov.innerHTML = _presTelaCorrigir(d, esc);  ov.scrollTop = 0; return; }
+  ov.innerHTML = _presTelaConfirmar(d, esc);
+  ov.scrollTop = 0;
+}
+
+// Passo 1, uma vez na vida de cada pessoa: qual linha da escala é você.
+// A sugestão vem do nome do login contido no nome da escala — acerta 25 dos 30 medidos.
+// Os outros 5 escolhem na lista. Ninguém é vinculado por palpite do app: a pessoa toca.
+// Sobre a MESMA lista que aparece na tela, não sobre a escala inteira: sugerir alguém
+// que não está entre as opções é não sugerir nada, só que de um jeito que parece ter
+// funcionado — e era isso que escondia a ambiguidade real entre dois SILVA da gerência.
+function _presSugestao(lista, nomeLogin) {
+  const alvo = window.gnNomeEscalaNorm(nomeLogin);
+  if (!alvo) return null;
+  const cand = (lista || []).filter(f => {
+    const n = window.gnNomeEscalaNorm(f.nome);
+    return n && (n.indexOf(alvo) >= 0 || alvo.indexOf(n) >= 0);
+  });
+  return cand.length === 1 ? cand[0].nome : null;   // ambíguo não sugere nada
+}
+function _presTelaQuem(d, esc) {
+  const sess = session;
+  const daGerencia = d.funcs.filter(f => ['Gerente','Sub Gerente'].includes((f.setor||'').trim()));
+  const lista = daGerencia.length ? daGerencia : d.funcs;
+  const sug = _presSugestao(lista, sess && sess.nome);
+  const opcoes = lista.map(f => {
+    const marcado = sug && window.gnNomeEscalaNorm(f.nome) === window.gnNomeEscalaNorm(sug);
+    return `<label style="display:flex;align-items:center;gap:10px;padding:11px 12px;border:1px solid ${marcado ? 'var(--txt-green,#059669)' : 'var(--b1)'};background:${marcado ? 'rgba(5,150,105,.08)' : 'var(--s2)'};border-radius:12px;margin-bottom:7px;cursor:pointer">
+      <input type="radio" name="pres-quem" value="${esc(f.nome)}" ${marcado ? 'checked' : ''} style="width:17px;height:17px;flex-shrink:0;accent-color:#059669">
+      <span style="min-width:0">
+        <span style="display:block;font-size:13px;font-weight:800;color:var(--t1);overflow-wrap:anywhere">${esc(String(f.nome||'').trim())}</span>
+        <span style="display:block;font-size:10.5px;color:var(--t3)">${esc((f.setor||'').trim() || 'sem função')}${marcado ? ' · parece ser você' : ''}</span>
+      </span>
+    </label>`;
+  }).join('');
+  return _presMoldura(
+    'Quem é você na escala?',
+    `Seu login é <b>${esc((sess && sess.nome) || '')}</b>, e na escala da loja os nomes são completos. Só desta vez: diga qual é o seu, e o app passa a saber o seu horário.`,
+    `<div>${opcoes}</div>`,
+    `<button onclick="_presSalvarQuem()" style="${_PRES_BTN}">${_presOcupado ? 'Salvando...' : 'Sou eu — continuar'}</button>`
+  );
+}
+
+async function _presSalvarQuem() {
+  if (_presOcupado) return;
+  const sel = document.querySelector('input[name="pres-quem"]:checked');
+  if (!sel) { _presErro = 'Escolha o seu nome na lista.'; _presRender(); return; }
+  _presOcupado = true; _presErro = ''; _presRender();
+  const nome = sel.value;
+  // fetch cru e res.ok, como o resto dos PATCH deste arquivo: gnFetchJson devolve o
+  // fallback em vez de lançar, e `return=minimal` responde 204 sem corpo — os dois juntos
+  // fariam uma falha de gravação passar por sucesso.
+  const ok = await _presPatch(`gn_usuarios?id=eq.${session.id}`,
+    { escala_nome: nome, escala_nome_em: new Date().toISOString() }, 'presenca:vincular');
+  if (!ok) {
+    _presOcupado = false;
+    _presErro = 'Não consegui salvar — tente de novo.';
+    _presRender(); return;
+  }
+  const achou = window.gnEscalaAchaFunc(_presDados.funcs, nome);
+  _presDados.escalaNome = nome;
+  _presDados.func = achou ? achou.func : null;
+  _presDados.fidx = achou ? achou.idx : -1;
+  _presOcupado = false;
+  _presTela = 'confirmar';
+  _presRender();
+}
+
+function _presHeaders() {
+  return { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' };
+}
+async function _presPatch(rota, body, contexto) {
+  try {
+    const r = await fetch(`${SB_URL}/rest/v1/${rota}`, { method: 'PATCH', headers: _presHeaders(), body: JSON.stringify(body) });
+    if (!r.ok && window.gnLogError) window.gnLogError(contexto, 'HTTP ' + r.status);
+    return r.ok;
+  } catch (e) { if (window.gnLogError) window.gnLogError(contexto, e); return false; }
+}
+async function _presPost(rota, body, contexto) {
+  try {
+    const r = await fetch(`${SB_URL}/rest/v1/${rota}`, { method: 'POST', headers: _presHeaders(), body: JSON.stringify(body) });
+    if (!r.ok && window.gnLogError) window.gnLogError(contexto, 'HTTP ' + r.status);
+    return r.ok;
+  } catch (e) { if (window.gnLogError) window.gnLogError(contexto, e); return false; }
+}
+
+// Passo 2: a confirmação. O texto muda com o estado, porque as três situações pedem
+// coisas diferentes de quem está lendo.
+const _PRES_TEXTO = {
+  no_horario: {
+    titulo: 'Você está na loja?',
+    acao: 'Sim, estou na loja',
+  },
+  fora_do_horario: {
+    titulo: 'Fora do horário da sua escala',
+    acao: 'Estou na loja mesmo assim',
+  },
+  sem_horario: {
+    titulo: 'Seu horário de hoje está em branco',
+    acao: 'Estou na loja',
+  },
+  fora_de_escala: {
+    titulo: 'Hoje não é seu dia de trabalho',
+    acao: 'Estou na loja mesmo assim',
+  },
+};
+
+function _presTelaConfirmar(d, esc) {
+  const e = _presEstadoDoDia(d);
+  d.estado = e.estado; d.hd = e.hd; d.status = e.status;
+  const agora = _horaAgoraHM();
+  const txt = _PRES_TEXTO[e.estado] || _PRES_TEXTO.no_horario;
+  const rotuloStatus = ESCALA_HOME_STATUS_LABEL[e.status] || e.status;
+  const nomeEscala = esc(String(d.func && d.func.nome || '').trim());
+
+  let sub, corpo = '', botoes = '';
+  const cartao = (cor, linhas) => `<div style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid ${cor};border-radius:14px;padding:12px 14px">${linhas}</div>`;
+  const linha = (rot, val, corVal) => `<div style="display:flex;justify-content:space-between;gap:10px;padding:3px 0;font-size:12px">
+    <span style="color:var(--t3)">${rot}</span><span style="font-weight:800;color:${corVal || 'var(--t1)'};font-variant-numeric:tabular-nums">${val}</span></div>`;
+
+  if (e.estado === 'no_horario') {
+    sub = `Confirme que você está na loja agora. Isso aparece no plantão da Home e no Painel — é o que diz à direção quem está aqui de fato, não só quem a escala previa.`;
+    corpo = cartao('var(--txt-green,#059669)',
+      linha('Você', nomeEscala) + linha('Sua escala hoje', esc(d.hd.entrada + '–' + d.hd.saida)) + linha('Agora', esc(agora)));
+    botoes = `<button onclick="_presConfirmar()" style="${_PRES_BTN}">${_presOcupado ? 'Confirmando...' : txt.acao}</button>`;
+
+  } else if (e.estado === 'fora_do_horario') {
+    sub = `Sua escala diz <b>${esc(d.hd.entrada + '–' + d.hd.saida)}</b> e agora são <b>${esc(agora)}</b>. Se o horário de hoje é outro, corrija aqui — a escala é o que conta no banco de horas, então ela precisa dizer o que você realmente vai fazer.`;
+    corpo = cartao('var(--txt-amber,#d97706)',
+      linha('Você', nomeEscala) + linha('Escala de hoje', esc(d.hd.entrada + '–' + d.hd.saida)) + linha('Agora', esc(agora), 'var(--txt-amber,#d97706)'));
+    botoes = (d.semanaMaterializada
+        ? `<button onclick="_presIrCorrigir()" style="${_PRES_BTN}">Corrigir meu horário de hoje</button>`
+        : `<div style="font-size:11px;color:var(--t3);line-height:1.5;padding:2px 2px 4px">A escala desta semana ainda não foi aberta no Check-list, então não dá pra corrigir por aqui sem criar a semana por fora. Corrija no app Check-list.</div>`)
+      + `<button onclick="_presConfirmar()" style="${_PRES_BTN2}">${_presOcupado ? 'Confirmando...' : txt.acao}</button>`;
+
+  } else if (e.estado === 'sem_horario') {
+    sub = `Você está escalado hoje (<b>${esc(rotuloStatus)}</b>), mas o horário do dia está em branco na escala. Informe o horário que vai fazer.`;
+    corpo = cartao('var(--txt-amber,#d97706)', linha('Você', nomeEscala) + linha('Escala de hoje', 'em branco', 'var(--txt-amber,#d97706)') + linha('Agora', esc(agora)));
+    botoes = (d.semanaMaterializada
+        ? `<button onclick="_presIrCorrigir()" style="${_PRES_BTN}">Informar meu horário de hoje</button>`
+        : `<div style="font-size:11px;color:var(--t3);line-height:1.5;padding:2px 2px 4px">A escala desta semana ainda não foi aberta no Check-list. Informe o horário por lá.</div>`)
+      + `<button onclick="_presConfirmar()" style="${_PRES_BTN2}">${_presOcupado ? 'Confirmando...' : txt.acao}</button>`;
+
+  } else {
+    sub = `A escala marca hoje como <b>${esc(rotuloStatus)}</b> pra você. Se veio cobrir, pode entrar — fica registrado que foi fora da escala, e aparece assim no Painel.`;
+    corpo = cartao('#94a3b8', linha('Você', nomeEscala) + linha('Escala de hoje', esc(rotuloStatus), '#94a3b8') + linha('Agora', esc(agora)));
+    botoes = `<button onclick="_presConfirmar()" style="${_PRES_BTN}">${_presOcupado ? 'Confirmando...' : txt.acao}</button>`;
+  }
+
+  // Trocar de pessoa sem deslogar: quem errou a escolha na primeira vez ficaria preso ao
+  // vínculo errado pra sempre, e o único jeito de sair seria pedir pro TI.
+  botoes += `<button onclick="_presTrocarQuem()" style="width:100%;padding:9px;border:none;background:transparent;color:var(--t3);font-family:inherit;font-size:11px;font-weight:700;cursor:pointer;text-decoration:underline">Não sou ${nomeEscala} — trocar</button>`;
+  return _presMoldura(txt.titulo, sub, corpo, botoes);
+}
+
+function _presTrocarQuem() { _presTela = 'quem'; _presErro = ''; _presRender(); }
+function _presIrCorrigir() { _presTela = 'corrigir'; _presErro = ''; _presRender(); }
+
+function _presTelaCorrigir(d, esc) {
+  const hd = d.hd || { entrada: '', saida: '' };
+  const campo = (id, rot, val) => `<div style="flex:1;min-width:0">
+    <label style="display:block;font-size:10px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--t4);margin-bottom:4px">${rot}</label>
+    <input id="${id}" type="time" value="${esc(val || '')}" style="width:100%;box-sizing:border-box;padding:11px 10px;border-radius:10px;border:1px solid var(--b1);background:var(--s2);color:var(--t1);font-family:inherit;font-size:15px;font-variant-numeric:tabular-nums">
+  </div>`;
+  return _presMoldura(
+    'Horário de hoje',
+    `Coloque o horário que você vai <b>realmente</b> fazer hoje. Isso corrige a sua escala do dia e fica registrado com o horário anterior — a escala é o que o banco de horas lê.`,
+    `<div style="display:flex;gap:10px">${campo('pres-ent','Entrada', hd.entrada)}${campo('pres-sai','Saída', hd.saida)}</div>
+     <div style="font-size:10.5px;color:var(--t4);margin-top:8px;line-height:1.5">Só o dia de hoje muda. O resto da semana continua como está.</div>`,
+    `<button onclick="_presSalvarHorario()" style="${_PRES_BTN}">${_presOcupado ? 'Salvando...' : 'Salvar e confirmar presença'}</button>
+     <button onclick="_presVoltarConfirmar()" style="${_PRES_BTN2}">Voltar</button>`
+  );
+}
+function _presVoltarConfirmar() { _presTela = 'confirmar'; _presErro = ''; _presRender(); }
+
+// Grava a correção NA ESCALA e a trilha, e só então confirma a presença.
+// Leitura-modificação-escrita do all_data inteiro, que é como o Check-list também grava
+// (flushComissoesOps lá). A releitura acontece aqui, imediatamente antes do PATCH, e não
+// num retrato guardado no começo da trava: entre abrir a tela e tocar no botão a loja pode
+// ter mexido na escala, e escrever por cima do retrato velho apagaria a edição dela — foi
+// exatamente esse o bug de "salva e alguns minutos depois volta sozinho" que o Check-list
+// já levou. Mexe num campo só, de uma pessoa, de um dia.
+async function _presSalvarHorario() {
+  if (_presOcupado) return;
+  const d = _presDados;
+  const ent = (document.getElementById('pres-ent') || {}).value || '';
+  const sai = (document.getElementById('pres-sai') || {}).value || '';
+  if (!/^\d{2}:\d{2}$/.test(ent) || !/^\d{2}:\d{2}$/.test(sai)) {
+    _presErro = 'Preencha entrada e saída.'; _presRender(); return;
+  }
+  if (ent === sai) { _presErro = 'Entrada e saída não podem ser iguais.'; _presRender(); return; }
+  _presOcupado = true; _presErro = ''; _presRender();
+
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const rows = await window.gnFetchJson(
+    `${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(d.comKey)}&select=all_data`, H, 'presenca:relerEscala', null);
+  if (rows === null || !rows.length) {
+    _presOcupado = false; _presErro = 'Não consegui ler a escala — tente de novo.'; _presRender(); return;
+  }
+  const allData = (rows[0] && rows[0].all_data) || {};
+  const wd = allData[String(d.idx)];
+  if (!wd || !Array.isArray(wd.funcs)) {
+    _presOcupado = false;
+    _presErro = 'A escala desta semana não está aberta no Check-list — corrija por lá.';
+    _presRender(); return;
+  }
+  // Acha a pessoa no retrato RECÉM-LIDO, pelo nome: o índice guardado quando a trava abriu
+  // vale pro array de antes, e o id do funcionário é posição, não identidade.
+  const achou = window.gnEscalaAchaFunc(wd.funcs, d.escalaNome);
+  if (!achou) {
+    _presOcupado = false;
+    _presErro = 'Não encontrei o seu nome na escala desta semana.';
+    _presRender(); return;
+  }
+  const f = achou.func;
+  const hdAntes = ((f.horario_dias || [])[d.diaIdx]) || { entrada: '', saida: '' };
+  const hd = Array.isArray(f.horario_dias) && f.horario_dias.length === 7
+    ? f.horario_dias.slice()
+    : Array(7).fill(null).map((_, i) => Object.assign({ entrada: '', saida: '' }, (f.horario_dias || [])[i] || {}));
+  hd[d.diaIdx] = Object.assign({}, hd[d.diaIdx] || {}, { entrada: ent, saida: sai });
+  wd.funcs = wd.funcs.slice();
+  wd.funcs[achou.idx] = Object.assign({}, f, { horario_dias: hd });
+  wd._lastEdit = Date.now();
+  allData[String(d.idx)] = wd;
+
+  const okEscala = await _presPatch(`gn_comissoes?loja=eq.${encodeURIComponent(d.comKey)}`, { all_data: allData }, 'presenca:gravarEscala');
+  if (!okEscala) {
+    _presOcupado = false; _presErro = 'Não consegui gravar na escala — tente de novo.'; _presRender(); return;
+  }
+  // A trilha depois da escala, nunca antes: trilha de uma mudança que não gravou é pior
+  // que trilha nenhuma. Se ela falhar, a presença ainda é confirmada e o erro vai pro log
+  // — o que não pode é a pessoa ficar presa na trava por causa do registro de auditoria.
+  await _presPost('gn_escala_correcao', {
+    usuario_id: session.id, nome: session.nome, cargo: session.cargo, loja: d.loja,
+    data: d.hoje, sem_idx: d.idx, dia_idx: d.diaIdx, escala_nome: d.escalaNome,
+    entrada_antes: hdAntes.entrada || null, saida_antes: hdAntes.saida || null,
+    entrada_depois: ent, saida_depois: sai,
+  }, 'presenca:trilha');
+
+  // O objeto local acompanha, pra confirmação gravar o horário novo e não o antigo.
+  d.func = wd.funcs[achou.idx]; d.fidx = achou.idx;
+  _presOcupado = false;
+  await _presConfirmar(true);
+}
+
+async function _presConfirmar(jaCorrigiu) {
+  if (_presOcupado && !jaCorrigiu) return;
+  const d = _presDados;
+  _presOcupado = true; _presErro = ''; _presRender();
+  const e = _presEstadoDoDia(d);
+  const corpo = {
+    usuario_id: session.id, nome: session.nome, cargo: session.cargo,
+    loja: d.loja, data: d.hoje,
+    estado: e.estado === 'sem_horario' ? 'fora_do_horario' : e.estado,
+    escala_status: e.status || null,
+    escala_entrada: (e.hd && e.hd.entrada) || null,
+    escala_saida: (e.hd && e.hd.saida) || null,
+    hora_confirmacao: _horaAgoraHM(),
+    corrigiu_horario: !!jaCorrigiu,
+    escala_nome: d.escalaNome || null,
+    aparelho: (navigator.userAgent || '').slice(0, 180),
+  };
+  const ok = await _presPost('gn_presenca_loja', corpo, 'presenca:confirmar');
+  if (!ok) {
+    _presOcupado = false;
+    // Sem fila offline, pela mesma razão da assinatura do Caixa: a confirmação é o que
+    // destrava o app, e destravar em cima de algo que não gravou é o pior dos dois mundos.
+    _presErro = 'Não consegui registrar — tente de novo.';
+    _presRender(); return;
+  }
+  try { localStorage.setItem(_presChaveLocal(session.id, d.loja), '1'); } catch (er) {}
+  _presOcupado = false;
+  _presLiberar();
+  // O plantão passa a mostrar a confirmação que acabou de entrar, sem esperar recarga.
+  try { _renderPlantaoHome(true, session, false); } catch (er) {}
 }
 
 // ── ALERTA URGENTE (mestre/supervisor → loja) ──────────────────────────────
@@ -6294,6 +6785,11 @@ function doLogout() {
   session = null; masterLoja = null;
   // Sem isto, o "já respondeu" de quem saiu valeria pro próximo que entrasse no aparelho.
   _gateReset();
+  // A trava de presença é overlay fixo: sem tirar ela aqui, "Não sou eu — sair" deslogava
+  // por baixo e deixava a própria trava cobrindo a tela de login — a porta de saída não
+  // levava a lugar nenhum.
+  _presDados = null;
+  _presLiberar();
   document.getElementById('inp-nome').value = '';
   document.getElementById('inp-senha').value = '';
   showLoginScreen();
@@ -6331,6 +6827,10 @@ function showHome(sess) {
   setTheme(lojaEfetiva);
   _verificarBloqueioCaixaOntem(sess, isMaster);
   _verificarBarrisSemanalHome(sess, isMaster);
+  // Presença na loja: só gerente/sub, só nas lojas da regra, e falha aberto em tudo que
+  // não carregar. Não dá await de propósito — a Home monta normalmente por baixo, e a
+  // trava sobe quando (e se) a escala responder.
+  _presencaChecar(sess, isMaster);
 
   // Header: nome do usuário
   document.getElementById('hdr-user').textContent = sess.nome + (sess.cargo ? ' · ' + sess.cargo : '');
@@ -9321,7 +9821,7 @@ async function _loadDashAll() {
     const comKeysAll = Object.values(LOJA_COM_KEY).join(',');
     const catorze = new Date(); catorze.setDate(catorze.getDate()-14);
     const from14 = catorze.toISOString().slice(0,10);
-    const [fatCur, fatPrv, fatPrvComp, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows, comissoesAllRows, bhConfigRows, cancelRows, caixaFechadosRows, alertasUrgentesRows, visitasPassadasRows, provisoesRows, carnesRows, trioAgendaOntemRows, bhMesesRows, buffetRows] = await Promise.all([
+    const [fatCur, fatPrv, fatPrvComp, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows, comissoesAllRows, bhConfigRows, cancelRows, caixaFechadosRows, alertasUrgentesRows, visitasPassadasRows, provisoesRows, carnesRows, trioAgendaOntemRows, bhMesesRows, buffetRows, presencaRows, correcaoRows] = await Promise.all([
       _fetchFat(range.dates).catch(e=>{ _errCb('fatCur')(e); return {}; }),
       _fetchFat(prevRange.dates).catch(e=>{ _errCb('fatPrv')(e); return {}; }),
       precisaCompSeparada ? _fetchFat(prevRangeCompDates).catch(e=>{ _errCb('fatPrvComp')(e); return {}; }) : Promise.resolve(null),
@@ -9360,6 +9860,11 @@ async function _loadDashAll() {
       // Buffet de feijoada e rodízio lançados no fechamento de caixa, no MESMO período
       // do faturamento mostrado nos cards (não nos últimos 30 dias como caixaFechadosRows).
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${range.from}&data=lte.${range.to}&select=loja,data,feijoada_inteira,feijoada_meia,rodizio_inteira,rodizio_meia`, H, 'dash:buffetRows', []),
+      // Presença de HOJE (quem está na loja agora) e as correções de horário do PERÍODO.
+      // A presença é do dia porque "quem está na loja" é uma pergunta do agora; a correção
+      // é do período porque ela é auditoria — o que interessa é o padrão, não o instante.
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_presenca_loja?data=eq.${hoje}&select=loja,nome,cargo,estado,hora_confirmacao,corrigiu_horario,escala_entrada,escala_saida&order=hora_confirmacao.asc`, H, 'dash:presencaRows', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_escala_correcao?data=gte.${range.from}&data=lte.${range.to}&select=loja,data,nome,cargo,entrada_antes,saida_antes,entrada_depois,saida_depois,criado_em&order=criado_em.desc`, H, 'dash:correcaoRows', []),
     ]);
     _dashFat = fatCur; _dashFatPrev = precisaCompSeparada ? fatPrvComp : fatPrv;
     _dashFatPrevParcial = precisaCompSeparada;
@@ -9603,6 +10108,7 @@ async function _loadDashAll() {
     _dashSem10CaixasPer = _raioxMapearCaixasSem10(cancelRows);
     _dashDeclTransfPer = _raioxMapearDecl(cancelRows, 'sem_transferencia_por', 'sem_transferencia_em');
     _dashDeclSem10Per = _raioxMapearDecl(cancelRows, 'sem_nota10_por', 'sem_nota10_em');
+    _dashPresencaHoje = presencaRows || []; _dashCorrecoes = correcaoRows || [];
     const spark={}; LOJAS_LISTA.forEach(k=>{spark[k]=[(fat3[k]||0),(fat2[k]||0),(fatPrv[k]||0),(fatCur[k]||0)];});
     _dashSparkData=spark;
     _dashAlertasUrgentes = alertasUrgentesRows || [];
@@ -9620,7 +10126,7 @@ async function _loadDashAll() {
     _dashContratosVencendo=_dashContratosVencendo||{}; _dashManutParada=_dashManutParada||{};
     _dashCaixaSemConferencia=_dashCaixaSemConferencia||{};
     _dashComissoesAll=_dashComissoesAll||[]; _dashLojasAll=_dashLojasAll||[];
-    _dashBhCfg=_dashBhCfg||{}; _dashBhMesesRows=_dashBhMesesRows||[]; _dashCancelPer=_dashCancelPer||{}; _dashDeclPer=_dashDeclPer||{}; _dashSem10Per=_dashSem10Per||{}; _dashSem10CaixasPer=_dashSem10CaixasPer||{}; _dashDeclSem10Per=_dashDeclSem10Per||{};
+    _dashBhCfg=_dashBhCfg||{}; _dashBhMesesRows=_dashBhMesesRows||[]; _dashCancelPer=_dashCancelPer||{}; _dashDeclPer=_dashDeclPer||{}; _dashSem10Per=_dashSem10Per||{}; _dashSem10CaixasPer=_dashSem10CaixasPer||{}; _dashDeclSem10Per=_dashDeclSem10Per||{}; _dashPresencaHoje=_dashPresencaHoje||[]; _dashCorrecoes=_dashCorrecoes||[];
     _dashTransfPer=_dashTransfPer||{}; _dashDeclTransfPer=_dashDeclTransfPer||{};
     _dashVisitasHoje=_dashVisitasHoje||{};
     _dashAlertasUrgentes=_dashAlertasUrgentes||[];
@@ -12868,6 +13374,126 @@ function _sem10MacroDados() {
   };
 }
 
+/* ── 👤 PRESENÇA ────────────────────────────────────────────────────────────────────────
+   "Quero ter uma informação mais precisa de quem está na loja."
+
+   Esta aba lê o que a trava da Home grava. Duas perguntas diferentes, por isso dois
+   blocos com recortes de tempo diferentes:
+
+     · QUEM ESTÁ NA LOJA — é uma pergunta do agora, então só hoje. Loja sem nenhuma
+       confirmação aparece nomeada: é o sinal acionável, e some se eu só listar quem
+       confirmou. Mesma lição do painel de cancelamento, onde o silêncio era invisível.
+
+     · CORREÇÕES DE HORÁRIO — é auditoria, então o período inteiro. horario_dias alimenta
+       o banco de horas (ver CLAUDE.md): quem corrige o próprio horário está declarando a
+       própria hora extra. A correção é permitida de propósito — é pra isso que o campo
+       existe —, mas quem paga a folha precisa ver o antes e o depois sem ir procurar.
+
+   Não tenta dizer quem FALTOU confirmar: isso exigiria a escala das 11 lojas carregada
+   aqui, e a Home já carrega bastante. Quem precisa dessa cobrança a tem no plantão da
+   própria loja, que é onde ela é acionável.                                              */
+const _PRES_ESTADO_PAINEL = {
+  no_horario:     { cor: 'var(--txt-green)', ico: '✓', rot: 'no horário' },
+  fora_do_horario:{ cor: 'var(--txt-amber)', ico: '!', rot: 'fora do horário' },
+  fora_de_escala: { cor: 'var(--txt-amber)', ico: '!', rot: 'fora da escala' },
+};
+
+function _presencaMacroDados() {
+  const daRegra = LOJAS_LISTA.filter(k => !window.gnPresencaLiberada || window.gnPresencaLiberada(k));
+  const porLoja = {};
+  (_dashPresencaHoje || []).forEach(r => {
+    const k = _normLoja(r.loja);
+    if (!daRegra.includes(k)) return;
+    (porLoja[k] = porLoja[k] || []).push(r);
+  });
+  const lojas = daRegra.map(k => ({
+    k, nome: LOJA_DISPLAY[k] || k,
+    pessoas: (porLoja[k] || []).slice().sort((a, b) => String(a.hora_confirmacao).localeCompare(String(b.hora_confirmacao))),
+  }));
+  const corrPorLoja = {};
+  (_dashCorrecoes || []).forEach(r => {
+    const k = _normLoja(r.loja);
+    if (!daRegra.includes(k)) return;
+    (corrPorLoja[k] = corrPorLoja[k] || []).push(r);
+  });
+  return {
+    comGente: lojas.filter(l => l.pessoas.length),
+    semGente: lojas.filter(l => !l.pessoas.length),
+    nLojas: daRegra.length,
+    total: lojas.reduce((a, l) => a + l.pessoas.length, 0),
+    foraDoPrevisto: lojas.reduce((a, l) => a + l.pessoas.filter(p => p.estado !== 'no_horario').length, 0),
+    correcoes: daRegra.map(k => ({ k, nome: LOJA_DISPLAY[k] || k, itens: corrPorLoja[k] || [] }))
+      .filter(l => l.itens.length).sort((a, b) => b.itens.length - a.itens.length),
+    nCorrecoes: Object.values(corrPorLoja).reduce((a, v) => a + v.length, 0),
+  };
+}
+
+function _buildPresencaPanel() {
+  if (!_dashPresencaHoje) return _skelPanel(3);
+  const d = _presencaMacroDados();
+  const esc = s2 => window.escapeHtml(String(s2 == null ? '' : s2));
+  const dm = iso => String(iso || '').slice(8, 10) + '/' + String(iso || '').slice(5, 7);
+  const periodo = _dashPer === 'sem' ? _weekRange(_dashWoff).label : _monthRange(_dashMoff).label;
+
+  const kpis = `<div class="kpi-row">
+    <div class="kpi-tile" style="border-left-color:var(--txt-green)">
+      <div class="kpi-tile-lbl">Na loja hoje</div>
+      <div class="kpi-tile-val">${d.total}</div>
+      <div class="kpi-tile-sub">${d.comGente.length} de ${d.nLojas} loja${d.nLojas === 1 ? '' : 's'} com alguém confirmado</div>
+    </div>
+    <div class="kpi-tile" style="border-left-color:${d.foraDoPrevisto ? 'var(--txt-amber)' : 'var(--t3)'}">
+      <div class="kpi-tile-lbl">Fora do previsto</div>
+      <div class="kpi-tile-val" style="color:${d.foraDoPrevisto ? 'var(--txt-amber)' : 'var(--t1)'}">${d.foraDoPrevisto}</div>
+      <div class="kpi-tile-sub">confirmações fora do horário ou da escala</div>
+    </div>
+  </div>`;
+
+  const blocos = d.comGente.map(l => `
+    <div style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid var(--txt-green);border-radius:14px;padding:12px 14px;margin-bottom:10px">
+      <div style="font-size:13px;font-weight:800;color:var(--t1);margin-bottom:3px">${esc(l.nome)}</div>
+      ${l.pessoas.map(p => {
+        const e = _PRES_ESTADO_PAINEL[p.estado] || _PRES_ESTADO_PAINEL.no_horario;
+        return `<div style="display:flex;gap:8px;align-items:baseline;padding:5px 0;border-top:1px solid var(--b1)">
+          <span style="color:${e.cor};font-weight:800;font-size:12px;width:12px;flex-shrink:0;text-align:center">${e.ico}</span>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:11.5px;font-weight:700;color:var(--t1);overflow-wrap:anywhere">${esc(p.nome)}<span style="font-weight:500;color:var(--t3)"> · ${esc((p.cargo || '').replace('_', '-'))}</span></div>
+            <div style="font-size:9.5px;color:${p.estado === 'no_horario' ? 'var(--t3)' : e.cor}">${esc(e.rot)}${p.escala_entrada ? ` · escala ${esc(p.escala_entrada)}–${esc(p.escala_saida)}` : ''}${p.corrigiu_horario ? ' · corrigiu o horário' : ''}</div>
+          </div>
+          <div style="font-size:12px;font-weight:800;color:var(--t1);font-variant-numeric:tabular-nums;white-space:nowrap">${esc(p.hora_confirmacao || '')}</div>
+        </div>`;
+      }).join('')}
+    </div>`).join('');
+
+  // Loja sem ninguém confirmado é o que pede ação — e é exatamente o que some se a tela
+  // listar só quem confirmou.
+  const semGente = d.semGente.length ? `
+    <div style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:11px 14px;margin-bottom:10px">
+      <div style="font-size:9px;font-weight:800;color:var(--t4);letter-spacing:1.2px;text-transform:uppercase;margin-bottom:5px">Sem ninguém confirmado hoje · ${d.semGente.length} loja${d.semGente.length === 1 ? '' : 's'}</div>
+      <div style="font-size:10.5px;color:var(--t2);line-height:1.6">${d.semGente.map(l => esc(l.nome)).join(' · ')}</div>
+      <div style="font-size:9.5px;color:var(--t4);margin-top:3px">Pode ser que a gerência ainda não tenha aberto o app hoje — ou que não tenha ninguém lá.</div>
+    </div>` : '';
+
+  const correcoes = d.nCorrecoes ? `
+    <div style="background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.32);border-radius:14px;padding:11px 14px;margin-bottom:10px">
+      <div style="font-size:12px;font-weight:800;color:var(--txt-amber);margin-bottom:2px">⚠ ${d.nCorrecoes} ${d.nCorrecoes === 1 ? 'correção' : 'correções'} de horário em ${esc(periodo)}</div>
+      <div style="font-size:10px;color:var(--t2);line-height:1.5;margin-bottom:5px">A escala é o que o banco de horas lê. Corrigir o próprio horário é permitido — é pra isso que o campo existe —, mas o antes e o depois ficam aqui.</div>
+      ${d.correcoes.map(l => `<div style="margin-top:6px">
+        <div style="font-size:10.5px;font-weight:800;color:var(--t1)">${esc(l.nome)}</div>
+        ${l.itens.map(c => `<div style="display:flex;gap:8px;align-items:baseline;font-size:10.5px;color:var(--t2);padding:2px 0">
+          <span style="color:var(--t4);min-width:34px;font-variant-numeric:tabular-nums">${dm(c.data)}</span>
+          <span style="flex:1;min-width:0;overflow-wrap:anywhere">${esc(c.nome)}</span>
+          <span style="white-space:nowrap;font-variant-numeric:tabular-nums">${c.entrada_antes ? `<span style="color:var(--t4);text-decoration:line-through">${esc(c.entrada_antes + '–' + c.saida_antes)}</span>` : `<span style="color:var(--t4)">em branco</span>`} → <b style="color:var(--t1)">${esc(c.entrada_depois + '–' + c.saida_depois)}</b></span>
+        </div>`).join('')}
+      </div>`).join('')}
+    </div>` : '';
+
+  if (!d.total && !d.nCorrecoes) {
+    return kpis + `<div class="att-item"><div><div class="att-nm">Ninguém confirmou presença hoje</div>
+      <div class="att-rs">Nenhuma das ${d.nLojas} lojas tem confirmação registrada. A trava aparece pra gerência ao abrir a Home.</div></div></div>`;
+  }
+  return kpis + correcoes + blocos + semGente;
+}
+
 function _buildSem10Panel() {
   if (!_dashSem10Per) return _skelPanel(3);
   const d = _sem10MacroDados();
@@ -13833,6 +14459,9 @@ function renderDashboard() {
   } else if (_dashTab==='sem10') {
     content = _buildSem10Panel();
 
+  } else if (_dashTab==='presenca') {
+    content = _buildPresencaPanel();
+
   } else if (_dashTab==='ferias') {
     content = _buildFeriasPanel();
 
@@ -13892,6 +14521,7 @@ function renderDashboard() {
         <button class="dash-tab${_dashTab==='att'?' on':''}" onclick="_setDashTab('att')">⚠ Atenção</button>
         <button class="dash-tab${_dashTab==='cancel'?' on':''}" onclick="_setDashTab('cancel')">🧾 Cancel. e transf.</button>
         <button class="dash-tab${_dashTab==='sem10'?' on':''}" onclick="_setDashTab('sem10')">💸 Sem 10%</button>
+        <button class="dash-tab${_dashTab==='presenca'?' on':''}" onclick="_setDashTab('presenca')">👤 Presença</button>
         <button class="dash-tab${_dashTab==='ferias'?' on':''}" onclick="_setDashTab('ferias')">🏖 Férias</button>
         <button class="dash-tab${_dashTab==='xadrez'?' on':''}" onclick="_setDashTab('xadrez')">🔀 Xadrez</button>
         <button class="dash-tab${_dashTab==='bi'?' on':''}" onclick="_setDashTab('bi')">📊 BI</button>
