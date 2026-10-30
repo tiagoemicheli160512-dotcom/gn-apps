@@ -105,7 +105,8 @@ const LINHAS = [
     const simples = {};
     Object.keys(sem).forEach(c => { const s = sem[c];
       simples[c] = { cache: s.cache, couver: s.couver, saldo: s.saldo, status: s.status,
-                     diasSemCouver: s.diasSemCouver, dias: s.dias.length, naoVeioCache: s.naoVeioCache }; });
+                     diasSemCouver: s.diasSemCouver, dias: s.dias.length, naoVeioCache: s.naoVeioCache,
+                     cacheDevido: s.cacheDevido, cacheDescontado: s.cacheDescontado }; });
     // Cada aviso e cada cartão com o SEU próprio texto: recortar por posição no texto
     // corrido do painel passava do bloco de negativos pro de couvert faltando, e a
     // verificação "não cita a outra loja" passava sozinha.
@@ -234,13 +235,20 @@ const LINHAS = [
   check('a tela diz que o couvert ainda não foi arrecadado',
     /ainda não arrecadado/.test(v.txt), v.txt.slice(0, 300));
 
-  // ══ 5. BANDA QUE NÃO VEIO — o cachê não se inventa ═══════════════════════════════
-  // O registro não zera o cachê quando a banda não vem, e o app não tem como saber se foi
-  // pago. Então soma como está e DIZ que está somando.
+  // ══ 5. BANDA QUE NÃO VEIO — o cachê sai da conta ═════════════════════════════
+  // Regra do dono: banda que não veio não é paga. O registro continua guardando o cachê
+  // contratado — quem muda é a CONTA, que passa a somar só o que é devido, e a tela diz
+  // quanto saiu pra ninguém precisar refazer a subtração de cabeça.
+  // O detalhe por dia e o resumo da rede são cobrados mais abaixo, em e2e_trios_desconto.
   check('a apresentação em que a banda não veio aparece marcada',
     /não veio/.test(p.txt), p.txt.slice(0, 400));
-  check('e o painel avisa quanto do cachê é de banda que não veio',
-    /inclui R\$ ?900/.test(p.txt.replace(/ /g, ' ')), p.txt.slice(0, 400));
+  const ns = p.simples[Object.keys(p.simples).find(c => /^NORTE/.test(c) && c.endsWith('|' + p.iniISO))] || null;
+  check('o cachê contratado da noite sem banda continua no registro',
+    ns && ns.cache === 900 && ns.naoVeioCache === 900, JSON.stringify(ns));
+  check('mas ele é descontado da conta — não sobra nada a pagar',
+    ns && ns.cacheDescontado === 900 && ns.cacheDevido === 0, JSON.stringify(ns));
+  check('e o painel diz quanto foi descontado',
+    /R\$ ?900,00 descontados/.test(p.txt.replace(/ /g, ' ')), p.txt.slice(0, 500));
 
   // ══ 6. MAGLIA FORA ═══════════════════════════════════════════════════════════════
   // Maglia não usa a aba Banda do Check-list e não tem uma linha em gn_trios_agenda.
