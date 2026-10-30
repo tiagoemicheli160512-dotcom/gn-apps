@@ -1192,18 +1192,52 @@ async function confirmarDevolucaoPedidos(lojaKey, devId) {
 // Exclui só CANCELADO (provisão desfeita, nunca chegou a ser enviada de fato); AGUARDANDO,
 // RECEBIDO_OK, DIVERGENCIA e DEVOLVIDO contam, porque o pedido foi de fato feito ao
 // fornecedor pra aquela loja, independente do desfecho na ponta.
+// A Prov.ant procurava a provisão da semana passada SÓ pela data de entrega — e provisão
+// sem data nenhuma não entra em comparação de intervalo em SQL, então sumia da tela.
+//
+// E ela fica sem data por um motivo concreto: a data é calculada a partir dos dias de
+// entrega do fornecedor (ver confirmarPedido), e fornecedor cadastrado sem dias e sem
+// prazo gera a provisão com data_entrega NULL.
+//
+// MEDIDO em 13.198 provisões vivas: 532 (4,0%) estão sem data — mas a conta por região é
+// que explica por que isso apareceu primeiro em São Paulo:
+//   · SP:         237 de 506   (46,8%)  — PETICO, PMG, QUENTE, WASAN
+//   · RJ:         295 de 11.363 (2,6%)  — CDI, DMIC, GRF, NOGMIX, SEARA, TOP MATHEUS…
+//   · HORTIFRUTI:   0
+// Em SP quase metade das linhas são desses quatro fornecedores, então a coluna parecia
+// vazia; no Rio o mesmo buraco passa despercebido.
+//
+// A regra do conserto: quando a provisão NÃO tem data, ela vale pela semana do PEDIDO que
+// a gerou — é a única informação de semana que aquela linha tem, e toda provisão tem
+// pedido (0 linhas sem pedido_id nas 13.198). O que já aparecia continua vindo pela data,
+// sem mexer em número nenhum que a tela já mostrava certo.
 async function carregarProvisaoAnterior() {
   const semAnt = new Date(S.semanaAtiva);
   semAnt.setDate(semAnt.getDate() - 7);
   const monday = semAnt.toISOString().split('T')[0];
   const sunday = getSundayOfWeek(semAnt).toISOString().split('T')[0];
-  const data = await _fetchTodasPaginas(() => db.from('gn_provisoes')
-    .select('catalogo_id,loja_slug,qtd_prevista,status')
-    .gte('data_entrega', monday).lte('data_entrega', sunday)
-    .neq('status', 'CANCELADO')
-    .order('id'));
+  const SEL = 'id,catalogo_id,loja_slug,qtd_prevista,status';
+
+  const { data: pedsAnt } = await db.from('gn_pedidos').select('id').eq('semana_inicio', monday);
+  const idsAnt = (pedsAnt || []).map(x => x.id);
+
+  const [porData, semData] = await Promise.all([
+    _fetchTodasPaginas(() => db.from('gn_provisoes').select(SEL)
+      .gte('data_entrega', monday).lte('data_entrega', sunday)
+      .neq('status', 'CANCELADO').order('id')),
+    idsAnt.length
+      ? _fetchTodasPaginas(() => db.from('gn_provisoes').select(SEL)
+          .in('pedido_id', idsAnt).is('data_entrega', null)
+          .neq('status', 'CANCELADO').order('id'))
+      : Promise.resolve([]),
+  ]);
+
+  // As duas buscas são disjuntas por construção — uma exige data, a outra exige a
+  // ausência dela — então nenhuma linha vem nas duas e não há o que desduplicar. Se um dia
+  // elas se sobrepuserem, a mesma linha soma duas vezes e a quantidade dobra na tela;
+  // e2e_prov_ant_sem_data cobra a soma total exata justamente pra isso não passar calado.
   S.provisaoAnterior = {};
-  (data || []).forEach(p => {
+  [...(porData || []), ...(semData || [])].forEach(p => {
     if (!S.provisaoAnterior[p.catalogo_id]) S.provisaoAnterior[p.catalogo_id] = {};
     const atual = S.provisaoAnterior[p.catalogo_id][p.loja_slug] || 0;
     S.provisaoAnterior[p.catalogo_id][p.loja_slug] = atual + (parseFloat(p.qtd_prevista) || 0);
