@@ -18667,6 +18667,29 @@ function _bandaAtualizarBadge(){
 }
 
 let _bandaTabRows = null;
+// Datas em que a agenda diz que NENHUMA banda veio. Vem de gn_trios_agenda, que é onde
+// essa marca existe — o `banda` do checklist_diario guarda só nome, valor, consumo e
+// quantidade de couvert, e por isso esta tela cobrava o cachê de quem não tocou enquanto
+// o Painel de Gestão já descontava. Duas telas discordando sobre o mesmo dinheiro.
+let _bandaTabSemShow = new Set();
+
+// Banda que não veio não é paga — a mesma regra do Painel, e a mesma ressalva: a marca
+// `banda_nao_veio` quer dizer duas coisas. Em 10/10 a Pedreira marcou porque o trio ficou
+// preso na Dutra e ninguém tocou; em 26 e 27/09 a Guarulhos marcou uma TROCA de banda, e
+// nessas noites outro trio tocou e a casa arrecadou couvert de 48 e 129 pessoas. Quem
+// decide é o couvert da noite, não a marca: arrecadou, alguém tocou, e quem tocou recebe.
+function _bandaCalc(r){
+  const b = r.banda || {};
+  const valor = parseFloat(b.valor) || 0;
+  const consumo = parseFloat(b.consumo) || 0;
+  const qtd = parseFloat(b.qtd_couvert) || 0;
+  const rec = qtd * BANDA_COUVERT_VALOR;
+  const desc = Math.max(0, consumo - BANDA_CONSUMO_FRANQUIA);
+  const semShow = _bandaTabSemShow.has(r.data_operacao) && rec <= 0;
+  const liq = semShow ? 0 : Math.max(0, valor - desc);
+  return { nome: b.nome || '', valor, qtd, rec, desc: semShow ? 0 : desc, liq,
+           res: rec - liq, semShow };
+}
 
 async function carregarBandaTab(forcar){
   _carregarBandaHoje();
@@ -18680,13 +18703,38 @@ async function carregarBandaTab(forcar){
   document.getElementById('banda-tab-conteudo').innerHTML =
     '<div style="text-align:center;padding:30px;color:var(--t2);font-size:12px;">Carregando...</div>';
   try{
-    const {data,error} = await sb.from('checklist_diario')
-      .select('data_operacao,banda')
-      .eq('loja', LOJA)
-      .gte('data_operacao', ini)
-      .lte('data_operacao', fim)
-      .order('data_operacao', {ascending:true});
+    const slug = _triosLojaSlug();
+    const [{data,error}, agenda] = await Promise.all([
+      sb.from('checklist_diario')
+        .select('data_operacao,banda')
+        .eq('loja', LOJA)
+        .gte('data_operacao', ini)
+        .lte('data_operacao', fim)
+        .order('data_operacao', {ascending:true}),
+      // A agenda é COMPLEMENTO: se ela falhar, o histórico continua abrindo com o cachê
+      // cheio, que é o que esta tela sempre mostrou. Desconto que depende de rede não pode
+      // derrubar a tela inteira por causa de uma consulta a mais.
+      // O segundo braço do `then` é cinto de segurança: medido com os dois tipos de falha
+      // (500 e conexão cortada), o cliente resolve com {error} nos dois e nunca rejeita,
+      // então hoje ele não é alcançado — fica porque uma rejeição aqui derrubaria o
+      // Promise.all e, com ele, a aba inteira.
+      slug ? sb.from('gn_trios_agenda').select('data,banda_nao_veio')
+               .eq('loja', slug).gte('data', ini).lte('data', fim)
+               .then(r => r.error ? null : (r.data || []), () => null)
+            : Promise.resolve(null),
+    ]);
     if(error) throw error;
+    // O dia só conta como sem show quando TODAS as apresentações dele não vieram — um dia
+    // com dois trios em que só um faltou teve show, e o cachê de quem tocou é devido.
+    const porDia = {};
+    (agenda || []).forEach(x => {
+      const d = String(x.data).slice(0, 10);
+      if(!porDia[d]) porDia[d] = { total: 0, naoVeio: 0 };
+      porDia[d].total++;
+      if(x.banda_nao_veio) porDia[d].naoVeio++;
+    });
+    _bandaTabSemShow = new Set(Object.keys(porDia)
+      .filter(d => porDia[d].total > 0 && porDia[d].naoVeio === porDia[d].total));
     _bandaTabRows = (data||[]).filter(r=>r.banda && r.banda.nome && r.banda.nome.trim());
     if(state.banda && state.banda.nome && state.banda.nome.trim()){
       const hoje = state.data;
@@ -18717,13 +18765,8 @@ function renderBandaTab(){
   let totalCouvert=0, totalCusto=0, totalResultado=0, diasVermelhos=0;
   const cards = rows.map(r=>{
     const b = r.banda||{};
-    const consumo = parseFloat(b.consumo)||0;
-    const valor   = parseFloat(b.valor)||0;
-    const qtd     = parseFloat(b.qtd_couvert)||0;
-    const desc    = Math.max(0, consumo - BANDA_CONSUMO_FRANQUIA);
-    const liq     = Math.max(0, valor - desc);
-    const rec     = qtd * BANDA_COUVERT_VALOR;
-    const res     = rec - liq;
+    const c = _bandaCalc(r);
+    const { desc, liq, rec, res, qtd, semShow } = c;
     totalCouvert += rec; totalCusto += liq; totalResultado += res;
     if(res < 0) diasVermelhos++;
     const dt = new Date(r.data_operacao+'T12:00:00');
@@ -18749,7 +18792,8 @@ function renderBandaTab(){
         <div style="background:var(--red-dim);border-radius:7px;padding:6px;text-align:center;">
           <div style="color:var(--t2);margin-bottom:1px;">Banda</div>
           <div style="font-weight:700;color:var(--t1);">${_fmtBRL(liq)}</div>
-          ${desc>0?`<div style="color:var(--t1);font-size:11px;">-${_fmtBRL(desc)} consumo</div>`:''}
+          ${semShow?`<div style="color:var(--t1);font-size:11px;">não veio — ${_fmtBRL(c.valor)} descontados</div>`
+            :desc>0?`<div style="color:var(--t1);font-size:11px;">-${_fmtBRL(desc)} consumo</div>`:''}
         </div>
         <div style="background:${ok?'rgba(34,197,94,0.07)':'rgba(239,68,68,0.07)'};border-radius:7px;padding:6px;text-align:center;">
           <div style="color:var(--t2);margin-bottom:1px;">Resultado</div>
@@ -18786,17 +18830,16 @@ function abrirRelatorioBanda(){
   const diasNomes = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
   let totalRes = 0;
   rows.forEach(r=>{
-    const b = r.banda||{};
-    const desc = Math.max(0,(parseFloat(b.consumo)||0)-BANDA_CONSUMO_FRANQUIA);
-    const liq  = Math.max(0,(parseFloat(b.valor)||0)-desc);
-    const rec  = (parseFloat(b.qtd_couvert)||0)*BANDA_COUVERT_VALOR;
-    const res  = rec-liq;
+    // O MESMO cálculo da tela. Antes a conta era refeita aqui por fora, e qualquer regra
+    // nova (como o desconto da banda que não veio) valia num lugar e no outro não.
+    const { nome, valor, qtd, rec, desc, liq, res, semShow } = _bandaCalc(r);
     totalRes  += res;
     const dt = new Date(r.data_operacao+'T12:00:00');
-    txt += diasNomes[dt.getDay()]+' '+fmtBR(r.data_operacao)+' — '+(b.nome||'')+'\n';
-    txt += '  Couvert: '+(b.qtd_couvert||0)+' × R$7 = '+_fmtBRL(rec)+'\n';
-    txt += '  Banda: '+_fmtBRL(parseFloat(b.valor)||0);
-    if(desc>0) txt += ' (desconto consumo: -'+_fmtBRL(desc)+') líquido: '+_fmtBRL(liq);
+    txt += diasNomes[dt.getDay()]+' '+fmtBR(r.data_operacao)+' — '+nome+'\n';
+    txt += '  Couvert: '+qtd+' × R$7 = '+_fmtBRL(rec)+'\n';
+    txt += '  Banda: '+_fmtBRL(valor);
+    if(semShow)   txt += ' (banda não veio: '+_fmtBRL(valor)+' descontados) a pagar: '+_fmtBRL(liq);
+    else if(desc>0) txt += ' (desconto consumo: -'+_fmtBRL(desc)+') líquido: '+_fmtBRL(liq);
     txt += '\n  Resultado: '+(res>=0?'+':'')+_fmtBRL(res)+' '+(res>=0?'✅':'❌')+'\n\n';
   });
   txt += '─────────────────────\nSaldo total: '+(totalRes>=0?'+':'')+_fmtBRL(totalRes)+' '+(totalRes>=0?'✅':'❌');
