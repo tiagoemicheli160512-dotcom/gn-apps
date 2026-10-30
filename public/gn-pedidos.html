@@ -3648,6 +3648,83 @@ async function _carregarTotalCompradorSemana(pedidoId, fornecedores) {
   if (S.pedidoAtual && S.pedidoAtual.id === pedidoId && (S.tab === 'edu' || S.tab === 'oseas')) renderPedido();
 }
 
+// ── TOTAL DA REDE NA SEMANA (só na aba Oseas) ─────────────────────────
+// "Se todas as lojas pedirem Boi Bumbá e a soma for 100, o sistema deve apresentar esse
+// total" — a quantidade que a rede INTEIRA pediu, que é o número que vai pro fornecedor.
+//
+// O card de cima soma UM pedido, e isso não é a rede: a semana tem um pedido por região.
+// MEDIDO na semana 26/10, Boi Bumbá: RJ 76 PCT em 5 lojas, SP 30 PCT em 1 — a rede pediu
+// 106, e a tela mostrava 76 ou 30 conforme a região aberta, nunca o total.
+//
+// DUAS regras que vêm da forma do dado e erram o número se forem ignoradas:
+//
+//  1. O MESMO produto tem catalogo_id DIFERENTE em cada região (Boi Bumbá é 27634b32… no
+//     Rio e 7310aa86… em SP). Somar por id devolveria duas linhas de 76 e 30 em vez de uma
+//     de 106 — exatamente o que este card existe pra evitar. A soma é por NOME do produto,
+//     normalizado (as 20 linhas de PETISCOS são 20 produtos × 2 regiões, com nome e unidade
+//     iguais nos dois lados, e uma delas tem espaço dobrado: "RABADA DESFIADA  500G").
+//
+//  2. Pedido CANCELADO não entra. Hoje o cancelamento esvazia os itens, então somaria zero
+//     de qualquer forma — mas somar um pedido jogado fora é errado no dia em que ele parar
+//     de esvaziar, e aí o número sai inflado sem nada na tela denunciando.
+//
+// O catálogo é buscado aqui, e não lido de S.catalogo, porque S.catalogo tem só a região
+// aberta: os itens da outra região ficariam sem nome e sumiriam da conta.
+const _totalRedeOseasCache = {};   // semana_inicio -> {loading|erro|itens|pedidos|regioes}
+
+function _chaveProduto(nome) {
+  return String(nome || '').trim().replace(/\s+/g, ' ').toUpperCase();
+}
+
+async function _carregarTotalRedeOseas(semanaISO) {
+  if (_totalRedeOseasCache[semanaISO]) return;       // já carregado ou carregando
+  _totalRedeOseasCache[semanaISO] = { loading: true };
+  try {
+    const { data: peds, error } = await db.from('gn_pedidos')
+      .select('id,regiao,status').eq('semana_inicio', semanaISO).neq('status', 'CANCELADO');
+    if (error) throw error;
+    const ids = (peds || []).map(x => x.id);
+    if (!ids.length) {
+      _totalRedeOseasCache[semanaISO] = { loading: false, itens: [], pedidos: 0, regioes: [] };
+    } else {
+      const regiaoDe = {};
+      (peds || []).forEach(x => { regiaoDe[x.id] = x.regiao; });
+      const [itens, cat] = await Promise.all([
+        _fetchTodasPaginas(() => db.from('gn_pedido_itens')
+          .select('pedido_id,catalogo_id,loja_slug,qtd_pedida').in('pedido_id', ids)),
+        // Sem filtro de `ativo`: item que foi pedido conta mesmo que o catálogo tenha sido
+        // desativado depois — o pedido aconteceu.
+        _fetchTodasPaginas(() => db.from('gn_catalogo')
+          .select('id,produto,und').in('fornecedor', OSEAS_FORNECEDORES)),
+      ]);
+      const doCatalogo = {};
+      (cat || []).forEach(c => { doCatalogo[c.id] = c; });
+      const porProduto = {};
+      const regioes = {};
+      (itens || []).forEach(it => {
+        const c = doCatalogo[it.catalogo_id];
+        if (!c) return;                                         // não é item do Oseas
+        if (!LOJAS_SLUG_PEDIDO_REAIS.includes(it.loja_slug)) return;  // Maglia, Mandacaru, Teste
+        const qtd = parseFloat(it.qtd_pedida) || 0;
+        if (qtd <= 0) return;
+        const chave = _chaveProduto(c.produto);
+        if (!porProduto[chave]) porProduto[chave] = { produto: c.produto, und: c.und, total: 0, porRegiao: {} };
+        const linha = porProduto[chave];
+        linha.total += qtd;
+        const r = regiaoDe[it.pedido_id] || '—';
+        linha.porRegiao[r] = (linha.porRegiao[r] || 0) + qtd;
+        regioes[r] = true;
+      });
+      _totalRedeOseasCache[semanaISO] = { loading: false, pedidos: ids.length,
+        regioes: Object.keys(regioes).sort(),
+        itens: Object.values(porProduto).sort((x, y) => y.total - x.total) };
+    }
+  } catch (e) {
+    _totalRedeOseasCache[semanaISO] = { loading: false, erro: true };
+  }
+  if (S.tab === 'oseas') renderPedido();
+}
+
 // Aviso de "fornecedor revertido, esperando confirmar de novo" — ver
 // carregarFornecedoresRevertidos(). Some sozinho assim que o fornecedor for confirmado de
 // novo (deixa de estar em S.fornecedoresRevertidos).
@@ -3717,9 +3794,54 @@ function _fornecedoresRevertidosAlertHtml() {
   }).join('');
 }
 
+// Na aba OSEAS o card passa a somar a REDE (todos os pedidos da semana, as duas regiões),
+// que é o número que vai pro fornecedor. A aba Edu fica como estava, somando o pedido
+// aberto — foi o que o dono pediu: "só da aba Oseas, que são os petiscos".
+function _totalRedeOseasCardHtml() {
+  const semana = S.pedidoAtual && S.pedidoAtual.semana_inicio;
+  if (!semana) return '';
+  const cache = _totalRedeOseasCache[semana];
+  if (!cache) _carregarTotalRedeOseas(semana);
+
+  let corpo;
+  if (!cache || cache.loading) {
+    corpo = `<div style="font-size:11px;color:var(--muted);padding:4px 0">Carregando…</div>`;
+  } else if (cache.erro) {
+    corpo = `<div style="font-size:11px;color:var(--muted);padding:4px 0">Não foi possível carregar o total da rede.</div>`;
+  } else if (!cache.itens.length) {
+    corpo = `<div style="font-size:11px;color:var(--muted);padding:4px 0">Nenhum petisco pedido ainda nesta semana.</div>`;
+  } else {
+    corpo = `<div style="max-height:300px;overflow-y:auto;margin-top:4px">
+      ${cache.itens.map(it => {
+        const regs = Object.keys(it.porRegiao).sort();
+        // A quebra por região só aparece quando há mais de uma: "RJ 76" ao lado de um total
+        // de 76 não informa nada e só enche a linha.
+        const quebra = regs.length > 1
+          ? `<div style="font-size:10px;color:var(--muted);font-family:monospace">${regs.map(r => `${r} ${fmtQtd(it.porRegiao[r])}`).join(' · ')}</div>`
+          : '';
+        return `<div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:5px 0;border-bottom:1px solid rgba(0,0,0,.04)">
+          <span style="flex:1;min-width:0;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${it.produto}</span>
+          <div style="text-align:right;flex-shrink:0">
+            <div style="font-weight:800;color:#1A1D23;font-family:monospace">${fmtQtd(it.total)} ${it.und}</div>
+            ${quebra}
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`;
+  }
+  const regioesTxt = cache && !cache.erro && cache.regioes && cache.regioes.length
+    ? ' · ' + cache.regioes.join(' + ') : '';
+  return `<div style="background:var(--card2);border:1px solid var(--border);border-left:3px solid var(--primary);border-radius:var(--r);padding:12px 14px;margin-bottom:10px">
+    <div style="font-size:12px;font-weight:700;margin-bottom:3px">📦 Total da Rede · Oseas${regioesTxt}</div>
+    <div style="font-size:10px;color:var(--muted);margin-bottom:2px">Tudo que as lojas pediram de petisco nesta semana, somado — as duas regiões juntas, que é o total que vai pro fornecedor. Maglia, Mandacaru e Loja Teste ficam de fora; pedido cancelado não conta.</div>
+    ${corpo}
+  </div>`;
+}
+
 function _totalCompradorSemanaCardHtml() {
   if (!S.eduAtivo && !S.oseasAtivo) return '';
   if (!S.pedidoAtual) return '';
+  if (S.oseasAtivo) return _totalRedeOseasCardHtml();
   const fornecedores = S.eduAtivo ? EDU_FORNECEDORES : OSEAS_FORNECEDORES;
   const pedidoId = S.pedidoAtual.id;
   const cache = S.totalCompradorCache[pedidoId];
