@@ -1107,6 +1107,13 @@ select option { background: var(--graf2); color: var(--txt); }
     </div>
     <div class="section-title">Notas sem 10%</div>
     <div id="listaDez"></div>
+    <!-- Dia sem nota sem 10%: mesmo desenho do "dia sem cancelamento". Existe porque a
+         linha em branco dizia duas coisas diferentes e o Painel não tinha como separar —
+         loja que não teve mesa sem 10% e loja que teve e não lançou apareciam iguais.
+         Medido antes de montar: em 30 dias, Caxias e Boulevard fecharam 30 caixas cada
+         e não lançaram UMA nota. Ou houve nota e ela está lançada, ou alguém assina que
+         não houve; sem um dos dois, o caixa não fecha. -->
+    <div id="semNota10Box"></div>
   </div>
 
   <div class="pane hidden" id="pane-fechar">
@@ -2115,6 +2122,7 @@ function renderTudo() {
     `<div class="linha-item"><div class="desc">Mesa ${n.mesa || '—'}<small>${n.garcom || ''}</small></div>
     <div class="val">${money(n.valor)}${_pend(n)}</div><button class="del" onclick="excluir('gn_caixa_gorjeta','${n.id}','notas10')">✕</button></div>`).join('')
     : '<div class="vazio">Sem notas.</div>';
+  renderSemNota10();
 
   // Cancelamentos: só existe pras lojas que usam (ver GN_CANCELAMENTO_FORA). A seção
   // inteira some pra quem não usa, em vez de ficar um campo morto na tela de fechamento.
@@ -2485,7 +2493,8 @@ function renderPreFechamento() {
     const temCancel = !cancelamentoPendente() && cancelSemFoto === 0;
     const transfSemFoto = transferenciasSemFoto().length;
     const temTransf = !transferenciaPendente() && transfSemFoto === 0;
-    const allOk = temValor && temRepique && temSistema && temFotoSistema && temFotos && temBuffet && temJust && temCancel && temTransf && isFechado;
+    const temNota10 = !nota10Pendente();
+    const allOk = temValor && temRepique && temSistema && temFotoSistema && temFotos && temBuffet && temJust && temCancel && temTransf && temNota10 && isFechado;
     const semFotoCount = S.saidas.filter(s => !s.foto || s.foto.trim() === '').length;
     preChk.innerHTML = `<div style="background:var(--graf3);border:1px solid ${allOk?'var(--ok)':'var(--linha)'};border-radius:8px;padding:10px 14px;margin-bottom:12px">
       <div style="font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Pré-fechamento</div>
@@ -2503,6 +2512,9 @@ function renderPreFechamento() {
           transfSemFoto > 0 ? `Transferências de mesa: ${transfSemFoto} sem foto da comanda`
           : S.transf.length > 0 ? `Transferências de mesa lançadas (${S.transf.length})`
           : 'Transferências de mesa do dia respondidas') : ''}
+      ${nota10Exigido() ? ck(temNota10,
+          S.notas10.length > 0 ? `Notas sem 10% lançadas (${S.notas10.length})`
+          : 'Notas sem 10% do dia respondidas') : ''}
       ${S.saidas.some(x => _exigeJustificativa(x.categoria))
         ? ck(temJust, semJustCount > 0 ? `Justificativa do extra (${semJustCount} sem)` : 'Justificativa do extra')
         : ''}
@@ -2763,6 +2775,11 @@ async function fecharCaixa() {
   const transfSemFoto = transferenciasSemFoto();
   if (transfSemFoto.length)
     erros.push(`• Transferências de mesa: ${transfSemFoto.length === 1 ? 'falta a foto da comanda de 1 transferência' : `faltam as fotos de ${transfSemFoto.length} transferências`} (toque no 📷 ao lado de cada uma)`);
+  // Mesma regra das duas de cima, na aba Sem 10%: ou a nota está lançada, ou alguém assina
+  // que não houve. Sem isso, "loja não lançou nada" e "loja não teve nada" eram a mesma
+  // linha em branco — e o Painel não tinha como cobrar nenhuma das duas.
+  if (nota10Pendente())
+    erros.push('• Notas sem 10%: lance as notas do dia ou confirme "dia sem nota sem 10%" com o responsável (aba Sem 10%)');
   // Buffet/rodízio: feijoada trava em toda loja que usa buffet (nos dias em que é
   // servida), rodízio só nas lojas de GN_BUFFET_OBRIGATORIO. Zero é resposta válida
   // (não vendeu nenhum) — o que trava é o campo em branco, igual ao repique.
@@ -3186,8 +3203,12 @@ const GUIA_SECOES = [
   },
   { id:'dez', num:'05', titulo:'Sem 10%', roles:['operador'],
     resumo:'Registro de mesas/contas em que o cliente não pagou os 10% de taxa de serviço.',
-    corpo: _guiaSteps(['Preencha mesa, garçom e valor da conta.'])
+    corpo: _guiaSteps([
+        'Preencha mesa, garçom e valor da conta.',
+        'Se nenhuma mesa saiu sem os 10%, assine "dia sem nota sem 10%" com usuário e senha no fim da aba.',
+      ])
       + _guiaCallout('info','ℹ️','O total calculado aqui (10% do que não foi cobrado) é só referência — o valor que efetivamente entra no fechamento é digitado manualmente no campo Repique, na aba Fechar.')
+      + _guiaCallout('warn','⚠️','O caixa não fecha sem resposta: ou há nota lançada, ou alguém assina que não houve. Em branco, o Painel não consegue distinguir a loja que não teve mesa sem 10% da que teve e não lançou.')
   },
   { id:'fechar', num:'06', titulo:'Fechar', roles:['operador','gestao'],
     resumo:'A aba mais importante — onde o turno é conferido e encerrado.',
@@ -3335,6 +3356,16 @@ function _txtTransferencias() {
   return `\n━━━━━━━━━━━━━\nTRANSFERÊNCIAS DE MESA (${S.transf.length})\n${linhas}`;
 }
 
+// Mesma razão dos dois blocos de cima, no bloco de notas sem 10%: sem isto, quem confere
+// lê "Valor das notas: R$ 0,00" e não sabe se a loja não teve mesa sem 10% ou se não
+// lançou. O número zero não diz qual dos dois foi; a declaração diz.
+function _txtNota10Decl() {
+  if (!nota10Exigido() || S.notas10.length) return '';
+  return semNota10Declarado()
+    ? `\nDia sem nota sem 10% (declarado por ${S.fech.sem_nota10_por})`
+    : '\nNenhuma lançada — e sem declaração de "dia sem nota sem 10%"';
+}
+
 function _buildTextoCaixa(fromDb) {
   // fromDb=true lê o valor encontrado direto de S.fech.total_real (persistido no fechar)
   // em vez do input #valorEncontrado — usado pra reimprimir um fechamento do histórico,
@@ -3345,7 +3376,7 @@ function _buildTextoCaixa(fromDb) {
   const difTxt = Math.abs(dif) < 0.01 ? 'Conferido ✓' : (dif > 0 ? `Sobra ${money(Math.abs(dif))}` : `Falta ${money(Math.abs(dif))}`);
   const cart = ENTRADAS.filter(b => !NAO_CARTAO.includes(b.k) && totEntradaK(b.k) > 0)
     .map(b => `  ${b.k}: ${money(totEntradaK(b.k))}`).join('\n');
-  return `GN CAIXA — ${S.loja}\n${S.fech.data.split('-').reverse().join('/')} · ${S.turnoSel}\n━━━━━━━━━━━━━\nRESUMO\nEntradas: ${money(totEntradas())}\niFood: ${money(ifoodVal())}  Online: ${money(onlineVal())}\nDelivery: ${money(deliveryVal())}\nRepique: ${money(repiqueVal())}\nVenda Salão: ${money(vendaSalao())}\nSaídas: ${money(totSaidas())}\nTOTAL GERAL: ${money(totalGeral())}\nVALOR LÍQUIDO: ${money(totLiquido())}\nTotal real: ${money(real)}\n➡ ${difTxt}\n━━━━━━━━━━━━━\nCARTÕES\n${cart || '  —'}\nTotal cartões: ${money(totCartoes())}\n━━━━━━━━━━━━━\nFundo: ${money(fundo())} (notas ${money(suprNotas())} / dinh ${money(suprDinheiro())})\n━━━━━━━━━━━━━\nNOTAS SEM 10%\nValor das notas: ${money(notasTotal())}\n10% não cobrado: ${money(repique())}\n━━━━━━━━━━━━━\n${_txtCancelamentos()}${_txtTransferencias()}`;
+  return `GN CAIXA — ${S.loja}\n${S.fech.data.split('-').reverse().join('/')} · ${S.turnoSel}\n━━━━━━━━━━━━━\nRESUMO\nEntradas: ${money(totEntradas())}\niFood: ${money(ifoodVal())}  Online: ${money(onlineVal())}\nDelivery: ${money(deliveryVal())}\nRepique: ${money(repiqueVal())}\nVenda Salão: ${money(vendaSalao())}\nSaídas: ${money(totSaidas())}\nTOTAL GERAL: ${money(totalGeral())}\nVALOR LÍQUIDO: ${money(totLiquido())}\nTotal real: ${money(real)}\n➡ ${difTxt}\n━━━━━━━━━━━━━\nCARTÕES\n${cart || '  —'}\nTotal cartões: ${money(totCartoes())}\n━━━━━━━━━━━━━\nFundo: ${money(fundo())} (notas ${money(suprNotas())} / dinh ${money(suprDinheiro())})\n━━━━━━━━━━━━━\nNOTAS SEM 10%\nValor das notas: ${money(notasTotal())}\n10% não cobrado: ${money(repique())}${_txtNota10Decl()}\n━━━━━━━━━━━━━\n${_txtCancelamentos()}${_txtTransferencias()}`;
 }
 function enviarWhats() {
   if (S.fech && S.fech.status !== 'FECHADO') {
@@ -3357,7 +3388,7 @@ function enviarWhats() {
   const difTxt = Math.abs(dif) < 0.01 ? 'Conferido ✓' : (dif > 0 ? `Sobra ${money(Math.abs(dif))}` : `Falta ${money(Math.abs(dif))}`);
   const cart = ENTRADAS.filter(b => !NAO_CARTAO.includes(b.k) && totEntradaK(b.k) > 0)
     .map(b => `  ${b.k}: ${money(totEntradaK(b.k))}`).join('\n');
-  const t = `*GN CAIXA — ${S.loja}*\n${S.fech.data.split('-').reverse().join('/')} · ${S.turnoSel}\n━━━━━━━━━━━━━\n*RESUMO*\nEntradas: ${money(totEntradas())}\niFood: ${money(ifoodVal())}  Online: ${money(onlineVal())}\nDelivery: ${money(deliveryVal())}\nRepique: ${money(repiqueVal())}\nVenda Salão: ${money(vendaSalao())}\nSaídas: ${money(totSaidas())}\n*TOTAL GERAL: ${money(totalGeral())}*\n*VALOR LÍQUIDO: ${money(totLiquido())}*\nTotal real: ${money(real)}\n➡ ${difTxt}\n━━━━━━━━━━━━━\n*CARTÕES*\n${cart || '  —'}\nTotal cartões: ${money(totCartoes())}\n━━━━━━━━━━━━━\nFundo: ${money(fundo())} (notas ${money(suprNotas())} / dinh ${money(suprDinheiro())})\n━━━━━━━━━━━━━\n*NOTAS SEM 10%*\nValor das notas: ${money(notasTotal())}\n10% não cobrado: ${money(repique())}\n━━━━━━━━━━━━━\n*${_txtCancelamentos()}*${_txtTransferencias()}`;
+  const t = `*GN CAIXA — ${S.loja}*\n${S.fech.data.split('-').reverse().join('/')} · ${S.turnoSel}\n━━━━━━━━━━━━━\n*RESUMO*\nEntradas: ${money(totEntradas())}\niFood: ${money(ifoodVal())}  Online: ${money(onlineVal())}\nDelivery: ${money(deliveryVal())}\nRepique: ${money(repiqueVal())}\nVenda Salão: ${money(vendaSalao())}\nSaídas: ${money(totSaidas())}\n*TOTAL GERAL: ${money(totalGeral())}*\n*VALOR LÍQUIDO: ${money(totLiquido())}*\nTotal real: ${money(real)}\n➡ ${difTxt}\n━━━━━━━━━━━━━\n*CARTÕES*\n${cart || '  —'}\nTotal cartões: ${money(totCartoes())}\n━━━━━━━━━━━━━\nFundo: ${money(fundo())} (notas ${money(suprNotas())} / dinh ${money(suprDinheiro())})\n━━━━━━━━━━━━━\n*NOTAS SEM 10%*\nValor das notas: ${money(notasTotal())}\n10% não cobrado: ${money(repique())}${_txtNota10Decl()}\n━━━━━━━━━━━━━\n*${_txtCancelamentos()}*${_txtTransferencias()}`;
   window.open('https://wa.me/?text=' + encodeURIComponent(t), '_blank');
 }
 function gerarPDF(texto, titulo) {
@@ -4402,13 +4433,107 @@ async function addNota10() {
   $('dezVal').value = ''; $('dezMesa').value = ''; $('dezGarcom').value = '';
   try {
     const row = await sb('gn_caixa_gorjeta', { method: 'POST', prefer: 'return=representation', body });
-    S.notas10.push(row[0]); renderTudo(); toast('Nota add');
+    S.notas10.push(row[0]);
+    // "Dia sem nota sem 10%" e uma nota lançada não podem coexistir — igual ao cancelamento.
+    if (semNota10Declarado()) await desfazerSemNota10();
+    renderTudo(); toast('Nota add');
   } catch(e) {
     const tempId = uuid();
     S.notas10.push({id:tempId,_pendente:true,fechamento_id:S.fech.id,mesa:body.mesa,garcom:body.garcom,valor:v});
     _pfEnqueue({tempId,tabela:'gn_caixa_gorjeta',method:'POST',body});
+    // Mesmo offline a contradição não pode ficar na tela: a nota já está lançada aqui.
+    if (semNota10Declarado()) await desfazerSemNota10();
     renderTudo(); toast('⚠️ Offline — salvo localmente');
   }
+}
+
+// ── DIA SEM NOTA SEM 10% ──────────────────────────────────────────────────────
+// Mesmo desenho do "dia sem cancelamento", e pela mesma razão: silêncio não é resposta.
+// A diferença que isto resolve está no Painel — "loja não lançou nenhuma nota" era a
+// mesma linha em branco pra quem não teve mesa sem 10% e pra quem teve e não lançou.
+// Com a assinatura, a primeira passa a ter nome e hora; a segunda continua em branco, e
+// aí a cobrança tem endereço.
+// Loja que não usa a regra (ver GN_SEM10_FORA) não é cobrada por ela no fechamento.
+function nota10Exigido() {
+  return window.gnSem10Liberado ? window.gnSem10Liberado(S.loja) : true;
+}
+function semNota10Declarado() { return !!(S.fech && S.fech.sem_nota10_por); }
+// A pendência que trava o fechamento: nenhuma nota lançada E ninguém assinou que não
+// houve. Com nota lançada, o próprio lançamento já responde.
+function nota10Pendente() {
+  return nota10Exigido() && S.notas10.length === 0 && !semNota10Declarado();
+}
+
+function renderSemNota10() {
+  const box = $('semNota10Box');
+  if (!box) return;
+  if (!nota10Exigido()) { box.innerHTML = ''; return; }
+  // Com nota lançada não há o que declarar — e deixar o botão na tela só convidaria a
+  // gravar uma contradição.
+  if (S.notas10.length > 0) { box.innerHTML = ''; return; }
+  if (semNota10Declarado()) {
+    const quando = S.fech.sem_nota10_em
+      ? new Date(S.fech.sem_nota10_em).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+      : '';
+    box.innerHTML = `<div style="background:rgba(22,163,74,.12);border:1px solid var(--ok);border-radius:8px;padding:10px 13px;margin-top:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <div style="flex:1;min-width:0;font-size:12px;color:var(--txt)">
+        <b>✓ Dia sem nota sem 10%</b><br>
+        <span style="color:var(--mut);font-size:11px">Declarado por ${escHtmlCx(S.fech.sem_nota10_por)}${quando ? ' · ' + quando : ''}</span>
+      </div>
+      ${S.modoConsulta || S.fech.status === 'FECHADO' ? '' : `<button class="del" onclick="desfazerSemNota10()" title="Desfazer">✕</button>`}
+    </div>`;
+    return;
+  }
+  if (S.modoConsulta) { box.innerHTML = ''; return; }
+  box.innerHTML = `<div style="background:rgba(234,179,8,.1);border:1px solid var(--ouro);border-radius:8px;padding:10px 13px;margin-top:8px">
+    <div style="font-size:12px;color:var(--txt);margin-bottom:8px">
+      Nenhuma mesa saiu sem os 10% hoje? Então alguém precisa assinar isso — o caixa não fecha sem resposta.
+    </div>
+    <div class="form-row" style="margin-bottom:0">
+      <div class="form-group">
+        <label>Responsável</label>
+        <input id="semNota10Resp" type="text" placeholder="Usuário" autocomplete="off" autocapitalize="off" value="${escHtmlCx((S.user && S.user.nome) || '')}">
+      </div>
+      <div class="form-group">
+        <label>Senha</label>
+        <input id="semNota10Senha" type="password" placeholder="Senha" autocomplete="off">
+      </div>
+      <button class="btn-add" style="background:var(--ouro)" onclick="declararSemNota10()" title="Confirmar dia sem nota sem 10%">✓</button>
+    </div>
+    <div class="err-txt" id="semNota10Msg"></div>
+  </div>`;
+}
+
+async function declararSemNota10() {
+  const resp = ($('semNota10Resp')?.value || '').trim();
+  const senha = $('semNota10Senha')?.value || '';
+  if (S.notas10.length > 0) { $('semNota10Msg').textContent = 'Já existe nota sem 10% lançada neste dia.'; return; }
+  const { u, erro } = await _verificarAssinatura(resp, senha, 'gn-caixa:sem-nota10');
+  if (erro) { $('semNota10Msg').textContent = erro; return; }
+  // Nome verificado, não digitado — é o que faz a declaração valer alguma coisa.
+  const body = { sem_nota10_por: u.nome, sem_nota10_em: new Date().toISOString() };
+  try {
+    await sb(`gn_caixa_fechamento?id=eq.${S.fech.id}`, { method: 'PATCH', prefer: 'return=minimal', body });
+    Object.assign(S.fech, body);
+    renderTudo(); renderPreFechamento(); toast('Dia sem nota sem 10% assinado por ' + u.nome);
+  } catch (e) {
+    // Sem fila offline, mesma razão do "dia sem cancelamento": a declaração é a resposta
+    // que destrava o fechamento, e destravar em cima de algo que não gravou é o pior dos
+    // dois mundos.
+    if (window.gnLogError) window.gnLogError('caixa:declararSemNota10', e);
+    $('semNota10Msg').textContent = 'Não consegui registrar — tente de novo.';
+  }
+}
+
+async function desfazerSemNota10() {
+  const body = { sem_nota10_por: null, sem_nota10_em: null };
+  try {
+    await sb(`gn_caixa_fechamento?id=eq.${S.fech.id}`, { method: 'PATCH', prefer: 'return=minimal', body });
+  } catch (e) {
+    _pfEnqueue({ tempId: uuid(), realId: S.fech.id, tabela: 'gn_caixa_fechamento', method: 'PATCH', body });
+  }
+  Object.assign(S.fech, body);
+  renderTudo(); renderPreFechamento();
 }
 
 async function mostrarHome() {

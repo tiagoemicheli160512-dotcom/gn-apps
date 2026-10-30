@@ -529,6 +529,11 @@ window.GN_CANCELAMENTO_FORA = ['MAGLIA'];
 // fora pelo mesmo motivo de lá — e porque a regra foi pedida pras lojas da rede, sem citar
 // ela (ver CLAUDE.md).
 window.GN_TRANSFERENCIA_FORA = ['MAGLIA'];
+// Declaração de "dia sem nota sem 10%" no fechamento de caixa: mesma faixa de lojas das
+// duas de cima. A Maglia fica de fora pelo mesmo motivo — o pedido foi pelas lojas da
+// rede, sem citar ela (ver CLAUDE.md) — e, na prática, ela não fecha caixa neste app:
+// zero fechamentos na base.
+window.GN_SEM10_FORA = ['MAGLIA'];
 // Uma comparação só pras duas listas (e pras próximas): a chave da loja chega com caixa e
 // espaços variando conforme o app, e cada cópia dessa comparação é uma chance de divergir.
 window.gnLojaForaDe = function (lista, loja) {
@@ -544,6 +549,9 @@ window.gnCancelamentoLiberado = function (loja) {
 };
 window.gnTransferenciaLiberada = function (loja) {
   return !window.gnLojaForaDe(window.GN_TRANSFERENCIA_FORA, loja);
+};
+window.gnSem10Liberado = function (loja) {
+  return !window.gnLojaForaDe(window.GN_SEM10_FORA, loja);
 };
 // A lista de status que a tela oferece, já sem o que não vale pra aquela loja.
 window.gnStatusDaLoja = function (lista, loja) {

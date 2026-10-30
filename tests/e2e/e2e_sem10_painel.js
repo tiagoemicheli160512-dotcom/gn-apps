@@ -12,8 +12,10 @@
 //  · Maglia NÃO USA o app Caixa — zero fechamentos. Fica fora, e isso não esconde lacuna.
 //  · Caxias fechou 95 caixas e nunca lançou UMA nota; Boulevard parou de lançar em 27/07;
 //    Nova Iguaçu lançou 4 notas num único dia. Por isso "sem nota" aqui não é uma coisa
-//    só — e, diferente do cancelamento, o app NÃO tem assinatura de "não houve", então a
-//    tela não pode dizer que não teve: só pode dizer que fechou caixa e não lançou.
+//    só. Era a lacuna da primeira versão: sem assinatura de "não houve", a tela só podia
+//    dizer que a loja fechou caixa e não lançou. Com a assinatura (sem_nota10_por no
+//    fechamento, pedido do dono), "não teve" passa a ter nome e data, e o que fica em
+//    branco é cobrança de verdade — os quatro estados são os mesmos do cancelamento.
 //  · 1 nota de R$ 20.396 (Bangu 12/09, mesa 57) num dia cuja venda inteira foi R$ 22.906
 //    — 89% do dia numa mesa só, contra média de R$ 206 e percentil 99 de R$ 684.
 //  · 62 fechamentos sem total_sistema: nesses não há com o que comparar.
@@ -44,10 +46,21 @@ const LINHAS = [
   fech('BANGU', '2026-10-21', 22906.23, [['57', 'Raphael', 20396], ['50', 'Raphael', 352.89]]),
   // Pedreira: dia SEM total do sistema lançado — não dá pra comparar.
   fech('PEDREIRA', '2026-10-22', null, [['3', 'Caio', 500]]),
-  // Caxias: fechou caixa e não lançou nenhuma nota. É o caso real dela na base.
+  // Caxias: fechou caixa e não lançou nenhuma nota, e NINGUÉM assinou que não houve. É o
+  // caso real dela na base, e o estado que a tela precisa cobrar: 'sem_info'.
   fech('CAXIAS', '2026-10-20', 9000, []),
   fech('CAXIAS', '2026-10-21', 9500, []),
-  // Maglia não entra: não usa o app Caixa. Se entrasse, cairia em "não lançou".
+  // Guarulhos: não lançou nota, mas os DOIS caixas foram assinados. É o "não teve mesmo",
+  // com nome e hora — o que antes era indistinguível de Caxias.
+  fech('GUARULHOS', '2026-10-20', 7000, [], { sem_nota10_por: 'Cassia', sem_nota10_em: '2026-10-20T23:10:00Z' }),
+  fech('GUARULHOS', '2026-10-21', 7200, [], { sem_nota10_por: 'Augusto', sem_nota10_em: '2026-10-21T23:30:00Z' }),
+  // Boulevard: metade respondida. Um caixa assinado, o outro fechado em silêncio — e é a
+  // DATA do que ficou sem resposta que faz a cobrança ter endereço.
+  fech('BOULEVARD', '2026-10-20', 6000, [], { sem_nota10_por: 'Marcos', sem_nota10_em: '2026-10-20T23:00:00Z' }),
+  fech('BOULEVARD', '2026-10-22', 6100, []),
+  // Caixa ainda ABERTO não conta: a resposta dele só existe quando fecha.
+  fech('CAMPO GRANDE', '2026-10-22', 5000, [], { status: 'ABERTO' }),
+  // Maglia não entra: não usa o app Caixa. Se entrasse, cairia em "sem resposta".
   fech('MAGLIA', '2026-10-20', 5000, []),
 ];
 
@@ -74,6 +87,7 @@ const LINHAS = [
     _dashPer = 'sem'; _dashWoff = 0;
     _dashSem10Per = _raioxMapearSem10(LINHAS);
     _dashSem10CaixasPer = _raioxMapearCaixasSem10(LINHAS);
+    _dashDeclSem10Per = _raioxMapearDecl(LINHAS, 'sem_nota10_por', 'sem_nota10_em');
     const d = _sem10MacroDados();
     const html = _buildSem10Panel();
     const el = document.createElement('div'); el.innerHTML = html;
@@ -81,7 +95,9 @@ const LINHAS = [
       dados: { valor: d.valor, dez: d.dez, qtd: d.qtd, suspeitas: d.suspeitas,
                semTotalDia: d.semTotalDia, nLojas: d.nLojas,
                lojas: d.lojas.map(l => ({ k: l.k, valor: l.valor, dez: l.dez, n: l.itens.length, susp: l.suspeitas })),
-               semNota: d.semNota.map(l => ({ k: l.k, estado: l.estado, caixas: l.caixas })) } };
+               semNota: d.semNota.map(l => ({ k: l.k, estado: l.estado, caixas: l.caixas,
+                 declarados: l.declarados, abertos: l.abertos, responsaveis: l.responsaveis,
+                 datasOk: l.datasOk, datasFalta: l.datasFalta })) } };
   }, { LINHAS });
 
   const r = await montar();
@@ -117,19 +133,48 @@ const LINHAS = [
   check('nem é cobrada por não ter lançado',
     !d.semNota.some(l => l.k === 'MAGLIA') && !/Maglia/.test(r.txt), JSON.stringify(d.semNota));
 
-  // ══ 4. "SEM NOTA" NÃO É UMA COISA SÓ ════════════════════════════════════════════
-  // Diferente do cancelamento, aqui NÃO existe assinatura de "não houve" — então a tela
-  // não pode dizer que a loja não teve nota, só que fechou caixa e não lançou.
-  const cax = d.semNota.find(l => l.k === 'CAXIAS');
-  check('quem fechou caixa e não lançou fica separado',
-    cax && cax.estado === 'nao_lancou' && cax.caixas === 2, JSON.stringify(cax));
+  // ══ 4. "SEM NOTA" NÃO É UMA COISA SÓ — AGORA COM NOME E DATA ════════════════════
+  // É o coração da mudança: a assinatura de "não houve" separa a loja que não teve mesa
+  // sem 10% da que teve e não lançou. Antes as duas eram a mesma linha em branco.
+  const est = k => d.semNota.find(l => l.k === k);
+  const cax = est('CAXIAS'), gua = est('GUARULHOS'), bou = est('BOULEVARD');
+
+  check('quem fechou caixa e NINGUÉM assinou fica como sem resposta',
+    cax && cax.estado === 'sem_info' && cax.caixas === 2, JSON.stringify(cax));
+  check('quem não lançou mas assinou TODOS os caixas aparece como declarado',
+    gua && gua.estado === 'declarado' && gua.declarados === 2, JSON.stringify(gua));
+  check('e os dois NÃO caem no mesmo estado — era a lacuna que isto fecha',
+    cax && gua && cax.estado !== gua.estado, JSON.stringify([cax && cax.estado, gua && gua.estado]));
+  check('quem assinou só parte dos caixas fica como parcial',
+    bou && bou.estado === 'parcial' && bou.declarados === 1 && bou.caixas === 2, JSON.stringify(bou));
   const semCaixa = d.semNota.filter(l => l.estado === 'sem_caixa');
   check('e quem não fechou caixa no período também, com outro motivo',
     semCaixa.length > 0 && semCaixa.every(l => l.caixas === 0), JSON.stringify(semCaixa.slice(0, 3)));
-  check('a tela diz que não dá pra saber se não teve ou se não lançou',
-    /não esteja sendo lançado/.test(r.txt) && /assinatura/.test(r.txt), r.txt.slice(-500));
-  check('e que sem caixa fechado não há o que lançar',
-    /Não há o que lançar/.test(r.txt), r.txt.slice(-300));
+
+  // O nome de quem assinou, na tela — não só a contagem. "2 caixas confirmados" não dá
+  // pra cobrar nem pra agradecer; "confirmado por Cassia, Augusto" dá.
+  check('a tela mostra QUEM assinou',
+    /Cassia/.test(r.txt) && /Augusto/.test(r.txt), r.txt.slice(-700));
+  // E a DATA do que ficou sem resposta: é o que transforma "falta responder" em cobrança.
+  check('e a DATA de cada caixa que ficou sem resposta',
+    /Sem resposta em 22\/10/.test(r.txt), (r.txt.match(/Sem resposta em [^·]{0,40}/) || [''])[0]);
+  // A data colada na FRASE de Caxias, não solta em qualquer canto do painel: 20/10 e
+  // 21/10 também são os dias das notas de outras lojas, e procurar os números soltos
+  // dava verde com a frase sem data nenhuma.
+  check('Caxias aparece com as duas datas que ficaram em silêncio',
+    /sem ninguém confirmar que não houve nota sem 10%\.?\s*Sem resposta em 20\/10 e 21\/10/.test(r.txt),
+    (r.txt.match(/Caxias[\s\S]{0,160}/) || [''])[0]);
+  check('a tela diz o que falta: ninguém confirmou que não houve nota sem 10%',
+    /sem ninguém confirmar que não houve nota sem 10%/.test(r.txt), r.txt.slice(-700));
+  check('e que sem caixa fechado não há o que responder',
+    /Nenhum caixa fechado no período/.test(r.txt), r.txt.slice(-400));
+  // Caixa ABERTO não é silêncio: ele ainda vai ser respondido quando fechar.
+  check('caixa ainda aberto não é cobrado, e a tela explica por quê',
+    d.semNota.some(l => l.abertos > 0) && /Caixa ainda aberto não entra nesta conta/.test(r.txt),
+    JSON.stringify(d.semNota.filter(l => l.abertos)));
+  const cg = est('CAMPO GRANDE');
+  check('e a loja com só um caixa aberto não vira "fechou sem responder"',
+    cg && cg.estado === 'sem_caixa', JSON.stringify(cg));
 
   // ══ 5. A CONFERÊNCIA — E A TELA NÃO ESCOLHE O CULPADO ═══════════════════════════
   check('a nota que passa de metade da venda do dia é marcada',
@@ -169,8 +214,13 @@ const LINHAS = [
     /10% não cobrado:/.test(rel) && /Valor das notas:/.test(rel), rel.slice(0, 200));
   check('e marca a nota que pede conferência',
     /confira a nota e o total do dia/.test(rel), rel.slice(0, 600));
-  check('e nomeia quem fechou caixa sem lançar',
-    /Fechou caixa e não lançou nenhuma: [^\n]*Caxias/.test(rel), rel.slice(-300));
+  check('e separa, no relatório, quem assinou de quem ficou em silêncio',
+    /confirmado por Cassia, Augusto/.test(rel) &&
+    /Fechou sem ninguém confirmar:/.test(rel) && /Caxias/.test(rel), rel.slice(-700));
+  check('com a data do que ficou sem resposta, não só a contagem',
+    /Caxias — 2 caixas: 20\/10 e 21\/10/.test(rel), rel.slice(-700));
+  check('e o parcial sai com os dois lados: o que foi e o que falta',
+    /Boulevard — confirmado em 20\/10[^\n]*1 de 2 caixas[^\n]*sem resposta em 22\/10/.test(rel), rel.slice(-700));
 
   // ══ 8. A CONSULTA DO PAINEL PRECISA TRAZER O DADO ══════════════════════════════
   // A suíte monta as linhas à mão pra testar o cálculo. Se alguém tirar as notas do
@@ -185,6 +235,10 @@ const LINHAS = [
     /gn_caixa_gorjeta\(/.test(qFech), qFech.slice(0, 300));
   check('e o total do dia, que é com o que a nota se compara',
     /\btotal_sistema\b/.test(qFech), qFech.slice(0, 300));
+  // A assinatura vem da MESMA linha. Se cair do select, todo mundo volta pra 'sem_info' e
+  // a tela acusa de silêncio quem respondeu — pior que não mostrar nada.
+  check('e a assinatura de "dia sem nota sem 10%", que separa quem respondeu de quem não',
+    /\bsem_nota10_por\b/.test(qFech) && /\bsem_nota10_em\b/.test(qFech), qFech.slice(0, 400));
 
   const reais = erros.filter(e => !/createClient|Failed to fetch|supabase|NetworkError|net::/i.test(e));
   check('nenhum erro de JS', reais.length === 0, reais.slice(0, 3).join(' | '));
