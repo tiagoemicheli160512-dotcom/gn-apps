@@ -38,14 +38,18 @@ const PRODUTOS = [
   await page.goto('file://' + ARQ);
   await page.waitForFunction(() => { try {
     return typeof removerItemPedido === 'function' && typeof restaurarItemPedido === 'function'
-        && typeof _pedidoItensEscondidos === 'function' && Array.isArray(PRODUTOS_PEDIDO);
+        && typeof _pedidoItensEscondidos === 'function' && typeof _pedidoEscondidosSet === 'function'
+        && typeof _mesclarListasPedido === 'function' && typeof _carregarNomesEscondidos === 'function'
+        && Array.isArray(PRODUTOS_PEDIDO);
   } catch (e) { return false; } }, null, { timeout: 25000 });
 
-  const montar = async (removidos) => page.evaluate(({ PRODUTOS, removidos }) => {
+  const montar = async (removidos, restaurados) => page.evaluate(({ PRODUTOS, removidos, restaurados }) => {
     PRODUTOS_PEDIDO.length = 0; PRODUTOS_PEDIDO.push(...PRODUTOS);
     pedidoCustom = [];
     pedidoRemovidos = removidos.slice();
-  }, { PRODUTOS, removidos });
+    pedidoRestaurados = (restaurados || []).slice();
+    _nomesEscondidos = {};
+  }, { PRODUTOS, removidos, restaurados });
 
   // ══ 1. O FILTRO QUE FAZIA O ITEM SUMIR ══════════════════════════════════════════
   await montar([]);
@@ -76,15 +80,17 @@ const PRODUTOS = [
   check('com o nome, não só o número — número não diz nada pra quem está na loja',
     escondidos[0] && escondidos[0].produto === 'Stella 550 ml Cx c/ 24 unds', JSON.stringify(escondidos[0]));
   check('e marcado como ainda existente no catálogo',
-    escondidos[0] && escondidos[0].noCatalogo === true, JSON.stringify(escondidos[0]));
+    escondidos[0] && escondidos[0].naLista === true, JSON.stringify(escondidos[0]));
 
   // Item escondido que não está mais no catálogo da região: a tela não pode prometer que
   // ele volta, porque restaurar não o traz de volta pra lista.
   await montar(['9', 'C999']);
   const comSumido = await page.evaluate(() => _pedidoItensEscondidos());
   const fora = comSumido.find(e => e.id === 'C999');
-  check('item escondido que saiu do catálogo é marcado como tal, em vez de sumir',
-    !!fora && fora.noCatalogo === false && fora.produto === null, JSON.stringify(comSumido));
+  check('item escondido sem cadastro é marcado como tal, em vez de sumir',
+    !!fora && fora.naLista === false && fora.produto === null, JSON.stringify(comSumido));
+  check('e a tela avisa que trazer de volta não o faz aparecer na lista',
+    !!fora && /não está mais no catálogo/.test(fora.motivo || ''), JSON.stringify(fora));
 
   // ══ 3. O CAMINHO DE VOLTA, QUE NÃO EXISTIA ═════════════════════════════════════
   await montar(['9']);
@@ -115,6 +121,54 @@ const PRODUTOS = [
   await page.evaluate(() => { restaurarItemPedido('10'); });
   check('restaurar um item que não estava escondido não mexe na lista',
     (await page.evaluate(() => pedidoRemovidos.join(','))) === '9');
+
+  // ══ 3b. A VOLTA TEM DE SOBREVIVER À UNIÃO ENTRE AS LOJAS ═══════════════════════
+  // É o defeito que a primeira versão deste conserto NÃO resolvia, e que foi medido ao
+  // vivo: a Stella foi retirada de pedidoRemovidos das 11 lojas direto no banco e
+  // RESSUSCITOU em três delas em minutos — as que estavam com o app aberto reenviaram a
+  // lista antiga, e o merge do sbPull é união pura (só acrescenta). Tirar o id da lista
+  // local, sozinho, é sempre desfeito pela próxima sincronização.
+  // Chama a união DE VERDADE (_mesclarListasPedido, a mesma que o sbPull usa a cada
+  // sincronização). Reescrever a regra aqui faria o teste concordar consigo mesmo e
+  // passar com o app quebrado — e foi assim que a primeira versão desta suíte deixou
+  // viva a mutação que tirava a união dos restaurados.
+  const simularUniao = (outrasLojas) => page.evaluate(outras => {
+    outras.forEach(d => _mesclarListasPedido(d));
+    return { removidos: pedidoRemovidos.slice(), restaurados: pedidoRestaurados.slice(),
+             lista: getProdutosPedidoOrdenados().map(p => String(p.item)) };
+  }, outrasLojas);
+
+  await montar(['9'], []);
+  await page.evaluate(() => { restaurarItemPedido('9'); });
+  // Outra loja ainda com o item escondido — o estado real das 11 lojas no momento do
+  // conserto.
+  const aposUniao = await simularUniao([{ pedidoRemovidos: ['9'] }]);
+  check('a loja vizinha ainda tem o id escondido, e isso continua chegando',
+    aposUniao.removidos.includes('9'), JSON.stringify(aposUniao.removidos));
+  check('mas o item NÃO ressuscita — a volta vence a união',
+    aposUniao.lista.includes('9'), JSON.stringify(aposUniao.lista));
+  check('e a volta fica registrada pra se espalhar pras outras lojas',
+    aposUniao.restaurados.includes('9'), JSON.stringify(aposUniao.restaurados));
+
+  // E o caminho inverso: a volta feita em OUTRA loja chega nesta e vale aqui também.
+  await montar(['9'], []);
+  const recebeuVolta = await simularUniao([{ pedidoRemovidos: ['9'], pedidoRestaurados: ['9'] }]);
+  check('a volta feita em outra loja chega e vale aqui também',
+    recebeuVolta.lista.includes('9'), JSON.stringify(recebeuVolta.lista));
+
+  // Esconder de novo tem que funcionar: senão o item ficaria preso visível pra sempre.
+  await montar(['9'], ['9']);
+  page.once('dialog', async d => { await d.accept(); });
+  await page.evaluate(() => { removerItemPedido('9'); });
+  await page.waitForTimeout(200);
+  const escondeuDeNovo = await page.evaluate(() => ({
+    restaurados: pedidoRestaurados.slice(),
+    lista: getProdutosPedidoOrdenados().map(p => String(p.item)),
+  }));
+  check('esconder de novo tira a marca de volta — senão o item ficava preso visível',
+    !escondeuDeNovo.restaurados.includes('9'), JSON.stringify(escondeuDeNovo.restaurados));
+  check('e o item some da lista outra vez',
+    !escondeuDeNovo.lista.includes('9'), JSON.stringify(escondeuDeNovo.lista));
 
   // ══ 4. O AVISO PRECISA DIZER O ALCANCE ═════════════════════════════════════════
   // A lista é unida entre as lojas no sbPull, então esconder numa esconde em todas. O
@@ -152,6 +206,57 @@ const PRODUTOS = [
   });
   check('a tela tem o nome do item escondido pra mostrar',
     /Stella 550 ml/.test(html), html);
+
+  // ══ 6. A LÁPIDE PRECISA CHEGAR AO SERVIDOR ═════════════════════════════════════
+  // Se ela ficar só na memória do aparelho, a volta morre no próximo carregamento e o
+  // item some de novo — do jeito que ninguém consegue reportar, porque "funcionou e
+  // depois desfez sozinho".
+  await montar(['9'], ['9']);
+  const enviado = await page.evaluate(async () => {
+    const pedidos = [];
+    const origReq = window.sbRequest;
+    window.sbRequest = async (rota, opts) => {
+      if (opts && (opts.method === 'PATCH' || opts.method === 'POST') && opts.body) {
+        try { pedidos.push(JSON.parse(opts.body)); } catch (e) {}
+      }
+      return [];
+    };
+    try { await sbPush(); } catch (e) {}
+    window.sbRequest = origReq;
+    const corpo = pedidos.map(b => JSON.stringify(b)).join(' ');
+    return { achou: /pedidoRestaurados/.test(corpo), n: pedidos.length };
+  });
+  check('o push pro servidor leva a lista de restaurados',
+    enviado.achou === true, JSON.stringify(enviado));
+
+  // ══ 7. O NOME DO ITEM ESCONDIDO ════════════════════════════════════════════════
+  // Foi o que apareceu na tela da Campo Grande: seis linhas sem nome nenhum, todas
+  // dizendo "fora do catálogo desta região", e ninguém sabia o que estava trazendo de
+  // volta. A causa: PRODUTOS_PEDIDO só tem o que está ATIVO, e item desativado não tem
+  // nome ali. O nome tem que vir do catálogo, sem o filtro de ativo.
+  await montar(['97'], []);
+  const semNome = await page.evaluate(() => _pedidoItensEscondidos()[0]);
+  check('item desativado começa sem nome, porque não está em PRODUTOS_PEDIDO',
+    semNome && semNome.produto === null, JSON.stringify(semNome));
+
+  const comNome = await page.evaluate(async () => {
+    const orig = window.sbRequest;
+    window.sbRequest = async (rota) => {
+      if (/gn_catalogo/.test(rota) && /item_id=in/.test(rota)) {
+        return [{ item_id: 97, produto: 'Abobora Moranga', grupo: 'HORTIFRUTI', ativo: false, regiao: 'RJ' }];
+      }
+      return [];
+    };
+    await _carregarNomesEscondidos();
+    window.sbRequest = orig;
+    return _pedidoItensEscondidos()[0];
+  });
+  check('depois da busca no catálogo, o item escondido tem nome',
+    comNome && comNome.produto === 'Abobora Moranga', JSON.stringify(comNome));
+  check('e a tela diz o motivo certo: desativado, não "de outra região"',
+    comNome && /desativado no catálogo/.test(comNome.motivo || ''), JSON.stringify(comNome));
+  check('e avisa que trazer de volta não o faz aparecer na lista',
+    comNome && comNome.naLista === false, JSON.stringify(comNome));
 
   const reais = erros.filter(e => !/createClient|Failed to fetch|supabase|NetworkError|net::/i.test(e));
   check('nenhum erro de JS', reais.length === 0, reais.slice(0, 3).join(' | '));

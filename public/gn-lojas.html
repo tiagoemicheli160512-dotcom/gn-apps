@@ -946,6 +946,14 @@ function _epObsRecebimento(nota) {
 let _entregaItensMap = {}; // id -> itens (para recalc sem JSON no onclick)
 let pedidoCustom = [];  // itens novos criados no app [{item, fornecedor, grupo, subgrupo, produto, und, custo, posIndex}]
 let pedidoRemovidos = []; // IDs (string) de itens removidos da lista
+// Ids trazidos DE VOLTA de propósito. Existe porque pedidoRemovidos é unida entre as
+// lojas no sbPull (união pura, nunca encolhe): tirar um id da lista local não adianta
+// nada — basta uma loja com o app aberto ainda tendo o id pra ele voltar no próximo
+// sync. Medido ao vivo: a Stella (item 9) foi retirada das 11 lojas direto no banco e
+// RESSUSCITOU em três delas em minutos, pelas que estavam com o app aberto.
+// Esta lista é unida do mesmo jeito e VENCE a de removidos, então a volta também se
+// propaga sozinha em vez de ser desfeita. Esconder de novo tira o id daqui.
+let pedidoRestaurados = [];
 let pedidoConfs  = {};  // lojaKey -> [{id,ts,usuario,cargo,itens:[{produto,fornecedor,cx,und,pedidoCx,pedidoUnd}]}]
 // item (PRODUTOS_PEDIDO.item) -> qtd_pedida oficial já sincronizada em gn_pedido_itens
 // (app Estoque e Pedido) pra essa loja, na semana ativa. Uma vez que um item tem valor
@@ -1357,7 +1365,7 @@ async function sbPush() {
       pedidoAll:   _mergeMapaAninhadoPorLoja(filterByLoja(pedidoAll, loja), baseAllData.pedidoAll),
       minAll: { [loja]: { ...((baseAllData.minAll||{})[loja]), ...(minAll[loja] || {}) } },
       fatoresConversao, mapeamentoPedido,
-      pedidoCustom, pedidoRemovidos, pedidoConfs: filterByLoja(pedidoConfs, loja),
+      pedidoCustom, pedidoRemovidos, pedidoRestaurados, pedidoConfs: filterByLoja(pedidoConfs, loja),
       avariasAll: { [loja]: _mergeArrPorId(avariasAll[loja], (baseAllData.avariasAll||{})[loja], _pendingDelIds.avariasAll) },
       devolucoesAll: { [loja]: _mergeArrPorId(devolucoesAll[loja], (baseAllData.devolucoesAll||{})[loja], _pendingDelIds.devolucoesAll) },
       // urgenciaTemplate NÃO entra aqui de propósito — é só espelho do que o app Estoque e
@@ -1416,7 +1424,7 @@ async function sbPushLoja(lojaAlvo) {
     pedidoAll:   _mergeMapaAninhadoPorLoja(filterByLoja(pedidoAll, lojaAlvo), baseAllData.pedidoAll),
     minAll: { [lojaAlvo]: { ...((baseAllData.minAll||{})[lojaAlvo]), ...(minAll[lojaAlvo] || {}) } },
     fatoresConversao, mapeamentoPedido,
-    pedidoCustom, pedidoRemovidos, pedidoConfs: filterByLoja(pedidoConfs, lojaAlvo),
+    pedidoCustom, pedidoRemovidos, pedidoRestaurados, pedidoConfs: filterByLoja(pedidoConfs, lojaAlvo),
     // Necessário pro pagamento de transferência em dinheiro: quando a loja que NÃO é a
     // sessão atual recebe o registro de avaria (pagamento pro Financeiro validar), ele só
     // existe em memória local — sem isso aqui, sbPushLoja nunca levava esse registro pro
@@ -1507,9 +1515,7 @@ async function sbPull(silent) {
         if (d.pedidoCustom)  d.pedidoCustom.forEach(c => {
           if (!pedidoCustom.find(x=>String(x.item)===String(c.item))) pedidoCustom.push(c);
         });
-        if (d.pedidoRemovidos) d.pedidoRemovidos.forEach(r => {
-          if (!pedidoRemovidos.includes(r)) pedidoRemovidos.push(r);
-        });
+        _mesclarListasPedido(d);
         if (d.minAll) Object.keys(d.minAll).forEach(l => {
           minAll[l] = Object.assign({}, minAll[l]||{}, d.minAll[l]);
         });
@@ -3993,17 +3999,102 @@ function avancarSemana() {
 let SAVE_KEY = "gn_estoque_v1"; // ajustado por loja quando o arquivo é travado (ver patch de loja fixa)
 const APP_VERSION = "2026-06-24-v44"; // ALTERAR a cada nova versão para forçar limpeza de dados antigos
 
-function salvarDados() {
-  try {
-    const payload = {
-      loja, semana: semana.toISOString(),
-      estIniAll, vendasAll, contAll, minAll, lookup, entradasAll, transferAll, fichasCustom, fichasRemoved, insumosCustom, pedidoAll, pedidoCustom, pedidoRemovidos, fatoresConversao, mapeamentoPedido, avariasAll, devolucoesAll
-    };
-    localStorage.setItem(SAVE_KEY, JSON.stringify(payload));
-    showToast("💾 Dados salvos!");
-  } catch(e) {
-    showToast("⚠️ Erro ao salvar: " + e.message);
+/* ── O QUE VAI PRO NAVEGADOR ───────────────────────────────────────────────────────────
+   "Erro ao salvar: Setting the value of 'gn_estoque_v1' exceeded the quota."
+
+   Visto na Campo Grande e na Bangu, e a causa não é o tamanho de nenhuma loja: o sbPull
+   junta os dados de TODAS as lojas e de TODAS as semanas nas mesmas variáveis
+   (`Object.assign(vendasAll, d.vendasAll)` pra cada linha que chega), e o autoSave
+   gravava esse monte inteiro no localStorage. Só estIniAll tinha poda — vendasAll,
+   contAll, entradasAll, transferAll e pedidoAll cresciam pra sempre. Com 11 lojas e a
+   linha da Bangu sozinha já em ~1 MB no servidor, o limite do navegador (uns 5 MB) cai.
+
+   E o estrago não é só o aviso na tela: cheio, o localStorage para de aceitar QUALQUER
+   gravação. O autoSave engole o erro calado, o app segue com o estado antigo em disco, e
+   no próximo carregamento ele volta do cache velho e REENVIA esse estado pro servidor —
+   foi assim que a Stella voltou a sumir depois de trazida de volta.
+
+   O cache local é rede de proteção pra queda de internet, não arquivo histórico: o
+   servidor tem tudo. Então vai pro navegador só a loja aberta e as últimas semanas. */
+const SAVE_SEMANAS_LOCAIS = 8;
+
+// Poda só os mapas com chave "LOJA|AAAA-MM-DD" — são esses que crescem a cada semana e
+// a cada loja sincronizada, e são eles que enchem o navegador.
+// minAll, avariasAll e devolucoesAll ficam inteiros de propósito: são por loja (sem
+// semana), pequenos, e outras partes do app leem a entrada de OUTRA loja (o pagamento de
+// transferência grava avaria na linha da loja de destino). Podar eles economizaria pouco
+// e mudaria comportamento — não vale.
+function _podarPorLojaSemana(mapa, lojaAtual, corteISO) {
+  const out = {};
+  Object.keys(mapa || {}).forEach(k => {
+    const barra = k.indexOf('|');
+    if (barra < 0) { out[k] = mapa[k]; return; }  // sem semana na chave: mantém
+    if (k.slice(0, barra) !== lojaAtual) return;  // outra loja: o servidor guarda
+    if (k.slice(barra + 1) < corteISO) return;    // semana velha demais
+    out[k] = mapa[k];
+  });
+  return out;
+}
+
+// O payload enxuto pro navegador. `semanas` menor = mais enxuto, usado quando mesmo o
+// corte padrão não couber.
+function _payloadLocal(semanas) {
+  const corte = new Date(getMonday(new Date()).getTime() - semanas * 7 * 86400000);
+  const corteISO = wkKey(corte);
+  const porLoja = m => _podarPorLojaSemana(m, loja, corteISO);
+  return {
+    loja, semana: semana.toISOString(),
+    // Por loja e semana — o que pesa.
+    estIniAll: porLoja(estIniAll), vendasAll: porLoja(vendasAll), contAll: porLoja(contAll),
+    entradasAll: porLoja(entradasAll), transferAll: porLoja(transferAll), pedidoAll: porLoja(pedidoAll),
+    // Inteiros: por loja, pequenos, e lidos pra outras lojas em alguns fluxos.
+    avariasAll, devolucoesAll, minAll,
+    // Configuração da rede: pequena e necessária pra tela funcionar offline.
+    lookup, fichasCustom, fichasRemoved, insumosCustom, pedidoCustom,
+    pedidoRemovidos, pedidoRestaurados, fatoresConversao, mapeamentoPedido, urgenciaTemplate,
+  };
+}
+
+// Grava no navegador cedendo espaço antes de desistir: se não couber com 8 semanas,
+// tenta com 4, 2 e 1. Devolve o que conseguiu, pra quem chamou poder dizer a verdade em
+// vez de mostrar o erro cru do navegador, que não diz a ninguém o que fazer.
+function _gravarLocal() {
+  const tentativas = [SAVE_SEMANAS_LOCAIS, 4, 2, 1];
+  for (let i = 0; i < tentativas.length; i++) {
+    try {
+      localStorage.setItem(SAVE_KEY, JSON.stringify(_payloadLocal(tentativas[i])));
+      return { ok: true, semanas: tentativas[i], reduziu: i > 0 };
+    } catch (e) {
+      // Antes de encolher mais, joga fora o lixo de versões antigas do app, que é o que
+      // costuma estar ocupando espaço sem dono.
+      if (i === 0) { try { _limparCachesAntigos(); } catch (e2) {} }
+    }
   }
+  return { ok: false };
+}
+
+// Chaves de versões antigas do app (gn_estoque_v1__LOJA de uma loja que este aparelho
+// não usa mais, caches de outros apps) — espaço ocupado por dado que ninguém lê.
+function _limparCachesAntigos() {
+  const manter = new Set([SAVE_KEY, 'gn_session_v1', 'gn_nav_loja', 'gn_last_loja', 'gn_home_loja']);
+  Object.keys(localStorage).forEach(k => {
+    if (manter.has(k)) return;
+    if (k.startsWith('gn_estoque_v1')) { try { localStorage.removeItem(k); } catch (e) {} }
+  });
+}
+
+function salvarDados() {
+  const r = _gravarLocal();
+  if (r.ok && !r.reduziu) { showToast("💾 Dados salvos!"); return; }
+  if (r.ok) {
+    showToast("💾 Salvo — guardei as últimas " + r.semanas + " semanas aqui no aparelho.");
+    return;
+  }
+  // Mensagem que diz o que é e o que fazer. O erro cru do navegador ("exceeded the
+  // quota") não dizia nem que os dados estão salvos no servidor, que é a única coisa
+  // que a loja precisa saber pra não entrar em pânico.
+  showToast("⚠️ Memória do navegador cheia. Seus dados ESTÃO salvos no servidor — "
+    + "o que falhou foi só a cópia local. Avise o suporte.");
 }
 
 function carregarDados() {
@@ -4031,15 +4122,17 @@ function carregarDados() {
 
 /* Auto-salvar a cada mudança de estado */
 function autoSave() {
-  try {
-    const payload = {
-      loja, semana: semana.toISOString(),
-      estIniAll, vendasAll, contAll, minAll, lookup, entradasAll, transferAll, fichasCustom, fichasRemoved, insumosCustom, pedidoAll, pedidoCustom, pedidoRemovidos, fatoresConversao, mapeamentoPedido, avariasAll, devolucoesAll, urgenciaTemplate
-    };
-    localStorage.setItem(SAVE_KEY, JSON.stringify(payload));
-  } catch(e) {}
+  // Falhar aqui não pode parar o envio pro servidor, que é onde o dado de verdade mora —
+  // mas também não pode mais ser silencioso: o cache velho que ficava no disco era
+  // reenviado no carregamento seguinte e desfazia edições já gravadas na nuvem.
+  const r = _gravarLocal();
+  if (!r.ok && !_avisouLocalCheio) {
+    _avisouLocalCheio = true;
+    showToast("⚠️ Memória do navegador cheia — os dados seguem indo pro servidor. Avise o suporte.");
+  }
   sbScheduleSync();
 }
+let _avisouLocalCheio = false;
 
 /* Exportar JSON completo como arquivo */
 function exportarJSON() {
@@ -5959,6 +6052,9 @@ function removerItemPedido(id) {
     + 'Vale pra TODAS as lojas da rede, não só pra esta.\n'
     + 'Dá pra trazer de volta em "itens escondidos", no fim da lista.')) return;
   if (!pedidoRemovidos.includes(idStr)) pedidoRemovidos.push(idStr);
+  // Tira da lápide, senão o item seguiria visível: a lista de restaurados vence a de
+  // escondidos, então esconder de novo precisa desfazer a volta.
+  pedidoRestaurados = pedidoRestaurados.filter(r => String(r) !== idStr);
   // Se for item custom, remover da lista custom também
   pedidoCustom = pedidoCustom.filter(c => String(c.item) !== idStr);
   autoSave();
@@ -5966,30 +6062,87 @@ function removerItemPedido(id) {
   render();
 }
 
-// Os itens escondidos, com nome, pra tela poder mostrar o que sumiu. O nome vem do
-// catálogo já sincronizado (PRODUTOS_PEDIDO continua inteiro — quem filtra é o
-// getProdutosPedidoOrdenados); item custom escondido perdeu o cadastro junto, então
-// sobra o id, que ainda é melhor que uma linha em branco.
+// O que está escondido DE FATO: o que foi removido, menos o que alguém trouxe de volta.
+// Um lugar só, porque a lista do pedido, o bloco de escondidos e o botão de restaurar
+// precisam concordar — se divergirem, a tela mostra um item que a lista não tem.
+// A união das duas listas do pedido, vinda de UMA linha de loja. Extraída do sbPull com
+// nome próprio porque é ela que decide se um item volta ou ressuscita, e dentro do laço
+// do sync não dava pra exercitar — o teste acabava reimplementando a regra e concordando
+// consigo mesmo, que é o jeito de uma suíte passar com o app quebrado.
+//
+// União pura nas duas, de propósito: é o que faz tanto o esconder quanto o trazer de
+// volta se espalharem sozinhos pelas lojas. O desempate está no _pedidoEscondidosSet —
+// restaurado vence removido.
+function _mesclarListasPedido(d) {
+  if (!d) return;
+  (d.pedidoRemovidos || []).forEach(r => {
+    if (!pedidoRemovidos.includes(r)) pedidoRemovidos.push(r);
+  });
+  (d.pedidoRestaurados || []).forEach(r => {
+    if (!pedidoRestaurados.includes(r)) pedidoRestaurados.push(r);
+  });
+}
+
+function _pedidoEscondidosSet() {
+  const voltaram = new Set((pedidoRestaurados || []).map(String));
+  return new Set((pedidoRemovidos || []).map(String).filter(id => !voltaram.has(id)));
+}
+
+// Nomes dos itens escondidos. PRODUTOS_PEDIDO só tem o que está ATIVO e na região desta
+// loja, então item desativado no catálogo caía aqui sem nome nenhum e a tela dizia "fora
+// do catálogo desta região" pra todos — foi o que apareceu na Campo Grande: seis linhas
+// iguais, sem nome, e ninguém sabia o que estava trazendo de volta. Este mapa é
+// preenchido pelo _carregarNomesEscondidos(), que busca os ids no catálogo SEM o filtro
+// de ativo e SEM o de região, só pra poder dar nome ao que está escondido.
+let _nomesEscondidos = {};   // id -> { produto, grupo, ativo, regiao }
+
 function _pedidoItensEscondidos() {
-  return (pedidoRemovidos || []).map(idStr => {
+  return [..._pedidoEscondidosSet()].map(idStr => {
     const prod = (PRODUTOS_PEDIDO || []).find(p => String(p.item) === String(idStr));
+    const cat = _nomesEscondidos[String(idStr)] || null;
     return {
       id: String(idStr),
-      produto: prod ? prod.produto : null,
-      grupo: prod ? prod.grupo : null,
-      fornecedor: prod ? prod.fornecedor : null,
-      // Item que não está mais no catálogo da região desta loja (ou foi desativado) não
-      // volta pra lista nem se for restaurado — a tela diz isso em vez de prometer.
-      noCatalogo: !!prod,
+      produto: prod ? prod.produto : (cat ? cat.produto : null),
+      grupo: prod ? prod.grupo : (cat ? cat.grupo : null),
+      // `naLista` é o que a tela pode PROMETER: só o item ativo e da região desta loja
+      // volta pra lista do pedido ao ser restaurado. Os outros voltam pro catálogo da
+      // região certa ou ao serem reativados, e dizer isso é mais honesto que um botão
+      // que parece não funcionar.
+      naLista: !!prod,
+      motivo: prod ? null
+        : cat && cat.ativo === false ? 'desativado no catálogo'
+        : cat ? ('do catálogo de ' + cat.regiao)
+        : 'não está mais no catálogo',
     };
-  }).sort((a, b) => (b.noCatalogo - a.noCatalogo) || String(a.produto || a.id).localeCompare(String(b.produto || b.id), 'pt-BR'));
+  }).sort((a, b) => (b.naLista - a.naLista) || String(a.produto || a.id).localeCompare(String(b.produto || b.id), 'pt-BR'));
+}
+
+// Busca o nome do que está escondido. Uma consulta só, e só quando há algo escondido —
+// numa rede sem remoções isto nunca sai do lugar.
+async function _carregarNomesEscondidos() {
+  const ids = [...(_pedidoEscondidosSet())].filter(id => /^\d+$/.test(id));
+  const faltam = ids.filter(id => !(id in _nomesEscondidos));
+  if (!faltam.length) return;
+  try {
+    const rows = await sbRequest('gn_catalogo?item_id=in.(' + faltam.join(',')
+      + ')&select=item_id,produto,grupo,ativo,regiao', { method: 'GET' });
+    (rows || []).forEach(r => { _nomesEscondidos[String(r.item_id)] = r; });
+    // Id que nem no catálogo existe mais (item custom apagado) fica marcado pra não
+    // ficar consultando o servidor a cada render.
+    faltam.forEach(id => { if (!(id in _nomesEscondidos)) _nomesEscondidos[id] = null; });
+    render();
+  } catch (e) { /* sem nome, a tela mostra o id — não trava por isso */ }
 }
 
 function restaurarItemPedido(id) {
   const idStr = String(id);
-  const antes = pedidoRemovidos.length;
+  if (!_pedidoEscondidosSet().has(idStr)) return;
+  // Tirar de pedidoRemovidos sozinho NÃO resolve: a lista é unida entre as lojas no
+  // sbPull, e basta uma loja com o app aberto ainda tendo o id pra ele voltar no
+  // próximo sync — foi o que desfez, em minutos, a retirada da Stella feita direto no
+  // banco nas 11 lojas. A lápide é o que faz a volta grudar e se espalhar.
+  if (!pedidoRestaurados.includes(idStr)) pedidoRestaurados.push(idStr);
   pedidoRemovidos = pedidoRemovidos.filter(r => String(r) !== idStr);
-  if (pedidoRemovidos.length === antes) return;
   autoSave();
   showToast("↩️ Item de volta na lista de pedido.");
   render();
@@ -7327,7 +7480,7 @@ function getProdutosPedidoOrdenados() {
     result.splice(idx, 0, c);
   });
   // Remover itens da lista de removidos
-  const removidos = new Set(pedidoRemovidos || []);
+  const removidos = _pedidoEscondidosSet();
   return result.filter(p => !removidos.has(String(p.item)));
 }
 
@@ -10410,11 +10563,13 @@ function render() {
         // algo escondido — numa rede sem remoções, isto não ocupa espaço nenhum.
         const esc = _pedidoItensEscondidos();
         if (!esc.length) return '';
+        _carregarNomesEscondidos();   // busca os nomes que faltam, uma vez
         const linha = e => `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--linha)">
           <span style="font-size:9px;color:var(--t3);font-family:monospace;width:34px;flex-shrink:0">${e.id}</span>
-          <span style="flex:1;min-width:0;font-size:11.5px;color:${e.noCatalogo?'var(--t1)':'var(--t3)'};overflow-wrap:anywhere">
-            ${e.produto || '(fora do catálogo desta região)'}
-            ${e.noCatalogo && e.grupo ? `<span style="font-size:9.5px;color:var(--t3)"> · ${e.grupo}</span>` : ''}
+          <span style="flex:1;min-width:0;font-size:11.5px;color:${e.naLista?'var(--t1)':'var(--t3)'};overflow-wrap:anywhere">
+            ${e.produto || '(sem cadastro no catálogo)'}
+            ${e.grupo ? `<span style="font-size:9.5px;color:var(--t3)"> · ${e.grupo}</span>` : ''}
+            ${e.motivo ? `<span style="display:block;font-size:9.5px;color:var(--txt-amber)">${e.motivo} — trazer de volta aqui não faz aparecer na lista</span>` : ''}
           </span>
           <button onclick="restaurarItemPedido('${e.id}')"
             style="background:rgba(5,150,105,.14);border:none;border-radius:7px;color:var(--txt-green);font-size:10.5px;font-weight:700;padding:3px 9px;flex-shrink:0;cursor:pointer">↩️ Trazer de volta</button>
@@ -12278,6 +12433,7 @@ try {
     pedidoAll       = p.pedidoAll       || {};
     pedidoCustom    = p.pedidoCustom    || [];
     pedidoRemovidos = p.pedidoRemovidos || [];
+    pedidoRestaurados = p.pedidoRestaurados || [];
     fatoresConversao  = p.fatoresConversao  || {};
     mapeamentoPedido = p.mapeamentoPedido || {};
     avariasAll = p.avariasAll || {};
