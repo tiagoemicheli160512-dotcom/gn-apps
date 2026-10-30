@@ -63,7 +63,7 @@ const PRODUTOS = [
   // Era isto que fazia o item "não aparecer em bebidas e em lugar nenhum": a lista do
   // pedido é a fonte de TODAS as telas desta aba, não só da de Bebidas.
   // Pelo rótulo EXATO do item do catálogo: as fichas técnicas têm um insumo próprio
-  // chamado "STELLA ARTOIS 600ML", que é outra coisa e continua na contagem. Procurar só
+  // chamado "STELLA ARTOIS 550ML", que é outra coisa e continua na contagem. Procurar só
   // por /STELLA/ casava com ele e a checagem falhava sem nada estar errado — e, pior, o
   // mesmo engano de nome pode ser o que levou alguém a esconder o item achando que era
   // duplicata.
@@ -72,7 +72,7 @@ const PRODUTOS = [
     await page.evaluate(r => !_itensContagemFisica().some(i => (i.label || '') === r), rotuloExato),
     JSON.stringify(await page.evaluate(() => _itensContagemFisica().map(i => i.label).slice(0, 8))));
   check('e o insumo de ficha de nome parecido NÃO é afetado — é outro item',
-    await page.evaluate(() => _itensContagemFisica().some(i => (i.label || '') === 'STELLA ARTOIS 600ML')));
+    await page.evaluate(() => _itensContagemFisica().some(i => (i.label || '') === 'STELLA ARTOIS 550ML')));
 
   // ══ 2. O QUE ESTÁ ESCONDIDO PRECISA SER VISÍVEL ═════════════════════════════════
   const escondidos = await page.evaluate(() => _pedidoItensEscondidos());
