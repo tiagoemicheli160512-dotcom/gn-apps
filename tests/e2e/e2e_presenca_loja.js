@@ -116,7 +116,7 @@ function escalaBangu() {
   page.on('pageerror', e => erros.push(String(e)));
   await page.goto('file://' + HOME);
   await page.waitForFunction(() => { try {
-    return typeof _presencaChecar === 'function' && typeof _presEstadoDoDia === 'function'
+    return typeof gnPresencaGuardiao === 'function' && typeof _presEstadoDoDia === 'function'
         && typeof showHome === 'function' && Array.isArray(LOJAS_LISTA || []);
   } catch (e) { return false; } }, null, { timeout: 25000 });
 
@@ -128,7 +128,7 @@ function escalaBangu() {
       session = { id: 7, nome, cargo, loja, permissoes: {}, ts: Date.now() };
       masterLoja = null;
       LOJAS_LISTA = _computeLojasVisiveis(session);
-      _presencaChecar(session, false);
+      gnPresencaGuardiao({ sbUrl: SB_URL, sbKey: SB_KEY, sessao: session, aoSair: doLogout });
     }, { nome, cargo, loja });
     await page.waitForTimeout(450);
   };
@@ -281,14 +281,14 @@ function escalaBangu() {
   const p2 = await ctx2.newPage();
   p2.on('pageerror', e => erros.push(String(e)));
   await p2.goto('file://' + HOME);
-  await p2.waitForFunction(() => typeof _presencaChecar === 'function', null, { timeout: 25000 });
+  await p2.waitForFunction(() => typeof gnPresencaGuardiao === 'function', null, { timeout: 25000 });
   const entrar2 = async (nome, cargo, loja) => {
     await p2.evaluate(({ nome, cargo, loja }) => {
       try { Object.keys(localStorage).filter(k => k.indexOf('gn_presenca_') === 0).forEach(k => localStorage.removeItem(k)); } catch (e) {}
       const ov = document.getElementById('gate-presenca'); if (ov) ov.remove();
       session = { id: 7, nome, cargo, loja, permissoes: {}, ts: Date.now() };
       masterLoja = null; LOJAS_LISTA = _computeLojasVisiveis(session);
-      _presencaChecar(session, false);
+      gnPresencaGuardiao({ sbUrl: SB_URL, sbKey: SB_KEY, sessao: session, aoSair: doLogout });
     }, { nome, cargo, loja });
     await p2.waitForTimeout(450);
   };

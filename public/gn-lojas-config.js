@@ -370,6 +370,16 @@ window.CARGOS_ALTERNAR_LOJA    = ['compras','supervisor','administrador']; // po
 window.gnLogError = function(context, err) {
   console.error('[GN:' + context + ']', (err && err.message) ? err.message : err);
 };
+// ── ENDEREÇO DO SUPABASE, FONTE ÚNICA ──────────────────────────────────────────────
+// Os 13 apps declaram isto cada um do seu jeito (SB_KEY, SUPA_KEY, SB_ANON) dentro do
+// próprio <script>. Quem é carregado de fora — como a trava de presença — dependia de
+// adivinhar o nome E de o script do app ter executado até o fim: app que quebra antes
+// deixava a trava sumir calada, que é pior que trava nenhuma, porque parece que está
+// valendo. Aqui o endereço existe antes de qualquer app, e não depende de nenhum deles.
+// A chave é a anon, pública por desenho deste projeto — ela já está nos 13 arquivos.
+window.GN_SB_URL = 'https://ncxttwvpafajnilpjbol.supabase.co';
+window.GN_SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5jeHR0d3ZwYWZham5pbHBqYm9sIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE4NDcyMDEsImV4cCI6MjA5NzQyMzIwMX0.MGDZNGY8GfSzBKAgdR7OhvOeR71i4fj9YseJRhoh5sE';
+
 window.gnFetchJson = async function(url, headers, context, fallback, fetchOpts) {
   try {
     const r = await fetch(url, Object.assign({ headers }, fetchOpts));
