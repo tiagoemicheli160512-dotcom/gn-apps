@@ -12198,7 +12198,14 @@ async function _loadTriosGerencia() {
     // O ATO de lançar, não o valor: couver_valor tem DEFAULT 0 no banco, então zero não
     // distingue "a loja lançou e deu zero" de "ninguém lançou". A marca só conta vinda de
     // uma apresentação que aconteceu — a que não veio não tem couvert a lançar.
-    if (r.couver_lancado_em && !r.banda_nao_veio) d.lancado = true;
+    //
+    // E um couvert COM VALOR também conta, mesmo na linha marcada como "banda não veio":
+    // a loja usa essa marca pra duas coisas diferentes, e numa delas houve show. Em
+    // Guarulhos, 26 e 27/09, a marca diz "Trocou a banda, venho o trio zambele" e "SP
+    // Baião" — os dois trios se trocaram de dia, tocaram, e a casa arrecadou R$ 336 e
+    // R$ 903 de 48 e 129 pessoas. Sem este segundo caminho esses dois dias apareciam como
+    // "a banda não veio, sem couvert lançado" com o dinheiro na mão.
+    if (couver > 0 || (r.couver_lancado_em && !r.banda_nao_veio)) d.lancado = true;
     if (r.banda_nao_veio) { d.naoVeio++; d.naoVeioCache += cache; }
     d.apresTotal = (d.apresTotal || 0) + 1;
     d.apres.push({ artista: r.artista || '—', cache, couver, hora: r.horario_inicio || '',
@@ -12206,20 +12213,43 @@ async function _loadTriosGerencia() {
                    motivo: r.banda_nao_veio_motivo || '' });
   });
 
+  // O DESCONTO do cachê de quem não tocou.
+  //
+  // A regra combinada: banda que não veio não é paga, então o cachê dela não pode entrar
+  // na conta — era o que deixava a Pedreira negativa em 10–11/10 sem ter perdido dinheiro
+  // (cachê R$ 1.600 contra R$ 1.141 de couvert, saldo −R$ 459; com o desconto, +R$ 341).
+  //
+  // Mas a marca `banda_nao_veio` quer dizer DUAS coisas na prática, e descontar por ela
+  // sozinha apagaria cachê que foi devido de verdade. Nas três marcas que existem na base:
+  //   · 10/10 Pedreira — ninguém tocou (trio preso na Dutra), couvert 0  → desconta;
+  //   · 26/09 e 27/09 Guarulhos — TROCA de banda, outro trio tocou e a casa arrecadou
+  //     R$ 336 e R$ 903                                                  → não desconta.
+  // Por isso o que decide não é a marca, é se a noite arrecadou: couvert no caixa quer
+  // dizer que alguém tocou, e quem tocou recebe.
+  Object.values(porDia).forEach(d => {
+    // "Ninguém tocou" é UMA definição só, usada pelo desconto, pelo status do período e
+    // pela linha do dia. Separadas, a linha do dia continuava cobrando "sem couvert" de
+    // uma noite que o próprio painel já sabia que não teve banda.
+    d.semShow = d.apresTotal > 0 && d.naoVeio === d.apresTotal && d.couver <= 0;
+    d.cacheDescontado = d.semShow ? d.naoVeioCache : 0;
+    d.cacheDevido = d.cache - d.cacheDescontado;
+  });
+
   const porSemana = {};   // 'loja|chave do período' → agregado
   Object.values(porDia).forEach(d => {
     const chv = _triosChaveDe(d.dia, per);
     const ch = d.k + '|' + chv;
     if (!porSemana[ch]) porSemana[ch] = { k: d.k, sem: chv, cache: 0, couver: 0,
-      dias: [], diasValidos: [], diasSemCouver: [], diasSemShow: [], diasFuturos: [],
-      naoVeio: 0, naoVeioCache: 0 };
+      cacheDescontado: 0, dias: [], diasValidos: [], diasSemCouver: [], diasSemShow: [],
+      diasFuturos: [], naoVeio: 0, naoVeioCache: 0 };
     const s = porSemana[ch];
     s.cache += d.cache; s.couver += d.couver;
+    s.cacheDescontado += d.cacheDescontado;
     s.naoVeio += d.naoVeio; s.naoVeioCache += d.naoVeioCache;
     s.dias.push(d);
     // O dia em que NENHUMA banda veio não é dia sem couvert: não houve apresentação, então
     // não há couvert a lançar. Cobrar o lançamento aí é cobrança falsa.
-    const semShow = d.apresTotal > 0 && d.naoVeio === d.apresTotal;
+    const semShow = d.semShow;
     if (semShow) s.diasSemShow.push(d.dia);
     if (d.dia >= hoje) s.diasFuturos.push(d.dia);
     else if (semShow) { /* já contado em diasSemShow */ }
@@ -12227,13 +12257,15 @@ async function _loadTriosGerencia() {
   });
   Object.values(porSemana).forEach(s => {
     s.dias.sort((a, b) => a.dia.localeCompare(b.dia));
-    s.saldo = s.couver - s.cache;
+    s.cacheDevido = s.cache - s.cacheDescontado;
+    s.saldo = s.couver - s.cacheDevido;
     // Os fins de semana dentro do período, pro detalhe do cartão no modo mês: listar os
     // ~9 dias de um mês corrido faz o cartão virar uma parede.
     const fds = {};
     s.dias.forEach(d => { const w = _triosSegundaDe(d.dia);
-      if (!fds[w]) fds[w] = { sem: w, cache: 0, couver: 0, dias: [] };
-      fds[w].cache += d.cache; fds[w].couver += d.couver; fds[w].dias.push(d); });
+      if (!fds[w]) fds[w] = { sem: w, cache: 0, couver: 0, cacheDevido: 0, dias: [] };
+      fds[w].cache += d.cache; fds[w].couver += d.couver;
+      fds[w].cacheDevido += d.cacheDevido; fds[w].dias.push(d); });
     s.fdsemanas = Object.values(fds).sort((a, b) => a.sem.localeCompare(b.sem));
     // A ordem importa: período que não chegou vem antes de tudo (não há o que cobrar),
     // depois aquele em que a banda não veio em nenhum dia (o cachê está gravado mas o
@@ -12305,9 +12337,9 @@ function _buildTriosPanel() {
 
   // ── Rede, no período navegado ──────────────────────────────────────────────────────
   const comTrio = ordenadas.map(daSemana).filter(Boolean);
-  const totCache = comTrio.reduce((t, s) => t + s.cache, 0);
   const totCouver = comTrio.reduce((t, s) => t + s.couver, 0);
-  const totNaoVeioCache = comTrio.reduce((t, s) => t + s.naoVeioCache, 0);
+  const totDescontado = comTrio.reduce((t, s) => t + s.cacheDescontado, 0);
+  const totCache = comTrio.reduce((t, s) => t + s.cacheDevido, 0);
   const saldoRede = totCouver - totCache;
   const cell = (rotulo, valor, cor, nota) => `<div style="flex:1;min-width:92px">
     <div style="font-size:9px;font-weight:800;letter-spacing:.8px;text-transform:uppercase;color:var(--t4)">${rotulo}</div>
@@ -12322,7 +12354,7 @@ function _buildTriosPanel() {
           ${cell('Couvert arrecadado', _fmtBRL(totCouver), 'var(--t1)', '')}
           ${cell('Saldo', (saldoRede < 0 ? '−' : '') + _fmtBRL(Math.abs(saldoRede)), saldoRede < 0 ? 'var(--txt-red)' : 'var(--txt-green)', 'couvert − cachê')}
         </div>
-        ${totNaoVeioCache > 0 ? `<div style="font-size:10px;color:var(--txt-amber);margin-top:8px">⚠ O cachê acima inclui ${_fmtBRL(totNaoVeioCache)} de apresentação marcada como "banda não veio" — o registro não diz se esse cachê foi pago ou não.</div>` : ''}
+        ${totDescontado > 0 ? `<div style="font-size:10px;color:var(--t2);margin-top:8px">➖ ${_fmtBRL(totDescontado)} já descontados do cachê: banda que não veio não é paga. Noite marcada como "banda não veio" que mesmo assim arrecadou couvert continua contando — ali alguém tocou.</div>` : ''}
       </div>`;
 
   // ── Os dois avisos, separados ──────────────────────────────────────────────────────
@@ -12346,8 +12378,8 @@ function _buildTriosPanel() {
         'Sem o couvert não há saldo: o dado não é zero, ele não foi lançado — a aba Banda do Check-list é onde entra.') : '') +
     (semShow.length ? bloco('var(--txt-amber)', TRIOS_AMBAR.fundo, TRIOS_AMBAR.borda,
         `⚠ ${semShow.length} loja${semShow.length === 1 ? '' : 's'} em que a banda não veio`,
-        semShow.map(s => `${LOJA_DISPLAY[s.k] || s.k} <span style="color:var(--t4)">(${s.diasSemShow.map(_carnesDM).join(', ')})</span> · cachê ${_fmtBRL(s.cache)}`).join(' · '),
-        'Sem apresentação não há couvert a lançar. O cachê continua gravado na agenda e o registro não diz se foi pago.') : '') +
+        semShow.map(s => `${LOJA_DISPLAY[s.k] || s.k} <span style="color:var(--t4)">(${s.diasSemShow.map(_carnesDM).join(', ')})</span> · ${_fmtBRL(s.cacheDescontado)} descontados`).join(' · '),
+        'Sem apresentação não há couvert a lançar, e o cachê de quem não veio não entra na conta.') : '') +
     (comTrio.length && !negativos.length && !faltando.length && !semShow.length
         ? bloco('var(--txt-green)', 'rgba(22,163,74,.08)', 'rgba(22,163,74,.25)',
             `✅ As ${comTrio.length} lojas com trio lançaram o couvert e fecharam positivas`, `Nada pendente ${noPeriodo}.`, '') : '');
@@ -12371,13 +12403,13 @@ function _buildTriosPanel() {
     const detalhe = mes
       ? s.fdsemanas.map(w => linhaDetalhe(
           `${_carnesDM(_carnesISO(new Date(new Date(w.sem + 'T12:00:00').getTime() + 5 * 864e5)))}–${_carnesDM(_carnesISO(new Date(new Date(w.sem + 'T12:00:00').getTime() + 6 * 864e5)))}`,
-          w.cache, w.couver, w.dias.every(d => d.dia >= _triosGerData.hoje),
+          w.cacheDevido, w.couver, w.dias.every(d => d.dia >= _triosGerData.hoje),
           w.dias.some(d => d.dia < _triosGerData.hoje && !d.lancado))).join('')
       : s.dias.map(d => `<div style="display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--t3);padding:2px 0">
           <span style="font-weight:800;color:var(--t2);min-width:38px">${_carnesDM(d.dia)}</span>
-          <span style="flex:1">${d.apres.map(a => a.artista + (a.naoVeio ? ' <span style="color:var(--txt-red)">(não veio)</span>' : '')).join(' · ')}</span>
-          <span style="font-variant-numeric:tabular-nums;color:var(--t2)">${_fmtBRL(d.cache)}</span>
-          <span style="font-variant-numeric:tabular-nums;min-width:62px;text-align:right;color:${d.dia >= _triosGerData.hoje ? 'var(--t4)' : d.lancado ? 'var(--txt-green)' : 'var(--txt-amber)'}">${d.dia >= _triosGerData.hoje ? '—' : d.lancado ? _fmtBRL(d.couver) : 'sem couvert'}</span>
+          <span style="flex:1">${d.apres.map(a => a.artista + (a.naoVeio ? (d.cacheDescontado > 0 ? ' <span style="color:var(--txt-red)">(não veio — cachê descontado)</span>' : ' <span style="color:var(--txt-amber)">(não veio — mas a noite arrecadou, cachê mantido)</span>') : '')).join(' · ')}</span>
+          <span style="font-variant-numeric:tabular-nums;color:var(--t2)">${_fmtBRL(d.cacheDevido)}</span>
+          <span style="font-variant-numeric:tabular-nums;min-width:62px;text-align:right;color:${d.dia >= _triosGerData.hoje || d.semShow ? 'var(--t4)' : d.lancado ? 'var(--txt-green)' : 'var(--txt-amber)'}">${d.dia >= _triosGerData.hoje ? '—' : d.semShow ? 'sem show' : d.lancado ? _fmtBRL(d.couver) : 'sem couvert'}</span>
         </div>`).join('');
     return `<div style="background:var(--s1);border:1px solid var(--b1);border-left:3px solid ${cor};border-radius:11px;padding:11px 12px;margin-bottom:8px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:7px">
@@ -12385,7 +12417,8 @@ function _buildTriosPanel() {
         <span style="font-size:9px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:${e.cor};background:${e.fundo};border:1px solid ${e.borda};border-radius:6px;padding:2px 7px">${e.rotulo}</span>
       </div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:7px">
-        ${cell('Cachê', _fmtBRL(s.cache), 'var(--t2)', '')}
+        ${cell('Cachê', _fmtBRL(s.cacheDevido), 'var(--t2)',
+               s.cacheDescontado > 0 ? `➖ ${_fmtBRL(s.cacheDescontado)} descontados` : '')}
         ${cell('Couvert', s.status === 'futuro' ? '—' : _fmtBRL(s.couver), 'var(--t2)',
                s.status === 'futuro' ? 'ainda não arrecadado' : s.status === 'naoVeio' ? 'não houve apresentação' : '')}
         ${(() => {
@@ -12431,7 +12464,7 @@ function _buildTriosPanel() {
         const r = _triosRotuloColuna(sem, per);
         const quando = per === 'mes' ? r.baixo + '/' + r.topo : _carnesDM(sem);
         const t = !s ? `${quando}: sem trio na agenda`
-          : `${quando}: cachê ${_fmtBRL(s.cache)} · couvert ${s.status === 'futuro' ? 'ainda não arrecadado' : _fmtBRL(s.couver)}` +
+          : `${quando}: cachê ${_fmtBRL(s.cacheDevido)}${s.cacheDescontado > 0 ? ` (${_fmtBRL(s.cacheDescontado)} descontados)` : ''} · couvert ${s.status === 'futuro' ? 'ainda não arrecadado' : _fmtBRL(s.couver)}` +
             (s.status === 'futuro' || s.diasSemCouver.length ? ` · ${e.rotulo}` : ` · saldo ${(s.saldo < 0 ? '−' : '') + _fmtBRL(Math.abs(s.saldo))}`);
         return `<span title="${t.replace(/"/g, '&quot;')}" style="flex:1;height:18px;border-radius:4px;background:${e.fundo};border:1px solid ${e.borda};display:inline-block"></span>`;
       }).join('');
@@ -12463,20 +12496,23 @@ function _triosRelatorioTexto(wpp) {
   const ordenadas = chaves.slice().sort((a, b2) => (LOJA_DISPLAY[a] || a).localeCompare(LOJA_DISPLAY[b2] || b2));
   let msg = `${wpp ? '🎵 ' : ''}${b('TRIOS — CACHÊ E COUVERT')}\n${periodoTxt}\n`;
   const comTrio = ordenadas.map(k => porSemana[k + '|' + iniISO]).filter(Boolean);
-  const totCache = comTrio.reduce((t, s) => t + s.cache, 0);
+  const totCache = comTrio.reduce((t, s) => t + s.cacheDevido, 0);
   const totCouver = comTrio.reduce((t, s) => t + s.couver, 0);
-  msg += `\nCachê a pagar: ${_fmtBRL(totCache)}\nCouvert arrecadado: ${_fmtBRL(totCouver)}\n`;
+  const totDescontado = comTrio.reduce((t, s) => t + s.cacheDescontado, 0);
+  msg += `\nCachê a pagar: ${_fmtBRL(totCache)}\n`;
+  if (totDescontado > 0) msg += `  (${_fmtBRL(totDescontado)} descontados — banda que não veio não é paga)\n`;
+  msg += `Couvert arrecadado: ${_fmtBRL(totCouver)}\n`;
   msg += `Saldo da rede: ${(totCouver - totCache < 0 ? '-' : '') + _fmtBRL(Math.abs(totCouver - totCache))}\n`;
   const negativos = [], faltando = [], semShow = [];
   ordenadas.forEach(k => {
     const s = porSemana[k + '|' + iniISO];
     if (!s) return;
     msg += `\n${wpp ? '🏪 ' : ''}${b(LOJA_DISPLAY[k] || k)}\n`;
-    msg += `  Cachê: ${_fmtBRL(s.cache)}\n`;
+    msg += `  Cachê: ${_fmtBRL(s.cacheDevido)}${s.cacheDescontado > 0 ? ` (${_fmtBRL(s.cacheDescontado)} descontados)` : ''}\n`;
     if (s.status === 'futuro') { msg += `  Couvert: ainda não arrecadado (${mes ? 'o mês não começou' : 'o fim de semana não chegou'})\n`; return; }
     if (s.status === 'naoVeio') {
       msg += `  ⚠ A banda não veio em ${s.diasSemShow.map(_carnesDM).join(', ')} — sem apresentação não há couvert a lançar\n`;
-      msg += `  O cachê acima segue gravado na agenda; o registro não diz se foi pago\n`;
+      msg += `  O cachê de quem não veio já está descontado e não entra na conta\n`;
       semShow.push(LOJA_DISPLAY[k] || k); return;
     }
     msg += `  Couvert: ${_fmtBRL(s.couver)}\n`;
@@ -12487,7 +12523,11 @@ function _triosRelatorioTexto(wpp) {
       msg += `  Saldo: ${(s.saldo < 0 ? '-' : '') + _fmtBRL(Math.abs(s.saldo))}\n`;
       if (s.saldo < 0) { msg += `  ⚠ Negativo: o cachê custou mais do que o couvert arrecadou\n`; negativos.push(LOJA_DISPLAY[k] || k); }
     }
-    if (s.naoVeioCache > 0) msg += `  ⚠ Inclui ${_fmtBRL(s.naoVeioCache)} de banda marcada como "não veio"\n`;
+    // Noite com a marca "banda não veio" que mesmo assim arrecadou: alguém tocou (troca
+    // de banda), então o cachê continua devido — e isso precisa ser dito, porque o nome
+    // do artista na agenda é o do trio que NÃO foi.
+    const trocou = s.naoVeioCache - s.cacheDescontado;
+    if (trocou > 0) msg += `  ℹ ${_fmtBRL(trocou)} de noite marcada como "banda não veio" que arrecadou couvert — outro trio tocou, o cachê segue devido\n`;
   });
   if (negativos.length) msg += `\n${b('Saldo negativo')}: ${negativos.join(', ')}\n`;
   if (faltando.length)  msg += `${b('Sem couvert lançado')}: ${faltando.join(', ')}\n`;
