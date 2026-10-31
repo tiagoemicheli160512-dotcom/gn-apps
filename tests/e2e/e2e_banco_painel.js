@@ -16,7 +16,7 @@ const { chromium } = require('playwright');
 const HOME = process.env.ARQ_HOME || CAMINHOS.pub('gn-home.html');
 const CHK  = process.env.ARQ_CHK  || CAMINHOS.pub('gn-checklist.html');
 let ok = 0, falhou = 0;
-const check = (n, c) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ? ok++ : falhou++; };
+const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (!c && extra ? ' >> ' + extra : '')); c ? ok++ : falhou++; };
 
 const HOJE = '2026-10-31';
 
@@ -253,11 +253,61 @@ const LOJAS = ['BANGU', 'CAXIAS', 'PEDREIRA', 'RANCHO', 'BOULEVARD', 'NOVA AMERI
   check('a tela diz 6 pessoas com saldo e 4 acima de ±8h', /6 pessoas/.test(txt) && /4 acima de ±8h/.test(txt));
   check('as -99h da Maglia não entram em nada', !/99h/.test(txt) && !txt.includes('Heitor'));
 
-  check('loja com mais hora em jogo primeiro: Bangu, Pedreira, Nova Iguaçu, Boulevard',
-    ['Bangu', 'Pedreira', 'Nova Iguaçu', 'Boulevard'].reduce((pos, nome) => {
-      const i = txt.indexOf(nome);
-      return pos !== -1 && i > pos ? i : -1;
-    }, 0) !== -1);
+  // Molde das abas Carnes e Trios: um cartão por loja, em ordem alfabética, inclusive as
+  // que não têm nada — quem some da lista não pode ser conferido.
+  // Os títulos dos cartões, na ordem em que saem — não o texto inteiro, que tem o nome das
+  // lojas também nos avisos lá em cima.
+  const titulos = String(html).match(/font-weight:(?:800|700);color:var\(--t[12]\);flex:1">([^<]+)</g)
+    .map(x => x.replace(/.*">/, '').replace(/<$/, ''));
+  check('um cartão por loja, em ordem alfabética (Maglia de fora)',
+    titulos.join('|') === 'Bangu|Boulevard|Caxias|Nova América|Nova Iguaçu|Pedreira', titulos.join('|'));
+
+  // ── 13. Navegar pro ciclo ANTERIOR ────────────────────────────────────────────────────
+  // É o que a aba Banco do Check-list já permite loja a loja: consultar o ciclo que fechou.
+  // Um passo pra trás cai em datas diferentes em cada loja, porque cada uma tem a sua âncora.
+  const ant = await page.evaluate(() => {
+    try {
+      _bancoGerNav(-1);
+      const o = {};
+      _bancoGerData.lojas.forEach(k => {
+        const c = _bancoGerData.porLoja[k];
+        o[k] = { ciclo: c.ciclo, neg: c.neg, pos: c.pos, legado: c.legado,
+                 fora: c.mesesForaDoCiclo, antes: c.anteriorAoPrimeiro,
+                 pessoas: c.pessoas.map(p => p.nome) };
+      });
+      return { off: _bancoGerData.off, porLoja: o, html: _buildBancoPanel() };
+    } catch (e) { return { erro: String(e && e.message) }; }
+  });
+  const aTxt = ant.html ? String(ant.html).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ') : '';
+  check('o ‹ volta um ciclo e o cabeçalho diz isso', ant.off === -1 && /CICLO ANTERIOR/.test(aTxt));
+  check('Bangu no ciclo anterior: 26/03/26 → 25/09/26, e agora são as 20h de Ago que contam',
+    ant.porLoja && ant.porLoja['BANGU'].ciclo.inicio === '2026-03-26' &&
+    ant.porLoja['BANGU'].ciclo.fim === '2026-09-25' && ant.porLoja['BANGU'].pos === 20);
+  check('e Out/26, que era o saldo do ciclo vigente, passa a ser mês de outro ciclo',
+    ant.porLoja && JSON.stringify(ant.porLoja['BANGU'].fora) === JSON.stringify(['2026-10']));
+  check('Caxias no ciclo anterior: as -30h de Mar/26 aparecem — é ali que o legado mora',
+    ant.porLoja && ant.porLoja['CAXIAS'].neg === 30 &&
+    JSON.stringify(ant.porLoja['CAXIAS'].legado) === JSON.stringify(['2026-03']));
+  check('Pedreira e Nova Iguaçu dizem que o ciclo ainda não existia, em vez de fechar zeradas',
+    ant.porLoja && ant.porLoja['PEDREIRA'].antes === true && ant.porLoja['RANCHO'].antes === true &&
+    /ciclo ainda não existia/i.test(aTxt));
+  check('o cartão de um ciclo encerrado diz quando ele fechou, não quantos dias faltam',
+    /fechou em 25\/09\/26/.test(aTxt) && !/fecha em/.test(aTxt));
+  // Ciclo que já fechou tem prazo NEGATIVO, e "negativo é menor que 45": sem a trava, o
+  // aviso vermelho de prazo apareceria em cima de todo ciclo encerrado que se consultasse.
+  check('e ciclo encerrado não ganha aviso de prazo', !/fecham? o ciclo em menos de/.test(aTxt));
+  const volta = await page.evaluate(() => { _bancoGerNav(1); return { off: _bancoGerData.off, neg: _bancoGerData.porLoja['BANGU'].neg }; });
+  check('o › volta pro ciclo vigente', volta.off === 0 && volta.neg === 21);
+  // O ciclo vigente é o fim da linha: não há o que consultar adiante dele, e um passo a
+  // mais cairia numa janela de 6 meses que ainda não começou.
+  const alem = await page.evaluate(() => {
+    _bancoGerNav(1);
+    return { off: _bancoGerData.off, html: _buildBancoPanel() };
+  });
+  check('o › não passa do ciclo vigente', alem.off === 0 && /CICLO VIGENTE/.test(String(alem.html)));
+  check('e o botão vem desabilitado quando não há pra onde avançar',
+    /_bancoGerNav\(1\)[^>]*disabled/.test(String(alem.html)));
+  check('o cabeçalho de navegação diz qual ciclo está em vista', /CICLO VIGENTE/.test(txt));
 
   check('Bangu: mostra os casos acima de ±8h', txt.includes('Ana Paula') && txt.includes('Joana Reis'));
   check('Bangu: o saldo pequeno fica recolhido por padrão', !txt.includes('Bruno Dias'));
@@ -271,12 +321,14 @@ const LOJAS = ['BANGU', 'CAXIAS', 'PEDREIRA', 'RANCHO', 'BOULEVARD', 'NOVA AMERI
 
   check('Boulevard: ninguém acima de ±8h, mas a pessoa com saldo aparece do mesmo jeito',
     txt.includes('Iris Melo') && BV && BV.pessoas.length === 1 && BV.acima === 0);
-  check('Caxias entra no bloco de quem não tem saldo no ciclo', /sem nenhum saldo no ciclo/i.test(txt) && txt.includes('Caxias'));
+  check('Caxias tem cartão próprio, com o selo de sem saldo e o motivo escrito',
+    txt.includes('Caxias') && /sem saldo/i.test(txt) && /Ninguém com saldo positivo ou negativo neste ciclo/.test(txt));
   check('Nova América entra no bloco de quem está sem o 1º ciclo cadastrado',
     /sem o 1º ciclo cadastrado/i.test(txt) && txt.includes('Nova América') && /Out\/26/.test(txt));
 
   // ── 10. O prazo do ciclo ──────────────────────────────────────────────────────────────
-  check('a 55 dias do fechamento ainda não há faixa de prazo', !/fecha o ciclo em/.test(txt));
+  check('a 55 dias do fechamento ainda não há aviso de prazo', !/fecham? o ciclo em menos de/.test(txt));
+  check('mas o cartão da Pedreira já mostra o prazo', /fecha em 55 dias/.test(txt));
   const htmlPerto = await page.evaluate(() => {
     try {
       // Mesmos dados, 20 dias depois: a Pedreira passa a fechar em 35 dias.
@@ -286,8 +338,9 @@ const LOJAS = ['BANGU', 'CAXIAS', 'PEDREIRA', 'RANCHO', 'BOULEVARD', 'NOVA AMERI
       return _buildBancoPanel();
     } catch (e) { return 'ERRO: ' + e.message; }
   });
-  check('a 35 dias a faixa de prazo aparece, com a loja e o número',
-    /fecha o ciclo em 35 dias/.test(String(htmlPerto)) && String(htmlPerto).includes('Pedreira'));
+  check('a 35 dias o aviso sobe pro topo, com a loja e o número',
+    /1 loja fecha o ciclo em menos de 45 dias/.test(String(htmlPerto)) &&
+    /Pedreira .*35 dias/.test(String(htmlPerto).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ')));
 
   // ── 11. O relatório ───────────────────────────────────────────────────────────────────
   const rel = await page.evaluate(() => {
