@@ -72,6 +72,23 @@ const ITENS = [
 
 // Um PostgREST de brinquedo: respeita os filtros que o app manda. É o que dá sentido às
 // checagens de exclusão — se o app parar de mandar `status=neq.CANCELADO`, os 999 chegam.
+// A contagem que cada loja faz na aba Pedido do app Lojas. S.contagens guarda a MAIS
+// RECENTE por produto+loja, e _estAntVigEfetivo so a trata como Est.vig (estoque de
+// agora) quando ela e DESTA semana — contagem velha vira Est.ant e nao entra na soma.
+const CONTAGENS = {
+  'boi-rj': {
+    bangu:          { atual: 30, data_contagem: '2026-10-27' },
+    caxias:         { atual: 12, data_contagem: '2026-10-26' },
+    maglia:         { atual: 99, data_contagem: '2026-10-27' },  // fora da rede
+    norte_shopping: { atual:  7, data_contagem: '2026-10-19' },  // semana PASSADA
+  },
+  'boi-sp': { itaquera: { atual: 8, data_contagem: '2026-10-28' } },
+  // Rabada: so contagem velha — tem que sair como "nenhuma loja contou".
+  'rab-rj': { bangu: { atual: 40, data_contagem: '2026-10-18' } },
+  // Xique: contado com zero, que e diferente de nao ter contado.
+  'so-rj':  { pedreira: { atual: 0, data_contagem: '2026-10-29' } },
+};
+
 function responder(url) {
   const u = new URL(url);
   const tabela = u.pathname.split('/').pop();
@@ -96,7 +113,10 @@ function responder(url) {
 
 (async () => {
   const browser = await chromium.launch({ executablePath: CAMINHOS.CHROMIUM });
-  const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 } });
+  // Fuso a oeste de UTC: a semana da contagem e montada a partir de uma data em texto, e
+  // e ai que um toISOString() descuidado devolve o dia anterior.
+  const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 },
+                                         timezoneId: 'America/Sao_Paulo' });
   const urls = [];
   await ctx.route('**/rest/v1/**', r => {
     const u = r.request().url();
@@ -116,9 +136,10 @@ function responder(url) {
     ['_totalCompradorSemanaCardHtml'], 30000);
 
   urls.length = 0;
-  const r = await page.evaluate(async () => {
+  const r = await page.evaluate(async ({ CONTAGENS }) => {
     S.tab = 'oseas'; S.oseasAtivo = true; S.eduAtivo = false; S.matheusAtivo = false;
     S.pedidoAtual = { id: 'p-rj', semana_inicio: '2026-10-26', status: 'RASCUNHO', regiao: 'RJ' };
+    S.contagens = CONTAGENS;
     S.totalCompradorCache = {};
     if (typeof _totalRedeOseasCache !== 'undefined') {
       Object.keys(_totalRedeOseasCache).forEach(k => delete _totalRedeOseasCache[k]);
@@ -131,19 +152,33 @@ function responder(url) {
     }
     const el = document.createElement('div');
     el.innerHTML = _totalCompradorSemanaCardHtml();
-    const linhas = [...el.querySelectorAll('div')].filter(d => d.children.length === 2
-      && d.firstElementChild.tagName === 'SPAN');
+    // Um bloco por item: nome, a linha do PEDIDO e a linha do CONTADO. Lidas por marcador
+    // (o ícone de cada uma), não por posição — posição quebra ao mexer no leiaute e o teste
+    // passa a medir o leiaute em vez do número.
+    const linhas = [...el.querySelectorAll('.oseas-linha')]
+      .map(d => {
+        const lin = t => t.replace(/\s+/g, ' ').trim();
+        const ped = lin(d.children[1].textContent);
+        const con = lin(d.children[2].textContent);
+        const mPed = ped.match(/\ud83d\udce6 pedido ([^\u00b7]+?)(?:\s*\u00b7\s*(.*))?$/);
+        const mCon = con.match(/\ud83c\udfea contado ([^\u00b7]+?) em (\d+) loja[s]?(?:\s*\u00b7\s*(.*))?$/);
+        return {
+          produto: lin(d.children[0].textContent),
+          total: mPed ? mPed[1].trim() : null,
+          quebra: mPed && mPed[2] ? mPed[2].trim() : '',
+          contado: mCon ? mCon[1].trim() : null,
+          lojas: mCon ? Number(mCon[2]) : null,
+          quebraContado: mCon && mCon[3] ? mCon[3].trim() : '',
+          semContagem: /nenhuma loja contou/.test(con),
+        };
+      });
     return {
       cache: typeof _totalRedeOseasCache !== 'undefined' ? _totalRedeOseasCache['2026-10-26'] : {},
       titulo: (el.querySelector('div > div') || {}).textContent || '',
       txt: el.textContent.replace(/\s+/g, ' ').trim(),
-      linhas: linhas.map(d => ({
-        produto: d.firstElementChild.textContent.trim(),
-        total: d.lastElementChild.firstElementChild.textContent.trim(),
-        quebra: d.lastElementChild.children[1] ? d.lastElementChild.children[1].textContent.replace(/\s+/g,' ').trim() : '',
-      })),
+      linhas,
     };
-  });
+  }, { CONTAGENS });
 
   // ══ 1. O NÚMERO DO EXEMPLO DO DONO ══════════════════════════════════════════════
   const boi = r.linhas.find(l => /BOI BUMBA/.test(l.produto)) || {};
@@ -189,7 +224,34 @@ function responder(url) {
   check('os três pedidos da semana foram lidos (RJ, SP e o hortifruti), menos o cancelado',
     r.cache.pedidos === 3, JSON.stringify({ pedidos: r.cache.pedidos }));
 
-  // ══ 6. A ABA EDU CONTINUA COMO ERA ══════════════════════════════════════════════
+  // ══ 6. O ESTOQUE QUE AS LOJAS CONTARAM ═══════════════════════════
+  // É outro número, não outra forma de ver o mesmo: um diz o que pediram, o outro o que
+  // têm na mão. 100 pedidos com 80 em estoque é uma conversa; com 2, é outra.
+  check('o item traz também o que as lojas contaram (30 + 12 + 8)',
+    boi.contado === '50 PCT', JSON.stringify(boi));
+  // 45 de 11 lojas e 45 de 3 lojas não querem dizer a mesma coisa.
+  check('e diz de quantas lojas esse estoque veio',
+    boi.lojas === 3, JSON.stringify(boi));
+  check('com a quebra por região da contagem (42 no Rio, 8 em SP)',
+    boi.quebraContado === 'RJ 42 · SP 8', JSON.stringify(boi));
+  // Contagem da semana passada é Est.ant esperando ser recontado (_estAntVigEfetivo):
+  // empilhar ela aqui misturaria dois momentos num número só.
+  check('contagem de semana passada não entra na soma',
+    boi.contado === '50 PCT' && !/\b57\b/.test(r.txt), JSON.stringify(boi));
+  check('e Maglia também fica de fora da contagem',
+    !/149|99/.test(boi.contado + boi.quebraContado), JSON.stringify(boi));
+  const rabL = r.linhas.find(l => /RABADA/.test(l.produto)) || {};
+  check('item cuja única contagem é velha sai como "nenhuma loja contou"',
+    rabL.semContagem === true && rabL.contado === null, JSON.stringify(rabL));
+  // Contado ZERO é informação: a loja olhou e não tinha. Diferente de não ter contado.
+  const xiqL = r.linhas.find(l => /XIQUE/.test(l.produto)) || {};
+  check('contado zero aparece como zero, não como "ninguém contou"',
+    xiqL.contado === '0 UND' && xiqL.lojas === 1 && xiqL.semContagem === false, JSON.stringify(xiqL));
+  check('a legenda explica os dois números',
+    /pedido/.test(r.txt) && /em estoque/.test(r.txt) && /nesta semana/.test(r.txt),
+    r.txt.slice(0, 600));
+
+  // ══ 7. A ABA EDU CONTINUA COMO ERA ══════════════════════════════════════════════
   // "Só da aba Oseas, que são os petiscos" — o Edu soma o pedido ABERTO, não a rede.
   const edu = await page.evaluate(async () => {
     S.tab = 'edu'; S.eduAtivo = true; S.oseasAtivo = false;
