@@ -4655,6 +4655,21 @@ function _gnBhCicloVigente(ancora, refISO) {
   }
   return { inicio, fim };
 }
+// Espelho de _bhMesesDoCiclo (gn-checklist.html): os meses de um ciclo, cada um nomeado pelo
+// mês em que o período mensal TERMINA. 26/03 → 25/09 dá Abr..Set, seis colunas. É a mesma
+// lista que a aba Banco soma na coluna Saldo, então ela tem que dar exatamente isto — um mês
+// a mais ou a menos aqui muda o saldo da loja inteira sem nenhum erro aparecer na tela.
+function _gnBhMesesDoCiclo(inicio, fim) {
+  const res = [];
+  let [cy, cm] = _gnBhDiaAnterior(_gnBhSomaMeses(inicio, 1)).slice(0, 7).split('-').map(Number);
+  const [fy, fm] = fim.slice(0, 7).split('-').map(Number);
+  let guard = 0;
+  while ((cy < fy || (cy === fy && cm <= fm)) && guard++ < 240) {
+    res.push(cy + '-' + String(cm).padStart(2, '0'));
+    cm++; if (cm > 12) { cm = 1; cy++; }
+  }
+  return res;
+}
 
 // Casa pelo ANO também: com 2026 e 2027 no mesmo calendário, dia+mês aparece duas vezes e
 // sem o ano a data cairia na semana do outro ano.
@@ -9269,7 +9284,12 @@ function _raioxHtml() {
       ${avisoEscala}`;
 
   // ── Banco de horas ──────────────────────────────────────────────────────────
-  const bhHtml = (!x.bh.negativas && !x.bh.positivas)
+  // O aviso do ciclo fica FORA do ternário, e isso não é detalhe de formatação: é quando o
+  // período não tem lançamento nenhum que ele mais importa. A Pedreira não lançou nada em
+  // Out/26 e carrega -585h no ciclo; quem lê "nenhum saldo lançado no período" sem o aviso
+  // conclui que a loja está limpa.
+  const bhCicloNota = `<div style="font-size:9.5px;color:var(--t4);margin-top:7px;line-height:1.45">Só o que foi lançado NO PERÍODO acima. O saldo acumulado do ciclo — o que tem que fechar em 6 meses — está na aba ⏱ Banco do Painel.</div>`;
+  const bhHtml = ((!x.bh.negativas && !x.bh.positivas)
     ? `<div style="font-size:11px;color:var(--t3)">Nenhum saldo lançado no período.</div>`
     : `<div style="display:flex;gap:8px;margin-bottom:4px">
         <div style="flex:1"><div style="font-size:9px;color:var(--t4);font-weight:800">DEVIDAS</div>
@@ -9284,7 +9304,7 @@ function _raioxHtml() {
         esc(g.setor))).join('')}
       ${x.bh.graves.length > 8 ? `<div style="font-size:9.5px;color:var(--t3);margin-top:6px">e mais ${x.bh.graves.length - 8} — a lista completa fica no app Check-list.</div>` : ''}
       ${x.bh.semSalario ? `<div style="font-size:9.5px;color:var(--txt-amber);margin-top:7px;line-height:1.45">
-        Tem gente sem salário de setor cadastrado: as horas aparecem, o valor em R$ dessas não entra na soma.</div>` : ''}`;
+        Tem gente sem salário de setor cadastrado: as horas aparecem, o valor em R$ dessas não entra na soma.</div>` : ''}`) + bhCicloNota;
 
   // ── Notas canceladas ────────────────────────────────────────────────────────
   const cancelHtml = !x.cancel.qtd
@@ -12555,6 +12575,379 @@ async function enviarPDFTriosWpp() {
   await _compartilharPdfWpp(r.msg, r.titulo);
 }
 
+// ── Aba ⏱ Banco — o cenário do banco de horas de cada loja ────────────────────────────
+//
+// Pedido do dono: "trazer as informações do banco de horas para o painel de gestão,
+// trazendo o cenário da loja só dos casos que tem banco positivo ou negativo".
+//
+// O que o Painel já tinha era o banco do PERÍODO escolhido (dia/semana/mês), dentro do
+// raio-x de cada loja — e período não é ciclo. O número que cobra ação é o do CICLO: o
+// banco só fecha de 6 em 6 meses, e o que sobrar no fim é hora extra a pagar com 50% (ou
+// hora negativa que a loja já pagou sem receber de volta). MEDIDO em 31/10/2026, com a
+// visão por mês ao lado da do ciclo:
+//
+//   Pedreira       ciclo -585,0h (R$ 4.431)   ·  só Out/26: -168,5h   ·  fecha em 55 dias
+//   Norte Shopping ciclo -287,6h (R$ 2.272)   ·  só Out/26:    0,0h   ·  fecha em 86 dias
+//   Rancho         ciclo +207,5h (R$ 2.595)   ·  só Out/26:    0,0h
+//
+// Nas duas últimas a visão por mês mostra ZERO: a loja ainda não lançou Out/26, e o saldo
+// que ela carrega está todo nos meses anteriores do ciclo. Quem olhasse o Painel hoje
+// concluiria que não há nada ali.
+//
+// Rede inteira no ciclo vigente: +572,5h a pagar (R$ 6.866,05, já com o adicional de 50%)
+// e -1.091,9h já pagas sem contrapartida (R$ 8.386,02). 129 pessoas com saldo, 60 delas
+// acima de ±8h — o limite que a própria aba Banco marca como alerta.
+//
+// As regras que não podem divergir da aba Banco do Check-list, porque é dela que o número
+// sai (ver _bhContexto / _bhSaldoFunc lá):
+//   1. O ciclo é derivado da ÂNCORA (gn_banco_horas/CONFIG.periodo_inicio), de 6 em 6
+//      meses, até conter hoje. Cada loja tem a sua: hoje há três ciclos diferentes na rede.
+//   2. O mês de uma coluna é o mês em que o período mensal TERMINA (ciclo no dia 26:
+//      Set/26 é 26/08 → 25/09).
+//   3. O "legado" — lançamento anterior ao 1º mês do 1º ciclo — soma no saldo do PRIMEIRO
+//      ciclo e só dele. Hoje isso é a Nova Iguaçu/Rancho: âncora em 26/09, 7 meses de
+//      lançamento antes disso (Mar a Set/26), e são eles que respondem pelo +207,5h.
+//   4. Só o campo `horas` soma — é o que a aba Banco faz. Férias/afastamento (`semBanco`) é
+//      gravado com horas 0 e um motivo (14 na rede, todos com 0 — confirmado no banco), então
+//      sai pela regra do saldo zerado, não por uma exceção própria que pudesse divergir.
+//   5. Lançamento feito com o nome ANTIGO da pessoa pertence a quem hoje se chama de outro
+//      jeito (trilha `_nomesAnteriores`). Sem isso a loja que renomeou o cadastro apareceria
+//      com a pessoa em duas linhas e o saldo partido no meio.
+//
+// Maglia fica fora: a regra do CLAUDE.md é que ela só entra quando o pedido cita o nome, e
+// este não citou. Ela também não tem linha nenhuma em gn_banco_horas — apareceria como
+// "sem ciclo cadastrado" todo dia, uma cobrança falsa.
+const LOJA_FORA_BANCO_GERENCIA = 'MAGLIA';
+// O mesmo ±8h que a aba Banco usa pra marcar o caso como alerta.
+const BH_GER_LIMITE_ALERTA = 8;
+// Até quantos dias pro fim do ciclo o prazo já aparece em vermelho. O ciclo tem 6 meses e o
+// último mês é o do "alerta final" da própria aba Banco — mesma régua.
+const BH_GER_PRAZO_CRITICO_DIAS = 45;
+
+let _bancoGerData = null, _bancoGerLoaded = false;
+// Lojas com a lista completa aberta. O padrão mostra só quem passou de ±8h porque em
+// Pedreira e Norte Shopping a lista inteira tem 27 e 32 linhas — a tela viraria rolagem.
+const _bancoGerAberto = new Set();
+
+function _bancoGerToggle(k) {
+  if (_bancoGerAberto.has(k)) _bancoGerAberto.delete(k); else _bancoGerAberto.add(k);
+  renderDashboard();
+}
+
+// O setor de cada pessoa e a trilha de nomes antigos, varrendo TODAS as semanas da escala e
+// deixando a mais recente valer. Olhar só a última semana com registro perdia o setor de 44
+// das 129 pessoas com saldo (medido) — gente que saiu no meio do ciclo, ou que não está na
+// semana que a loja já preencheu lá na frente. Sem setor não há salário, e sem salário o
+// saldo aparece em horas sem R$, dizendo por quê.
+function _bancoGerCadastro(comKey) {
+  const linha = (_dashComissoesAll || []).find(x => x.loja === comKey);
+  const allData = (linha && linha.all_data) || {};
+  const porNome = new Map();     // norm(nome) → {nome, setor, anteriores:[]}
+  Object.keys(allData).filter(k => /^\d+$/.test(k)).map(Number).sort((a, b) => a - b)
+    .forEach(idx => (allData[String(idx)].funcs || []).forEach(f => {
+      if (!f || !f.nome || !f.nome.trim()) return;
+      porNome.set(_bhNormNomeHome(f.nome), {
+        nome: f.nome.trim(), setor: (f.setor || '').trim(),
+        _nomesAnteriores: f._nomesAnteriores || [],
+      });
+    }));
+  const lista = [...porNome.values()];
+  // norm(nome antigo) → nome de hoje. _bhAliasesHome já descarta o apelido que mais de uma
+  // pessoa reivindica: atribuir aquele lançamento seria escolher no par ou ímpar.
+  const apelidos = new Map();
+  lista.forEach(f => _bhAliasesHome(f.nome, lista).forEach(a => apelidos.set(_bhNormNomeHome(a), f.nome)));
+  return { porNome, apelidos, lista };
+}
+
+// Cenário de UMA loja: função pura sobre o que o loader já buscou.
+function _bancoGerCenarioDaLoja(k, cfg, porMes, hoje) {
+  const chkKey = LOJA_DB_KEY[k] || k;
+  const comKey = LOJA_COM_KEY[k] || k;
+  const c = {
+    k, chkKey, ancora: (cfg && cfg.periodo_inicio) || null, ciclo: null, meses: [], legado: [],
+    pessoas: [], pos: 0, neg: 0, valorPos: 0, valorNeg: 0, acima: 0,
+    diasPraFechar: null, semSalario: 0, mesesForaDoCiclo: [],
+  };
+  const mesesDaLoja = Object.keys(porMes || {}).filter(m => /^\d{4}-\d{2}$/.test(m) && (porMes[m] || []).length);
+  if (!c.ancora) { c.mesesForaDoCiclo = mesesDaLoja.sort(); return c; }
+  const vig = _gnBhCicloVigente(c.ancora, hoje);
+  if (!vig) { c.mesesForaDoCiclo = mesesDaLoja.sort(); return c; }
+  c.ciclo = vig;
+  c.meses = _gnBhMesesDoCiclo(vig.inicio, vig.fim);
+  c.diasPraFechar = Math.round((new Date(vig.fim + 'T12:00:00') - new Date(hoje + 'T12:00:00')) / 864e5);
+  // Legado: só no primeiro ciclo, e só o que é anterior ao primeiro mês DELE.
+  const primeiroMesDoPrimeiroCiclo = _gnBhPrimeiroMesDoCiclo(c.ancora);
+  c.legado = vig.inicio === c.ancora
+    ? mesesDaLoja.filter(m => m < primeiroMesDoPrimeiroCiclo).sort()
+    : [];
+  const mesesSaldo = c.legado.concat(c.meses);
+  const noSaldo = new Set(mesesSaldo);
+  c.mesesForaDoCiclo = mesesDaLoja.filter(m => !noSaldo.has(m)).sort();
+
+  const { porNome, apelidos } = _bancoGerCadastro(comKey);
+  const salSetor = (cfg && cfg.salariosSetor) || {};
+  const soma = new Map();        // norm(nome canônico) → {nome, horas}
+  // Sem tratar `semBanco` de forma especial, de propósito: a aba Banco também soma só o
+  // campo `horas`, e férias/afastamento é gravado com horas 0 e o motivo (14 lançamentos na
+  // rede, todos com 0 — confirmado no banco). Então ele não vira linha pela regra do saldo
+  // zerado, e se um dia vier com hora o número continua igual ao do Check-list em vez de
+  // divergir dele sem ninguém notar.
+  mesesSaldo.forEach(m => (porMes[m] || []).forEach(reg => {
+    if (!reg || !reg.nome) return;
+    const kLanc = _bhNormNomeHome(reg.nome);
+    // O lançamento pode estar no nome antigo: a soma vai pra quem é a pessoa hoje.
+    const nomeAtual = apelidos.get(kLanc);
+    const chave = nomeAtual ? _bhNormNomeHome(nomeAtual) : kLanc;
+    const cad = porNome.get(chave);
+    const atual = soma.get(chave) || { nome: (cad && cad.nome) || nomeAtual || reg.nome.trim(), horas: 0 };
+    atual.horas += parseFloat(reg.horas) || 0;
+    soma.set(chave, atual);
+  }));
+
+  soma.forEach((v, chave) => {
+    // "Só dos casos que tem banco positivo ou negativo": saldo zerado sai da lista. Zero é
+    // o banco funcionando — quem compensou tudo não pede nada de ninguém.
+    if (Math.abs(v.horas) < 0.005) return;
+    const cad = porNome.get(chave);
+    const setor = (cad && cad.setor) || '';
+    const vh = window.gnBhValorHora ? window.gnBhValorHora(salSetor[setor]) : 0;
+    const valor = window.gnBhValorHoras ? window.gnBhValorHoras(v.horas, vh) : 0;
+    if (!vh) c.semSalario++;
+    if (v.horas > 0) { c.pos += v.horas; c.valorPos += valor; }
+    else { c.neg += Math.abs(v.horas); c.valorNeg += valor; }
+    if (Math.abs(v.horas) > BH_GER_LIMITE_ALERTA) c.acima++;
+    c.pessoas.push({ nome: v.nome, setor, horas: v.horas, valor, semValor: !vh });
+  });
+  // Mesma ordem de "casos mais graves" da aba Banco: maior saldo em módulo primeiro, e no
+  // empate o negativo na frente — hora devida é a que cobra ação.
+  c.pessoas.sort((a, b) => Math.abs(b.horas) - Math.abs(a.horas) || a.horas - b.horas);
+  return c;
+}
+
+async function _loadBancoGerencia() {
+  _bancoGerLoaded = false; _bancoGerData = null;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  // A tabela inteira de uma vez, CONFIG e meses juntos: são ~70 linhas na rede toda. Recortar
+  // por mês aqui não daria: o ciclo de cada loja começa num mês diferente (âncora própria) e
+  // o legado da Nova Iguaçu chega a Mar/26 — o corte teria que ser a união de três janelas.
+  const rows = await window.gnFetchJson(
+    `${SB_URL}/rest/v1/gn_banco_horas?select=loja,mes,registros`, H, 'bancoGerencia', null);
+  if (!rows) { _bancoGerLoaded = true; _bancoGerData = { erro: true }; renderDashboard(); return; }
+  const cfgPorLoja = {}, mesesPorLoja = {};
+  rows.forEach(r => {
+    if (r.mes === 'CONFIG') { cfgPorLoja[r.loja] = r.registros || {}; return; }
+    (mesesPorLoja[r.loja] = mesesPorLoja[r.loja] || {})[r.mes] = Array.isArray(r.registros) ? r.registros : [];
+  });
+  const hoje = _carnesISO(new Date());
+  const lojas = LOJAS_LISTA.filter(k => k !== LOJA_FORA_BANCO_GERENCIA);
+  const porLoja = {};
+  lojas.forEach(k => {
+    const chkKey = LOJA_DB_KEY[k] || k;
+    porLoja[k] = _bancoGerCenarioDaLoja(k, cfgPorLoja[chkKey], mesesPorLoja[chkKey] || {}, hoje);
+  });
+  // A escala é o que dá setor (e o setor dá o salário, que dá o R$). Sem ela o saldo em horas
+  // continua certo — e a tela diz que o R$ ficou de fora, em vez de mostrar R$ 0,00.
+  const semEscala = !(_dashComissoesAll || []).length;
+  _bancoGerData = { porLoja, lojas, hoje, semEscala };
+  _bancoGerLoaded = true;
+  renderDashboard();
+}
+
+const _bhGerHoras = h => (h < 0 ? '-' : '+') + _raioxHoras(h);
+const _bhGerBR = iso => String(iso).slice(8, 10) + '/' + String(iso).slice(5, 7) + '/' + String(iso).slice(2, 4);
+
+function _buildBancoPanel() {
+  const reportBtns = _reportBtnsRowHtml('Banco');
+  if (!_bancoGerLoaded || !_bancoGerData) return reportBtns + _skelPanel(5);
+  if (_bancoGerData.erro) {
+    return reportBtns + `<div style="font-size:12px;color:var(--t3);padding:14px">Não deu pra carregar o banco de horas agora. Troque de aba e volte.</div>`;
+  }
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  const { porLoja, lojas, semEscala } = _bancoGerData;
+
+  const comSaldo = lojas.filter(k => porLoja[k].pessoas.length);
+  const semCiclo = lojas.filter(k => !porLoja[k].ciclo);
+  const zeradas  = lojas.filter(k => porLoja[k].ciclo && !porLoja[k].pessoas.length);
+
+  const totPos = comSaldo.reduce((t, k) => t + porLoja[k].pos, 0);
+  const totNeg = comSaldo.reduce((t, k) => t + porLoja[k].neg, 0);
+  const totVP  = comSaldo.reduce((t, k) => t + porLoja[k].valorPos, 0);
+  const totVN  = comSaldo.reduce((t, k) => t + porLoja[k].valorNeg, 0);
+  const totPessoas = comSaldo.reduce((t, k) => t + porLoja[k].pessoas.length, 0);
+  const totAcima   = comSaldo.reduce((t, k) => t + porLoja[k].acima, 0);
+
+  // Quem está mais perto de fechar com saldo na mão: é o prazo que não dá pra esticar.
+  const maisUrgente = comSaldo
+    .filter(k => porLoja[k].diasPraFechar !== null)
+    .sort((a, b) => porLoja[a].diasPraFechar - porLoja[b].diasPraFechar)[0];
+
+  const kpi = (rot, val, sub, cor) => `<div style="flex:1;min-width:132px;background:var(--s2);border:1px solid var(--b1);border-radius:12px;padding:10px 12px">
+    <div style="font-size:9px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:var(--t4)">${rot}</div>
+    <div style="font-size:17px;font-weight:800;color:${cor || 'var(--t1)'};font-variant-numeric:tabular-nums;margin-top:2px">${val}</div>
+    <div style="font-size:9.5px;color:var(--t3);margin-top:1px">${sub}</div></div>`;
+
+  const kpis = `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+    ${kpi('A compensar', '-' + _raioxHoras(totNeg), _fmtBRL(totVN) + ' já pagos', 'var(--txt-red)')}
+    ${kpi('A pagar', '+' + _raioxHoras(totPos), _fmtBRL(totVP) + ' com +50%', 'var(--txt-green)')}
+    ${kpi('Em jogo', _fmtBRL(totVP + totVN), totPessoas + ' pessoa' + (totPessoas === 1 ? '' : 's') + ' · ' + totAcima + ' acima de ±' + BH_GER_LIMITE_ALERTA + 'h')}
+  </div>`;
+
+  const explica = `<div style="font-size:10.5px;color:var(--t3);line-height:1.55;margin-bottom:12px">
+    Saldo do <b>ciclo vigente</b> de cada loja — o período de 6 meses em que o banco tem que
+    fechar. Cada loja tem o ciclo dela, por isso as datas abaixo são diferentes. Só aparece
+    quem está com saldo <b>positivo ou negativo</b>: zerado é o banco funcionando.
+    Hora positiva que sobrar no fim é paga com <b>adicional de 50%</b>; hora negativa é a que
+    a loja já pagou sem receber de volta.
+    ${semEscala ? `<br><span style="color:var(--txt-amber);font-weight:700">⚠ A escala não carregou — os saldos em horas estão certos, mas o valor em R$ ficou de fora (ele vem do salário do setor).</span>` : ''}
+  </div>`;
+
+  const urgenteHtml = maisUrgente && porLoja[maisUrgente].diasPraFechar <= BH_GER_PRAZO_CRITICO_DIAS
+    ? `<div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:12px;padding:11px 14px;margin-bottom:10px">
+        <div style="font-size:12px;font-weight:800;color:var(--txt-red);margin-bottom:3px">⏰ ${LOJA_DISPLAY[maisUrgente] || maisUrgente} fecha o ciclo em ${porLoja[maisUrgente].diasPraFechar} dia${porLoja[maisUrgente].diasPraFechar === 1 ? '' : 's'}</div>
+        <div style="font-size:10.5px;color:var(--t2);line-height:1.5">Em ${_bhGerBR(porLoja[maisUrgente].ciclo.fim)} o que não tiver sido compensado vira hora extra a pagar. Hoje são ${_bhGerHoras(porLoja[maisUrgente].pos)} e ${_bhGerHoras(-porLoja[maisUrgente].neg)} na mão.</div>
+      </div>`
+    : '';
+
+  // Loja com mais hora em jogo primeiro: é o tamanho do problema, não a ordem do alfabeto.
+  const ordenadas = comSaldo.slice().sort((a, b) =>
+    (porLoja[b].pos + porLoja[b].neg) - (porLoja[a].pos + porLoja[a].neg) ||
+    (LOJA_DISPLAY[a] || a).localeCompare(LOJA_DISPLAY[b] || b));
+
+  const cards = ordenadas.map(k => {
+    const c = porLoja[k];
+    const cor = COR_LOJA[k] || '#8b5cf6';
+    const aberto = _bancoGerAberto.has(k);
+    const graves = c.pessoas.filter(p => Math.abs(p.horas) > BH_GER_LIMITE_ALERTA);
+    // Sem ninguém acima de ±8h a lista inteira é curta — esconder metade dela não economiza
+    // nada e deixaria a loja parecendo vazia.
+    const visiveis = aberto || !graves.length ? c.pessoas : graves;
+    const prazoCor = c.diasPraFechar <= BH_GER_PRAZO_CRITICO_DIAS ? 'var(--txt-red)' : 'var(--t3)';
+    const linhas = visiveis.map(p => {
+      const alerta = Math.abs(p.horas) > BH_GER_LIMITE_ALERTA;
+      const sub = [p.setor || 'sem setor na escala', p.semValor ? '⚠ sem salário do setor' : _fmtBRL(p.valor)]
+        .filter(Boolean).join(' · ');
+      return `<div style="display:flex;justify-content:space-between;gap:10px;padding:5px 0;border-top:1px solid var(--b1)">
+        <div style="min-width:0">
+          <div style="font-size:11.5px;font-weight:700;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${alerta ? '⚠️ ' : ''}${esc(p.nome)}</div>
+          <div style="font-size:9.5px;color:var(--t3)">${esc(sub)}</div>
+        </div>
+        <div style="font-size:12px;font-weight:800;font-variant-numeric:tabular-nums;white-space:nowrap;color:${p.horas > 0 ? 'var(--txt-green)' : 'var(--txt-red)'}">${_bhGerHoras(p.horas)}</div>
+      </div>`;
+    }).join('');
+    const maisBtn = graves.length && c.pessoas.length > graves.length
+      ? `<button onclick="_bancoGerToggle('${k}')" style="margin-top:8px;width:100%;background:var(--fill-sutil2);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 10px;color:var(--t2);font-size:10.5px;font-weight:700;cursor:pointer;font-family:inherit">${aberto ? '▲ Mostrar só os ' + graves.length + ' acima de ±' + BH_GER_LIMITE_ALERTA + 'h' : '▼ Ver as outras ' + (c.pessoas.length - graves.length) + ' com saldo menor'}</button>`
+      : '';
+    const legadoHtml = c.legado.length
+      ? `<div style="font-size:9.5px;color:#8a6d1f;background:rgba(234,179,8,.08);border:1px solid rgba(234,179,8,.25);border-radius:8px;padding:6px 8px;margin-top:8px;line-height:1.45">
+          ↩ ${c.legado.map(_gnBhMesLabel).join(', ')} ${c.legado.length === 1 ? 'é lançamento' : 'são lançamentos'} anterior${c.legado.length === 1 ? '' : 'es'} ao 1º mês do ciclo. Soma${c.legado.length === 1 ? '' : 'm'} neste ciclo, que é o primeiro da loja, e o próximo nasce sem ${c.legado.length === 1 ? 'ele' : 'eles'}.</div>`
+      : '';
+    const foraHtml = c.mesesForaDoCiclo.length
+      ? `<div style="font-size:9.5px;color:var(--t4);margin-top:6px">${c.mesesForaDoCiclo.map(_gnBhMesLabel).join(', ')} ${c.mesesForaDoCiclo.length === 1 ? 'é de outro ciclo' : 'são de outros ciclos'} e não ${c.mesesForaDoCiclo.length === 1 ? 'entra' : 'entram'} neste saldo.</div>`
+      : '';
+    return `<div style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid ${cor};border-radius:14px;padding:12px 14px;margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap">
+        <div style="font-size:13px;font-weight:800;color:var(--t1)">${LOJA_DISPLAY[k] || k}</div>
+        <div style="font-size:9.5px;color:${prazoCor};font-weight:700">${_bhGerBR(c.ciclo.inicio)} → ${_bhGerBR(c.ciclo.fim)} · fecha em ${c.diasPraFechar} dia${c.diasPraFechar === 1 ? '' : 's'}</div>
+      </div>
+      <div style="display:flex;gap:14px;margin:7px 0 2px;flex-wrap:wrap">
+        <div><span style="font-size:14px;font-weight:800;color:var(--txt-red);font-variant-numeric:tabular-nums">${_bhGerHoras(-c.neg)}</span>
+          <span style="font-size:9.5px;color:var(--t3)"> ${_fmtBRL(c.valorNeg)} já pagos</span></div>
+        <div><span style="font-size:14px;font-weight:800;color:var(--txt-green);font-variant-numeric:tabular-nums">${_bhGerHoras(c.pos)}</span>
+          <span style="font-size:9.5px;color:var(--t3)"> ${_fmtBRL(c.valorPos)} com +50%</span></div>
+      </div>
+      <div style="font-size:9.5px;color:var(--t4);margin-bottom:4px">${c.pessoas.length} pessoa${c.pessoas.length === 1 ? '' : 's'} com saldo${graves.length ? ` · ${graves.length} acima de ±${BH_GER_LIMITE_ALERTA}h` : ''}${c.semSalario ? ` · ${c.semSalario} sem salário do setor` : ''}</div>
+      ${linhas}
+      ${maisBtn}
+      ${legadoHtml}
+      ${foraHtml}
+    </div>`;
+  }).join('');
+
+  const zeradasHtml = zeradas.length
+    ? `<div style="background:rgba(22,163,74,.06);border:1px solid rgba(22,163,74,.2);border-radius:12px;padding:10px 14px;margin-bottom:10px">
+        <div style="font-size:11.5px;font-weight:700;color:var(--txt-green);margin-bottom:2px">✅ ${zeradas.length} loja${zeradas.length === 1 ? '' : 's'} sem nenhum saldo no ciclo</div>
+        <div style="font-size:10px;color:var(--t2);line-height:1.5">${zeradas.map(k => `${LOJA_DISPLAY[k] || k} <span style="color:var(--t4)">(${_bhGerBR(porLoja[k].ciclo.inicio)} → ${_bhGerBR(porLoja[k].ciclo.fim)})</span>`).join(' · ')}</div>
+        <div style="font-size:9.5px;color:var(--t4);margin-top:4px">Pode ser banco zerado de verdade ou ciclo que começou agora e ainda não teve lançamento. O que falta lançar é cobrado no card de pendências, lá em cima.</div>
+      </div>`
+    : '';
+
+  const semCicloHtml = semCiclo.length
+    ? `<div style="background:rgba(167,139,250,.10);border:1px solid rgba(167,139,250,.3);border-radius:12px;padding:11px 14px;margin-bottom:10px">
+        <div style="font-size:12px;font-weight:800;color:#a78bfa;margin-bottom:3px">⏱ ${semCiclo.length} loja${semCiclo.length === 1 ? '' : 's'} sem o 1º ciclo cadastrado</div>
+        <div style="font-size:10.5px;color:var(--t2);line-height:1.5">${semCiclo.map(k => {
+          const c = porLoja[k];
+          const n = c.mesesForaDoCiclo.length;
+          return `${LOJA_DISPLAY[k] || k}${n ? ` — ${n} ${n === 1 ? 'mês lançado' : 'meses lançados'} (${c.mesesForaDoCiclo.map(_gnBhMesLabel).join(', ')})` : ''}`;
+        }).join('<br>')}</div>
+        <div style="font-size:9.5px;color:var(--t4);margin-top:5px">Sem a data de início do 1º ciclo não há como saber que período somar — o lançamento fica guardado, mas não vira saldo. A loja cadastra na aba Banco de Horas do Check-list.</div>
+      </div>`
+    : '';
+
+  if (!comSaldo.length) {
+    return reportBtns + explica + semCicloHtml + (zeradasHtml ||
+      `<div style="font-size:12px;color:var(--t3);padding:14px">Nenhuma loja com saldo de banco de horas no ciclo vigente.</div>`);
+  }
+  return reportBtns + kpis + explica + urgenteHtml + cards + zeradasHtml + semCicloHtml;
+}
+
+// ── Relatório da aba ⏱ Banco (mesmo padrão de gerarWpp/gerarPDF/enviarPDF...Wpp) ───────
+// O WhatsApp leva só quem passou de ±8h: a rede inteira são 129 pessoas com saldo, e uma
+// mensagem com 129 linhas ninguém lê. O PDF leva todas, porque é o que vai pra reunião.
+function _bancoRelatorioTexto(wpp) {
+  if (!_bancoGerLoaded || !_bancoGerData || _bancoGerData.erro) return null;
+  const { porLoja, lojas } = _bancoGerData;
+  const b = s => wpp ? '*' + s + '*' : s;
+  const comSaldo = lojas.filter(k => porLoja[k].pessoas.length)
+    .sort((a, b2) => (porLoja[b2].pos + porLoja[b2].neg) - (porLoja[a].pos + porLoja[a].neg));
+  const totPos = comSaldo.reduce((t, k) => t + porLoja[k].pos, 0);
+  const totNeg = comSaldo.reduce((t, k) => t + porLoja[k].neg, 0);
+  const totVP  = comSaldo.reduce((t, k) => t + porLoja[k].valorPos, 0);
+  const totVN  = comSaldo.reduce((t, k) => t + porLoja[k].valorNeg, 0);
+
+  let msg = `${wpp ? '⏱ ' : ''}${b('BANCO DE HORAS — CICLO VIGENTE')}\n`;
+  msg += `Cada loja tem o ciclo dela; só entra quem está com saldo positivo ou negativo.\n`;
+  msg += `\nA compensar: ${_bhGerHoras(-totNeg)} (${_fmtBRL(totVN)} já pagos)\n`;
+  msg += `A pagar: ${_bhGerHoras(totPos)} (${_fmtBRL(totVP)}, já com o adicional de 50%)\n`;
+  msg += `Em jogo: ${_fmtBRL(totVP + totVN)}\n`;
+
+  comSaldo.forEach(k => {
+    const c = porLoja[k];
+    msg += `\n${wpp ? '🏪 ' : ''}${b(LOJA_DISPLAY[k] || k)} — ciclo ${_bhGerBR(c.ciclo.inicio)} a ${_bhGerBR(c.ciclo.fim)} (fecha em ${c.diasPraFechar} dia${c.diasPraFechar === 1 ? '' : 's'})\n`;
+    msg += `  ${_bhGerHoras(-c.neg)} a compensar (${_fmtBRL(c.valorNeg)}) · ${_bhGerHoras(c.pos)} a pagar (${_fmtBRL(c.valorPos)})\n`;
+    const lista = wpp ? c.pessoas.filter(p => Math.abs(p.horas) > BH_GER_LIMITE_ALERTA) : c.pessoas;
+    lista.forEach(p => {
+      msg += `  ${Math.abs(p.horas) > BH_GER_LIMITE_ALERTA ? '⚠ ' : ''}${p.nome}: ${_bhGerHoras(p.horas)}`;
+      msg += p.semValor ? ` (sem salário do setor)\n` : ` (${_fmtBRL(p.valor)})\n`;
+    });
+    if (wpp && c.pessoas.length > lista.length) {
+      msg += `  e mais ${c.pessoas.length - lista.length} com saldo até ±${BH_GER_LIMITE_ALERTA}h — a lista inteira está no Painel\n`;
+    }
+    if (c.legado.length) msg += `  ↩ ${c.legado.map(_gnBhMesLabel).join(', ')} ${c.legado.length === 1 ? 'é lançamento' : 'são lançamentos'} anterior${c.legado.length === 1 ? '' : 'es'} ao 1º mês do ciclo e soma${c.legado.length === 1 ? '' : 'm'} aqui\n`;
+  });
+
+  const zeradas = lojas.filter(k => porLoja[k].ciclo && !porLoja[k].pessoas.length);
+  if (zeradas.length) msg += `\n${b('Sem saldo no ciclo')}: ${zeradas.map(k => LOJA_DISPLAY[k] || k).join(', ')}\n`;
+  const semCiclo = lojas.filter(k => !porLoja[k].ciclo);
+  if (semCiclo.length) msg += `${b('Sem o 1º ciclo cadastrado')}: ${semCiclo.map(k => LOJA_DISPLAY[k] || k).join(', ')} — sem a data não há como somar o saldo\n`;
+  return { msg, titulo: 'Banco de horas — ciclo vigente' };
+}
+
+function gerarWppBanco() {
+  const r = _bancoRelatorioTexto(true);
+  if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  window.open('https://wa.me/?text=' + encodeURIComponent(r.msg), '_blank');
+}
+function gerarPDFBanco() {
+  const r = _bancoRelatorioTexto(false);
+  if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  gerarPDF(r.msg, r.titulo);
+}
+async function enviarPDFBancoWpp() {
+  const r = _bancoRelatorioTexto(false);
+  if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  await _compartilharPdfWpp(r.msg, r.titulo);
+}
+
 // ── Relatórios da aba 🍺 Barris (mesmo padrão de gerarWpp/gerarPDF/enviarPDF...Wpp já
 // usado em Xadrez/Férias/Alertas — ver _reportBtnsRowHtml) ────────────────────────────
 function _barrisSemRelatorioTexto(){
@@ -14102,6 +14495,9 @@ function renderDashboard() {
   } else if (_dashTab==='trios') {
     content = _buildTriosPanel();
 
+  } else if (_dashTab==='banco') {
+    content = _buildBancoPanel();
+
   } else if (_dashTab==='dre') {
     content = _buildDreRedePanel();
 
@@ -14150,10 +14546,11 @@ function renderDashboard() {
         <button class="dash-tab${_dashTab==='barris'?' on':''}" onclick="_setDashTab('barris')">🍺 Barris</button>
         <button class="dash-tab${_dashTab==='carnes'?' on':''}" onclick="_setDashTab('carnes')">🥩 Carnes</button>
         <button class="dash-tab${_dashTab==='trios'?' on':''}" onclick="_setDashTab('trios')">🎵 Trios</button>
+        <button class="dash-tab${_dashTab==='banco'?' on':''}" onclick="_setDashTab('banco')">⏱ Banco</button>
         <button class="dash-tab${_dashTab==='dre'?' on':''}" onclick="_setDashTab('dre')">💰 DRE</button>
         <button class="dash-tab${_dashTab==='metas'?' on':''}" onclick="_setDashTab('metas')">⚙ Metas</button>
       </div>
-      ${(_dashTab!=='metas'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris'&&_dashTab!=='carnes'&&_dashTab!=='trios'&&_dashTab!=='dre')?periodRow:''}
+      ${(_dashTab!=='metas'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris'&&_dashTab!=='carnes'&&_dashTab!=='trios'&&_dashTab!=='banco'&&_dashTab!=='dre')?periodRow:''}
       ${content}
     </div>`;
   _updateHdrBell();
@@ -14167,6 +14564,7 @@ function _setDashTab(t){
   if(t==='barris'&&!_barrisSemGerenciaLoaded) _loadBarrisSemanalGerencia();
   if(t==='carnes'&&!_carnesGerLoaded) _loadCarnesGerencia();
   if(t==='trios'&&!_triosGerLoaded) _loadTriosGerencia();
+  if(t==='banco'&&!_bancoGerLoaded) _loadBancoGerencia();
   renderDashboard();
 }
 function _navToAtt(){ const el=document.getElementById('dash-section'); if(el)el.scrollIntoView({behavior:'smooth'}); _setDashTab('att'); }
