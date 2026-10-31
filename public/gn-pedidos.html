@@ -3751,6 +3751,10 @@ async function _carregarTotalRedeOseas(semanaISO) {
       });
       _totalRedeOseasCache[semanaISO] = { loading: false, pedidos: ids.length,
         regioes: Object.keys(regioes).sort(),
+        // O catálogo fica guardado porque a CONTAGEM é somada no render, não aqui: ela vem
+        // de S.contagens, que a loja atualiza o tempo todo — congelar no carregamento
+        // mostraria um estoque velho até a próxima troca de semana.
+        catalogo: doCatalogo,
         itens: Object.values(porProduto).sort((x, y) => y.total - x.total) };
     }
   } catch (e) {
@@ -3845,20 +3849,27 @@ function _totalRedeOseasCardHtml() {
   } else if (!cache.itens.length) {
     corpo = `<div style="font-size:11px;color:var(--muted);padding:4px 0">Nenhum petisco pedido ainda nesta semana.</div>`;
   } else {
-    corpo = `<div style="max-height:300px;overflow-y:auto;margin-top:4px">
+    const contado = _contagemRedeOseas(cache.catalogo, semana);
+    // Quebra por região só quando há mais de uma: "RJ 76" ao lado de um total de 76 não
+    // informa nada e só enche a linha.
+    const quebraTxt = porRegiao => {
+      const regs = Object.keys(porRegiao || {}).sort();
+      return regs.length > 1 ? ' · ' + regs.map(r => `${r} ${fmtQtd(porRegiao[r])}`).join(' · ') : '';
+    };
+    corpo = `<div style="max-height:340px;overflow-y:auto;margin-top:4px">
       ${cache.itens.map(it => {
-        const regs = Object.keys(it.porRegiao).sort();
-        // A quebra por região só aparece quando há mais de uma: "RJ 76" ao lado de um total
-        // de 76 não informa nada e só enche a linha.
-        const quebra = regs.length > 1
-          ? `<div style="font-size:10px;color:var(--muted);font-family:monospace">${regs.map(r => `${r} ${fmtQtd(it.porRegiao[r])}`).join(' · ')}</div>`
-          : '';
-        return `<div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:5px 0;border-bottom:1px solid rgba(0,0,0,.04)">
-          <span style="flex:1;min-width:0;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${it.produto}</span>
-          <div style="text-align:right;flex-shrink:0">
-            <div style="font-weight:800;color:#1A1D23;font-family:monospace">${fmtQtd(it.total)} ${it.und}</div>
-            ${quebra}
+        const c = contado[_chaveProduto(it.produto)];
+        const linhaContado = c
+          ? `<span style="color:#1D4ED8;font-weight:700">🏪 contado ${fmtQtd(c.total)} ${it.und}</span>
+             <span style="color:var(--muted)"> em ${c.lojas} loja${c.lojas === 1 ? '' : 's'}${quebraTxt(c.porRegiao)}</span>`
+          : `<span style="color:var(--muted)">🏪 nenhuma loja contou este item nesta semana</span>`;
+        return `<div class="oseas-linha" style="padding:6px 0;border-bottom:1px solid rgba(0,0,0,.04)">
+          <div style="font-size:12px;color:var(--text);margin-bottom:2px">${it.produto}</div>
+          <div style="font-size:11px;font-family:monospace;line-height:1.55">
+            <span style="color:#1A1D23;font-weight:800">📦 pedido ${fmtQtd(it.total)} ${it.und}</span>
+            <span style="color:var(--muted)">${quebraTxt(it.porRegiao)}</span>
           </div>
+          <div style="font-size:11px;font-family:monospace;line-height:1.55">${linhaContado}</div>
         </div>`;
       }).join('')}
     </div>`;
@@ -3867,7 +3878,13 @@ function _totalRedeOseasCardHtml() {
     ? ' · ' + cache.regioes.join(' + ') : '';
   return `<div style="background:var(--card2);border:1px solid var(--border);border-left:3px solid var(--primary);border-radius:var(--r);padding:12px 14px;margin-bottom:10px">
     <div style="font-size:12px;font-weight:700;margin-bottom:3px">📦 Total da Rede · Oseas${regioesTxt}</div>
-    <div style="font-size:10px;color:var(--muted);margin-bottom:2px">Tudo que as lojas pediram de petisco nesta semana, somado — as duas regiões juntas, que é o total que vai pro fornecedor. Maglia, Mandacaru e Loja Teste ficam de fora; pedido cancelado não conta.</div>
+    <div style="font-size:10px;color:var(--muted);margin-bottom:4px;line-height:1.5">
+      <b>📦 pedido</b>: tudo que as lojas pediram de petisco nesta semana, somado — as duas
+      regiões juntas, que é o total que vai pro fornecedor.<br>
+      <b>🏪 contado</b>: o que elas têm em estoque, do que contaram <b>nesta semana</b> na aba
+      Pedido do app Lojas — por isso vem com o número de lojas: contagem de semana passada
+      não entra.<br>
+      Maglia, Mandacaru e Loja Teste ficam de fora dos dois; pedido cancelado não conta.</div>
     ${corpo}
   </div>`;
 }
@@ -5843,6 +5860,56 @@ async function _abrirPendenciaDiasEntrega(forcado) {
   S._diasPendSemData = semData;
   _renderPendenciaDiasEntrega();
   $('modal-bg').classList.add('ativo');
+}
+
+// O ESTOQUE que as lojas contaram nesta semana, por produto do Oseas.
+//
+// É outro número, não outra forma de ver o mesmo: o total da rede diz o que as lojas
+// PEDIRAM; este diz o que elas têm na mão. Quem compra precisa dos dois juntos — 100
+// pedidos com 80 em estoque é uma conversa, 100 pedidos com 2 em estoque é outra.
+//
+// Soma o Est.vig, e Est.vig só existe quando a contagem é DESTA semana (ver
+// _estAntVigEfetivo): contagem da semana passada é o estoque antigo esperando ser
+// recontado, e empilhar ela aqui misturaria dois momentos num número só.
+//
+// Mesma regra de agrupamento do pedido, e pelo mesmo motivo: o produto tem catalogo_id
+// diferente em cada região, então a soma é por NOME. E o número vem sempre com quantas
+// lojas contaram — 45 de 11 lojas e 45 de 3 lojas não querem dizer a mesma coisa, e sem
+// isso o total parece completo quando não está.
+function _contagemRedeOseas(doCatalogo, semanaISO) {
+  const porProduto = {};
+  if (!doCatalogo || !semanaISO) return porProduto;
+  const ini = new Date(semanaISO + 'T12:00:00');
+  const monISO = semanaISO;
+  const sunISO = _dataISOLocal(getSundayOfWeek(ini));
+  Object.keys(doCatalogo).forEach(catId => {
+    const c = doCatalogo[catId];
+    const porLoja = (S.contagens || {})[catId] || {};
+    Object.keys(porLoja).forEach(slug => {
+      if (!LOJAS_SLUG_PEDIDO_REAIS.includes(slug)) return;   // Maglia, Mandacaru, Teste
+      const { estVig } = _estAntVigEfetivo(porLoja[slug], monISO, sunISO);
+      if (estVig == null) return;                            // não contou nesta semana
+      const chave = _chaveProduto(c.produto);
+      if (!porProduto[chave]) porProduto[chave] = { total: 0, lojas: 0, porRegiao: {} };
+      const linha = porProduto[chave];
+      linha.total += parseFloat(estVig) || 0;
+      linha.lojas += 1;
+      const r = _REGIAO_POR_LOJA[slug] || '—';
+      linha.porRegiao[r] = (linha.porRegiao[r] || 0) + (parseFloat(estVig) || 0);
+    });
+  });
+  return porProduto;
+}
+
+// Região de cada loja, do cadastro central — a contagem não passa por pedido nenhum,
+// então não dá pra herdar a região dali como o total pedido faz.
+const _REGIAO_POR_LOJA = Object.fromEntries(
+  (window.GN_LOJAS || []).map(l => [l.lojaSlug, l.regiao]));
+
+// Data local em ISO, sem passar por toISOString() — que converte pra UTC e, num fuso a
+// oeste, devolve o dia anterior.
+function _dataISOLocal(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }
 
 function _renderPendenciaDiasEntrega() {
