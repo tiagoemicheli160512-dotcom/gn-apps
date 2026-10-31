@@ -1192,52 +1192,50 @@ async function confirmarDevolucaoPedidos(lojaKey, devId) {
 // Exclui só CANCELADO (provisão desfeita, nunca chegou a ser enviada de fato); AGUARDANDO,
 // RECEBIDO_OK, DIVERGENCIA e DEVOLVIDO contam, porque o pedido foi de fato feito ao
 // fornecedor pra aquela loja, independente do desfecho na ponta.
-// A Prov.ant procurava a provisão da semana passada SÓ pela data de entrega — e provisão
-// sem data nenhuma não entra em comparação de intervalo em SQL, então sumia da tela.
+// A SEMANA DA Prov.ant É A DO PEDIDO, NÃO A DA ENTREGA.
 //
-// E ela fica sem data por um motivo concreto: a data é calculada a partir dos dias de
-// entrega do fornecedor (ver confirmarPedido), e fornecedor cadastrado sem dias e sem
-// prazo gera a provisão com data_entrega NULL.
+// A coluna sempre quis dizer "o que o Compras provisionou na semana passada" — o ATO de
+// provisionar, que acontece quando o comprador confirma o fornecedor. Mas ela procurava
+// pela DATA DE ENTREGA, e entrega não é pedido: o fornecedor que recebe o pedido na quinta
+// e entrega na segunda seguinte cai sempre na semana de calário seguinte.
 //
-// MEDIDO em 13.198 provisões vivas: 532 (4,0%) estão sem data — mas a conta por região é
-// que explica por que isso apareceu primeiro em São Paulo:
-//   · SP:         237 de 506   (46,8%)  — PETICO, PMG, QUENTE, WASAN
-//   · RJ:         295 de 11.363 (2,6%)  — CDI, DMIC, GRF, NOGMIX, SEARA, TOP MATHEUS…
-//   · HORTIFRUTI:   0
-// Em SP quase metade das linhas são desses quatro fornecedores, então a coluna parecia
-// vazia; no Rio o mesmo buraco passa despercebido.
+// Relato do Matheus, e o CIA MATHEUS é exatamente esse caso (dias de entrega SEG e TER,
+// pedido fechado na quinta): "quando faz a conferência na semana seguinte, os dados não
+// batem com o que ele pediu — está puxando uma semana atrás".
 //
-// A regra do conserto: quando a provisão NÃO tem data, ela vale pela semana do PEDIDO que
-// a gerou — é a única informação de semana que aquela linha tem, e toda provisão tem
-// pedido (0 linhas sem pedido_id nas 13.198). O que já aparecia continua vindo pela data,
-// sem mexer em número nenhum que a tela já mostrava certo.
+// MEDIDO na semana de 26/10, CIA MATHEUS:
+//   · pela data de entrega (como estava): 1.130 — a entrega que caiu em 19–25/10, que veio
+//     do pedido de 12/10, dois pedidos atrás;
+//   · pela semana do pedido (como fica):     980 — o que ele realmente pediu em 19/10.
+//
+// E não é um caso isolado nem universal, que é por que ninguém tinha visto antes: das
+// 12.666 provisões com data, 11.341 (89,5%) entregam na mesma semana do pedido e as duas
+// leituras coincidem. As 1.325 (10,5%) que escorregam se concentram em poucos
+// fornecedores — CIA MATHEUS em 217 de 218 linhas (99,5%), VITOR em 920 de 1.340 (68,7%),
+// SAUDALI/CIACARNE em 51 de 73 (69,9%). Nenhuma entrega cai ANTES da semana do pedido.
+//
+// De quebra isto resolve sozinho a provisão SEM data (532 linhas, 4,0%), que antes sumia
+// da coluna porque NULL não entra em comparação de intervalo em SQL: a semana do pedido
+// vale pra ela igual às outras, e toda provisão tem pedido (0 linhas sem pedido_id).
+//
+// Exclui só CANCELADO: provisão desfeita nunca chegou a ser pedida. AGUARDANDO,
+// RECEBIDO_OK, DIVERGENCIA e DEVOLVIDO contam — o pedido foi feito, qualquer que tenha
+// sido o desfecho na ponta.
 async function carregarProvisaoAnterior() {
   const semAnt = new Date(S.semanaAtiva);
   semAnt.setDate(semAnt.getDate() - 7);
-  const monday = semAnt.toISOString().split('T')[0];
-  const sunday = getSundayOfWeek(semAnt).toISOString().split('T')[0];
-  const SEL = 'id,catalogo_id,loja_slug,qtd_prevista,status';
+  const monday = _dataISOLocal(semAnt);
 
+  S.provisaoAnterior = {};
   const { data: pedsAnt } = await db.from('gn_pedidos').select('id').eq('semana_inicio', monday);
   const idsAnt = (pedsAnt || []).map(x => x.id);
+  if (!idsAnt.length) return;
 
-  const [porData, semData] = await Promise.all([
-    _fetchTodasPaginas(() => db.from('gn_provisoes').select(SEL)
-      .gte('data_entrega', monday).lte('data_entrega', sunday)
-      .neq('status', 'CANCELADO').order('id')),
-    idsAnt.length
-      ? _fetchTodasPaginas(() => db.from('gn_provisoes').select(SEL)
-          .in('pedido_id', idsAnt).is('data_entrega', null)
-          .neq('status', 'CANCELADO').order('id'))
-      : Promise.resolve([]),
-  ]);
+  const linhas = await _fetchTodasPaginas(() => db.from('gn_provisoes')
+    .select('id,catalogo_id,loja_slug,qtd_prevista,status')
+    .in('pedido_id', idsAnt).neq('status', 'CANCELADO').order('id'));
 
-  // As duas buscas são disjuntas por construção — uma exige data, a outra exige a
-  // ausência dela — então nenhuma linha vem nas duas e não há o que desduplicar. Se um dia
-  // elas se sobrepuserem, a mesma linha soma duas vezes e a quantidade dobra na tela;
-  // e2e_prov_ant_sem_data cobra a soma total exata justamente pra isso não passar calado.
-  S.provisaoAnterior = {};
-  [...(porData || []), ...(semData || [])].forEach(p => {
+  (linhas || []).forEach(p => {
     if (!S.provisaoAnterior[p.catalogo_id]) S.provisaoAnterior[p.catalogo_id] = {};
     const atual = S.provisaoAnterior[p.catalogo_id][p.loja_slug] || 0;
     S.provisaoAnterior[p.catalogo_id][p.loja_slug] = atual + (parseFloat(p.qtd_prevista) || 0);
@@ -5906,8 +5904,13 @@ function _contagemRedeOseas(doCatalogo, semanaISO) {
 const _REGIAO_POR_LOJA = Object.fromEntries(
   (window.GN_LOJAS || []).map(l => [l.lojaSlug, l.regiao]));
 
-// Data local em ISO, sem passar por toISOString() — que converte pra UTC e, num fuso a
-// oeste, devolve o dia anterior.
+// Data local em ISO, sem passar por toISOString().
+//
+// toISOString() converte pra UTC, e num horário local de meia-noite isso muda o DIA em
+// qualquer fuso a LESTE de Greenwich (meia-noite em UTC+2 é 22h do dia anterior em UTC).
+// A leste não é onde a rede opera — no Brasil, UTC−3, meia-noite local é 03h do mesmo dia
+// em UTC e a conversão acerta —, mas a Prov.ant passou a casar a semana por IGUALDADE, e
+// igualdade não perdoa um dia de diferença: erraria pra NADA em vez de errar um pouco.
 function _dataISOLocal(d) {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }
