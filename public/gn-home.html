@@ -12991,6 +12991,358 @@ async function enviarPDFBancoWpp() {
   await _compartilharPdfWpp(r.msg, r.titulo);
 }
 
+// ── Aba 👷 Extra — o pagamento de funcionário extra, loja por loja ────────────────────
+//
+// Pedido do dono: "trazer também para o painel de gestão o pagamento de funcionário extra,
+// do app caixa", no mesmo molde das abas Carnes, Trios e Banco.
+//
+// O extra é despesa de caixa (gn_caixa_despesa, categoria `funcionario_extra`), sempre em
+// dinheiro — 546 dos 546 lançamentos até aqui. Ele aparecia na rede toda só dentro do card
+// "Desempenho do mês anterior", uma loja por vez e sem comparação com ninguém. MEDIDO em
+// Out/26, que é o que essa comparação muda:
+//
+//   Campo Grande   R$ 4.068,00 sobre R$   165.722 de venda  =  2,45%
+//   São Gonçalo    R$ 3.300,00 sobre R$   335.885           =  0,98%
+//   Caxias         R$ 3.000,00 sobre R$   352.739           =  0,85%
+//   ...
+//   Guarulhos      R$   500,00 sobre R$   216.644           =  0,23%
+//   REDE           R$ 24.244,80 sobre R$ 4.273.682          =  0,57%
+//
+// Em reais a Campo Grande é a terceira; em proporção da venda ela é 4,3 vezes a rede, e é a
+// loja que vende MENOS. Por isso o numero que decide aqui e o percentual, nao o valor —
+// mesma razao do "kg por R$ mil" da aba Carnes.
+//
+// O gasto cresce: Ago R$ 20.882 (152 lançamentos), Set R$ 21.955 (185), Out R$ 24.244,80
+// (206). A navegação de mês existe pra isso — ‹ volta e mostra de onde veio.
+//
+// As travas do app Caixa aparecem no retrovisor, e e o melhor argumento pra elas: Ago/26
+// tem 152 de 152 lançamentos SEM justificativa e nenhum com foto; Out/26 tem 0 sem
+// justificativa e 206 com foto. Quem voltar o mês vê a mudança.
+//
+// O buraco que sobrou é o NOME: 67 dos 206 de Out/26 (32,5%) não dizem quem recebeu, e
+// parte do que diz não é nome de gente ("extra funcionario", 16 vezes na Nova América). Por
+// isso o cartão agrupa por pessoa e a linha "sem nome" aparece com todas as letras: extra
+// que se repete no mesmo nome não é extra, é gente trabalhando fixo sem registro — na Campo
+// Grande a Talita aparece 9 vezes em Out/26.
+//
+// Conta lançamento de caixa ABERTO também (2 em 546): o dinheiro saiu da gaveta do mesmo
+// jeito, e esconder a despesa porque o caixa não fechou seria subdeclarar o custo.
+//
+// Maglia fica fora: a regra do CLAUDE.md é que ela só entra quando o pedido cita o nome, e
+// este não citou. Ela também nunca lançou extra nenhum.
+const LOJA_FORA_EXTRA_GERENCIA = 'MAGLIA';
+// Acima de quantas vezes a média da rede (em % do faturamento) a loja vira aviso. Com 2, em
+// Out/26 só a Campo Grande entra — o alerta aponta um caso, não meia rede.
+const EXTRA_ALERTA_FATOR = 2;
+// Espelho de JUSTIFICATIVA_MIN do gn-caixa.html: abaixo disso o app não deixa salvar, e aqui
+// vale a mesma régua pra contar o que foi lançado antes da trava existir.
+const EXTRA_JUSTIFICATIVA_MIN = 10;
+// A partir de quantas vezes no mesmo mês o nome vira aviso. O texto fala em NOME que se
+// repete, não em pessoa, e isso é literal: o campo é livre e boa parte do que está lá não é
+// nome de gente ("EXTRA FUNCIONARIO", 16 vezes na Nova América em Out/26). Nos dois casos o
+// recado é o mesmo — aquilo deixou de ser eventual —, mas quem lê decide o que é. Com 4, em
+// Out/26 entram três linhas na rede inteira: um alerta que aponta caso, não meia tela.
+const EXTRA_REPETE_VEZES = 4;
+
+let _extraGerData = null, _extraGerLoaded = false, _extraGerOff = 0;
+// Lojas mostrando os lançamentos por dia em vez do agrupado por pessoa.
+const _extraGerPorDia = new Set();
+
+function _extraGerToggle(k) {
+  if (_extraGerPorDia.has(k)) _extraGerPorDia.delete(k); else _extraGerPorDia.add(k);
+  renderDashboard();
+}
+function _extraGerNav(dir) {
+  const novo = Math.min(0, _extraGerOff + dir);
+  if (novo === _extraGerOff) return;
+  _extraGerOff = novo;
+  _extraGerPorDia.clear();
+  _loadExtraGerencia();
+  renderDashboard();
+}
+
+const _extraNomeChave = n => (n || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ');
+
+async function _loadExtraGerencia() {
+  _extraGerLoaded = false; _extraGerData = null;
+  const r = _monthRange(_extraGerOff);
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  // !inner + filtro na tabela aninhada: só volta fechamento que TEM extra, e dele só a
+  // despesa de extra. Sem isso viriam as 1.119 despesas do mês inteiro pra usar 206.
+  // A data mora no fechamento, não na despesa — por isso a consulta parte dele.
+  const [fechRows, fatRows] = await Promise.all([
+    window.gnFetchJson(
+      `${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${r.from}&data=lte.${r.to}` +
+      `&select=loja,data,gn_caixa_despesa!inner(categoria,valor,nome,justificativa,foto)` +
+      `&gn_caixa_despesa.categoria=eq.funcionario_extra&order=data.asc`,
+      H, 'extraGerencia', null),
+    window.gnFetchJson(
+      `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${r.from}&data_operacao=lte.${r.to}` +
+      `&select=loja,venda_salao,venda_delivery`,
+      H, 'extraGerencia:fat', null),
+  ]);
+  if (!fechRows) { _extraGerLoaded = true; _extraGerData = { erro: true, range: r }; renderDashboard(); return; }
+  // O faturamento é complemento: sem ele os reais continuam certos e só a proporção fica de
+  // fora — e a tela diz isso, em vez de mostrar 0% como se a loja não gastasse nada.
+  const fatFalhou = !fatRows;
+
+  const lojas = LOJAS_LISTA.filter(k => k !== LOJA_FORA_EXTRA_GERENCIA)
+    .sort((a, b) => (LOJA_DISPLAY[a] || a).localeCompare(LOJA_DISPLAY[b] || b));
+  const porLoja = {};
+  lojas.forEach(k => { porLoja[k] = {
+    k, total: 0, qtd: 0, fat: 0, pct: null, dias: 0,
+    semNome: 0, semJust: 0, semFoto: 0, pessoas: [], repetidos: [], lancamentos: [],
+  }; });
+
+  (fatRows || []).forEach(row => {
+    const c = porLoja[_normLoja(row.loja)];
+    if (c) c.fat += (parseFloat(row.venda_salao) || 0) + (parseFloat(row.venda_delivery) || 0);
+  });
+
+  (fechRows || []).forEach(fech => {
+    const c = porLoja[_normLoja(fech.loja)];
+    if (!c) return;
+    const desps = Array.isArray(fech.gn_caixa_despesa) ? fech.gn_caixa_despesa
+                : (fech.gn_caixa_despesa ? [fech.gn_caixa_despesa] : []);
+    desps.forEach(d => {
+      if (!d || d.categoria !== 'funcionario_extra') return;
+      const valor = parseFloat(d.valor) || 0;
+      const nome = (d.nome || '').trim();
+      const just = (d.justificativa || '').trim();
+      c.total += valor; c.qtd++;
+      if (!nome) c.semNome++;
+      if (just.length < EXTRA_JUSTIFICATIVA_MIN) c.semJust++;
+      if (!d.foto) c.semFoto++;
+      c.lancamentos.push({ data: fech.data, nome, valor, just, foto: d.foto || null });
+    });
+  });
+
+  lojas.forEach(k => {
+    const c = porLoja[k];
+    c.dias = new Set(c.lancamentos.map(l => l.data)).size;
+    c.pct = (!fatFalhou && c.fat > 0) ? (c.total / c.fat) * 100 : null;
+    // Agrupado por pessoa: extra que se repete no mesmo nome é o sinal de gente fixa sem
+    // registro. Quem veio sem nome vira UMA linha, dita como tal — somar tudo num "—" mudo
+    // esconderia justamente o que não dá pra auditar.
+    const mapa = new Map();
+    c.lancamentos.forEach(l => {
+      const chave = _extraNomeChave(l.nome) || '\u0000sem-nome';
+      const at = mapa.get(chave) || { nome: l.nome, semNome: !l.nome, vezes: 0, total: 0 };
+      at.vezes++; at.total += l.valor;
+      mapa.set(chave, at);
+    });
+    // Quem se repete vem primeiro, e só depois o maior valor: um nome que apareceu 9 vezes
+    // diz mais sobre a operação do que um pagamento alto e único.
+    c.pessoas = [...mapa.values()].sort((a, b) =>
+      (b.vezes >= EXTRA_REPETE_VEZES) - (a.vezes >= EXTRA_REPETE_VEZES) ||
+      b.total - a.total || b.vezes - a.vezes);
+    c.repetidos = c.pessoas.filter(p => !p.semNome && p.vezes >= EXTRA_REPETE_VEZES);
+    c.lancamentos.sort((a, b) => (a.data < b.data ? -1 : a.data > b.data ? 1 : b.valor - a.valor));
+  });
+
+  _extraGerData = { porLoja, lojas, range: r, fatFalhou };
+  _extraGerLoaded = true;
+  renderDashboard();
+}
+
+const _EXTRA_STATUS = {
+  acima:    { cor: 'var(--txt-red)',   fundo: 'rgba(239,68,68,.12)', borda: 'rgba(239,68,68,.32)', rotulo: 'acima da média' },
+  normal:   { cor: 'var(--txt-green)', fundo: 'rgba(22,163,74,.10)', borda: 'rgba(22,163,74,.26)', rotulo: 'dentro da média' },
+  semBase:  { cor: 'var(--t4)',        fundo: 'var(--s2)',           borda: 'var(--b1)',           rotulo: 'sem faturamento pra comparar' },
+  semExtra: { cor: 'var(--t4)',        fundo: 'var(--s2)',           borda: 'var(--b1)',           rotulo: 'sem extra no mês' },
+};
+function _extraGerStatus(c, pctRede) {
+  if (!c.qtd) return 'semExtra';
+  if (c.pct === null) return 'semBase';
+  return (pctRede > 0 && c.pct > pctRede * EXTRA_ALERTA_FATOR) ? 'acima' : 'normal';
+}
+const _extraPct = p => p === null ? '—' : p.toFixed(2).replace('.', ',') + '%';
+
+function _buildExtraPanel() {
+  const reportBtns = _reportBtnsRowHtml('Extra');
+  if (!_extraGerLoaded || !_extraGerData) return reportBtns + _skelPanel(5);
+  const r = _extraGerData.range || _monthRange(_extraGerOff);
+  const navHtml = `<div style="display:flex;align-items:center;justify-content:center;gap:12px;background:var(--s2);border:1px solid var(--b1);border-radius:12px;padding:8px 10px;margin-bottom:10px">
+    <button onclick="_extraGerNav(-1)" style="background:none;border:1px solid rgba(0,0,0,.15);border-radius:8px;color:var(--t2);font-size:14px;padding:2px 10px;cursor:pointer;font-family:inherit">‹</button>
+    <div style="text-align:center">
+      <div style="font-size:11px;font-weight:800;color:var(--t1);letter-spacing:.5px">${r.label.toUpperCase()}</div>
+      <div style="font-size:9.5px;color:var(--t4)">${r.isCurrent ? 'mês corrente — em andamento' : 'mês fechado'}</div>
+    </div>
+    <button onclick="_extraGerNav(1)" ${_extraGerOff >= 0 ? 'disabled style="opacity:.3;' : 'style="'}background:none;border:1px solid rgba(0,0,0,.15);border-radius:8px;color:var(--t2);font-size:14px;padding:2px 10px;cursor:pointer;font-family:inherit">›</button>
+  </div>`;
+  if (_extraGerData.erro) {
+    return reportBtns + navHtml + `<div style="font-size:12px;color:var(--t3);padding:14px">Não deu pra carregar o funcionário extra agora. Troque de aba e volte.</div>`;
+  }
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  const { porLoja, lojas, fatFalhou } = _extraGerData;
+
+  const comExtra = lojas.filter(k => porLoja[k].qtd);
+  const totRede  = comExtra.reduce((t, k) => t + porLoja[k].total, 0);
+  const qtdRede  = comExtra.reduce((t, k) => t + porLoja[k].qtd, 0);
+  const fatRede  = lojas.reduce((t, k) => t + porLoja[k].fat, 0);
+  const pctRede  = (!fatFalhou && fatRede > 0) ? (totRede / fatRede) * 100 : null;
+  const semNome  = comExtra.reduce((t, k) => t + porLoja[k].semNome, 0);
+  const semJust  = comExtra.reduce((t, k) => t + porLoja[k].semJust, 0);
+  const acima    = pctRede ? comExtra.filter(k => _extraGerStatus(porLoja[k], pctRede) === 'acima') : [];
+  const repetem  = comExtra.filter(k => porLoja[k].repetidos.length);
+  const qtdRepet = repetem.reduce((t, k) => t + porLoja[k].repetidos.length, 0);
+
+  const cell = (rotulo, valor, cor, nota) => `<div style="flex:1;min-width:92px">
+    <div style="font-size:9px;font-weight:800;letter-spacing:.8px;text-transform:uppercase;color:var(--t4)">${rotulo}</div>
+    <div style="font-size:15px;font-weight:800;color:${cor};font-variant-numeric:tabular-nums;margin-top:2px">${valor}</div>
+    ${nota ? `<div style="font-size:9px;color:var(--t4);margin-top:1px">${nota}</div>` : ''}
+  </div>`;
+  const resumoHtml = !comExtra.length
+    ? `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:12px;padding:12px 14px;margin-bottom:10px;font-size:11.5px;color:var(--t2)">Nenhum funcionário extra pago em ${r.label}.</div>`
+    : `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:12px;padding:12px 14px;margin-bottom:10px">
+        <div style="display:flex;gap:12px;flex-wrap:wrap">
+          ${cell('Pago no mês', _fmtBRL(totRede), 'var(--t1)', `${qtdRede} lançamento${qtdRede === 1 ? '' : 's'} em ${comExtra.length} loja${comExtra.length === 1 ? '' : 's'}`)}
+          ${cell('Da venda', _extraPct(pctRede), 'var(--t1)', pctRede === null ? 'sem faturamento pra comparar' : _fmtBRLs(fatRede) + ' vendidos')}
+          ${cell('Sem nome', String(semNome), semNome ? 'var(--txt-amber)' : 'var(--t4)', semNome ? 'não dizem quem recebeu' : 'todos dizem quem recebeu')}
+        </div>
+        <div style="font-size:10px;color:var(--t2);margin-top:8px">Extra é despesa de caixa, sempre em dinheiro. O que compara as lojas é a <b>proporção da venda</b>, não o valor: a loja que vende menos sente o mesmo real muito mais.</div>
+        ${fatFalhou ? `<div style="font-size:10px;color:var(--txt-amber);margin-top:6px;font-weight:700">⚠ O faturamento do mês não carregou — os reais abaixo estão certos, mas a proporção da venda ficou de fora.</div>` : ''}
+      </div>`;
+
+  const bloco = (cor, fundo, borda, titulo, linhas, rodape) => `
+    <div style="background:${fundo};border:1px solid ${borda};border-radius:12px;padding:11px 14px;margin-bottom:10px">
+      <div style="font-size:12px;font-weight:800;color:${cor};margin-bottom:4px">${titulo}</div>
+      <div style="font-size:10.5px;color:var(--t2);line-height:1.6">${linhas}</div>
+      ${rodape ? `<div style="font-size:9.5px;color:var(--t4);margin-top:5px">${rodape}</div>` : ''}
+    </div>`;
+  const AMBAR = { fundo: 'rgba(245,158,11,.10)', borda: 'rgba(245,158,11,.3)' };
+  const avisosHtml =
+    (acima.length ? bloco('var(--txt-red)', 'rgba(239,68,68,.08)', 'rgba(239,68,68,.25)',
+        `⚠ ${acima.length} loja${acima.length === 1 ? '' : 's'} gasta${acima.length === 1 ? '' : 'm'} mais que o dobro da média da rede`,
+        acima.map(k => `${LOJA_DISPLAY[k] || k} <b style="color:var(--txt-red)">${_extraPct(porLoja[k].pct)}</b> <span style="color:var(--t4)">(${_fmtBRL(porLoja[k].total)} sobre ${_fmtBRLs(porLoja[k].fat)})</span>`).join(' · '),
+        `A média da rede em ${r.label} é ${_extraPct(pctRede)} da venda.`) : '') +
+    (semNome ? bloco('var(--txt-amber)', AMBAR.fundo, AMBAR.borda,
+        `⚠ ${semNome} de ${qtdRede} lançamento${qtdRede === 1 ? '' : 's'} não diz${semNome === 1 ? '' : 'em'} quem recebeu`,
+        comExtra.filter(k => porLoja[k].semNome).map(k => `${LOJA_DISPLAY[k] || k} <span style="color:var(--t4)">(${porLoja[k].semNome} de ${porLoja[k].qtd})</span>`).join(' · '),
+        'O nome é o que separa "cobrimos uma falta" de "tem gente fixa sem registro". O campo existe no lançamento do Caixa e não é obrigatório.') : '') +
+    (qtdRepet ? bloco('var(--txt-amber)', AMBAR.fundo, AMBAR.borda,
+        `⚠ ${qtdRepet} nome${qtdRepet === 1 ? '' : 's'} se repete${qtdRepet === 1 ? '' : 'm'} ${EXTRA_REPETE_VEZES} vezes ou mais no mês`,
+        repetem.map(k => `${LOJA_DISPLAY[k] || k}: ` + porLoja[k].repetidos
+          .map(p => `${esc(p.nome)} <b>${p.vezes}×</b> <span style="color:var(--t4)">(${_fmtBRL(p.total)})</span>`).join(', ')).join('<br>'),
+        'Extra que volta toda semana deixou de ser eventual. O campo é livre e nem tudo que está nele é nome de gente — vale olhar antes de concluir.') : '') +
+    (semJust ? bloco('var(--txt-amber)', AMBAR.fundo, AMBAR.borda,
+        `⚠ ${semJust} lançamento${semJust === 1 ? '' : 's'} sem justificativa`,
+        comExtra.filter(k => porLoja[k].semJust).map(k => `${LOJA_DISPLAY[k] || k} <span style="color:var(--t4)">(${porLoja[k].semJust} de ${porLoja[k].qtd})</span>`).join(' · '),
+        `São lançamentos anteriores à trava do Caixa, que hoje exige o motivo escrito com ao menos ${EXTRA_JUSTIFICATIVA_MIN} caracteres. Não há como completar depois — fica como histórico.`) : '') +
+    (comExtra.length && !acima.length && !semNome && !semJust && !qtdRepet
+        ? bloco('var(--txt-green)', 'rgba(22,163,74,.08)', 'rgba(22,163,74,.25)',
+            `✅ Nenhuma loja fora da média, e todo lançamento diz quem recebeu e por quê`,
+            `${_fmtBRL(totRede)} em ${r.label}, ${_extraPct(pctRede)} da venda da rede.`, '') : '');
+
+  const cardsHtml = lojas.map(k => {
+    const c = porLoja[k];
+    const e = _EXTRA_STATUS[_extraGerStatus(c, pctRede)] || _EXTRA_STATUS.semExtra;
+    const cor = COR_LOJA[k] || '#E8580A';
+    if (!c.qtd) return `<div style="background:var(--s1);border:1px solid var(--b1);border-left:3px solid ${cor};border-radius:11px;padding:10px 12px;margin-bottom:8px;display:flex;align-items:center;gap:10px">
+      <span style="font-size:12px;font-weight:700;color:var(--t2);flex:1">${LOJA_DISPLAY[k] || k}</span>
+      <span style="font-size:10px;color:${e.cor}">${e.rotulo}</span></div>`;
+
+    const porDia = _extraGerPorDia.has(k);
+    const detalhe = porDia
+      ? c.lancamentos.map(l => `<div style="display:flex;gap:9px;padding:6px 0;border-top:1px solid var(--b1)">
+          ${l.foto
+            ? `<img src="${esc(l.foto)}" alt="Comprovante do extra" loading="lazy"
+                  style="width:40px;height:40px;border-radius:7px;object-fit:cover;flex-shrink:0;cursor:pointer;background:var(--fill-sutil)"
+                  onclick="_cancelMacroAbrirFoto('${esc(l.foto)}')" title="Toque para ampliar">`
+            : `<div title="Lançado antes da foto do comprovante passar a ser exigida" style="width:40px;height:40px;border-radius:7px;flex-shrink:0;background:var(--fill-sutil);border:1px dashed var(--b2);display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;color:var(--t4);text-align:center;line-height:1.2">sem<br>foto</div>`}
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;gap:8px;align-items:baseline">
+              <span style="font-size:10.5px;font-weight:800;color:var(--t2);min-width:38px">${_carnesDM(l.data)}</span>
+              <span style="font-size:10.5px;color:${l.nome ? 'var(--t2)' : 'var(--txt-amber)'};flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${l.nome ? esc(l.nome) : 'sem nome'}</span>
+              <span style="font-size:11px;font-weight:800;color:var(--t1);font-variant-numeric:tabular-nums">${_fmtBRL(l.valor)}</span>
+            </div>
+            <div style="font-size:9.5px;color:${l.just.length >= EXTRA_JUSTIFICATIVA_MIN ? 'var(--t3)' : 'var(--txt-amber)'};line-height:1.4;margin-top:1px">${l.just ? esc(l.just) : 'sem justificativa'}</div>
+          </div>
+        </div>`).join('')
+      : c.pessoas.map(p => `<div style="display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--t3);padding:3px 0;border-top:1px solid var(--b1)">
+          <span style="font-weight:800;color:${p.semNome ? 'var(--txt-amber)' : 'var(--t2)'};flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${!p.semNome && p.vezes >= EXTRA_REPETE_VEZES ? '⚠️ ' : ''}${p.semNome ? 'sem nome' : esc(p.nome)}</span>
+          <span style="color:${!p.semNome && p.vezes >= EXTRA_REPETE_VEZES ? 'var(--txt-amber)' : 'var(--t4)'};white-space:nowrap;font-weight:${!p.semNome && p.vezes >= EXTRA_REPETE_VEZES ? '800' : '400'}">${p.vezes}×</span>
+          <span style="font-variant-numeric:tabular-nums;min-width:74px;text-align:right;font-weight:800;color:var(--t1)">${_fmtBRL(p.total)}</span>
+        </div>`).join('');
+    const btn = `<button onclick="_extraGerToggle('${k}')" style="margin-top:7px;width:100%;background:var(--fill-sutil2);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:5px 10px;color:var(--t2);font-size:10.5px;font-weight:700;cursor:pointer;font-family:inherit">${porDia ? '▲ Agrupar por pessoa' : '▼ Ver os ' + c.qtd + ' lançamento' + (c.qtd === 1 ? '' : 's') + ' por dia'}</button>`;
+    const avisoCard = [c.semNome ? `${c.semNome} sem nome` : '', c.semJust ? `${c.semJust} sem justificativa` : '',
+                       c.repetidos.length ? `${c.repetidos.length} nome${c.repetidos.length === 1 ? '' : 's'} repetindo ${EXTRA_REPETE_VEZES}× ou mais` : '']
+      .filter(Boolean).join(' · ');
+    return `<div style="background:var(--s1);border:1px solid var(--b1);border-left:3px solid ${cor};border-radius:11px;padding:11px 12px;margin-bottom:8px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:7px">
+        <span style="font-size:12.5px;font-weight:800;color:var(--t1);flex:1">${LOJA_DISPLAY[k] || k}</span>
+        <span style="font-size:9px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:${e.cor};background:${e.fundo};border:1px solid ${e.borda};border-radius:6px;padding:2px 7px">${e.rotulo}</span>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:7px">
+        ${cell('Pago', _fmtBRL(c.total), 'var(--t2)', `${c.qtd} lançamento${c.qtd === 1 ? '' : 's'}`)}
+        ${cell('Da venda', _extraPct(c.pct), c.pct === null ? 'var(--t4)' : (e.rotulo === 'acima da média' ? 'var(--txt-red)' : 'var(--t2)'), c.pct === null ? 'sem venda lançada' : _fmtBRLs(c.fat) + ' vendidos')}
+        ${cell('Dias com extra', String(c.dias), 'var(--t2)', `${c.pessoas.length} nome${c.pessoas.length === 1 ? '' : 's'} na lista`)}
+      </div>
+      ${avisoCard ? `<div style="font-size:9.5px;color:var(--txt-amber);margin-bottom:4px">⚠ ${avisoCard}</div>` : ''}
+      <div style="border-top:1px solid var(--b1);padding-top:6px">${detalhe}</div>
+      ${btn}
+    </div>`;
+  }).join('');
+
+  return reportBtns + navHtml + resumoHtml + avisosHtml + cardsHtml;
+}
+
+// ── Relatório da aba 👷 Extra (mesmo padrão de gerarWpp/gerarPDF/enviarPDF...Wpp) ──────
+// O WhatsApp leva o agrupado por pessoa; o PDF leva lançamento a lançamento, com data e
+// motivo, que é o que serve pra conferir. A foto não vai em nenhum dos dois: é um link do
+// Storage, e URL crua colada no WhatsApp não ajuda ninguém (mesma decisão da aba Cancel.).
+function _extraRelatorioTexto(wpp) {
+  if (!_extraGerLoaded || !_extraGerData || _extraGerData.erro) return null;
+  const { porLoja, lojas, range, fatFalhou } = _extraGerData;
+  const b = s => wpp ? '*' + s + '*' : s;
+  const comExtra = lojas.filter(k => porLoja[k].qtd)
+    .sort((a, b2) => (porLoja[b2].pct || 0) - (porLoja[a].pct || 0) || porLoja[b2].total - porLoja[a].total);
+  const totRede = comExtra.reduce((t, k) => t + porLoja[k].total, 0);
+  const qtdRede = comExtra.reduce((t, k) => t + porLoja[k].qtd, 0);
+  const fatRede = lojas.reduce((t, k) => t + porLoja[k].fat, 0);
+  const pctRede = (!fatFalhou && fatRede > 0) ? (totRede / fatRede) * 100 : null;
+
+  let msg = `${wpp ? '👷 ' : ''}${b('FUNCIONÁRIO EXTRA')}\n${range.label}${range.isCurrent ? ' (mês em andamento)' : ''}\n`;
+  msg += `\nPago: ${_fmtBRL(totRede)} em ${qtdRede} lançamento${qtdRede === 1 ? '' : 's'}\n`;
+  msg += `Da venda da rede: ${_extraPct(pctRede)}\n`;
+  if (!comExtra.length) { msg += `\nNenhum extra pago no mês.\n`; return { msg, titulo: 'Funcionário extra · ' + range.label }; }
+
+  comExtra.forEach(k => {
+    const c = porLoja[k];
+    const fora = pctRede && c.pct !== null && c.pct > pctRede * EXTRA_ALERTA_FATOR;
+    msg += `\n${wpp ? '🏪 ' : ''}${b(LOJA_DISPLAY[k] || k)} — ${_fmtBRL(c.total)} · ${_extraPct(c.pct)} da venda${fora ? ' ⚠ acima do dobro da média' : ''}\n`;
+    msg += `  ${c.qtd} lançamento${c.qtd === 1 ? '' : 's'} em ${c.dias} dia${c.dias === 1 ? '' : 's'}`;
+    msg += (c.semNome ? ` · ${c.semNome} sem nome` : '') + (c.semJust ? ` · ${c.semJust} sem justificativa` : '') + '\n';
+    c.repetidos.forEach(p => { msg += `  ⚠ "${p.nome}" se repete ${p.vezes}× no mês (${_fmtBRL(p.total)})\n`; });
+    if (wpp) {
+      c.pessoas.forEach(p => { msg += `  ${p.semNome ? 'sem nome' : p.nome}: ${p.vezes}× ${_fmtBRL(p.total)}\n`; });
+    } else {
+      c.lancamentos.forEach(l => {
+        msg += `  ${_carnesDM(l.data)} · ${l.nome || 'sem nome'} · ${_fmtBRL(l.valor)} · ${l.just || 'sem justificativa'}\n`;
+      });
+    }
+  });
+  const semExtra = lojas.filter(k => !porLoja[k].qtd);
+  if (semExtra.length) msg += `\n${b('Sem extra no mês')}: ${semExtra.map(k => LOJA_DISPLAY[k] || k).join(', ')}\n`;
+  return { msg, titulo: 'Funcionário extra · ' + range.label };
+}
+
+function gerarWppExtra() {
+  const r = _extraRelatorioTexto(true);
+  if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  window.open('https://wa.me/?text=' + encodeURIComponent(r.msg), '_blank');
+}
+function gerarPDFExtra() {
+  const r = _extraRelatorioTexto(false);
+  if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  gerarPDF(r.msg, r.titulo);
+}
+async function enviarPDFExtraWpp() {
+  const r = _extraRelatorioTexto(false);
+  if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  await _compartilharPdfWpp(r.msg, r.titulo);
+}
+
 // ── Relatórios da aba 🍺 Barris (mesmo padrão de gerarWpp/gerarPDF/enviarPDF...Wpp já
 // usado em Xadrez/Férias/Alertas — ver _reportBtnsRowHtml) ────────────────────────────
 function _barrisSemRelatorioTexto(){
@@ -14541,6 +14893,9 @@ function renderDashboard() {
   } else if (_dashTab==='banco') {
     content = _buildBancoPanel();
 
+  } else if (_dashTab==='extra') {
+    content = _buildExtraPanel();
+
   } else if (_dashTab==='dre') {
     content = _buildDreRedePanel();
 
@@ -14590,10 +14945,11 @@ function renderDashboard() {
         <button class="dash-tab${_dashTab==='carnes'?' on':''}" onclick="_setDashTab('carnes')">🥩 Carnes</button>
         <button class="dash-tab${_dashTab==='trios'?' on':''}" onclick="_setDashTab('trios')">🎵 Trios</button>
         <button class="dash-tab${_dashTab==='banco'?' on':''}" onclick="_setDashTab('banco')">⏱ Banco</button>
+        <button class="dash-tab${_dashTab==='extra'?' on':''}" onclick="_setDashTab('extra')">👷 Extra</button>
         <button class="dash-tab${_dashTab==='dre'?' on':''}" onclick="_setDashTab('dre')">💰 DRE</button>
         <button class="dash-tab${_dashTab==='metas'?' on':''}" onclick="_setDashTab('metas')">⚙ Metas</button>
       </div>
-      ${(_dashTab!=='metas'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris'&&_dashTab!=='carnes'&&_dashTab!=='trios'&&_dashTab!=='banco'&&_dashTab!=='dre')?periodRow:''}
+      ${(_dashTab!=='metas'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris'&&_dashTab!=='carnes'&&_dashTab!=='trios'&&_dashTab!=='banco'&&_dashTab!=='extra'&&_dashTab!=='dre')?periodRow:''}
       ${content}
     </div>`;
   _updateHdrBell();
@@ -14608,6 +14964,7 @@ function _setDashTab(t){
   if(t==='carnes'&&!_carnesGerLoaded) _loadCarnesGerencia();
   if(t==='trios'&&!_triosGerLoaded) _loadTriosGerencia();
   if(t==='banco'&&!_bancoGerLoaded) _loadBancoGerencia();
+  if(t==='extra'&&!_extraGerLoaded) _loadExtraGerencia();
   renderDashboard();
 }
 function _navToAtt(){ const el=document.getElementById('dash-section'); if(el)el.scrollIntoView({behavior:'smooth'}); _setDashTab('att'); }
