@@ -3445,6 +3445,43 @@ function _fotoDoMerge(local, serv, chave){
   });
   return out;
 }
+
+// Campos de AVALIAÇÃO do item: conforme e não conforme. Existem aqui pelo mesmo motivo da
+// foto, e o caso que obrigou a escrever isto foi MEDIDO: em 02/11 a Nova América terminou o
+// dia com 33 dos 36 itens do check-list operacional fotografados e NENHUM marcado. Não foi
+// desleixo — nos dias 29 e 31/10 a mesma loja fotografou os 36 e marcou os 36.
+//
+// O que acontecia: `mergeState` deixa o servidor vencer em todo campo, e a foto era o único
+// com defesa contra uma cópia do servidor ANTERIOR ao que este aparelho acabou de fazer (o
+// _fotoPendente, que nasceu exatamente dessa corrida). O toque na caixinha ia pro estado e
+// pro localStorage na hora, mas pro servidor só no save seguinte; qualquer carga do dia
+// nessa janela — recarregar o app, voltar de outra data, abrir em dois aparelhos — trazia o
+// `checked:false` de antes e DESFAZIA a marca. A foto sobrevivia porque estava protegida; a
+// marca não, e é por isso que a linha fica com foto e sem visto. Na tela o "✓ Salvo"
+// aparecia normal, e a loja clicava de novo achando que o app não salvava.
+//
+// Reproduzido: marcar o item, receber a cópia anterior do servidor e ver `checked` voltar
+// pra false — com a foto intacta ao lado, igualzinho à linha de 02/11.
+//
+// A regra é a mesma da foto: enquanto o servidor não confirmar o que este aparelho marcou,
+// o lado local vence. Segunda-feira é quando mais dói (contagem, dois aparelhos, muita
+// navegação de data) — e foram as duas segundas, 27/10 e 02/11, que fecharam com zero.
+const CAMPOS_AVALIACAO = ['checked', 'naoConforme'];
+function _marcarAvaliacaoPendente(chave){ CAMPOS_AVALIACAO.forEach(c => _fotoPendente.add(chave + '#' + c)); }
+function _avaliacaoDoMerge(local, serv, chave){
+  const out = {};
+  CAMPOS_AVALIACAO.forEach(c => {
+    if(!_fotoPendente.has(chave + '#' + c)) return;   // nada pendente: servidor manda, como mandava
+    out[c] = !!(local && local[c]);
+  });
+  return out;
+}
+// "Não tem reservas hoje" é a RESPOSTA do grupo (ver _chkContagem) e corria o mesmo risco:
+// é uma chave solta, não um item, e no merge de carga o servidor vencia sempre. Marcar e
+// recarregar antes do save desmarcava sozinho.
+const CHAVE_SEM_RESERVAS = '_semReservas';
+function _semReservasPendente(){ return _fotoPendente.has(_chaveFoto('abertura', 'reservas', CHAVE_SEM_RESERVAS) + '#' + CHAVE_SEM_RESERVAS); }
+
 // Listas (manutencao, faltas, despesas) casam pelo id, nao por posicao: a posicao muda
 // quando outro aparelho acrescenta ou remove um item, e casar por ela trocaria a foto de
 // dono — pior que perder.
@@ -6459,13 +6496,18 @@ function mergeState(rows){
           // e explica por que foram exatamente os dias em que a loja usou o "não tem
           // reservas hoje": antes dele, o dia nunca chegava a ter essa chave.
           if(!_ehItem(_siRaw) || !_ehItem(_liRaw === undefined ? {} : _liRaw)){
+            // ...menos quando é o "não tem reservas hoje" que este aparelho acabou de
+            // tocar e o servidor ainda não confirmou (mesma regra da avaliação do item).
+            if(key === 'abertura' && s === 'reservas' && i === CHAVE_SEM_RESERVAS && _semReservasPendente()) return;
             state[key][s][i] = _siRaw;   // servidor manda, igual ao resto do mergeState
             return;
           }
           const _li = _liRaw || {}, _si = _siRaw;
           // Chegou o item do servidor: a vaga deixa de ser "não visto" e volta a valer
           // como dado — é o que faz desmarcar um item continuar subindo depois da carga.
-          state[key][s][i] = _tocado({ ..._li, ..._si, ..._fotoDoMerge(_li, _si, _chaveFoto(key, s, i)) });
+          state[key][s][i] = _tocado({ ..._li, ..._si,
+            ..._fotoDoMerge(_li, _si, _chaveFoto(key, s, i)),
+            ..._avaliacaoDoMerge(_li, _si, _chaveFoto(key, s, i)) });
         });
       });
     }
@@ -9029,10 +9071,12 @@ function getMap(stateKey){ return stateKey==='checklist'?SETORES_CHECKLIST:state
 function toggleSemReservas(checked){
   if(!state.abertura.reservas) state.abertura.reservas={};
   state.abertura.reservas._semReservas = checked;
+  _marcarFotoPendente(_chaveFoto('abertura','reservas',CHAVE_SEM_RESERVAS), CHAVE_SEM_RESERVAS);
   const n = (SETORES_ABERTURA.reservas.items||[]).length;
   for(let i=0;i<n;i++){
     if(!state.abertura.reservas[i]) state.abertura.reservas[i]={checked:false,problema:'',fotoBase64:'',fotoName:''};
     _tocado(state.abertura.reservas[i]).checked = checked;
+    _marcarAvaliacaoPendente(_chaveFoto('abertura','reservas',i));
   }
   autoSave();
   renderSetorItems('abertura','reservas');
@@ -9525,6 +9569,7 @@ function _limparProblemaSeNeutro(stateKey, setor, idx){
 function toggleNaoConforme(stateKey, setor, idx){
   const d = _itemChk(stateKey, setor, idx);
   d.naoConforme = !d.naoConforme;
+  _marcarAvaliacaoPendente(_chaveFoto(stateKey, setor, idx));
   _marcarInicio(stateKey);
   if(d.naoConforme){
     d.checked = false;                                  // os dois são exclusivos
@@ -9574,6 +9619,7 @@ function toggleCheck(stateKey, setor, idx, el){
     }
   }
   d.checked = el.checked;
+  _marcarAvaliacaoPendente(_chaveFoto(stateKey, setor, idx));
   _marcarInicio(stateKey);
   if(el.checked){
     d.naoConforme = false;                              // marcar conforme tira o não conforme

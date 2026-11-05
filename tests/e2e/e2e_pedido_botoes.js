@@ -39,12 +39,17 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
     const btns = [...document.querySelectorAll('button')];
     const urg = btns.find(b => (b.getAttribute('onclick') || '').includes("_abrirPreviaConfirmar('urgencia')"));
     const fin = btns.find(b => /Finalizar/.test(b.textContent) && !/onclick=""/.test(b.outerHTML));
-    const grid = fin && fin.parentElement ? fin.parentElement.style.gridTemplateColumns : '';
+    // A faixa fixa do topo: é dela que o Finalizar saiu. Medir só "existe" deixaria passar
+    // a volta dele pro lado do ⚡, que é o defeito que levou as três lojas a fechar a
+    // semana com um quarto do catálogo (ver e2e_urgencia_finalizar).
+    const topo = urg ? urg.closest('div[style*="sticky"]') : document.querySelector('div[style*="sticky"][style*="z-index:29"]');
+    const y = el => { if (!el) return null; const r = el.getBoundingClientRect();
+      return r.height ? Math.round(r.top + r.height / 2 + window.scrollY) : null; };
     return {
       temUrgencia: !!urg,
       temFinalizar: !!fin,
-      finalizarTravado: !!(fin && /🔒/.test(fin.textContent)),
-      colunas: grid,
+      finalizarNoTopo: !!(fin && topo && topo.contains(fin)),
+      distancia: (urg && fin) ? Math.abs(y(fin) - y(urg)) : null,
       aplicavel: _urgAplicavel(),
     };
   }, opts);
@@ -52,21 +57,30 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
   // ── Fase 1: urgência ainda não enviada ──────────────────────────────────────
   const fase1 = await montar({ loja: 'BANGU', pendente: true, envio: {} });
   check('urgência pendente: o botão ⚡ está na tela', fase1.temUrgencia, JSON.stringify(fase1));
-  check('e o Finalizar aparece travado, dizendo que ainda não é a hora',
-    fase1.temFinalizar && fase1.finalizarTravado, JSON.stringify(fase1));
+  // Antes esta linha cobrava o contrário: que o Finalizar aparecesse ali, travado e com
+  // cadeado. Era esse botão — mesmo travado, mesmo tamanho, ao lado do ⚡ — que convidava o
+  // toque, e na semana de 02/11 três lojas fecharam a semana em menos de um minuto por
+  // causa dele. Agora ele simplesmente não existe enquanto a urgência não sai.
+  check('e o Finalizar não está na tela — não dá pra tocar no que não existe',
+    !fase1.temFinalizar, JSON.stringify(fase1));
 
   // ── Fase 2: urgência enviada — é a mudança pedida ───────────────────────────
   const fase2 = await montar({ loja: 'BANGU', pendente: false,
     envio: { urgencia_em: '2026-10-19T09:42:00Z', urgencia_por: 'Neto', urgencia_itens: 66 } });
   check('urgência enviada: o botão ⚡ SAI da tela', !fase2.temUrgencia, JSON.stringify(fase2));
-  check('sobra só o Finalizar, destravado', fase2.temFinalizar && !fase2.finalizarTravado, JSON.stringify(fase2));
-  check('e ele ocupa a linha inteira, sem buraco onde era o ⚡',
-    fase2.colunas === '1fr', fase2.colunas);
+  check('sobra só o Finalizar', fase2.temFinalizar, JSON.stringify(fase2));
+  // E ele NÃO herda a faixa do topo: antes ocupava a linha inteira onde o ⚡ estava, e o
+  // toque seguinte, no mesmo ponto da tela, finalizava a semana.
+  check('e ele não ocupa a faixa fixa do topo, onde o ⚡ estava',
+    !fase2.finalizarNoTopo, JSON.stringify(fase2));
 
   // ── Fase 3: já finalizado — continua sem o ⚡ ────────────────────────────────
   const fase3 = await montar({ loja: 'BANGU', pendente: false,
     envio: { urgencia_em: '2026-10-19T09:42:00Z', final_em: '2026-10-19T16:10:00Z', final_por: 'Neto' } });
-  check('depois de finalizar, o ⚡ segue fora', !fase3.temUrgencia && fase3.temFinalizar, JSON.stringify(fase3));
+  // Finalizado é o fim da linha: nem o ⚡ nem o Finalizar. Quem fechou sem querer tem o
+  // botão de reabrir, com senha mestre, dentro da faixa verde (ver e2e_urgencia_finalizar).
+  check('depois de finalizar, o ⚡ segue fora e não há o que finalizar de novo',
+    !fase3.temUrgencia && !fase3.temFinalizar, JSON.stringify(fase3));
 
   // ── Fase 4: sem resposta do servidor ────────────────────────────────────────
   // _checarUrgenciaPendencia deixa _envioSemana como estava quando a rede falha. Esconder o

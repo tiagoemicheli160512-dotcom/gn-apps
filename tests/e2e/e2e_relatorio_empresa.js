@@ -14,7 +14,12 @@ const HOME = process.env.ARQ_HOME || CAMINHOS.pub('gn-home.html');
 let ok = 0, falhou = 0;
 const check = (n, c) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ? ok++ : falhou++; };
 
-const COMP = '2026-09';
+// A competência é o MÊS ANTERIOR ao de hoje — é o que o card "Desempenho do mês anterior"
+// desenha. Cravada em '2026-09', a suíte passou setembro e outubro inteiros e ficou vermelha
+// em 01/11, quando o card passou a falar de outubro e a imagem da fixtura, chaveada em
+// setembro, deixou de ser achada. Nenhum defeito no app: só a virada do mês.
+const COMP = (() => { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - 1);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); })();
 const URL_ITAQUERA = 'https://ncxttwvpafajnilpjbol.supabase.co/storage/v1/object/public/gn-fotos/relatorio-empresa/itaquera-set.jpg';
 const URL_BANGU = 'https://ncxttwvpafajnilpjbol.supabase.co/storage/v1/object/public/gn-fotos/relatorio-empresa/bangu-set.jpg';
 

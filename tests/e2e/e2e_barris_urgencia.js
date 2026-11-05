@@ -215,8 +215,13 @@ const check = (n, c) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ? ok++ :
   check('o filtro de grupo sai da tela (não dá pra fugir pra outra categoria)',
     !/window\._pedidoGrupo='BEBIDAS'/.test(lista.html));
   check('Vazios/Preench saem também', !/⬜ Vazios/.test(lista.html) && !/✓ Preench/.test(lista.html));
-  check('o Finalizar fica travado enquanto a urgência não sai',
-    /🔒/.test(lista.html) && /Envie a urgência primeiro/.test(lista.html));
+  // Antes o Finalizar aparecia ali travado, com cadeado, ao lado do ⚡ — e era esse botão
+  // que convidava o toque (ver e2e_urgencia_finalizar: três lojas fecharam a semana em
+  // menos de um minuto por causa dele). Agora ele não está na tela enquanto a urgência não
+  // sai, e o que explica isso é texto, não um botão cinza.
+  check('o Finalizar não está na tela enquanto a urgência não sai',
+    !/_abrirPreviaConfirmar\('final'\)/.test(lista.html));
+  check('e a tela diz o que Finalizar agora fecharia', /A urgência ainda não saiu/.test(lista.html));
   check('o Urgência continua disponível — é o caminho de saída', /_abrirPreviaConfirmar\('urgencia'\)/.test(lista.html));
 
   // Enviar a urgência libera o catálogo inteiro

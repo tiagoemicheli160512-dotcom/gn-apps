@@ -18,8 +18,17 @@ const LOJAS_APP = process.env.ARQ_LOJAS || CAMINHOS.pub('gn-lojas.html');
 let ok = 0, falhou = 0;
 const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (extra ? '  → ' + extra : '')); c ? ok++ : falhou++; };
 
-const FECHADA = 'BOULEVARD|2026-08-10';  // o sbPull não aplica mais (mais de 1 semana atrás)
-const ABERTA  = 'BOULEVARD|2026-10-19';  // semana atual
+// As semanas saem de HOJE, não cravadas. A regra sob teste é RELATIVA ("o sbPull só aplica
+// semana de até uma semana atrás"), então data fixa vence sozinha com o calendário: a
+// "2026-10-19", escrita como semana atual, virou semana de três semanas atrás em 05/11 — a
+// regra passou a não aplicá-la e as quatro checagens caíram sem defeito nenhum no app.
+// Vermelho que não é defeito é o que faz todo mundo parar de olhar pro CI.
+const _segDe = d => { const x = new Date(d); const w = x.getDay(); x.setDate(x.getDate() + (w === 0 ? -6 : 1 - w)); return x; };
+const _isoDe = d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+const _semanaAtras = n => { const d = _segDe(new Date()); d.setDate(d.getDate() - 7*n); return _isoDe(d); };
+const FECHADA = 'BOULEVARD|' + _semanaAtras(10);  // o sbPull não aplica mais (mais de 1 semana atrás)
+const ABERTA  = 'BOULEVARD|' + _semanaAtras(0);   // semana atual
+const NUNCA_SINC = 'BOULEVARD|' + _semanaAtras(16);  // chave que nunca sincronizou
 
 async function abrir(browser, nuvem) {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 900 } });
@@ -45,7 +54,7 @@ async function abrir(browser, nuvem) {
       { loja: 'BOULEVARD', all_data: { estIniAll: estado.BOULEVARD } },
       { loja: 'NOVA AMERICA', all_data: { estIniAll: estado['NOVA AMERICA'] } },
     ].filter(x => !mm || x.loja === decodeURIComponent(mm[1]).replace(/\+/g, ' '))
-     .map(x => ({ loja: x.loja, all_data: x.all_data, updated_at: '2026-10-22T00:00:00Z' }));
+     .map(x => ({ loja: x.loja, all_data: x.all_data, updated_at: new Date().toISOString() }));
     return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(rows) });
   });
   const page = await ctx.newPage();
@@ -129,9 +138,9 @@ const gravado = (patches, chave, item) => {
   // ── 5. Item digitado aqui, em chave que nunca sincronizou, não pode ser perdido ──────
   {
     const a = await abrir(browser, { [FECHADA]: { OUTRO: 3 } });
-    await pushComEstado(a.page, { local: { 'BOULEVARD|2026-07-06': { NOVO: 5 } }, baseline: {} });
+    await pushComEstado(a.page, { local: { [NUNCA_SINC]: { NOVO: 5 } }, baseline: {} });
     const p = a.patches.filter(x => x.u.indexOf('BOULEVARD') > -1).pop();
-    const m = p.b.all_data.estIniAll['BOULEVARD|2026-07-06'];
+    const m = p.b.all_data.estIniAll[NUNCA_SINC];
     check('item novo de chave sem baseline é preservado', m && m.NOVO === 5, JSON.stringify(m));
     check('e o que já estava na nuvem em outra chave fica intacto',
       p.b.all_data.estIniAll[FECHADA] && p.b.all_data.estIniAll[FECHADA].OUTRO === 3);
