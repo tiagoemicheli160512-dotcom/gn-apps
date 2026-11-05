@@ -323,6 +323,53 @@ window.gnCancelMotivoFalta = function (categoria, detalhe) {
   return '';
 };
 
+// ── DESPESA DE CAIXA: QUANDO "OUTROS" É NA VERDADE FUNCIONÁRIO EXTRA ──────
+// Mora aqui porque DOIS apps precisam da mesma resposta e não podem divergir: o Caixa, na
+// hora de lançar, pra avisar que a categoria está errada; e o Painel de Gestão, na hora de
+// ler, pra não deixar o gasto de fora da aba 👷 Extra. Regra em dois lugares vira duas
+// regras — foi o que já aconteceu com o medidor de contraste antes de virar arquivo.
+//
+// MEDIDO desde 01/10: a Guarulhos lança quase todo extra em "outros", com a descrição
+// "EXTRA" ou "dobra fulano" — 31 lançamentos, R$ 4.300. Lendo só a categoria, ela era a
+// ÚLTIMA da rede em extra (R$ 500) quando é a PRIMEIRA (R$ 4.800). Campo Grande tem 2
+// lançamentos assim e a Pedreira 1.
+//
+// Conferida nos dois sentidos: o que pega dentro de "outros" é só extra ("EXTRA",
+// "extra jonatan", "dobra daniella", "Dobra gerência", "dobra folga gerente" — 34 linhas,
+// nenhum falso positivo); o que deixa passar não é extra (mercado, consumação de músicos,
+// limpeza de vidros, segurança, filmagem de marketing, premiação, conserto).
+//
+// Borda de palavra em volta de `extra`/`dobra` pra "extrato", "extração" e "dobradiça"
+// nunca entrarem: não existem na base hoje, mas o campo é livre e amanhã existem.
+//
+// FORA DE PROPÓSITO: "dias trabalhados" (3 linhas, R$ 852). Pagamento de dias tanto pode
+// ser extra quanto acerto de quem saiu — chutar mudaria o número de uma loja sem ninguém
+// ter decidido.
+window.GN_DESPESA_EXTRA_RX = /(^|[^0-9a-zà-ú])(extras?|dobra[sr]?)([^0-9a-zà-ú]|$)/i;
+
+// O texto do lançamento descreve um extra? Olha descrição e justificativa juntas: quando a
+// descrição vem vazia (244 de 1.297 desde 01/10), é a justificativa que diz o que foi.
+window.gnDespesaTextoDeExtra = function (nome, justificativa) {
+  return window.GN_DESPESA_EXTRA_RX.test(String(nome || '') + ' ' + String(justificativa || ''));
+};
+
+// Esta despesa conta como funcionário extra? Vale pra quem LÊ (Painel de Gestão).
+window.gnDespesaEhExtra = function (d) {
+  if (!d) return false;
+  if (d.categoria === 'funcionario_extra') return true;
+  if (d.categoria !== 'outros') return false;
+  return window.gnDespesaTextoDeExtra(d.nome, d.justificativa);
+};
+
+// A categoria escolhida está errada pro que foi escrito? Vale pra quem ESCREVE (Caixa).
+// Devolve a categoria certa, ou '' quando não há o que corrigir. Só opina sobre "Outros":
+// quem escolheu uma categoria específica escolheu de propósito, e ficar palpitando em cima
+// disso treina a pessoa a ignorar o aviso — que é como um aviso morre.
+window.gnDespesaCategoriaSugerida = function (categoria, nome, justificativa) {
+  if (categoria !== 'outros') return '';
+  return window.gnDespesaTextoDeExtra(nome, justificativa) ? 'funcionario_extra' : '';
+};
+
 // ── TRANSFERÊNCIA DE MESA ─────────────────────────────────────────────────
 // A regra da casa: transferência só vale entre mesas com consumo de verdade — cliente que
 // mudou de lugar, mesas que se juntaram. Usar transferência pra "guardar" um item lançado

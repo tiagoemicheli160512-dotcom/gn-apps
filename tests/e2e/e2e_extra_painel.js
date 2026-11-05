@@ -11,6 +11,16 @@
 // soma por loja com a chave certa, a proporção com o faturamento do MESMO mês, o agrupamento
 // por nome (com variação de caixa e espaço), a contagem do que não diz quem recebeu, o nome
 // que se repete, a Maglia de fora e a navegação de mês.
+//
+// DEPOIS: "alargar o filtro". A categoria sozinha estava lendo uma loja inteira errado — a
+// Guarulhos lança extra como "Outros", com a descrição "EXTRA" ou "dobra fulano": 31
+// lançamentos e R$ 4.300 desde 01/10 que a aba não via. Com isso ela aparecia em ÚLTIMO na
+// rede (R$ 500) sendo a PRIMEIRA (R$ 4.800). A regra mora em gn-lojas-config.js
+// (gnDespesaEhExtra), compartilhada com o aviso do app Caixa.
+//
+// O risco de alargar é o oposto: varrer pra dentro o que não é extra. Por isso o fixture
+// põe, na MESMA loja e no mesmo fechamento, "Outros" que é extra e "Outros" que não é
+// (mercado, consumação de músicos) — e a suíte cobra os dois lados.
 const CAMINHOS = require('../_env');
 const { chromium } = require('playwright');
 const HOME = process.env.ARQ_HOME || CAMINHOS.pub('gn-home.html');
@@ -56,6 +66,22 @@ const FECHAMENTOS = [
   // Maglia: tem extra, tem faturamento, e mesmo assim fica fora (regra do CLAUDE.md).
   { loja: 'MAGLIA', data: '2026-10-02', gn_caixa_despesa: [
     { categoria: 'funcionario_extra', valor: 9999, nome: 'Heitor', justificativa: JUST, foto: FOTO } ] },
+  // Guarulhos: o caso medido. Extra lançado como "Outros", do jeito que ela escreve —
+  // "EXTRA" cru, "dobra daniella", e um em que a descrição é vazia e quem diz é a
+  // justificativa. No MESMO fechamento, dois "Outros" que NÃO são extra: se entrarem, o
+  // filtro largou demais e a conta mente pro outro lado.
+  { loja: 'GUARULHOS', data: '2026-10-08', gn_caixa_despesa: [
+    { categoria: 'outros', valor: 300, nome: 'EXTRA',          justificativa: '',   foto: FOTO },
+    { categoria: 'outros', valor: 200, nome: 'dobra daniella', justificativa: '',   foto: FOTO },
+    { categoria: 'outros', valor: 100, nome: '',               justificativa: 'Dobra folga do Fernando', foto: FOTO },
+    { categoria: 'outros', valor: 777, nome: 'mercado',        justificativa: '',   foto: FOTO },
+    { categoria: 'outros', valor: 888, nome: 'CONSUMAÇÃO MUSICOS', justificativa: '', foto: FOTO },
+    { categoria: 'outros', valor: 444, nome: 'extrato bancario',   justificativa: '', foto: FOTO },
+  ] },
+  // E um na categoria certa, pra provar que os dois caminhos somam juntos e que a loja
+  // não vira "só Outros".
+  { loja: 'GUARULHOS', data: '2026-10-12', gn_caixa_despesa: [
+    { categoria: 'funcionario_extra', valor: 150, nome: 'Edcarlos', justificativa: JUST, foto: FOTO } ] },
   // Setembro, pro ‹ ter pra onde ir.
   { loja: 'BANGU', data: '2026-09-20', gn_caixa_despesa: [
     { categoria: 'funcionario_extra', valor: 700, nome: 'Ciclano', justificativa: JUST, foto: FOTO } ] },
@@ -68,13 +94,14 @@ const VENDAS = [
   { loja: 'Caxias',       data_operacao: '2026-10-04', venda_salao: 100000, venda_delivery: 0 },
   { loja: 'Campo Grande', data_operacao: '2026-10-04', venda_salao: 50000,  venda_delivery: 0 },
   { loja: 'Itaquera',     data_operacao: '2026-10-04', venda_salao: 250000, venda_delivery: 0 },
+  { loja: 'Guarulhos',    data_operacao: '2026-10-04', venda_salao: 100000, venda_delivery: 0 },
   { loja: 'Maglia',       data_operacao: '2026-10-04', venda_salao: 999999, venda_delivery: 0 },
   { loja: 'Bangu',        data_operacao: '2026-09-15', venda_salao: 70000,  venda_delivery: 0 },
 ];
 
 // Fora de ordem de propósito: a ordenação alfabética dos cartões é do app, e lista já
 // ordenada não prova nada.
-const LOJAS = ['ITAQUERA', 'MAGLIA', 'BANGU', 'CAXIAS', 'CAMPO GRANDE', 'BOULEVARD'];
+const LOJAS = ['ITAQUERA', 'MAGLIA', 'BANGU', 'CAXIAS', 'GUARULHOS', 'CAMPO GRANDE', 'BOULEVARD'];
 
 const entre = (v, de, ate) => v >= de && v <= ate;
 const faixa = url => {
@@ -84,25 +111,31 @@ const faixa = url => {
 };
 
 (async () => {
+  const catsPedidas = [];
   const browser = await chromium.launch({ executablePath: CAMINHOS.CHROMIUM });
   const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 900 } });
   await CAMINHOS.fixarRelogio(ctx, HOJE + 'T12:00:00');
 
   // Dublê de PostgREST: honra a janela de datas e o filtro da categoria na tabela aninhada
-  // (`gn_caixa_despesa.categoria=eq.funcionario_extra` + !inner), que é o que o app manda.
-  // Sem honrar, o teste não provaria que o recorte é feito no servidor.
+  // (`gn_caixa_despesa.categoria=in.(funcionario_extra,outros)` + !inner), que é o que o app
+  // manda. Sem honrar, o teste não provaria que o recorte é feito no servidor — e o que
+  // chega a mais o app teria que recusar sozinho, que é outra coisa.
   await ctx.route('**/rest/v1/**', async route => {
     const url = route.request().url();
     const [de, ate] = faixa(url);
     const json = body => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
     if (url.includes('gn_caixa_fechamento')) {
-      const soExtra = /gn_caixa_despesa\.categoria=eq\.funcionario_extra/.test(decodeURIComponent(url));
-      const inner = /gn_caixa_despesa!inner/.test(decodeURIComponent(url));
+      const u = decodeURIComponent(url);
+      const mEq = /gn_caixa_despesa\.categoria=eq\.([a-z_]+)/.exec(u);
+      const mIn = /gn_caixa_despesa\.categoria=in\.\(([a-z_,]+)\)/.exec(u);
+      const cats = mIn ? mIn[1].split(',') : (mEq ? [mEq[1]] : null);
+      catsPedidas.push(cats ? cats.join(',') : '(sem filtro)');
+      const inner = /gn_caixa_despesa!inner/.test(u);
       const linhas = FECHAMENTOS
         .filter(f => entre(f.data, de, ate))
         .map(f => ({ loja: f.loja, data: f.data,
-                     gn_caixa_despesa: soExtra ? f.gn_caixa_despesa.filter(d => d.categoria === 'funcionario_extra')
-                                               : f.gn_caixa_despesa }))
+                     gn_caixa_despesa: cats ? f.gn_caixa_despesa.filter(d => cats.includes(d.categoria))
+                                            : f.gn_caixa_despesa }))
         .filter(f => !inner || f.gn_caixa_despesa.length);
       return json(linhas);
     }
@@ -141,6 +174,8 @@ const faixa = url => {
       const c = _extraGerData.porLoja[k];
       o[k] = { total: c.total, qtd: c.qtd, fat: c.fat, pct: c.pct, dias: c.dias,
                semNome: c.semNome, semJust: c.semJust, semFoto: c.semFoto,
+               foraCat: c.foraCat, foraCatTotal: c.foraCatTotal,
+               foraCatLanc: c.lancamentos.filter(l => l.foraCat).map(l => l.nome || '-'),
                pessoas: c.pessoas.map(p => ({ nome: p.nome, semNome: p.semNome, vezes: p.vezes, total: p.total })),
                repetidos: c.repetidos.map(p => p.nome),
                lancamentos: c.lancamentos.map(l => l.data + '|' + (l.nome || '-') + '|' + l.valor) };
@@ -151,7 +186,7 @@ const faixa = url => {
   const d = await ler();
   const txt = String(d.html).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
   const B = d.porLoja['BANGU'], C = d.porLoja['CAXIAS'], CG = d.porLoja['CAMPO GRANDE'],
-        BV = d.porLoja['BOULEVARD'], I = d.porLoja['ITAQUERA'];
+        BV = d.porLoja['BOULEVARD'], I = d.porLoja['ITAQUERA'], G = d.porLoja['GUARULHOS'];
 
   // ── 1. Maglia fora ─────────────────────────────────────────────────────────────────────
   check('Maglia fica fora da aba (o pedido não citou o nome dela)',
@@ -170,8 +205,8 @@ const faixa = url => {
   check('Bangu: 0,60% da venda (R$ 600 sobre R$ 100 mil)', B && Math.abs(B.pct - 0.6) < 0.001);
   check('Campo Grande: 6,00% — terceira em reais, primeira em proporção',
     CG && CG.total === 3000 && Math.abs(CG.pct - 6) < 0.001);
-  check('a rede fica em 0,94% (R$ 4.700 sobre R$ 500 mil — a venda da Maglia não entra na base)',
-    /0,94%/.test(txt) && /R\$ 4\.700,00/.test(txt));
+  check('a rede fica em 0,91% (R$ 5.450 sobre R$ 600 mil — a venda da Maglia não entra na base)',
+    /0,91%/.test(txt) && /R\$ 5\.450,00/.test(txt));
   check('Boulevard tem extra e não tem venda lançada: a proporção fica em branco, não em zero',
     BV && BV.qtd === 1 && BV.pct === null && /sem faturamento pra comparar/i.test(txt));
 
@@ -179,8 +214,8 @@ const faixa = url => {
   check('só a Campo Grande passa do dobro da média, e o aviso diz o número',
     /1 loja gasta mais que o dobro da média da rede/.test(txt) &&
     /Campo Grande 6,00%/.test(txt) && !/Caxias 1,00%/.test(txt));
-  check('Bangu e Caxias ficam marcadas como dentro da média, e só elas',
-    (txt.match(/dentro da média/gi) || []).length === 2);
+  check('Bangu, Caxias e Guarulhos ficam marcadas como dentro da média, e só elas',
+    (txt.match(/dentro da média/gi) || []).length === 3);
   check('Itaquera vende e não teve extra: cartão próprio dizendo isso',
     I && I.qtd === 0 && /sem extra no mês/i.test(txt) && txt.includes('Itaquera'));
 
@@ -205,18 +240,49 @@ const faixa = url => {
     /sem nome 4× R\$ 1\.000,00/.test(txt));
 
   // ── 6. O que não dá pra auditar ───────────────────────────────────────────────────────
-  check('5 de 11 lançamentos não dizem quem recebeu, e o aviso aponta as lojas',
-    /5 de 11 lançamentos não dizem quem recebeu/.test(txt) &&
-    /Bangu \(1 de 5\)/.test(txt) && /Caxias \(4 de 4\)/.test(txt));
+  check('6 de 15 lançamentos não dizem quem recebeu, e o aviso aponta as lojas',
+    /6 de 15 lançamentos não dizem quem recebeu/.test(txt) &&
+    /Bangu \(1 de 5\)/.test(txt) && /Caxias \(4 de 4\)/.test(txt) && /Guarulhos \(1 de 4\)/.test(txt));
   check('justificativa curta conta como sem justificativa (a régua é a mesma do Caixa)',
-    C && C.semJust === 1 && /1 lançamento sem justificativa/.test(txt));
+    C && C.semJust === 1 && /3 lançamentos sem justificativa/.test(txt));
   check('e o lançamento sem foto é contado', C && C.semFoto === 1 && C.qtd === 4);
+
+  // ── 6b. O extra lançado na categoria errada ───────────────────────────────────────────
+  // O caso medido da Guarulhos. Os dois lados importam: pegar o que é extra e NÃO pegar o
+  // que só está na mesma categoria.
+  check('o extra lançado como "Outros" entra na conta da loja (R$ 750, não R$ 150)',
+    G && G.total === 750 && G.qtd === 4, G && G.total);
+  check('e o que é "Outros" de verdade fica fora (mercado, músicos e extrato: R$ 2.109)',
+    G && G.total === 750 && !/777|888|444/.test(txt), G && JSON.stringify(G.foraCatLanc));
+  check('"extrato bancario" não é extra — a borda de palavra existe pra isso',
+    G && !G.foraCatLanc.includes('extrato bancario'), G && JSON.stringify(G.foraCatLanc));
+  check('pega pelo que está escrito na descrição E na justificativa',
+    G && G.foraCat === 3 && G.foraCatTotal === 600 &&
+    G.foraCatLanc.includes('EXTRA') && G.foraCatLanc.includes('dobra daniella') &&
+    G.foraCatLanc.includes('-'), G && JSON.stringify(G.foraCatLanc));
+  check('a loja some do topo do ranking se a categoria mandar sozinha: aqui ela soma os dois caminhos',
+    G && G.total === 750 && G.qtd === 4 && G.foraCat === 3);
+  check('o aviso da rede diz quanto veio como "Outros" e de que loja',
+    /R\$ 600,00 de extra veio lançado como "Outros"/.test(txt) && /Guarulhos R\$ 600,00 \(3 de 4\)/.test(txt), txt.slice(0, 200));
+  check('e diz que esse dinheiro JÁ está somado — senão quem lê desconta duas vezes',
+    /já soma esses 3 lançamentos/i.test(txt));
+  // Duas aparições e só duas: o aviso da rede, no topo, e o cartão da Guarulhos. Uma
+  // terceira significaria o aviso vazando pro cartão de quem não tem o caso.
+  check('o cartão da loja avisa, e só o dela',
+    /⚠ R\$ 600,00 lançado como "Outros"/.test(txt) &&
+    (txt.match(/lançado como "Outros"/g) || []).length === 2,
+    JSON.stringify(txt.match(/.{25}lançado como "Outros"/g)));
+  check('nenhuma outra loja ganha o aviso sem ter o caso',
+    [B, C, CG, BV].every(x => x && x.foraCat === 0));
+  check('a consulta pede as duas categorias ao servidor, não todas',
+    catsPedidas.length > 0 && catsPedidas.every(c => c === 'funcionario_extra,outros'),
+    JSON.stringify(catsPedidas.slice(0, 3)));
 
   // ── 7. Ordem e navegação ──────────────────────────────────────────────────────────────
   const titulos = String(d.html).match(/font-weight:(?:800|700);color:var\(--t[12]\);flex:1">([^<]+)</g)
     .map(x => x.replace(/.*">/, '').replace(/<$/, ''));
   check('um cartão por loja, em ordem alfabética',
-    titulos.join('|') === 'Bangu|Boulevard|Campo Grande|Caxias|Itaquera');
+    titulos.join('|') === 'Bangu|Boulevard|Campo Grande|Caxias|Guarulhos|Itaquera');
   check('o cabeçalho diz o mês e que ele está em andamento',
     /OUT 2026/.test(txt) && /mês corrente — em andamento/.test(txt));
   check('o › vem desabilitado: não há mês à frente',
@@ -260,6 +326,14 @@ const faixa = url => {
     / 05\/10 sem nome R\$ 250,00 x /.test(dTxt) && dTxt.includes(JUST));
   check('e o lançamento sem foto diz "sem foto" em vez de uma imagem quebrada',
     /sem foto/.test(dTxt));
+  const gDia = await page.evaluate(() => {
+    _extraGerPorDia.add('GUARULHOS');
+    const h = _buildExtraPanel();
+    _extraGerPorDia.delete('GUARULHOS');
+    return h;
+  });
+  check('na lista por dia, a linha que veio da categoria errada leva a etiqueta OUTROS',
+    (gDia.match(/>OUTROS</g) || []).length === 3, (gDia.match(/>OUTROS</g) || []).length);
 
   // ── 9. Os relatórios ──────────────────────────────────────────────────────────────────
   const rel = await page.evaluate(() => {
@@ -267,7 +341,7 @@ const faixa = url => {
     catch (e) { return { erro: String(e && e.message) }; }
   });
   check('o relatório traz o total da rede e a proporção',
-    rel.pdf && /R\$ 4\.700,00/.test(rel.pdf) && /0,94%/.test(rel.pdf));
+    rel.pdf && /R\$ 5\.450,00/.test(rel.pdf) && /0,91%/.test(rel.pdf));
   check('o WhatsApp vai agrupado por pessoa', rel.wpp && /Talita: 4× R\$ 500,00/.test(rel.wpp));
   check('o PDF vai lançamento a lançamento, com data e motivo',
     rel.pdf && /03\/10 · Talita · R\$ 100,00 · cobertura da folga/.test(rel.pdf));
@@ -275,6 +349,12 @@ const faixa = url => {
   check('e dizem quais lojas não tiveram extra no mês',
     /Sem extra no mês.*Itaquera/.test(rel.pdf));
   check('a Maglia não entra em relatório nenhum', !/Maglia/.test(rel.pdf) && !/Maglia/.test(rel.wpp));
+  check('os dois relatórios avisam o que veio como "Outros", e que já está somado',
+    /R\$ 600,00 em 3 lançamentos veio lançado como "Outros"/.test(rel.pdf) &&
+    /Já está somado acima/.test(rel.pdf) && /Guarulhos R\$ 600,00/.test(rel.wpp));
+  check('e o PDF marca a linha de cada lançamento que veio da categoria errada',
+    /EXTRA \[Outros\]/.test(rel.pdf) && /dobra daniella \[Outros\]/.test(rel.pdf) &&
+    !/Edcarlos \[Outros\]/.test(rel.pdf));
 
   // ── 10. O app não confia cegamente na resposta ────────────────────────────────────────
   // A passada de cima prova que o recorte da categoria vai NA CONSULTA (o dublê só devolve
