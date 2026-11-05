@@ -2695,6 +2695,39 @@ async function _registrarEnvioSemana(campos) {
   }
 }
 
+// Reabre a semana que foi finalizada sem querer: limpa só a finalização, nunca a urgência
+// nem a contagem já lançada.
+//
+// Existe por um caso medido: na semana de 02/11, Boulevard, Itaquera e Campo Grande
+// finalizaram 53, 24 e 41 segundos depois de mandar a urgência — a semana fechou com 63, 62
+// e 79 itens contra os 190 a 251 das outras oito. A contagem cheia estava inteira no
+// aparelho (234, 198 e 244 itens), mas o app não tinha como voltar atrás: finalizado era
+// estado final, e o Compras ficava com um quarto do pedido.
+//
+// Só com a senha mestre, porque reabrir é desfazer o que a loja declarou pro Compras — a
+// mesma régua das outras correções deste app (ver pedirSenhaMestre / _podeLancarSemCadastro).
+// Quem reabre fica registrado em reaberto_por/reaberto_em: o painel do Compras precisa saber
+// que aquela finalização não é a primeira.
+async function _reabrirFinalizacaoSemana() {
+  const e = _envioSemana || {};
+  if (!e.final_em) { showToast('Esta semana não está finalizada.', 'warn'); return; }
+  await _registrarEnvioSemana({
+    final_em: null, final_por: null, final_itens: null,
+    reaberto_em: new Date().toISOString(),
+    reaberto_por: usuarioAtual ? usuarioAtual.nome : null,
+  });
+  if (_envioSemanaFalhou) {
+    showToast('⚠️ Não deu pra reabrir agora (sem conexão). Tente de novo em instantes.', 'err', 6000);
+    return;
+  }
+  showToast('🔓 Semana reaberta. Termine a contagem e toque em ✅ Finalizar o pedido da semana, no fim da lista.', 'success', 7000);
+  render();
+}
+function _pedirReabrirFinalizacao() {
+  if (!confirm('Reabrir o pedido desta semana?\n\nA finalização sai do painel do Compras até alguém finalizar de novo. A contagem já lançada não se perde.')) return;
+  pedirSenhaMestre(function(){ _reabrirFinalizacaoSemana(); });
+}
+
 // Faixa de confirmação no topo da aba Pedido: o que a loja JÁ enviou nesta semana e o que
 // falta. A loja não tinha como saber se tinha finalizado — a única confirmação era um toast
 // que desaparecia, e quem ficava na dúvida reenviava ou simplesmente não enviava. Aqui fica
@@ -2724,6 +2757,16 @@ function _faixaEnvioSemanaHtml(urgTrava) {
       '<div style="font-weight:800;color:#065f46;margin-bottom:2px">✅ Pedido desta semana FINALIZADO</div>' +
       (temUrg ? linha('⚡', '#065f46', 'Urgência enviada', hora(e.urgencia_em) + quem(e.urgencia_por) + (e.urgencia_itens ? ' · ' + e.urgencia_itens + ' itens' : '')) : '') +
       linha('📦', '#065f46', 'Pedido finalizado', hora(e.final_em) + quem(e.final_por) + (e.final_itens ? ' · ' + e.final_itens + ' itens' : '')) +
+      (e.reaberto_em ? linha('🔓', '#78350f', 'Já foi reaberto uma vez', hora(e.reaberto_em) + quem(e.reaberto_por)) : '') +
+      // Saída pra quem finalizou sem querer. Fica aqui, dentro da faixa que diz "finalizado",
+      // porque é nela que a loja olha quando desconfia — e não solta na tela, onde viraria
+      // mais um botão pra tocar errado.
+      '<div style="margin-top:8px;border-top:1px solid rgba(5,150,105,.25);padding-top:8px">' +
+      '<div style="font-size:10.5px;color:var(--t3);line-height:1.45;margin-bottom:6px">' +
+      'Finalizou sem querer e ainda falta contagem? Um responsável reabre com a senha mestre — ' +
+      'a contagem já lançada não se perde.</div>' +
+      '<button onclick="_pedirReabrirFinalizacao()" style="width:100%;background:var(--s2);border:1px solid rgba(180,83,9,.45);border-radius:10px;padding:8px 10px;color:var(--txt-amber);font-weight:800;font-size:11.5px;cursor:pointer">' +
+      '🔓 Reabrir pra finalizar de novo (senha mestre)</button></div>' +
       (_envioSemanaFalhou ? '<div style="margin-top:6px;color:var(--txt-amber)">⚠️ A confirmação pode não ter subido pra nuvem (internet instável). Abra esta aba de novo mais tarde pra conferir.</div>' : '') +
       '</div>';
   }
@@ -10508,21 +10551,26 @@ function render() {
       ficam no topo, longe do polegar que rola a lista. O filtro de grupo entrou nesse
       mesmo bloco fixo pra trocar de categoria (Bebidas, Hortifruti, etc.) sem precisar
       rolar a lista de volta ao topo pra achá-lo de novo. -->
+      <!-- No topo fica SÓ a Urgência. O Finalizar desceu pro fim da lista (ver o bloco
+      "Fechar a semana" lá embaixo), e o motivo está medido: na semana de 02/11, Boulevard,
+      Itaquera e Campo Grande finalizaram 53, 24 e 41 SEGUNDOS depois de mandar a urgência,
+      fechando a semana com 63, 62 e 79 itens contra os 190 a 251 das outras oito lojas.
+      Não foi distração de três lojas no mesmo dia: era o desenho. Os dois botões dividiam
+      a mesma faixa fixa e, no instante em que a urgência saía, o ⚡ desaparecia e o
+      Finalizar ESCORREGAVA pro lugar dele — o próximo toque, no mesmo ponto da tela,
+      finalizava. O botão trocava de significado embaixo do dedo.
+      Agora um não ocupa nunca o lugar do outro: enquanto a urgência não sai, o Finalizar
+      não existe na tela; depois que sai, ele só existe no fim da lista, depois de rolar
+      o catálogo inteiro — que é quando a contagem realmente acabou. -->
       <div style="position:sticky;top:${_headerH}px;z-index:29;background:var(--s1);padding:8px 0 6px;margin-top:8px">
-        <div style="display:grid;grid-template-columns:${_urgJaEnviada ? '1fr' : '1fr 1fr'};gap:8px">
-          ${_urgJaEnviada ? '' : `
-          <button onclick="_abrirPreviaConfirmar('urgencia')" style="background:linear-gradient(135deg,#b45309,#92400e);border:none;border-radius:12px;padding:10px 8px;color:#fff;font-weight:900;font-size:13px;display:flex;align-items:center;justify-content:center;gap:7px;box-shadow:0 2px 8px rgba(146,64,14,.35)">
-            <span style="font-size:15px">⚡</span>
-            <span>Urgência</span>
-          </button>`}
-          <!-- Finalizar fecha a semana com o que está contado. Com a urgência pendente a lista
-          está restrita, então finalizar aqui fecharia a semana com 1/4 do catálogo contado. -->
-          <button onclick="${_urgTrava ? `showToast('⚡ Envie a urgência primeiro — o restante do estoque libera depois disso.', 'warn')` : `_abrirPreviaConfirmar('final')`}"
-            style="background:${_urgTrava ? '#94a3b8' : 'linear-gradient(135deg,#1d4ed8,#1e40af)'};border:none;border-radius:12px;padding:10px 8px;color:#fff;font-weight:900;font-size:13px;display:flex;align-items:center;justify-content:center;gap:7px;${_urgTrava ? 'opacity:.75' : 'box-shadow:0 2px 8px rgba(30,64,175,.35)'}">
-            <span style="font-size:15px">${_urgTrava ? '🔒' : '✅'}</span>
-            <span>Finalizar</span>
-          </button>
-        </div>
+        ${_urgJaEnviada ? '' : `
+        <button onclick="_abrirPreviaConfirmar('urgencia')" style="width:100%;background:linear-gradient(135deg,#b45309,#92400e);border:none;border-radius:12px;padding:11px 8px;color:#fff;font-weight:900;font-size:13px;display:flex;align-items:center;justify-content:center;gap:7px;box-shadow:0 2px 8px rgba(146,64,14,.35)">
+          <span style="font-size:15px">⚡</span>
+          <span>${_urgTrava ? 'Enviar a urgência' : 'Urgência'}</span>
+        </button>
+        ${_urgTrava ? `<div style="font-size:10px;color:var(--txt-amber);text-align:center;padding-top:5px;line-height:1.35">
+          É este botão que fecha a urgência. O <b>✅ Finalizar</b> da semana só aparece depois, no fim da lista.
+        </div>` : ''}`}
 
         <!-- Na trava, o seletor é o das categorias DA URGÊNCIA (ver _urgGruposLoja): cada
         uma mostra quanto ainda falta contar, e a que já fechou ganha ✓. O filtro de grupo
@@ -10749,9 +10797,33 @@ function render() {
         }).join('')}
       </div>
 
+      <!-- Fechar a semana: fim da lista, com o aviso ANTES do botão. Finalizar é o último
+      ato do dia, não um atalho do topo — e quem chega aqui rolou o catálogo inteiro. -->
+      ${_urgTrava ? `
+      <div style="background:rgba(180,83,9,.1);border:1px solid rgba(180,83,9,.35);border-left:3px solid #B45309;border-radius:13px;padding:12px 14px;margin-bottom:10px;font-size:11.5px;color:var(--txt-amber);line-height:1.5">
+        <b>⚡ A urgência ainda não saiu.</b> Finalizar agora fecharia a semana com os
+        ${_urgQtd} itens da urgência no lugar dos ${prodsTotaisCatalogo} do catálogo.
+        Volte ao topo, toque em <b>⚡ Enviar a urgência</b>, e o resto do estoque libera na hora.
+      </div>`
+      : _envioSemana && _envioSemana.final_em ? `
+      <div style="background:rgba(5,150,105,.08);border:1px solid rgba(5,150,105,.3);border-left:3px solid #059669;border-radius:13px;padding:12px 14px;margin-bottom:10px;font-size:11.5px;color:#065f46;line-height:1.5">
+        <b>✅ A semana já está finalizada.</b> Se faltou contagem, é no aviso verde lá em cima
+        que se pede a reabertura — ela precisa da senha mestre.
+      </div>`
+      : `
+      <div style="background:rgba(30,64,175,.08);border:1px solid rgba(30,64,175,.3);border-left:3px solid #1d4ed8;border-radius:13px;padding:12px 14px;margin-bottom:10px;font-size:11.5px;color:var(--txt-blue);line-height:1.5">
+        <b>Terminou de contar tudo?</b> Finalizar fecha a semana com o que estiver lançado
+        agora — ${preench} de ${prodsTotaisCatalogo} itens contados — e é isso que o Compras
+        recebe. Se ainda falta item, conte antes: depois só com a senha mestre pra reabrir.
+      </div>
+      <button onclick="_abrirPreviaConfirmar('final')" style="width:100%;background:linear-gradient(135deg,#1d4ed8,#1e40af);border:none;border-radius:13px;padding:14px 10px;color:#fff;font-weight:900;font-size:15px;display:flex;align-items:center;justify-content:center;gap:9px;box-shadow:0 2px 10px rgba(30,64,175,.35);margin-bottom:10px">
+        <span style="font-size:17px">✅</span>
+        <span>Finalizar o pedido da semana</span>
+      </button>`}
+
       <div style="background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.25);border-radius:13px;padding:11px 13px;font-size:11px;color:var(--txt-blue);line-height:1.5">
-        <strong>⚡ Gerar Urgência:</strong> contagem rápida cedo — atualiza estoque, contagem e envia ao app Pedidos.<br>
-        <strong>✅ Finalizar Pedido:</strong> contagem completa — atualiza tudo + gera o Excel de fechamento.<br>
+        <strong>⚡ Urgência:</strong> contagem rápida cedo — atualiza estoque, contagem e envia ao app Pedidos. Fica no topo.<br>
+        <strong>✅ Finalizar Pedido:</strong> contagem completa — atualiza tudo + gera o Excel de fechamento. Fica no fim desta lista.<br>
         <strong>+ Novo:</strong> cria produto e adiciona automaticamente como insumo do app.
       </div>
     </div>`;

@@ -63,7 +63,9 @@ const URGENCIA_RJ = ['14', '16', '222', '344'];
       faltamContar: _urgFaltamContar(),
       linhas: document.querySelectorAll('#content .row-item[data-pid]').length,
       travado: /Conte primeiro a urgência/.test(html),
-      finalizarBloqueado: /Envie a urgência primeiro/.test(html),
+      // O Finalizar saiu da tela enquanto a urgência não sai (ver e2e_urgencia_finalizar):
+      // o que se mede agora é a AUSÊNCIA do botão, não um cadeado nele.
+      finalizarBloqueado: !/_abrirPreviaConfirmar\('final'\)/.test(html),
       badge: (html.match(/(?:🔒 Urgência|⚡ Urg) \((\d+)\)/) || [])[1] || null,
     };
   }, [lojaKey, catalogo, urg]);
@@ -73,7 +75,7 @@ const URGENCIA_RJ = ['14', '16', '222', '344'];
   check('nenhum item da urgência do Rio existe na lista de SP', sp.presentes === 0 || sp.presentes === null);
   check('SP não entra na trava de urgência', sp.aplicavel === false);
   check('a lista abre inteira em vez de vazia', sp.linhas === CATALOGO_SP.length);
-  check('e o Finalizar volta a funcionar', sp.finalizarBloqueado === false && sp.travado === false);
+  check('e o Finalizar volta pra tela', sp.finalizarBloqueado === false && sp.travado === false);
   check('a tela não promete itens que não existem lá', sp.badge === null);
   // O sintoma que denunciava a incoerência na foto: 88 marcados e 0 a contar.
   check('some a contradição "N marcados / 0 a contar"',
@@ -84,7 +86,7 @@ const URGENCIA_RJ = ['14', '16', '222', '344'];
   check('no Rio a trava continua valendo', rj.aplicavel === true && rj.travado === true);
   check('mostrando só os itens de urgência', rj.linhas === URGENCIA_RJ.length);
   check('com o número certo no selo', rj.badge === String(URGENCIA_RJ.length));
-  check('e o Finalizar segue bloqueado até a urgência sair', rj.finalizarBloqueado === true);
+  check('e o Finalizar segue fora da tela até a urgência sair', rj.finalizarBloqueado === true);
   check('com a contagem pendente batendo', rj.faltamContar === URGENCIA_RJ.length);
 
   // ── 3. Marcação parcial: o selo conta o que a loja tem, não o que a rede marcou ───
