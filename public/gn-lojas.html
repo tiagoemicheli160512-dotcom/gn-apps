@@ -943,6 +943,35 @@ function _epObsRecebimento(nota) {
   if (nota && nota.entregou) partes.push('ENTREGUE POR: ' + nota.entregou);
   return partes.length ? partes.join(' · ') : null;
 }
+
+// ── TROCA DE FORNECEDOR POR ITEM ──────────────────────────────────────────────────────
+// "Às vezes na cotação coloca-se tudo no mesmo fornecedor (ex.: descartável), mas um item
+// ou outro vem por outro." Compras mantém o pedido inteiro num fornecedor só; na Entrega a
+// loja escolhe quem DE FATO entregou aquele item, e a ressalva fica gravada.
+//
+// Lista FIXA, decidida com o dono: só troca dentro do mesmo tipo. O grupo do catálogo não
+// serve pra isso — UTILIDADES mistura descartável com limpeza, bobina e veneno; PROTEÍNA
+// mistura carne, frango e peixe. Pra acrescentar um tipo ou um fornecedor, é só aqui.
+//
+// O fornecedor do PEDIDO nunca muda (coluna `fornecedor`): o app Pedidos confirma,
+// reverte e evita duplicidade por ela. O real vai em `fornecedor_entregue`.
+const EP_FORN_SUBSTITUTOS = [
+  { tipo: 'Descartáveis',        fornecedores: ['DMIC', 'IEV', 'JOBAL', 'MULTIPLAS', 'TPO'] },
+  { tipo: 'Carnes (JBS/Nogmix)', fornecedores: ['NOGMIX - JBS', 'JBS', 'NOGMIX', 'NOGMIX MATHEUS'] },
+];
+function _epNormForn(f) { return String(f || '').trim().toUpperCase().replace(/\s+/g, ' '); }
+function _epGrupoSubst(forn) {
+  const n = _epNormForn(forn);
+  return EP_FORN_SUBSTITUTOS.find(g => g.fornecedores.some(x => _epNormForn(x) === n)) || null;
+}
+// Fornecedor que de fato está entregando o item. É por ele que a Entrega agrupa e pede a
+// nota: o item que veio pela IEV entra na nota da IEV, não na da DMIC.
+function _epForn(p) { return (p && (p.fornecedor_entregue || p.fornecedor)) || 'SEM FORNECEDOR'; }
+// Texto da ressalva, igual em todo lugar que mostra o item.
+function _epRessalvaForn(p) {
+  if (!p || !p.fornecedor_entregue || _epNormForn(p.fornecedor_entregue) === _epNormForn(p.fornecedor)) return '';
+  return 'Pedido em ' + (p.fornecedor || '—') + ' · entregue por ' + p.fornecedor_entregue;
+}
 let _entregaItensMap = {}; // id -> itens (para recalc sem JSON no onclick)
 let pedidoCustom = [];  // itens novos criados no app [{item, fornecedor, grupo, subgrupo, produto, und, custo, posIndex}]
 let pedidoRemovidos = []; // IDs (string) de itens removidos da lista
@@ -11100,7 +11129,7 @@ function render() {
       ${(()=>{
         // Selo pra pular direto pro fornecedor digitando o nome — com muitos fornecedores
         // na lista (ordem alfabética), rolar até achar o certo era o principal atrito aqui.
-        const fornsPend=[...new Set(provisoesEntrega.map(p=>p.fornecedor||'SEM FORNECEDOR'))].sort((a,b)=>a.localeCompare(b));
+        const fornsPend=[...new Set(provisoesEntrega.map(p=>_epForn(p)))].sort((a,b)=>a.localeCompare(b));
         if(fornsPend.length<2) return '';
         const opts=fornsPend.map(f=>`<option value="${escapeHtml(f)}">`).join('');
         return `<div style="margin-top:10px">
@@ -11118,12 +11147,12 @@ function render() {
         // sessão (mesmo que ainda aguardando sincronizar): sem isso, o item aparecia
         // duplicado (uma vez como pendente vindo de provisoesEntrega, que só é atualizado
         // quando carregarEntregas() reconsulta a nuvem, e outra vez já confirmado/travado).
-        provisoesEntrega.forEach(p=>{if(_epConfirmadosSessao[p.id])return;const f=p.fornecedor||'SEM FORNECEDOR';(porForn[f]=porForn[f]||[]).push(p);});
+        provisoesEntrega.forEach(p=>{if(_epConfirmadosSessao[p.id])return;const f=_epForn(p);(porForn[f]=porForn[f]||[]).push(p);});
         // Itens já confirmados nesta sessão, mas mantidos no grupo (travados) até o
         // pedido inteiro do fornecedor terminar — não deixa a lista "pular" no meio.
         idsConfirmadosSessao.forEach(id=>{
           const snap=_epConfirmadosSessao[id];
-          const f=snap.fornecedor||'SEM FORNECEDOR';
+          const f=_epForn(snap);
           (porForn[f]=porForn[f]||[]).push(snap);
         });
         const fornsFinalizados=[];
@@ -11145,7 +11174,7 @@ function render() {
             const unitPrev=qtdPrev>0?valPrev/qtdPrev:0;
             if(prov._statusFinal){
               const cor=prov._syncPendente?'#D97706':(prov._statusFinal==='RECEBIDO_OK'?'#16A34A':'#D97706');
-              const rotulo=(prov._statusFinal==='RECEBIDO_OK'?'✅ Confirmado':'⚠️ Divergência registrada')+(prov._syncPendente?' · ⏳ sincronizando…':'');
+              const rotulo=(prov._encerrado?'🏁 Restante finalizado sem chegar':prov._parcialResto!=null?`📦 Parcial — ${prov._parcialResto} ${und} seguem pendentes`:(prov._statusFinal==='RECEBIDO_OK'?'✅ Confirmado':'⚠️ Divergência registrada'))+(prov._syncPendente?' · ⏳ sincronizando…':'');
               return `<div style="padding:12px 14px;border-bottom:1px solid rgba(0,0,0,.05);opacity:.6">
                 <div style="display:flex;justify-content:space-between;align-items:center">
                   <div style="flex:1;min-width:0">
@@ -11181,6 +11210,8 @@ function render() {
                   ${pedidoDisplay?`<div style="font-size:10px;color:var(--t3);margin-top:1px">🛒 Pedido em ${pedidoDisplay}</div>`:''}
                   ${dtDisplay?`<div style="font-size:10px;color:var(--t3);margin-top:1px">📅 Previsão: ${dtDisplay}</div>`:''}
                   ${atrasadaParaExclusao?`<div style="font-size:10px;color:var(--txt-red);margin-top:3px;font-weight:800">🔴 Semana de provisão encerrada sem confirmação</div>`:''}
+                  ${prov.parcial_origem?`<div class="ep-restante" style="font-size:10px;color:var(--txt-amber);margin-top:3px;font-weight:800">⏳ Restante de entrega parcial — a outra parte já foi recebida</div>`:''}
+                  ${_epRessalvaForn(prov)?`<div class="ep-ressalva" style="font-size:10px;color:var(--txt-purple);margin-top:3px;font-weight:800">🔁 ${escapeHtml(_epRessalvaForn(prov))}</div>`:''}
                 </div>
                 <div style="text-align:right;flex-shrink:0;margin-left:8px">
                   <div style="font-size:13px;font-weight:800;color:${atrasadaParaExclusao?'#DC2626':'#B45309'}">R$ ${valPrev.toFixed(2).replace('.',',')}</div>
@@ -11200,9 +11231,15 @@ function render() {
                     style="width:100%;background:var(--s2);border:1px solid #E1E4E9;border-radius:8px;color:var(--t2);padding:7px 8px;font-size:13px;box-sizing:border-box"/>
                 </div>
               </div>
+              <label style="display:flex;align-items:flex-start;gap:8px;background:rgba(217,119,6,.06);border:1px solid rgba(217,119,6,.22);border-radius:10px;padding:8px 10px;margin-bottom:10px;cursor:pointer">
+                <input id="ep_parc_${prov.id}" type="checkbox" style="margin-top:2px;flex-shrink:0">
+                <span style="font-size:11px;color:var(--t2);line-height:1.35"><b>📦 Entrega parcial</b> — chegou só parte. Digite acima o que chegou; o restante fica pendente esperando a próxima entrega.</span>
+              </label>
               <button onclick="iniciarConfirmacaoEntrega('${prov.id}')" style="width:100%;background:linear-gradient(135deg,#059669,#047857);border:none;border-radius:13px;padding:11px;color:#fff;font-weight:800;font-size:13px">
                 ✅ Confirmar Recebimento
               </button>
+              ${prov.parcial_origem?`<button onclick="encerrarRestanteEntrega('${prov.id}')" style="width:100%;background:rgba(217,119,6,.08);border:1px solid rgba(217,119,6,.35);border-radius:13px;padding:9px;color:var(--txt-amber);font-weight:800;font-size:12px;margin-top:8px">🏁 Finalizar — o restante não vai chegar</button>`:''}
+              ${_epGrupoSubst(prov.fornecedor)?`<button onclick="abrirTrocaFornecedorEntrega('${prov.id}')" style="width:100%;background:none;border:1px dashed rgba(124,58,237,.4);border-radius:11px;padding:8px;color:var(--txt-purple);font-weight:700;font-size:11px;margin-top:8px">🔁 ${prov.fornecedor_entregue?'Trocar de novo o fornecedor':'Veio por outro fornecedor?'}</button>`:''}
               ${atrasadaParaExclusao?`<button onclick="solicitarExclusaoEntrega('${prov.id}')" style="width:100%;background:rgba(220,38,38,.08);border:1px solid rgba(220,38,38,.35);border-radius:13px;padding:9px;color:var(--txt-red);font-weight:800;font-size:12px;margin-top:8px">🗑️ Solicitar exclusão</button>`:''}
             </div>`;
           }).join('');
@@ -11253,7 +11290,7 @@ function render() {
         const filtroHtml=_epHistFiltroHtml();
         if(!provisoesHistorico.length) return filtroHtml?`${filtroHtml}<div class="card" style="padding:14px;text-align:center;color:var(--t2);font-size:12px;margin-top:8px">Nenhum recebimento confirmado nesse período.</div>`:'';
         const porForn={};
-        provisoesHistorico.forEach(p=>{const f=p.fornecedor||'SEM FORNECEDOR';(porForn[f]=porForn[f]||[]).push(p);});
+        provisoesHistorico.forEach(p=>{const f=_epForn(p);(porForn[f]=porForn[f]||[]).push(p);});
         const gruposHtml=Object.entries(porForn).sort(([a],[b])=>a.localeCompare(b)).map(([forn,itens])=>{
           const hasDiverg=itens.some(p=>p.status==='DIVERGENCIA');
           const totalForn=itens.reduce((s,p)=>{
@@ -11306,6 +11343,8 @@ function render() {
                   <div style="flex:1;min-width:0">
                     <div style="font-size:11px;color:${corItem};font-weight:700">${rotuloItem}</div>
                     <div style="font-size:12px;color:var(--t2);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${produto}</div>
+                    ${_epMarcaParcialHist(prov, rec)}
+                    ${_epRessalvaForn(prov)?`<div class="ep-ressalva" style="font-size:10px;color:var(--txt-purple);margin-top:1px;font-weight:700">🔁 ${escapeHtml(_epRessalvaForn(prov))}</div>`:''}
                     <div style="font-size:10px;color:var(--t3);margin-top:1px">👤 ${validadoPor||'—'}${recTs?' · '+recTs:''}</div>
                   </div>
                   <div style="text-align:right;flex-shrink:0;margin-left:8px">
@@ -11536,6 +11575,8 @@ function render() {
                   <div style="flex:1;min-width:0">
                     <div style="font-size:10px;color:${corItem};font-weight:700">${rotulo}</div>
                     <div style="font-size:12px;color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${produto}</div>
+                    ${_epMarcaParcialHist(prov, rec)}
+                    ${_epRessalvaForn(prov) ? `<div class="ep-ressalva" style="font-size:10px;color:var(--txt-purple);font-weight:700">🔁 ${escapeHtml(_epRessalvaForn(prov))}</div>` : ''}
                   </div>
                   <div style="text-align:right;flex-shrink:0">
                     <div style="font-size:12px;font-weight:800;color:${corItem}">R$ ${valRec.toFixed(2).replace('.',',')}</div>
@@ -12793,7 +12834,7 @@ function _epStatusBadges(counts) {
 function pularParaFornecedorEntrega(valorDigitado) {
   const nome = (valorDigitado||'').trim();
   if (!nome) return;
-  const forn = provisoesEntrega.map(p=>p.fornecedor||'SEM FORNECEDOR').find(f=>f===nome);
+  const forn = provisoesEntrega.map(p=>_epForn(p)).find(f=>f===nome);
   if (!forn) return;
   const gid = 'ep_pend_'+forn.replace(/[^a-z0-9]/gi,'_');
   const el = document.getElementById(gid);
@@ -12893,12 +12934,22 @@ function _epRec(prov) {
 // Agrupa as provisões confirmadas por (nota, fornecedor). Confirmações anteriores a esta
 // versão não têm nota gravada — em vez de sumirem do espelho, caem num grupo próprio por
 // fornecedor/dia marcado como "sem nota registrada", que é a informação honesta.
+// Da observação do recebimento, só o que é da NOTA (SEM NOTA / ENTREGUE POR). O resto
+// (entrega parcial, fornecedor trocado) é de um item só e não pode aparecer como se fosse
+// da nota inteira.
+function _epObsDaNota(obs) {
+  const partes = String(obs || '').split(' · ').filter(x => /^(SEM NOTA|ENTREGUE POR)/.test(x.trim()));
+  return partes.join(' · ');
+}
 function _epAgruparNotas(rows) {
   const grupos = {};
   rows.forEach(prov => {
     const rec = _epRec(prov);
+    // Restante de entrega parcial que NÃO chegou: não veio mercadoria nem nota. Entrar
+    // aqui o faria aparecer como "sem nota registrada", cobrando um documento que não existe.
+    if (rec && /RESTANTE N[ÃA]O ENTREGUE/i.test(rec.observacao || '')) return;
     const numero = (rec && rec.nota_numero) || '';
-    const forn = prov.fornecedor || 'SEM FORNECEDOR';
+    const forn = _epForn(prov);
     const quando = (rec && rec.validado_em) || prov.atualizado_em || '';
     const dia = quando ? quando.slice(0,10) : '—';
     const chave = numero ? ('N|'+numero+'|'+forn) : ('S|'+forn+'|'+dia);
@@ -12910,7 +12961,7 @@ function _epAgruparNotas(rows) {
         // receber. Sem isto, um recebimento sem nota declarado de propósito ficava igual a
         // uma confirmação antiga que simplesmente não tinha nota gravada — e aí não há como
         // cobrar o documento de ninguém.
-        obs: (rec && rec.observacao) || '',
+        obs: _epObsDaNota(rec && rec.observacao),
         quando, validadoPor: (rec && rec.validado_por) || '', itens: [], totalItens: 0,
       };
     }
@@ -12921,7 +12972,7 @@ function _epAgruparNotas(rows) {
     // "quando/quem confirmou" — é o momento em que a entrega começou a ser conferida.
     if (quando && (!g.quando || quando < g.quando)) { g.quando = quando; g.validadoPor = (rec && rec.validado_por) || g.validadoPor; }
     if (g.notaValor == null && rec && rec.nota_valor != null) g.notaValor = parseFloat(rec.nota_valor);
-    if (!g.obs && rec && rec.observacao) g.obs = rec.observacao;
+    if (!g.obs && rec && _epObsDaNota(rec.observacao)) g.obs = _epObsDaNota(rec.observacao);
   });
   return Object.values(grupos).sort((a,b) => String(b.quando).localeCompare(String(a.quando)));
 }
@@ -13173,7 +13224,7 @@ function _atualizarCamposValidadeBarris() {
 function iniciarConfirmacaoEntrega(id) {
   const prov = provisoesEntrega.find(function(p){ return p.id === id; });
   if (!prov) return;
-  if (!_epNotaGet(prov.fornecedor)) { abrirModalNotaEntrega(id); return; }
+  if (!_epNotaGet(_epForn(prov))) { abrirModalNotaEntrega(id); return; }
   _epSeguirAposNota(id);
 }
 
@@ -13198,9 +13249,9 @@ function trocarNotaEntrega(fornecedor, ev) {
 function abrirModalNotaEntrega(id, fornecedor) {
   const prov = id ? provisoesEntrega.find(function(p){ return p.id === id; }) : null;
   if (id && !prov) return;
-  const forn = (prov ? prov.fornecedor : fornecedor) || 'SEM FORNECEDOR';
+  const forn = (prov ? _epForn(prov) : fornecedor) || 'SEM FORNECEDOR';
   const atual = _epNotaGet(forn);
-  const itensDoForn = provisoesEntrega.filter(function(p){ return (p.fornecedor || 'SEM FORNECEDOR') === forn && !_epConfirmadosSessao[p.id]; });
+  const itensDoForn = provisoesEntrega.filter(function(p){ return _epForn(p) === forn && !_epConfirmadosSessao[p.id]; });
   const totalPrev = itensDoForn.reduce(function(s, p){ return s + (parseFloat(p.valor_previsto) || 0); }, 0);
 
   const existing = document.getElementById('modalNotaEntrega');
@@ -13379,7 +13430,7 @@ async function _confirmarValidadeBarrisEProsseguir(id) {
       return {
         loja: loja, loja_slug: slug, catalogo_id: prov.catalogo_id, provisao_id: prov.id,
         produto: (prov.gn_catalogo && prov.gn_catalogo.produto) || (cfg ? cfg.label : ''),
-        fornecedor: prov.fornecedor || '', validade: v, status: 'ATIVO',
+        fornecedor: _epForn(prov), validade: v, status: 'ATIVO',
         criado_por: (usuarioAtual && usuarioAtual.nome) || loja,
       };
     });
@@ -13411,16 +13462,41 @@ function confirmarEntrega(id){
   // então a exigência é reafirmada no último ponto antes de gravar, pra nenhum caminho
   // novo conseguir confirmar um recebimento sem nota. Mesmo princípio da validade dos
   // barris, que também é checada onde o dado é efetivamente usado.
-  const nota=_epNotaGet(prov.fornecedor);
+  const nota=_epNotaGet(_epForn(prov));
   if(!nota){ showToast('⚠️ Informe o número e o valor da nota fiscal antes de confirmar.'); abrirModalNotaEntrega(id); return; }
   const qtdEl=document.getElementById('ep_qtd_'+id);
   const valEl=document.getElementById('ep_val_'+id);
+  const parcEl=document.getElementById('ep_parc_'+id);
   const qtdRec=parseFloat((qtdEl?qtdEl.value:'0').replace(',','.'))||0;
-  const valRec=parseFloat((valEl?valEl.value:'0').replace(',','.'))||0;
+  let valRec=parseFloat((valEl?valEl.value:'0').replace(',','.'))||0;
   const qtdPrev=parseFloat(prov.qtd_prevista)||0;
-  const diff=qtdRec-qtdPrev;
+  const valPrev=parseFloat(prov.valor_previsto)||0;
+  const ehParcial=!!(parcEl&&parcEl.checked);
+  // ENTREGA PARCIAL: a provisão é dividida em duas. Esta linha fica com o que chegou (e
+  // passa a prever exatamente isso, então entra como RECEBIDO_OK, não como divergência), e
+  // uma linha nova guarda o restante como AGUARDANDO. Assim cada linha continua com UM
+  // recebimento — o app Pedidos e os relatórios leem gn_recebimentos[0], e dois
+  // recebimentos na mesma provisão fariam eles mostrarem só a primeira parte.
+  let parcial=null;
+  if(ehParcial){
+    if(!(qtdRec>0)){ showToast('⚠️ Na entrega parcial, digite quanto chegou (mais que zero).'); return; }
+    if(!(qtdRec<qtdPrev-0.0001)){ showToast(`⚠️ Entrega parcial é quando chega MENOS que o previsto (${qtdPrev}). Se chegou tudo, desmarque "Entrega parcial".`); return; }
+    const restoQtd=Math.round((qtdPrev-qtdRec)*1000)/1000;
+    const restoValor=Math.round(valPrev*restoQtd/qtdPrev*100)/100;
+    // O campo Valor vem pré-preenchido com o valor do item INTEIRO. Se ninguém mexeu nele,
+    // vale a parte proporcional ao que chegou — senão o recebido sairia com o valor cheio.
+    if(Math.abs(valRec-valPrev)<0.005) valRec=Math.round((valPrev-restoValor)*100)/100;
+    parcial={ restoId: _epNovoUuid(), restoQtd, restoValor,
+      novaPrevista: qtdRec, novoValorPrev: Math.round((valPrev-restoValor)*100)/100,
+      qtdOriginal: qtdPrev, valorOriginal: valPrev };
+  }
+  const diff=parcial?0:qtdRec-qtdPrev;
   const status=Math.abs(diff)<0.01?'RECEBIDO_OK':'DIVERGENCIA';
   const validado_por=(usuarioAtual&&usuarioAtual.nome)||loja;
+  // O restante de uma entrega parcial chega noutro dia. A data dele passa a ser a do
+  // recebimento — é por ela que a carne entra na aba Carnes do Check-list, e carne que
+  // chegou na quinta é carne de quinta, não do dia em que a primeira parte chegou.
+  const novaData=prov.parcial_origem?_epNotaHoje():null;
 
   // Confirmação em 2 etapas — o campo QTD já vem pré-preenchido com a quantidade
   // prevista, então um toque sem querer no botão já confirmava o recebimento inteiro na
@@ -13434,7 +13510,11 @@ function confirmarEntrega(id){
     ? `SEM NOTA — ${nota.motivo || 'motivo não informado'}`
     : `Nota: ${nota.numero} (R$ ${(parseFloat(nota.valor)||0).toFixed(2).replace('.',',')})`;
   const linhaEntregou = nota.entregou ? `\nEntregue por: ${nota.entregou}` : '';
-  if (!confirm(`Confirmar recebimento de "${produtoNome}"?\n\nQtd recebida: ${qtdRec} ${und}\nValor: R$ ${valRec.toFixed(2).replace('.',',')}\n${linhaNota}${linhaEntregou}` + (status==='DIVERGENCIA' ? `\n\n⚠️ Diferente do previsto (${qtdPrev} ${und}) — vai registrar como divergência.` : ''))) return;
+  const linhaParcial = parcial
+    ? `\n\n📦 ENTREGA PARCIAL: chegaram ${qtdRec} de ${qtdPrev} ${und}.\nO restante (${parcial.restoQtd} ${und}) fica pendente aqui na Entrega esperando chegar.`
+    : '';
+  const linhaRessalva = _epRessalvaForn(prov) ? `\n🔁 ${_epRessalvaForn(prov)}` : '';
+  if (!confirm(`Confirmar recebimento de "${produtoNome}"?\n\nQtd recebida: ${qtdRec} ${und}\nValor: R$ ${valRec.toFixed(2).replace('.',',')}\n${linhaNota}${linhaEntregou}${linhaRessalva}` + linhaParcial + (status==='DIVERGENCIA' ? `\n\n⚠️ Diferente do previsto (${qtdPrev} ${und}) — vai registrar como divergência.` : ''))) return;
 
   // 1) Grava na hora no aparelho, sem depender da rede — mesmo padrão de resiliência
   // já usado na Contagem (autoSave local + retry em segundo plano).
@@ -13445,18 +13525,149 @@ function confirmarEntrega(id){
   _epFilaPendente[loja].push({id,qtdRec,valRec,diff,status,validado_por,
     notaNumero: nota.semNota ? '' : nota.numero,
     notaValor:  nota.semNota ? null : nota.valor,
-    obs: _epObsRecebimento(nota),
+    obs: _epObsJuntar(_epObsRecebimento(nota), _epObsItem(prov, parcial, und)),
+    parcial, novaData,
     ts:Date.now(),prov});
   _epFilaSalvar();
 
   // 2) Trava o item na tela como confirmado (mas sinalizando "sincronizando") — usuário
   // não precisa esperar a rede pra seguir conferindo o resto do pedido.
-  _epConfirmadosSessao[id]={...prov,_statusFinal:status,_qtdRec:qtdRec,_valRec:valRec,_syncPendente:true};
-  showToast(status==='RECEBIDO_OK'?'✅ Confirmado! Sincronizando…':'⚠️ Divergência registrada! Sincronizando…');
+  _epConfirmadosSessao[id]={...prov,_statusFinal:status,_qtdRec:qtdRec,_valRec:valRec,_syncPendente:true,_parcialResto:parcial?parcial.restoQtd:null};
+  showToast(parcial?`📦 Parcial confirmado — ${parcial.restoQtd} ${und} seguem pendentes. Sincronizando…`:(status==='RECEBIDO_OK'?'✅ Confirmado! Sincronizando…':'⚠️ Divergência registrada! Sincronizando…'));
   render();
 
   // 3) Tenta enviar pra nuvem em segundo plano, com retry automático se a rede falhar.
   _epProcessarFila();
+}
+
+// Id gerado no aparelho pro RESTANTE de uma entrega parcial. Gerar aqui (e não deixar o
+// banco gerar) é o que torna o reenvio seguro: se a rede cair depois de gravar o restante
+// e antes da resposta chegar, a nova tentativa manda o MESMO id e o banco ignora a cópia,
+// em vez de criar um segundo restante.
+function _epNovoUuid() {
+  if (window.crypto && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+}
+// Cria a linha do RESTANTE: mesma origem (pedido, item, loja, fornecedor e o fornecedor
+// real, se trocado), previsão = o que falta, de volta como AGUARDANDO. parcial_origem
+// aponta sempre pra PRIMEIRA linha, mesmo num segundo parcial do restante.
+// on_conflict=id + ignore-duplicates: reenviar o mesmo id não cria um segundo restante.
+async function _epCriarRestanteParcial(item) {
+  const p = item.prov || {};
+  const pc = item.parcial;
+  await sbRequest('gn_provisoes?on_conflict=id', { method: 'POST',
+    headers: { 'Prefer': 'return=minimal,resolution=ignore-duplicates' },
+    body: JSON.stringify({
+      id: pc.restoId,
+      pedido_id: p.pedido_id || null, pedido_item_id: p.pedido_item_id || null,
+      catalogo_id: p.catalogo_id || null, loja_slug: p.loja_slug || null,
+      fornecedor: p.fornecedor || null, fornecedor_entregue: p.fornecedor_entregue || null,
+      data_entrega: p.data_entrega || null, data_entrega_fim: p.data_entrega_fim || null,
+      qtd_prevista: pc.restoQtd, valor_previsto: pc.restoValor,
+      status: 'AGUARDANDO', parcial_origem: p.parcial_origem || p.id,
+    }) });
+}
+function _epObsJuntar() {
+  const partes = Array.prototype.slice.call(arguments).filter(Boolean);
+  return partes.length ? partes.join(' · ') : null;
+}
+// O que o recebimento deste ITEM teve de diferente, gravado em observacao com prefixo fixo
+// (mesma convenção de SEM NOTA / ENTREGUE POR), pra dar pra filtrar depois.
+function _epObsItem(prov, parcial, und) {
+  const partes = [];
+  if (parcial) partes.push(`ENTREGA PARCIAL: ${parcial.novaPrevista} de ${parcial.qtdOriginal} ${und || ''}`.trim() + ` (restante ${parcial.restoQtd} pendente)`);
+  if (prov && prov.parcial_origem) partes.push('RESTANTE DE ENTREGA PARCIAL');
+  const r = _epRessalvaForn(prov);
+  if (r) partes.push('FORNECEDOR TROCADO: ' + r);
+  return partes.length ? partes.join(' · ') : null;
+}
+// Marca no histórico: a primeira parte de uma entrega parcial, o restante que chegou, e o
+// restante que foi encerrado sem chegar. Vem da observação gravada no recebimento.
+function _epMarcaParcialHist(prov, rec) {
+  const obs = (rec && rec.observacao) || '';
+  let txt = '';
+  if (/RESTANTE N[ÃA]O ENTREGUE/i.test(obs)) txt = '🏁 Restante não chegou — encerrado com divergência';
+  else if (/ENTREGA PARCIAL:/i.test(obs)) txt = '📦 ' + (obs.match(/ENTREGA PARCIAL:[^·]*/i) || [''])[0].trim();
+  else if (prov && prov.parcial_origem) txt = '📦 Restante de entrega parcial — chegou depois';
+  return txt ? `<div class="ep-parcial-hist" style="font-size:10px;color:var(--txt-amber);margin-top:1px;font-weight:700">${escapeHtml(txt)}</div>` : '';
+}
+
+// "Se não chegar, ter o botão finalizar com o saldo já informado e o resto ser a
+// divergência." Só existe no RESTANTE de uma entrega parcial: a parte que chegou já está
+// recebida na outra linha; esta fecha com zero recebido e a falta registrada como
+// divergência. Não pede nota — não chegou mercadoria, não há nota pra ela.
+function encerrarRestanteEntrega(id) {
+  const prov = provisoesEntrega.find(p => p.id === id);
+  if (!prov || !prov.parcial_origem) return;
+  const produtoNome = prov.gn_catalogo?.produto || 'este item';
+  const und = prov.gn_catalogo?.und || '';
+  const qtdPrev = parseFloat(prov.qtd_prevista) || 0;
+  if (!confirm(`Finalizar "${produtoNome}" sem o restante?\n\nFaltaram ${qtdPrev} ${und} que não vão chegar.\nA parte que já chegou continua recebida; estes ${qtdPrev} ${und} ficam registrados como DIVERGÊNCIA (não entregue).`)) return;
+  const validado_por = (usuarioAtual && usuarioAtual.nome) || loja;
+  if (!_epFilaPendente[loja]) _epFilaPendente[loja] = [];
+  _epFilaPendente[loja] = _epFilaPendente[loja].filter(x => x.id !== id);
+  _epFilaPendente[loja].push({ id, qtdRec: 0, valRec: 0, diff: -qtdPrev, status: 'DIVERGENCIA', validado_por,
+    notaNumero: '', notaValor: null,
+    obs: _epObsJuntar(`RESTANTE NÃO ENTREGUE: ${qtdPrev} ${und}`.trim() + ' — finalizado por ' + validado_por, _epRessalvaForn(prov) ? 'FORNECEDOR TROCADO: ' + _epRessalvaForn(prov) : null),
+    parcial: null, novaData: null, ts: Date.now(), prov });
+  _epFilaSalvar();
+  _epConfirmadosSessao[id] = { ...prov, _statusFinal: 'DIVERGENCIA', _qtdRec: 0, _valRec: 0, _syncPendente: true, _encerrado: true };
+  showToast('🏁 Restante finalizado como divergência. Sincronizando…');
+  render();
+  _epProcessarFila();
+}
+
+// Troca do fornecedor de UM item, dentro do mesmo tipo (EP_FORN_SUBSTITUTOS). Grava já,
+// antes de confirmar: o item muda de grupo na tela e passa a usar a nota do fornecedor
+// que de fato entregou. Dá pra desfazer enquanto o item não foi recebido.
+function abrirTrocaFornecedorEntrega(id) {
+  const prov = provisoesEntrega.find(p => p.id === id);
+  if (!prov) return;
+  const grupo = _epGrupoSubst(prov.fornecedor);
+  if (!grupo) { showToast('Este fornecedor não tem substituto cadastrado.'); return; }
+  const atual = _epForn(prov);
+  const opcoes = grupo.fornecedores.filter(f => _epNormForn(f) !== _epNormForn(atual));
+  const produto = prov.gn_catalogo?.produto || 'item';
+  const existing = document.getElementById('modalTrocaForn');
+  if (existing) existing.remove();
+  const modal = document.createElement('div');
+  modal.id = 'modalTrocaForn';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:9999;display:flex;align-items:flex-end;justify-content:center';
+  const btn = (f, rotulo) => `<button data-forn="${escapeHtml(f)}" onclick="_epAplicarTrocaForn('${id}', this.dataset.forn)" style="width:100%;text-align:left;background:var(--fill-sutil);border:1px solid rgba(0,0,0,.1);border-radius:11px;padding:11px 12px;color:var(--t1);font-weight:700;font-size:13px;margin-bottom:7px">${rotulo}</button>`;
+  modal.innerHTML =
+    '<div style="background:var(--s2);border-radius:20px 20px 0 0;width:100%;max-width:480px;max-height:90vh;overflow-y:auto;padding:16px 16px calc(16px + env(safe-area-inset-bottom,0px))">'
+    + '<div style="width:36px;height:4px;background:rgba(0,0,0,.2);border-radius:2px;margin:0 auto 14px"></div>'
+    + '<div style="font-size:14px;font-weight:800;color:var(--t1);text-align:center">🔁 Quem entregou este item?</div>'
+    + '<div style="font-size:11px;color:var(--t3);text-align:center;margin:4px 0 12px">' + escapeHtml(produto) + ' · pedido em <b>' + escapeHtml(prov.fornecedor || '—') + '</b><br>Só aparecem fornecedores de ' + escapeHtml(grupo.tipo) + '.</div>'
+    + opcoes.map(f => btn(f, _epNormForn(f) === _epNormForn(prov.fornecedor) ? '↩️ ' + escapeHtml(f) + ' <span style="font-weight:600;color:var(--t3)">(voltar pro fornecedor do pedido)</span>' : '🚚 ' + escapeHtml(f))).join('')
+    + '<button onclick="document.getElementById(\'modalTrocaForn\').remove()" style="width:100%;background:none;border:none;color:var(--t3);font-weight:700;font-size:12px;padding:8px">Cancelar</button>'
+    + '</div>';
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+  document.body.appendChild(modal);
+}
+async function _epAplicarTrocaForn(id, forn) {
+  const prov = provisoesEntrega.find(p => p.id === id);
+  if (!prov) return;
+  const grupo = _epGrupoSubst(prov.fornecedor);
+  // Reconfere a regra aqui também: a função é global, e o tipo é a trava que o dono pediu.
+  if (!grupo || !grupo.fornecedores.some(f => _epNormForn(f) === _epNormForn(forn))) { showToast('⚠️ Só dá pra trocar por fornecedor do mesmo tipo.'); return; }
+  const valor = _epNormForn(forn) === _epNormForn(prov.fornecedor) ? null : forn;
+  try {
+    // Só enquanto AGUARDANDO: item já recebido não muda de fornecedor por baixo.
+    const r = await sbRequest('gn_provisoes?id=eq.' + id + '&status=eq.AGUARDANDO', { method: 'PATCH',
+      headers: { 'Prefer': 'return=representation' }, body: JSON.stringify({ fornecedor_entregue: valor }) });
+    if (!r || !r.length) { showToast('⚠️ Este item já foi recebido em outro aparelho — atualize a lista.'); return; }
+    prov.fornecedor_entregue = valor;
+    const m = document.getElementById('modalTrocaForn'); if (m) m.remove();
+    _epGruposAbertos.add('ep_pend_' + _epForn(prov).replace(/[^a-z0-9]/gi, '_'));
+    showToast(valor ? `🔁 ${prov.gn_catalogo?.produto || 'Item'} agora está em ${valor} (pedido em ${prov.fornecedor}).` : `↩️ Voltou pro fornecedor do pedido (${prov.fornecedor}).`);
+    render();
+  } catch (e) {
+    showToast('⚠️ Não deu pra trocar o fornecedor agora. Tente de novo. ' + (e.message || ''));
+  }
 }
 
 // ── Carnes: entrega confirmada vira entrada da semana no Check-list ──────────────────────
@@ -13574,12 +13785,27 @@ async function _epProcessarFila(){
     if(_epFilaEmVoo.has(item.id)) continue;
     _epFilaEmVoo.add(item.id);
     try{
+      // Recebimento já gravado e só o RESTANTE da entrega parcial ficou pra trás (a rede
+      // caiu bem nessa hora): tenta só ele, sem reivindicar nem gravar o recebimento de novo.
+      if(item.etapa==='resto'){
+        await _epCriarRestanteParcial(item);
+        _epFilaPendente[loja]=(_epFilaPendente[loja]||[]).filter(x=>x.id!==item.id);
+        _epFilaSalvar();
+        if(_epConfirmadosSessao[item.id]) _epConfirmadosSessao[item.id]._syncPendente=false;
+        render();
+        continue;
+      }
       // Reivindica a provisão primeiro, com update condicional (só avança se ainda estiver
       // AGUARDANDO) — se duas pessoas da mesma loja (ou loja + supervisor) confirmarem o
       // mesmo item quase junto, só quem "ganhar" essa atualização segue pro insert do
       // recebimento, evitando duplicar (mesmo padrão do fix em gn-pedidos.html).
+      // Na entrega parcial, a mesma atualização já reduz a previsão desta linha ao que
+      // chegou — é o que faz ela fechar como RECEBIDO_OK e o restante ir pra linha nova.
+      const corpoClaim={status:item.status,atualizado_em:new Date().toISOString()};
+      if(item.parcial){ corpoClaim.qtd_prevista=item.parcial.novaPrevista; corpoClaim.valor_previsto=item.parcial.novoValorPrev; }
+      if(item.novaData) corpoClaim.data_entrega=item.novaData;
       const claim = await sbRequest('gn_provisoes?id=eq.'+item.id+'&status=eq.AGUARDANDO',{method:'PATCH',headers:{'Prefer':'return=representation'},
-        body:JSON.stringify({status:item.status,atualizado_em:new Date().toISOString()})});
+        body:JSON.stringify(corpoClaim)});
       if(!claim || claim.length===0){
         houveDuplicado=true;
         _epFilaPendente[loja]=(_epFilaPendente[loja]||[]).filter(x=>x.id!==item.id);
@@ -13597,17 +13823,28 @@ async function _epProcessarFila(){
             // como null, igual às sem nota antigas, e a aba Notas segue mostrando "—".
             observacao:item.obs||null})});
       }catch(eRec){
-        // reverte a provisão pra não ficar marcada como recebida sem nenhum registro
-        await sbRequest('gn_provisoes?id=eq.'+item.id,{method:'PATCH',headers:{'Prefer':'return=minimal'},body:JSON.stringify({status:'AGUARDANDO'})}).catch(()=>{});
+        // reverte a provisão pra não ficar marcada como recebida sem nenhum registro — e,
+        // na parcial, devolve também a previsão e a data originais desta linha.
+        const volta={status:'AGUARDANDO'};
+        if(item.parcial){ volta.qtd_prevista=item.parcial.qtdOriginal; volta.valor_previsto=item.parcial.valorOriginal; }
+        if(item.novaData && item.prov) volta.data_entrega=item.prov.data_entrega;
+        await sbRequest('gn_provisoes?id=eq.'+item.id,{method:'PATCH',headers:{'Prefer':'return=minimal'},body:JSON.stringify(volta)}).catch(()=>{});
         throw eRec;
+      }
+      // Carne conferida aqui já entra como entrada da semana na aba Carnes do Check-list.
+      // Depois do recebimento gravado (e só então — antes disso o total do dia sairia sem
+      // esta entrega) e sem travar a fila: a entrega já está salva, isto é consequência.
+      // O restante de uma parcial vai pro dia em que chegou (novaData).
+      _lancarCarneEntregaNoChecklist(item.novaData?Object.assign({},item.prov,{data_entrega:item.novaData}):item.prov);
+      if(item.parcial){
+        // O recebimento já está salvo. Se o restante falhar agora, o item fica na fila só
+        // com essa etapa — a próxima tentativa não reivindica nem recebe de novo.
+        try{ await _epCriarRestanteParcial(item); }
+        catch(eResto){ item.etapa='resto'; _epFilaSalvar(); throw eResto; }
       }
       _epFilaPendente[loja]=(_epFilaPendente[loja]||[]).filter(x=>x.id!==item.id);
       _epFilaSalvar();
       if(_epConfirmadosSessao[item.id]) _epConfirmadosSessao[item.id]._syncPendente=false;
-      // Carne conferida aqui já entra como entrada da semana na aba Carnes do Check-list.
-      // Depois do recebimento gravado (e só então — antes disso o total do dia sairia sem
-      // esta entrega) e sem travar a fila: a entrega já está salva, isto é consequência.
-      _lancarCarneEntregaNoChecklist(item.prov);
       render();
     }catch(e){
       houveErro=true;
@@ -13669,7 +13906,7 @@ function gerarWppEntregas(){
   const fmtR=v=>Number(v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
   const porForn={};
   provisoesEntrega.forEach(p=>{
-    const f=p.fornecedor||'SEM FORNECEDOR';
+    const f=_epForn(p);
     (porForn[f]=porForn[f]||[]).push(p);
   });
   let msg=`📦 *ENTREGAS PENDENTES — ${lojaDisp(loja)}*\n`;
