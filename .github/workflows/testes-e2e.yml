@@ -1,0 +1,89 @@
+name: Suítes e2e
+
+# Roda as suítes de tests/e2e num Chromium de verdade, a cada PR que toca o app ou os
+# testes. É isso que faz as suítes valerem continuamente: até aqui dependia de alguém
+# lembrar de rodar antes de abrir o PR.
+#
+# Repositório público ⇒ runner padrão do GitHub é gratuito e não consome minuto.
+#
+# Em SÉRIE de propósito. Cada suíte sobe um Chromium inteiro, e acima de ~metade dos
+# núcleos elas disputam CPU e aparecem vermelhas que não são defeito — a cada corrida é
+# outra suíte, e todas passam sozinhas. Medido numa máquina de 4 núcleos, quatro corridas
+# com --paralelo 2: 0, 3, 2 e 1 vermelhas, sempre em suítes diferentes; em série, 0.
+# Vermelha que não é defeito é o que faz todo mundo parar de olhar pro CI.
+
+on:
+  pull_request:
+    # Só o que pode quebrar uma suíte. PR de README não precisa de 25 min de Chromium.
+    paths:
+      - 'public/**'
+      - 'tests/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/testes-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Push novo no mesmo PR cancela a corrida anterior: ela já está medindo código velho.
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Histórico completo: `--reguas` lê origin/main pra montar os arquivos de
+          # comparação, e boa parte das suítes mede REGRESSÃO contra eles.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - run: npm ci
+
+      # O Chromium do Playwright tem ~170 MB. Sem cache, cada corrida baixa de novo.
+      - name: Cache do navegador
+        id: cache-navegador
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Instalar o Chromium
+        if: steps.cache-navegador.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      # Mesmo com cache, as bibliotecas de sistema precisam estar lá.
+      - name: Dependências de sistema do navegador
+        if: steps.cache-navegador.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      - name: Arquivos de comparação (origin/main)
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          node tests/run.js --reguas
+
+      - name: Rodar as suítes
+        # Sem GN_CHROMIUM: o tests/_env detecta sozinho. Aqui o Chromium do contêiner de
+        # desenvolvimento não existe, então ele não passa executablePath e o Playwright usa
+        # o que o passo acima baixou — que casa com a versão do pacote por construção.
+        run: node tests/run.js
+
+      - name: Guardar a saída quando falha
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: saida-e2e
+          path: |
+            /tmp/gn-testes
+          if-no-files-found: ignore
+          retention-days: 7
