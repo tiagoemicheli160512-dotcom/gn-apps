@@ -31,6 +31,8 @@ const REGUAS = [
   ['_base_home.html',         'gn-home.html'],
   ['_base_lojas.html',        'gn-lojas.html'],
   ['_base_gn-comissoes.html', 'gn-comissoes.html'],
+  // Usada por e2e_tema_app.js com APP=gn-rh (modelo parametrizado, roda à mão).
+  ['_base_gn-rh.html',        'gn-rh.html'],
 ];
 if (args.includes('--reguas')) {
   const { execFileSync } = require('child_process');

@@ -344,6 +344,7 @@ summary.loja-card-header::-webkit-details-marker{display:none}
   <button class="sidebar-link" data-sidebar-tab="guia" onclick="setTab('guia')"><span class="sl-icon">📖</span>Guia do app</button>
   <button class="sidebar-link active" data-sidebar-tab="operacoes" onclick="setTab('operacoes')"><span class="sl-icon">📊</span>Operações</button>
   <button class="sidebar-link" data-sidebar-tab="financeiro" onclick="setTab('financeiro')"><span class="sl-icon">💰</span>Financeiro</button>
+  <button class="sidebar-link" data-sidebar-tab="despesas" onclick="setTab('despesas')"><span class="sl-icon">💸</span>Despesas</button>
   <button class="sidebar-link" data-sidebar-tab="rh" onclick="setTab('rh')"><span class="sl-icon">👥</span>RH / BH</button>
   <button class="sidebar-link" data-sidebar-tab="comparativo" onclick="setTab('comparativo')"><span class="sl-icon">🔍</span>Comparativo</button>
   <button class="sidebar-link" data-sidebar-tab="admissoes" onclick="setTab('admissoes')"><span class="sl-icon">🆕</span>Admissões<span id="sidebar-admissoes-badge" style="display:none;margin-left:5px;background:var(--red);color:#fff;font-size:9px;font-weight:800;padding:1px 5px;border-radius:8px;vertical-align:middle"></span></button>
@@ -407,6 +408,10 @@ summary.loja-card-header::-webkit-details-marker{display:none}
     <button class="nav-btn" data-tab="financeiro" onclick="setTab('financeiro')">
       <span class="nav-icon">💰</span>
       <span class="nav-label">Financeiro</span>
+    </button>
+    <button class="nav-btn" data-tab="despesas" onclick="setTab('despesas')">
+      <span class="nav-icon">💸</span>
+      <span class="nav-label">Despesas</span>
     </button>
     <button class="nav-btn" data-tab="rh" onclick="setTab('rh')">
       <span class="nav-icon">👥</span>
@@ -530,6 +535,12 @@ let S = {
   opCaixa: [],           // caixa records for selected period
   opMode: 'dia',         // 'dia' | 'sem' | 'mes'
   opData: null,          // Date representing selected day / week Monday / month
+  // Despesas do caixa (aba própria) — ver carregarDespesas
+  despMode: 'sem',       // 'dia' | 'sem' | 'mes'
+  despData: null,        // Date do dia / segunda da semana / mês escolhido
+  despIni: null, despFim: null,
+  despLista: [],         // [{loja,data,turno,categoria,nome,valor,foto,justificativa,dinheiro}]
+  despAberta: new Set(), // lojas com a lista individual aberta
   // Financeiro
   finLoja: '',           // '' = todas
   finSemana: null,       // Date (segunda-feira)
@@ -3036,6 +3047,7 @@ function renderContent() {
     try {
       if (S.tab === 'operacoes')    { await carregarOperacoes();    renderOperacoes();    }
       if (S.tab === 'financeiro')  { await carregarFinanceiro();  renderFinanceiro();   }
+      if (S.tab === 'despesas')   { await carregarDespesas();    renderDespesas();     }
       if (S.tab === 'rh')          { await carregarRH();          renderRH();           }
       if (S.tab === 'admissoes')   { await carregarAdmissoes();   renderAdmissoes();    }
       if (S.tab === 'comparativo') { await carregarComparativo(); renderComparativo();  }
@@ -3053,6 +3065,316 @@ function renderContent() {
 }
 
 function recarregar() { renderContent(); }
+
+// ══════════════════════════════════════════════
+// DESPESAS DO CAIXA — o dinheiro que sai da gaveta, loja por loja
+// ══════════════════════════════════════════════
+// Pedido do dono: "somar as despesas do app caixa por lojas, o somatório da semana toda,
+// numa aba nova só pra essa informação, com as despesas individualmente pra saber o que foi
+// cada uma com a foto, e o total, com relatório por dia, por semana e por mês."
+//
+// A despesa mora em gn_caixa_despesa, e a DATA mora no fechamento, não nela — por isso a
+// consulta parte de gn_caixa_fechamento. É sempre dinheiro vivo: 1.152 de 1.152 lançamentos
+// de Out/26 estão com paga_dinheiro.
+//
+// MEDIDO em Out/26: R$ 80.322,57 em 1.152 lançamentos nas 11 lojas. E o que salta é a
+// composição:
+//
+//   outros             409 lançamentos   R$ 40.137,13   ← 44% de tudo
+//   funcionario_extra  247               R$ 28.544,80   (já tem aba própria no Painel)
+//   transporte         266               R$  7.256,25
+//   alimentacao        156               R$  4.969,50
+//   resto              ~74               R$  ~9.400
+//
+// Quase metade do dinheiro sai como "Outros". Não dá pra classificar isso daqui — mas dá
+// pra mostrar, que é o primeiro passo pra alguém decidir abrir categoria nova.
+//
+// O CAMPO QUE DIZ O QUE FOI é `nome`, não `descricao`: descricao está vazia em 1.152 de
+// 1.152 lançamentos de Out/26 (e em todos os meses anteriores). O app Caixa simplesmente
+// não a preenche. Quem lê a tela quer "o que foi essa saída de R$ 98", e isso está em
+// `nome`.
+//
+// Quando `nome` vem vazio, a `justificativa` costuma dizer o que o nome não disse
+// ("Teve 2 faltas hj no salão", "cobertura de falta"). MEDIDO desde 01/10: de 1.297
+// lançamentos, 244 estão sem nome — mas 78 deles têm justificativa, e só 166 não dizem
+// nada. Por isso a linha cai na justificativa antes de desistir, e a contagem de "sem
+// descrição" conta os 166, não os 244: acusar de muda uma linha que explica o gasto é
+// mandar o gerente procurar informação que já está lá.
+//
+// A FOTO é a prova, e ela virou regra no meio do caminho: 0 de 1.018 em Ago/26, 396 de
+// 1.077 em Set, 1.152 de 1.152 em Out. A lista mostra a miniatura quando existe e diz
+// "sem foto" quando não — lançamento velho não tem como ganhar foto depois.
+const DESP_CATEGORIAS = {
+  taxa_cartao:'Taxa Cartão', gorjeta_garcom:'Gorjeta Garçom', manutencao:'Manutenção',
+  material_limpeza:'Material Limpeza', descartavel:'Descartável', entrega_motoboy:'Entrega Motoboy',
+  troco:'Troco', alimentacao:'Alimentação Equipe', estacionamento:'Estacionamento',
+  transporte:'Transporte', outros:'Outros', fruta_verdura:'Fruta/Verdura',
+  condominio:'Condomínio', insumo:'Insumo', funcionario_extra:'Funcionário Extra',
+  papelaria:'Papelaria', agua:'Água',
+};
+const _despCatLabel = c => DESP_CATEGORIAS[c] || (c || '—');
+// Categoria que concentra gasto sem dizer o que é. Vira aviso quando passa de um terço do
+// que a loja gastou no período: abaixo disso é a miscelânea normal de qualquer caixa.
+const DESP_CAT_VAGA = 'outros';
+const DESP_VAGA_ALERTA = 1 / 3;
+
+async function carregarDespesas() {
+  if (!S.despData) { S.despData = new Date(); S.despData.setHours(12,0,0,0); }
+  const mode = S.despMode || 'sem';
+  let ini, fim;
+  if (mode === 'dia') {
+    ini = fim = isoDate(S.despData);
+  } else if (mode === 'sem') {
+    const mon = getMondayOfWeek(S.despData);
+    ini = isoDate(mon); fim = isoDate(getSundayOfWeek(mon));
+  } else {
+    const y = S.despData.getFullYear(), m = S.despData.getMonth();
+    ini = y + '-' + String(m + 1).padStart(2, '0') + '-01';
+    fim = isoDate(new Date(y, m + 1, 0));
+  }
+  S.despIni = ini; S.despFim = fim;
+  // !inner: só volta fechamento que TEM despesa, e dele só as despesas. Sem isso viriam
+  // todos os fechamentos do período (≈500 no mês) pra usar os que têm lançamento.
+  const res = await db.from('gn_caixa_fechamento')
+    .select('loja,data,turno,gn_caixa_despesa!inner(categoria,nome,valor,foto,justificativa,paga_dinheiro,criado_em)')
+    .gte('data', ini).lte('data', fim).order('data');
+  const lista = [];
+  (res.data || []).forEach(f => {
+    const ds = Array.isArray(f.gn_caixa_despesa) ? f.gn_caixa_despesa
+             : (f.gn_caixa_despesa ? [f.gn_caixa_despesa] : []);
+    ds.forEach(d => {
+      if (!d) return;
+      const nome = (d.nome || '').trim();
+      const just = (d.justificativa || '').trim();
+      lista.push({
+        loja: f.loja, data: f.data, turno: f.turno,
+        categoria: d.categoria || '', nome,
+        // `oque` é o que a linha mostra; `deJust` diz que veio da justificativa, pra ela
+        // não aparecer duas vezes na mesma linha.
+        oque: nome || just, deJust: !nome && !!just,
+        valor: parseFloat(d.valor) || 0, foto: d.foto || null,
+        justificativa: just,
+        dinheiro: d.paga_dinheiro !== false,
+      });
+    });
+  });
+  // Maior primeiro dentro do dia, e os dias do mais novo pro mais velho: quem abre a lista
+  // quer ver a saída grande de ontem, não a de R$ 4 da semana passada.
+  lista.sort((a, b) => (a.data < b.data ? 1 : a.data > b.data ? -1 : b.valor - a.valor));
+  S.despLista = lista;
+}
+
+function setDespMode(mode) {
+  S.despMode = mode;
+  if (!S.despData) { S.despData = new Date(); S.despData.setHours(12,0,0,0); }
+  S.despAberta = new Set();
+  renderContent();
+}
+function navegarDesp(delta) {
+  if (!S.despData) { S.despData = new Date(); S.despData.setHours(12,0,0,0); }
+  const mode = S.despMode || 'sem';
+  if (mode === 'dia') { S.despData = new Date(S.despData); S.despData.setDate(S.despData.getDate() + delta); }
+  else if (mode === 'sem') { S.despData = datePlusWeeks(S.despData, delta); }
+  else { const d = new Date(S.despData); d.setDate(1); d.setMonth(d.getMonth() + delta); S.despData = d; }
+  S.despAberta = new Set();
+  renderContent();
+}
+function despToggleLoja(k) {
+  if (!S.despAberta) S.despAberta = new Set();
+  if (S.despAberta.has(k)) S.despAberta.delete(k); else S.despAberta.add(k);
+  renderDespesas();
+}
+function despVerFoto(url) {
+  const ex = document.getElementById('_desp-foto'); if (ex) ex.remove();
+  const ov = document.createElement('div');
+  ov.id = '_desp-foto';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px';
+  ov.innerHTML = '<img src="' + String(url).replace(/"/g, '&quot;') + '" style="max-width:100%;max-height:100%;border-radius:10px;object-fit:contain">';
+  ov.addEventListener('click', () => ov.remove());
+  document.body.appendChild(ov);
+}
+
+// Agrupa o período carregado: por loja e por categoria. Função pura sobre S.despLista, pra
+// a tela, o relatório e os avisos saírem todos do mesmo número.
+function _despAgrupado() {
+  const porLoja = {}, porCat = {};
+  let total = 0, semNome = 0, semFoto = 0;
+  (S.despLista || []).forEach(d => {
+    const l = (porLoja[d.loja] = porLoja[d.loja] || { loja: d.loja, total: 0, n: 0, itens: [], cats: {}, semNome: 0, semFoto: 0 });
+    l.total += d.valor; l.n++; l.itens.push(d);
+    l.cats[d.categoria] = (l.cats[d.categoria] || 0) + d.valor;
+    if (!d.oque) { l.semNome++; semNome++; }
+    if (!d.foto) { l.semFoto++; semFoto++; }
+    porCat[d.categoria] = (porCat[d.categoria] || 0) + d.valor;
+    total += d.valor;
+  });
+  const lojas = Object.values(porLoja).sort((a, b) => b.total - a.total);
+  const cats = Object.entries(porCat).map(([c, v]) => ({ cat: c, valor: v })).sort((a, b) => b.valor - a.valor);
+  return { lojas, cats, total, n: (S.despLista || []).length, semNome, semFoto };
+}
+
+function _despPeriodoLabel() {
+  const mode = S.despMode || 'sem';
+  const d = S.despData || new Date();
+  if (mode === 'dia') return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  if (mode === 'sem') {
+    const mon = getMondayOfWeek(d), sun = getSundayOfWeek(mon);
+    const f = x => x.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+    return f(mon) + ' a ' + f(sun);
+  }
+  return d.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+}
+
+function renderDespesas() {
+  const g = _despAgrupado();
+  const mode = S.despMode || 'sem';
+  const hoje = new Date(); hoje.setHours(12,0,0,0);
+  const esc = s => window.escapeHtml ? window.escapeHtml(String(s)) : String(s);
+  const dm = iso => String(iso).slice(8,10) + '/' + String(iso).slice(5,7);
+  const pct = v => g.total > 0 ? Math.round(v / g.total * 100) : 0;
+
+  const cabecalho = `
+    <div class="sec-header"><div class="sec-title">Despesas do caixa</div></div>
+    <div class="filter-row" style="gap:4px;margin-bottom:8px">
+      <button class="ftab${mode==='dia'?' ativo':''}" onclick="setDespMode('dia')">Dia</button>
+      <button class="ftab${mode==='sem'?' ativo':''}" onclick="setDespMode('sem')">Semana</button>
+      <button class="ftab${mode==='mes'?' ativo':''}" onclick="setDespMode('mes')">Mês</button>
+    </div>
+    <div class="week-nav" style="margin-bottom:10px">
+      <button onclick="navegarDesp(-1)">&#8592;</button>
+      <div class="week-label" style="font-size:13px;font-weight:600">${_despPeriodoLabel()}</div>
+      <button ${isoDate(S.despData||hoje) >= isoDate(hoje) ? 'disabled style="opacity:.35"' : ''} onclick="navegarDesp(1)">&#8594;</button>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <button onclick="gerarWppDespesas()" style="background:var(--green-bg);border:1px solid var(--green);border-radius:6px;padding:5px 10px;color:var(--green);font-size:11px;font-weight:700;cursor:pointer">📲 WhatsApp</button>
+      <button onclick="gerarPDFDespesas()" style="background:var(--red-bg);border:1px solid var(--red);border-radius:6px;padding:5px 10px;color:var(--red);font-size:11px;font-weight:700;cursor:pointer">📄 PDF</button>
+      <button onclick="enviarPDFDespesasWpp()" style="background:var(--green-bg);border:1px solid var(--green);border-radius:6px;padding:5px 10px;color:var(--green);font-size:11px;font-weight:700;cursor:pointer">📄📲 PDF no Whats</button>
+    </div>`;
+
+  if (!g.n) {
+    $('content').innerHTML = cabecalho +
+      `<div class="empty"><div class="empty-icon">💸</div><div class="empty-text">Nenhuma despesa de caixa lançada em ${_despPeriodoLabel()}.</div></div>`;
+    return;
+  }
+
+  const kpis = `
+    <div class="stat-row" style="grid-template-columns:repeat(3,1fr);margin-bottom:10px">
+      <div class="stat"><div class="stat-val" style="font-size:17px;white-space:nowrap">R$ ${num(g.total)}</div><div class="stat-lbl">Saiu do caixa</div></div>
+      <div class="stat b"><div class="stat-val">${g.n}</div><div class="stat-lbl">Lançamentos</div></div>
+      <div class="stat"><div class="stat-val">${g.lojas.length}</div><div class="stat-lbl">Lojas</div></div>
+    </div>`;
+
+  // Por categoria: é o que responde "no que foi" sem abrir loja por loja.
+  const catsHtml = `
+    <div class="card" style="margin-bottom:10px">
+      <div class="card-title">No que foi</div>
+      ${g.cats.map(c => `
+        <div data-cat="${esc(c.cat)}" style="display:flex;align-items:center;gap:8px;padding:5px 0;border-top:1px solid var(--border)">
+          <span style="flex:1;font-size:12px;color:var(--text)">${esc(_despCatLabel(c.cat))}</span>
+          <span style="font-size:10px;color:var(--muted);min-width:34px;text-align:right">${pct(c.valor)}%</span>
+          <span style="font-size:12px;font-weight:700;min-width:92px;text-align:right">R$ ${num(c.valor)}</span>
+        </div>`).join('')}
+    </div>`;
+
+  // Aviso só quando "Outros" pesa de verdade. Abaixo de um terço é miscelânea normal.
+  const vaga = g.cats.find(c => c.cat === DESP_CAT_VAGA);
+  const avisoVaga = vaga && g.total > 0 && (vaga.valor / g.total) > DESP_VAGA_ALERTA ? `
+    <div style="background:var(--amber-bg);border:1px solid var(--amber);border-radius:10px;padding:10px 12px;margin-bottom:10px;font-size:11.5px;color:var(--amber);line-height:1.5">
+      ⚠️ <b>R$ ${num(vaga.valor)} (${pct(vaga.valor)}%) saiu como "Outros"</b> — a categoria que não diz o que é.
+      O que cada uma foi está escrito lançamento a lançamento, na lista de cada loja aqui embaixo.
+    </div>` : '';
+  const avisoSemNome = g.semNome ? `
+    <div style="background:var(--amber-bg);border:1px solid var(--amber);border-radius:10px;padding:10px 12px;margin-bottom:10px;font-size:11.5px;color:var(--amber);line-height:1.5">
+      ⚠️ <b>${g.semNome} de ${g.n} lançamentos não dizem o que foram.</b> Sem descrição e sem categoria
+      específica, a saída fica só como um valor — não dá pra conferir depois.
+    </div>` : '';
+
+  const cards = g.lojas.map(l => {
+    const nome = (LOJAS.find(x => x.userKey === l.loja) || {}).display || l.loja;
+    const aberta = S.despAberta && S.despAberta.has(l.loja);
+    const topCats = Object.entries(l.cats).sort((a, b) => b[1] - a[1]).slice(0, 3)
+      .map(([c, v]) => _despCatLabel(c) + ' R$ ' + num(v)).join(' · ');
+    const itens = !aberta ? '' : l.itens.map(d => `
+      <div style="display:flex;gap:9px;padding:7px 0;border-top:1px solid var(--border)">
+        ${d.foto
+          ? `<img src="${esc(d.foto)}" alt="Comprovante" loading="lazy" onclick="despVerFoto('${esc(d.foto)}')"
+               style="width:42px;height:42px;border-radius:7px;object-fit:cover;flex-shrink:0;cursor:pointer;background:rgba(0,0,0,.06)">`
+          : `<div title="Lançado antes da foto do comprovante passar a ser exigida" style="width:42px;height:42px;border-radius:7px;flex-shrink:0;background:rgba(0,0,0,.05);border:1px dashed var(--border);display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;color:var(--muted);text-align:center;line-height:1.2">sem<br>foto</div>`}
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;gap:8px;align-items:baseline">
+            <span style="font-size:11px;font-weight:700;color:var(--muted);min-width:36px">${dm(d.data)}</span>
+            <span style="flex:1;min-width:0;font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.oque ? esc(d.oque) : '<i style="color:var(--amber)">sem descrição</i>'}</span>
+            <span style="font-size:12.5px;font-weight:800;white-space:nowrap">R$ ${num(d.valor)}</span>
+          </div>
+          <div style="font-size:10px;color:var(--muted);margin-top:1px">${esc(_despCatLabel(d.categoria))}${d.turno ? ' · ' + esc(d.turno) : ''}${(d.justificativa && !d.deJust) ? ' · ' + esc(d.justificativa) : ''}</div>
+        </div>
+      </div>`).join('');
+    return `
+      <div class="card" style="margin-bottom:8px">
+        <div style="display:flex;align-items:baseline;gap:8px">
+          <span style="flex:1;font-size:14px;font-weight:800">${esc(nome)}</span>
+          <span style="font-size:15px;font-weight:800">R$ ${num(l.total)}</span>
+        </div>
+        <div style="font-size:10.5px;color:var(--muted);margin-top:2px">
+          ${l.n} lançamento${l.n===1?'':'s'} · ${pct(l.total)}% do total${l.semNome ? ` · <span style="color:var(--amber)">${l.semNome} sem descrição</span>` : ''}${l.semFoto ? ` · <span style="color:var(--amber)">${l.semFoto} sem foto</span>` : ''}
+        </div>
+        ${topCats ? `<div style="font-size:10.5px;color:var(--muted);margin-top:3px">${esc(topCats)}</div>` : ''}
+        ${itens}
+        <button onclick="despToggleLoja('${l.loja.replace(/'/g,"\\'")}')"
+          style="margin-top:8px;width:100%;background:rgba(0,0,0,.04);border:1px solid var(--border);border-radius:8px;padding:6px 10px;color:var(--muted);font-size:11px;font-weight:700;cursor:pointer">
+          ${aberta ? '▲ Fechar a lista' : '▼ Ver as ' + l.n + ' despesa' + (l.n===1?'':'s') + ', uma a uma'}
+        </button>
+      </div>`;
+  }).join('');
+
+  $('content').innerHTML = cabecalho + kpis + avisoVaga + avisoSemNome + catsHtml + cards;
+}
+
+// Relatório: o WhatsApp leva o resumo por loja e por categoria; o PDF leva lançamento a
+// lançamento, que é o que serve pra conferir. A foto não vai em nenhum dos dois — é um link
+// do Storage, e URL crua colada no WhatsApp não ajuda ninguém.
+function _despRelatorioTexto(wpp) {
+  const g = _despAgrupado();
+  const b = s => wpp ? '*' + s + '*' : s;
+  const per = _despPeriodoLabel();
+  const titulo = 'Despesas do caixa · ' + per;
+  if (!g.n) return { msg: `${b('DESPESAS DO CAIXA')}\n${per}\n\nNenhuma despesa lançada no período.\n`, titulo };
+  let msg = `${wpp ? '💸 ' : ''}${b('DESPESAS DO CAIXA')}\n${per}\n`;
+  msg += `\nSaiu do caixa: ${b('R$ ' + num(g.total))} em ${g.n} lançamento${g.n===1?'':'s'}, ${g.lojas.length} loja${g.lojas.length===1?'':'s'}\n`;
+  msg += `\n${b('No que foi')}\n`;
+  g.cats.forEach(c => {
+    const p = g.total > 0 ? Math.round(c.valor / g.total * 100) : 0;
+    msg += `  ${_despCatLabel(c.cat)}: R$ ${num(c.valor)} (${p}%)\n`;
+  });
+  if (g.semNome) msg += `\n⚠ ${g.semNome} de ${g.n} lançamentos sem descrição do que foram.\n`;
+  g.lojas.forEach(l => {
+    const nome = (LOJAS.find(x => x.userKey === l.loja) || {}).display || l.loja;
+    msg += `\n${wpp ? '🏪 ' : ''}${b(nome)} — R$ ${num(l.total)} em ${l.n} lançamento${l.n===1?'':'s'}\n`;
+    if (wpp) {
+      Object.entries(l.cats).sort((a, b2) => b2[1] - a[1]).forEach(([c, v]) => {
+        msg += `  ${_despCatLabel(c)}: R$ ${num(v)}\n`;
+      });
+      if (l.semNome) msg += `  ⚠ ${l.semNome} sem descrição\n`;
+    } else {
+      l.itens.forEach(d => {
+        msg += `  ${String(d.data).slice(8,10)}/${String(d.data).slice(5,7)} · ${_despCatLabel(d.categoria)} · ${d.oque || 'sem descrição'} · R$ ${num(d.valor)}${d.foto ? '' : ' · sem foto'}\n`;
+      });
+    }
+  });
+  return { msg, titulo };
+}
+function gerarWppDespesas() {
+  const r = _despRelatorioTexto(true);
+  window.open('https://wa.me/?text=' + encodeURIComponent(r.msg), '_blank');
+}
+function gerarPDFDespesas() {
+  const r = _despRelatorioTexto(false);
+  gerarPDF(r.msg, r.titulo);
+}
+async function enviarPDFDespesasWpp() {
+  const r = _despRelatorioTexto(false);
+  await _compartilharPdfWpp(r.msg, r.titulo);
+}
 
 // ══════════════════════════════════════════════
 // ACTIONS — OPERAÇÕES
