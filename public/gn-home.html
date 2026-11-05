@@ -12134,15 +12134,118 @@ function _carnesRelatorioTexto(wpp) {
   if (naoContaram.length) msg += `\n${b('Sem contagem lançada')}: ${naoContaram.join(', ')}\n`;
   return { msg, titulo: 'Controle de Carnes' + tituloFiltro };
 }
+// ── PDF da aba Carnes, no formato do relatório de vendas ────────────────────────────
+// "Podemos ver no relatório em PDF, pra tentar montar igual temos no relatório das vendas?
+//  Fica mais fácil de entender."
+//
+// O relatório de vendas monta TABELA (gnRelatorioPDF com `html` e `kpis`); a aba Carnes
+// mandava texto corrido pelo mesmo helper, e era essa a diferença que se via. Aqui o
+// conteúdo é o mesmo de sempre — muda o formato.
+//
+// O WhatsApp continua TEXTO, e os dois botões dele seguem no caminho antigo de propósito:
+// o WhatsApp não renderiza tabela, e o "PDF no Whats" precisa de um Blob de verdade pra
+// anexar, que o _textoParaPdfBlob faz a partir de texto (ver _compartilharPdfWpp). Tabela
+// ali viraria uma pilha de tags no corpo da mensagem.
+function _carnesPdfHtml() {
+  if (!_carnesGerLoaded || !_carnesGerData || _carnesGerData.erro) return null;
+  const { porLoja, iniISO, fimISO } = _carnesGerData;
+  const kg = v => (Math.round(v * 10) / 10).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  const esc = x => window.escapeHtml ? window.escapeHtml(String(x)) : String(x);
+  const lojas = _carnesLojasDoRelatorio(porLoja).sort((a, b) => (LOJA_DISPLAY[a] || a).localeCompare(LOJA_DISPLAY[b] || b));
+  const tituloFiltro = lojas.length < Object.keys(porLoja).length
+    ? ' — ' + lojas.map(k => LOJA_DISPLAY[k] || k).join(', ') : '';
+
+  // Duas somas de venda, e a diferença importa: `totFat` é a venda da rede, que é um fato;
+  // `fatComContagem` é só a das lojas que contaram, e é com ela que se faz o kg por R$ mil.
+  // Dividir a saída pela venda de quem NÃO contou achata o índice — com a Pedreira sem
+  // contagem, o número da rede caía de 0,81 pra 0,63 e parecia melhora.
+  let totKg = 0, totFat = 0, fatComContagem = 0;
+  const naoContaram = [];
+  const linhas = lojas.map(k => {
+    const d = porLoja[k];
+    const nome = esc(LOJA_DISPLAY[k] || k);
+    totFat += d.fat || 0;
+    if (!_carnesLojaContou(d)) {
+      naoContaram.push(nome);
+      // A loja sem contagem aparece na tabela, dita como tal. Some-la deixaria o relatório
+      // com a soma menor e ninguém saberia que faltou alguém — foi o que a aba já corrigiu
+      // na tela, e o PDF tem que contar a mesma história.
+      return `<tr><td>${nome}</td><td>${d.fat > 0 ? _fmtBRL(d.fat) : '—'}</td>` +
+             `<td colspan="5" style="color:#b45309">não lançou a contagem desta semana</td></tr>`;
+    }
+    const cels = CARNES_DEF_HOME.map(c => {
+      const r = _carnesDoCorte(d.carnes, c.key);
+      if (r.contagem === null) return '<td style="color:#999">sem contagem</td>';
+      totKg += r.venda;
+      const neg = r.venda < 0;
+      return `<td${neg ? ' style="color:#cf222e;font-weight:700"' : ''}>${kg(r.venda)}${neg ? ' ⚠' : ''}</td>`;
+    }).join('');
+    const somaLoja = CARNES_DEF_HOME.reduce((t, c) => {
+      const r = _carnesDoCorte(d.carnes, c.key);
+      return t + (r.contagem === null ? 0 : r.venda);
+    }, 0);
+    fatComContagem += d.fat || 0;
+    const razao = _carnesRazao(somaLoja, d.fat);
+    return `<tr><td>${nome}</td><td>${d.fat > 0 ? _fmtBRL(d.fat) : '—'}</td>${cels}` +
+           `<td><b>${kg(somaLoja)}</b></td>` +
+           `<td>${razao === null ? '—' : razao.toFixed(2).replace('.', ',')}</td></tr>`;
+  }).join('');
+
+  // Segunda tabela: de onde sai cada número. É a conta que a aba mostra por loja —
+  // início + compras − contagem = saída. Sem ela o PDF vira um total sem origem, e é
+  // justamente a origem que se confere na segunda-feira.
+  const detalhe = lojas.filter(k => _carnesLojaContou(porLoja[k])).map(k => {
+    const d = porLoja[k];
+    const nome = esc(LOJA_DISPLAY[k] || k);
+    return CARNES_DEF_HOME.map((c, i) => {
+      const r = _carnesDoCorte(d.carnes, c.key);
+      if (r.contagem === null) return '';
+      return `<tr><td>${i === 0 ? nome : ''}</td><td>${esc(c.label)}</td>` +
+             `<td>${kg(r.inicial)}${r.temInicial ? '' : ' <span style="color:#b45309">(sem inicial)</span>'}</td>` +
+             `<td>${kg(r.entradas)}</td><td>${kg(r.contagem)}</td><td><b>${kg(r.venda)}</b></td></tr>`;
+    }).join('');
+  }).join('');
+
+  const html =
+    `<h2 class="sec">Saída da semana, por loja</h2>
+     <table><thead><tr><th>Loja</th><th>Venda</th>` +
+       CARNES_DEF_HOME.map(c => `<th>${esc(c.label)}</th>`).join('') +
+       `<th>Total kg</th><th>kg/R$ mil</th></tr></thead><tbody>${linhas}</tbody></table>
+     <div style="font-size:8pt;color:#888;margin:-10px 0 16px">Saída em kg. <b>kg por R$ mil</b> é o que compara lojas de tamanhos diferentes — em reais a loja maior sempre parece a pior.</div>` +
+    (naoContaram.length
+      ? `<div style="font-size:9pt;color:#b45309;margin:-6px 0 16px"><b>Sem contagem lançada:</b> ${naoContaram.join(', ')}. A saída dessas lojas não entra no total.</div>`
+      : '') +
+    `<h2 class="sec">De onde sai cada número</h2>
+     <table><thead><tr><th>Loja</th><th>Corte</th><th>Início</th><th>Compras</th><th>Contagem</th><th>Saída</th></tr></thead><tbody>${detalhe}</tbody></table>
+     <div style="font-size:8pt;color:#888;margin:-10px 0 0">Início + compras − contagem = saída da semana.</div>`;
+
+  return {
+    titulo: 'Controle de Carnes' + tituloFiltro,
+    tituloDoc: `GN Carnes — ${_carnesDM(iniISO)} a ${_carnesDM(fimISO)}`,
+    subtitulo: `Semana ${_carnesDM(iniISO)} a ${_carnesDM(fimISO)} · gerado em ${window.gnPdfAgora ? window.gnPdfAgora() : ''}`,
+    kpis: [
+      { label: 'Saída de carne', valor: kg(totKg) + ' kg', sub: lojas.length + ' loja' + (lojas.length === 1 ? '' : 's') },
+      { label: 'Venda da semana', valor: _fmtBRL(totFat) },
+      { label: 'kg por R$ mil', valor: fatComContagem > 0 ? (totKg / (fatComContagem / 1000)).toFixed(2).replace('.', ',') : '—',
+        sub: naoContaram.length ? 'só as lojas que contaram' : '' },
+    ],
+    html,
+  };
+}
+
 function gerarWppCarnes() {
   const r = _carnesRelatorioTexto(true);
   if (!r) { alert('Aguarde os dados carregarem.'); return; }
   window.open('https://wa.me/?text=' + encodeURIComponent(r.msg), '_blank');
 }
 function gerarPDFCarnes() {
-  const r = _carnesRelatorioTexto(false);
+  const r = _carnesPdfHtml();
   if (!r) { alert('Aguarde os dados carregarem.'); return; }
-  gerarPDF(r.msg, r.titulo);
+  window.gnRelatorioPDF({
+    titulo: r.titulo, tituloDoc: r.tituloDoc, subtitulo: r.subtitulo,
+    kpis: r.kpis, html: r.html,
+    rodape: 'GN Operações · ' + r.titulo,
+  });
 }
 async function enviarPDFCarnesWpp() {
   const r = _carnesRelatorioTexto(false);
