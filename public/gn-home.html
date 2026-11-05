@@ -628,14 +628,16 @@
 </div>
 
 <!-- VISITAS POR SUPERVISOR (mestre) -->
-<div class="picker-overlay" id="visitas-sup-overlay" onclick="if(event.target===this)fecharVisitasSupervisor()">
-  <div class="picker-sheet" style="max-width:760px;margin:auto;max-height:90vh">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+<div class="picker-overlay" id="visitas-sup-overlay" style="align-items:stretch" onclick="if(event.target===this)fecharVisitasSupervisor()">
+  <div class="picker-sheet" style="max-width:none;width:100%;height:100dvh;max-height:100dvh;border-radius:0;border-top:none;padding:0 0 28px;display:flex;flex-direction:column">
+    <div style="position:sticky;top:0;z-index:2;background:var(--s2);display:flex;align-items:center;justify-content:space-between;padding:16px 16px 12px;border-bottom:1px solid rgba(0,0,0,.08)">
       <div class="picker-title" style="margin:0">📍 Visitas por Supervisor</div>
-      <button onclick="fecharVisitasSupervisor()" style="background:none;border:none;color:var(--t3);font-size:22px;cursor:pointer;line-height:1;padding:0 4px">×</button>
+      <button onclick="fecharVisitasSupervisor()" style="background:none;border:none;color:var(--t3);font-size:26px;cursor:pointer;line-height:1;padding:0 4px">×</button>
     </div>
+    <div style="flex:1;min-height:0;overflow-y:auto;padding:14px 16px 0">
     <div id="visitas-sup-content">
       <div style="text-align:center;padding:30px;color:var(--t4);font-size:12px">Carregando…</div>
+    </div>
     </div>
   </div>
 </div>
@@ -7774,7 +7776,11 @@ async function _carregarVisCalendario() {
   const alvo = _visSupNomeAlvo();
   if (!alvo) return;
   const [ano, mes] = _visCalMes.split('-').map(Number);
-  const inicio = `${_visCalMes}-01`;
+  // Os quadrados vazios antes do dia 1 passam a mostrar o fim do mês anterior (apagado),
+  // então a consulta tem que alcançar esses dias. São no máximo 6 — a primeira segunda
+  // nunca empurra mais que isso.
+  const dIni = new Date(ano, mes-1, 1); dIni.setDate(dIni.getDate() - 6);
+  const inicio = _carnesISO(dIni);
   const ultimoDia = new Date(ano, mes, 0).getDate();
   const fim = `${_visCalMes}-${String(ultimoDia).padStart(2,'0')}`;
   try {
@@ -7809,6 +7815,61 @@ const VIS_AUSENCIA_TIPOS = {
 };
 function _ehAusenciaVisitaLoja(loja){ return !!VIS_AUSENCIA_TIPOS[loja]; }
 
+// Conteúdo de um quadrado do calendário de visitas: as lojas visitadas, com horário e o
+// selo de remoto, mais a ausência do dia (folga/férias/viagem) escrita por extenso.
+//
+// Pedido do dono: "que no formato do calendário tivesse os nomes, folga/férias etc dentro
+// dos quadrados" — a ausência aparecia só como emoji, e emoji sozinho não diz se é folga
+// ou férias; "com o indicado do horário feito e se foi presencial ou remoto".
+//
+// Um montador só pros dois usos (mês atual e a cauda apagada do mês anterior): com dois,
+// o quadrado apagado vira outra tela e diverge na primeira mudança.
+function _visCalPillsHtml(visitas, dataStr, hoje) {
+  const reais = visitas.filter(v => !_ehAusenciaVisitaLoja(v.loja) && v.hora_chegada !== 'PLAN');
+  const ausencia = visitas.find(v => _ehAusenciaVisitaLoja(v.loja));
+  const planos = visitas.filter(v => v.hora_chegada === 'PLAN');
+  const planNaoConf = planos.filter(p => !reais.some(r => r.loja === p.loja));
+  const esc = x => window.escapeHtml ? window.escapeHtml(String(x)) : String(x);
+  // Uma linha por loja, com o horário da PRIMEIRA chegada do dia naquela loja. Duas idas
+  // à mesma loja no mesmo dia continuam sendo uma linha — o que interessa no quadrado é
+  // que a loja foi coberta e a que horas começou.
+  const porLoja = [];
+  reais.forEach(v => {
+    let e = porLoja.find(x => x.loja === v.loja);
+    if (!e) { e = { loja: v.loja, hora: null, remoto: true }; porLoja.push(e); }
+    const h = (v.hora_chegada || '').slice(0, 5);
+    if (h && (!e.hora || h < e.hora)) e.hora = h;
+    // Presencial manda: uma ida à loja no mesmo dia que um acesso remoto conta como
+    // presencial, que é a mesma regra do card de hoje e do relatório.
+    if (!_visEhRemoto(v)) e.remoto = false;
+  });
+  const MAX = 2;
+  const extra = porLoja.length - MAX;
+  const pills = porLoja.slice(0, MAX).map(e => {
+    const cor = COR_LOJA[_normLoja(e.loja)] || '#888';
+    const selo = e.remoto ? '💻' : '📍';
+    return `<div title="${esc(e.loja)}${e.hora ? ' · ' + e.hora : ''}${e.remoto ? ' · remoto' : ' · presencial'}" style="background:${cor};border-radius:4px;padding:1px 3px;color:#fff;line-height:1.25;width:100%;box-sizing:border-box;overflow:hidden;margin-top:2px">
+      <div style="font-size:7.5px;font-weight:800;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.loja)}</div>
+      <div style="font-size:7px;font-weight:600;opacity:.92;white-space:nowrap;font-variant-numeric:tabular-nums">${selo}${e.hora ? ' ' + e.hora : ''}</div>
+    </div>`;
+  });
+  if (extra > 0) pills.push(`<div style="background:rgba(0,0,0,.15);border-radius:4px;padding:1px 3px;font-size:7px;font-weight:700;color:var(--t1);margin-top:2px">+${extra}</div>`);
+  if (ausencia) {
+    const info = VIS_AUSENCIA_TIPOS[ausencia.loja];
+    pills.push(`<div style="background:${info.cor};border-radius:4px;padding:1px 3px;font-size:7.5px;font-weight:700;color:#fff;line-height:1.3;width:100%;box-sizing:border-box;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">${info.emoji} ${info.label}</div>`);
+  }
+  if (!reais.length) {
+    const planCor = dataStr < hoje ? '#dc2626' : 'var(--txt-amber)';
+    const lojasPlan = [...new Set(planNaoConf.map(v => v.loja))];
+    const extraPlan = lojasPlan.length - 2;
+    lojasPlan.slice(0, 2).forEach(l => {
+      pills.push(`<div title="Planejada: ${esc(l)}" style="background:transparent;border:1px dashed ${COR_LOJA[_normLoja(l)] || planCor};border-radius:4px;padding:1px 3px;font-size:7.5px;font-weight:700;color:${planCor};line-height:1.3;width:100%;box-sizing:border-box;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">📅 ${esc(l)}</div>`);
+    });
+    if (extraPlan > 0) pills.push(`<div style="border:1px dashed ${planCor};border-radius:4px;padding:1px 3px;font-size:7px;font-weight:700;color:${planCor};margin-top:2px">+${extraPlan}</div>`);
+  }
+  return { html: pills.join(''), reais, ausencia, planNaoConf };
+}
+
 function _renderVisCalendarioTab() {
   const chipsSupervisor = _visSupChipsHtml();
   if (!_visSupSelecionado) {
@@ -7824,10 +7885,13 @@ function _renderVisCalendarioTab() {
   const porData = {};
   _visCalData.forEach(v => { if (!porData[v.data]) porData[v.data] = []; porData[v.data].push(v); });
 
+  // O resumo e as contagens são DO MÊS: a consulta passou a trazer a cauda do mês anterior
+  // pros quadrados apagados, e deixá-la entrar aqui inflaria o número de visitas do mês.
+  const _noMes = v => String(v.data || '').slice(0, 7) === _visCalMes;
   const porLoja = {};
-  _visCalData.filter(v => !_ehAusenciaVisitaLoja(v.loja) && v.hora_chegada!=='PLAN').forEach(v => { porLoja[v.loja] = (porLoja[v.loja]||0)+1; });
+  _visCalData.filter(v => _noMes(v) && !_ehAusenciaVisitaLoja(v.loja) && v.hora_chegada!=='PLAN').forEach(v => { porLoja[v.loja] = (porLoja[v.loja]||0)+1; });
   const nPorAusencia = {};
-  Object.keys(VIS_AUSENCIA_TIPOS).forEach(t => { nPorAusencia[t] = _visCalData.filter(v => v.loja===t).length; });
+  Object.keys(VIS_AUSENCIA_TIPOS).forEach(t => { nPorAusencia[t] = _visCalData.filter(v => _noMes(v) && v.loja===t).length; });
 
   let html = chipsSupervisor;
   html += `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
@@ -7840,18 +7904,30 @@ function _renderVisCalendarioTab() {
   </div>
   <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:3px">`;
 
-  for (let i=0; i<primeiroDia; i++) html += `<div style="height:56px"></div>`;
-
   const hoje = new Date().toISOString().split('T')[0];
+  const ALT = 'min-height:92px';
+
+  // Os quadrados antes do dia 1 ficavam vazios. Agora mostram o FIM DO MÊS ANTERIOR,
+  // apagado: "pode ser meio apagado, mas que dê pra ver as lojas visitadas e com o
+  // indicado do horário feito e se foi presencial ou remoto". Apagado e sem clique —
+  // são dias de outro mês, e abrir o detalhe deles aqui confundiria o recorte.
+  for (let i = primeiroDia; i > 0; i--) {
+    const dPrev = new Date(ano, mes-1, 1 - i);
+    const prevStr = _carnesISO(dPrev);
+    const p = _visCalPillsHtml(porData[prevStr] || [], prevStr, hoje);
+    html += `<div title="${dPrev.getDate()}/${dPrev.getMonth()+1} — mês anterior" style="border-radius:8px;padding:4px 3px;background:var(--fill-sutil);border:1px dashed rgba(0,0,0,.10);${ALT};overflow:hidden;display:flex;flex-direction:column;align-items:center;box-sizing:border-box;opacity:.45">
+      <div style="font-size:10px;font-weight:600;color:var(--t3)">${dPrev.getDate()}</div>
+      ${p.html}
+    </div>`;
+  }
+
   for (let d=1; d<=ultimoDia; d++) {
     const dataStr = `${_visCalMes}-${String(d).padStart(2,'0')}`;
     const visitas = porData[dataStr] || [];
     const isHoje = dataStr === hoje;
     const isSel = dataStr === _visCalDiaSel;
-    const reais = visitas.filter(v => !_ehAusenciaVisitaLoja(v.loja) && v.hora_chegada!=='PLAN');
-    const ausencia = visitas.find(v => _ehAusenciaVisitaLoja(v.loja));
-    const planos = visitas.filter(v => v.hora_chegada==='PLAN');
-    const planNaoConf = planos.filter(p => !reais.some(r=>r.loja===p.loja));
+    const pil = _visCalPillsHtml(visitas, dataStr, hoje);
+    const reais = pil.reais, ausencia = pil.ausencia, planNaoConf = pil.planNaoConf;
     let cellBg = 'var(--t4)', cellBorder = 'var(--t4)', cellBorderStyle = 'solid';
     if (isSel) { cellBg='rgba(251,191,36,.12)'; cellBorder='#fbbf24'; }
     else if (ausencia) { cellBg=`${VIS_AUSENCIA_TIPOS[ausencia.loja].cor}1a`; cellBorder=isHoje?'#6366f1':`${VIS_AUSENCIA_TIPOS[ausencia.loja].cor}4d`; }
@@ -7860,26 +7936,9 @@ function _renderVisCalendarioTab() {
     else if (planNaoConf.length > 0) { cellBg='rgba(251,191,36,.06)'; cellBorder=isHoje?'#6366f1':'rgba(251,191,36,.5)'; cellBorderStyle='dashed'; }
     else if (isHoje) { cellBorder = '#6366f1'; }
 
-    const lojasUnicas = [...new Set(reais.map(v=>v.loja))];
-    const extraLojas = lojasUnicas.length - 2;
-    // Nome da loja também aparece nos dias só com provisão (planejada, ainda sem visita
-    // real) — antes só mostrava um 📅 genérico, e só dava pra saber qual loja era
-    // clicando no dia. Contorno tracejado (em vez de preenchido) mantém a distinção
-    // visual entre "planejado" e "visita já realizada".
-    const lojasPlanejadas = reais.length === 0 ? [...new Set(planNaoConf.map(v=>v.loja))] : [];
-    const extraLojasPlan = lojasPlanejadas.length - 2;
-    const planCor = dataStr < hoje ? '#dc2626' : 'var(--txt-amber)';
-    const lojasPills = [
-      ...lojasUnicas.slice(0,2).map(l=>`<div style="background:${COR_LOJA[_normLoja(l)]||'#888'};border-radius:3px;padding:1px 3px;font-size:6.5px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:calc(100% - 4px);margin-top:1px">${l}</div>`),
-      ...(extraLojas > 0 ? [`<div style="background:rgba(0,0,0,.15);border-radius:3px;padding:1px 3px;font-size:6px;font-weight:700;color:var(--t1);margin-top:1px">+${extraLojas}</div>`] : []),
-      ...(ausencia ? [`<div style="background:${VIS_AUSENCIA_TIPOS[ausencia.loja].cor};border-radius:3px;padding:1px 3px;font-size:6.5px;font-weight:700;color:#fff;margin-top:1px">${VIS_AUSENCIA_TIPOS[ausencia.loja].emoji}</div>`] : []),
-      ...lojasPlanejadas.slice(0,2).map(l=>`<div style="background:transparent;border:1px dashed ${COR_LOJA[_normLoja(l)]||planCor};border-radius:3px;padding:1px 3px;font-size:6.5px;font-weight:700;color:${planCor};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:calc(100% - 4px);margin-top:1px">📅 ${l}</div>`),
-      ...(extraLojasPlan > 0 ? [`<div style="border:1px dashed ${planCor};border-radius:3px;padding:1px 3px;font-size:6px;font-weight:700;color:${planCor};margin-top:1px">+${extraLojasPlan}</div>`] : []),
-    ].join('');
-
-    html += `<div onclick="_mostrarDiaVisCal('${dataStr}')" style="border-radius:8px;padding:4px 2px;background:${cellBg};border:2px ${cellBorderStyle} ${cellBorder};cursor:pointer;height:56px;overflow:hidden;display:flex;flex-direction:column;align-items:center;box-sizing:border-box">
+    html += `<div onclick="_mostrarDiaVisCal('${dataStr}')" style="border-radius:8px;padding:4px 3px;background:${cellBg};border:2px ${cellBorderStyle} ${cellBorder};cursor:pointer;${ALT};overflow:hidden;display:flex;flex-direction:column;align-items:center;box-sizing:border-box">
       <div style="font-size:11px;font-weight:${isHoje||isSel?'800':'600'};color:var(--t1)">${d}</div>
-      ${lojasPills}
+      ${pil.html}
     </div>`;
   }
   html += `</div>`;
