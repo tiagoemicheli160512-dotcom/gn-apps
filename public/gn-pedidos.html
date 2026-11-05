@@ -3195,7 +3195,7 @@ async function setTab(tab) {
     S.todosModo = true;
     S.hortifrutiCarregando = true;
     renderContent();
-    await Promise.all([carregarPedidoHortifruti(), carregarHortifrutiLiberacoes(), carregarHortifrutiBloqueio()]);
+    await Promise.all([carregarPedidoHortifruti(), carregarHortifrutiLiberacoes(), carregarHortifrutiBloqueio(), carregarCarneObrigatorios()]);
     S.hortifrutiCarregando = false;
   } else if (saindoHortifruti && S._pedidoAtualSemanal) {
     S.pedidoAtual = S._pedidoAtualSemanal;
@@ -3329,6 +3329,95 @@ function _datasEspeciaisCardHtml() {
       </div>`;
     }).join('')}
   </div>`;
+}
+
+// ── CARNE — contagem obrigatória num dia (feriado que cai na segunda) ───────
+// Pedido do dono: "No feriado tem que ser obrigatório a contagem, pois ao deixar pra terça
+// o valor muda completamente. Criar o mesmo sistema que criamos pro hortifruti, onde tem o
+// botão de liberar a contagem."
+//
+// MEDIDO no feriado de 02/11/2026 (Finados, segunda): ZERO contagens em gn_contagens_pedido
+// naquele dia — nenhuma loja, nenhum item. As 11 contaram na TERÇA 03/11, e a Campo Grande
+// só na quarta 04/11. Seis lojas (Pedreira 09:38, Nova América 09:54, Campo Grande 10:03,
+// Norte Shopping 10:22, Bangu 11:28, São Gonçalo 13:55) abriram a aba Carnes do Check-list
+// na segunda e gravaram a linha da semana — mas o estoque de abertura das 4 carnes não vem
+// do que se digita ali, vem da contagem do app Lojas. As 11 linhas da semana ficaram
+// carimbadas `inicialDe: 2026-11-03`.
+//
+// Ou seja: nenhuma contagem se perdeu no caminho. Ninguém contou na segunda. O que faltava
+// era alguém ser cobrado no dia — é o que esta liberação faz.
+//
+// Diferença do hortifruti, de propósito: lá o botão LIBERA quem estava impedido; aqui ele
+// OBRIGA quem poderia deixar pra depois. Mesmo mecanismo (uma data numa tabela, lida pelo
+// app Lojas), sentido oposto.
+let carneObrigatorios = [];
+
+async function carregarCarneObrigatorios() {
+  try {
+    const { data } = await db.from('gn_carne_contagem_obrigatoria').select('*').gte('data', hoje()).order('data');
+    carneObrigatorios = data || [];
+  } catch (e) { carneObrigatorios = []; }
+}
+
+function _carneObrigatorioCardHtml() {
+  const hojeStr = hoje();
+  // Sugere a PRÓXIMA segunda: é o dia que o pedido trata, e o feriado que estraga a conta é
+  // justamente o que cai nela. Quem quiser outro dia troca no campo.
+  const prox = new Date(hojeStr + 'T12:00:00');
+  prox.setDate(prox.getDate() + ((8 - prox.getDay()) % 7 || 7));
+  const proxISO = prox.toISOString().slice(0, 10);
+  return `<div style="background:var(--card2);border:1px solid var(--border);border-left:3px solid #b91c1c;border-radius:var(--r);padding:12px 14px;margin-bottom:10px">
+    <div style="font-size:12px;font-weight:700;margin-bottom:3px">🥩 Obrigar a contagem da carne num dia</div>
+    <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.4">Pro feriado que cai na segunda. No dia marcado, o app Lojas abre travado na contagem das 4 carnes e só destrava depois que a loja contar — zero só passa com justificativa escrita. Deixar pra terça muda o valor da semana inteira.</div>
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <input id="carne-obrig-data" type="date" value="${proxISO}" style="flex:1;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:8px;color:var(--text);font-size:13px">
+      <button onclick="marcarCarneObrigatoria()" style="background:#b91c1c;border:none;border-radius:8px;padding:8px 14px;color:#fff;font-weight:700;font-size:12px;cursor:pointer;white-space:nowrap">Obrigar</button>
+    </div>
+    <input id="carne-obrig-motivo" type="text" placeholder="Motivo (aparece pra loja): Finados, ponto facultativo..." maxlength="80" style="width:100%;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:8px;color:var(--text);font-size:12px;margin-bottom:${carneObrigatorios.length ? '10px' : '0'}">
+    ${carneObrigatorios.map(l => {
+      const d = new Date(l.data + 'T12:00:00');
+      const dd = String(d.getDate()).padStart(2, '0'), mm = String(d.getMonth() + 1).padStart(2, '0');
+      const semana = ['domingo','segunda','terça','quarta','quinta','sexta','sábado'][d.getDay()];
+      return `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--bg);border-radius:var(--rs);padding:7px 10px;margin-bottom:5px">
+        <div style="font-size:11px;font-weight:700;min-width:0">🥩 ${dd}/${mm} <span style="font-weight:400;color:var(--muted)">(${semana})</span>${l.data === hojeStr ? ' <span style="color:#b91c1c">— hoje</span>' : ''}${l.motivo ? `<div style="font-size:10px;font-weight:400;color:var(--muted)">${escapeHtml(l.motivo)}</div>` : ''}</div>
+        <span onclick="removerCarneObrigatoria('${l.data}')" style="cursor:pointer;font-size:11px;color:#ef4444;font-weight:700;white-space:nowrap">✕ Remover</span>
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
+async function marcarCarneObrigatoria() {
+  const inp = document.getElementById('carne-obrig-data');
+  const mot = document.getElementById('carne-obrig-motivo');
+  const data = inp ? inp.value : '';
+  const motivo = mot ? mot.value.trim() : '';
+  if (!data) { toast('Escolha uma data.', 'err'); return; }
+  const d = new Date(data + 'T12:00:00');
+  const diaNome = ['domingo','segunda','terça','quarta','quinta','sexta','sábado'][d.getDay()];
+  if (!confirm('Obrigar a contagem da carne em ' + data.split('-').reverse().join('/') + ' (' + diaNome + ')?\n\nNesse dia o app Lojas abre travado na contagem das 4 carnes, em TODAS as lojas, e só destrava depois de contar.')) return;
+  try {
+    const sess = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
+    await db.from('gn_carne_contagem_obrigatoria').upsert(
+      { data, motivo: motivo || null, criado_por: (sess && sess.nome) || 'Compras' }, { onConflict: 'data' });
+    toast('🥩 Contagem obrigatória marcada!', 'ok');
+    if (mot) mot.value = '';
+    await carregarCarneObrigatorios();
+    renderContent();
+  } catch (e) {
+    toast('Erro ao marcar: ' + (e.message || e), 'err');
+  }
+}
+
+async function removerCarneObrigatoria(data) {
+  if (!confirm('Tirar a obrigação de contar carne em ' + data.split('-').reverse().join('/') + '?')) return;
+  try {
+    await db.from('gn_carne_contagem_obrigatoria').delete().eq('data', data);
+    toast('Obrigação removida.', 'ok');
+    await carregarCarneObrigatorios();
+    renderContent();
+  } catch (e) {
+    toast('Erro ao remover: ' + (e.message || e), 'err');
+  }
 }
 
 // ── HORTIFRUTI — liberação especial de envio ────────────────────────────────
@@ -4257,7 +4346,7 @@ function renderPedido() {
   if (!S.pedidoAtual) {
     // O painel de status entra aqui também: "nenhum pedido nesta semana" é exatamente quando
     // saber que nenhuma loja enviou nada importa mais, e sem isto a tela ficava muda.
-    $('content').innerHTML = semNavHtmlAtivo + _datasEspeciaisCardHtml() + _hortifrutiBloqueioCardHtml() + _hortifrutiLiberacaoCardHtml() + _vendaSemanaAntCardHtml() +
+    $('content').innerHTML = semNavHtmlAtivo + _datasEspeciaisCardHtml() + _carneObrigatorioCardHtml() + _hortifrutiBloqueioCardHtml() + _hortifrutiLiberacaoCardHtml() + _vendaSemanaAntCardHtml() +
       (S.hortifrutiAtivo ? '' : _painelEnvioSemanaHtml()) + `
       <div class="empty" style="margin-top:20px">
         <div class="empty-icon">📋</div>
@@ -4623,7 +4712,7 @@ function renderPedido() {
     }
   }
 
-  $('content').innerHTML = semNavHtmlAtivo + _datasEspeciaisCardHtml() + _hortifrutiBloqueioCardHtml() + _hortifrutiLiberacaoCardHtml() + _vendaSemanaAntCardHtml() + `
+  $('content').innerHTML = semNavHtmlAtivo + _datasEspeciaisCardHtml() + _carneObrigatorioCardHtml() + _hortifrutiBloqueioCardHtml() + _hortifrutiLiberacaoCardHtml() + _vendaSemanaAntCardHtml() + `
     <div class="pedido-bar">
       <div class="pedido-info">
         <div class="pedido-label">PEDIDO${labelAba}</div>

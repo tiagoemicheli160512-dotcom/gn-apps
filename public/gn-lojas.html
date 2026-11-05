@@ -6586,6 +6586,213 @@ async function _carregarCatalogo() {
 // Guarulhos compram em SP, com preço e fornecedor próprios; todo o resto é RJ. TODA leitura
 // de gn_catalogo nesta tela tem que passar por aqui — sem o filtro, a loja do Rio abriria o
 // pedido vendo o catálogo das duas regiões somado, com o item repetido.
+
+// ══════════════════════════════════════════════
+// CONTAGEM DE CARNE OBRIGATÓRIA — a trava do feriado
+// ══════════════════════════════════════════════
+// Pedido do dono: "No feriado tem que ser obrigatório a contagem, pois ao deixar pra terça
+// o valor muda completamente. (...) virando no app, ao ser liberado, aparece como
+// obrigatório pra quem acessar colocar. Não permitir colocar zero sem justificar que
+// estava zero mesmo."
+//
+// POR QUE EXISTE, medido no feriado de 02/11/2026 (Finados, segunda): ZERO contagens em
+// gn_contagens_pedido naquele dia — nenhuma loja, nenhum item. As 11 contaram na TERÇA
+// 03/11, e a Campo Grande só na quarta. Seis lojas abriram a aba Carnes do Check-list na
+// segunda e gravaram a linha da semana, mas o estoque de abertura das 4 carnes não vem
+// dali: vem desta contagem. As 11 linhas ficaram carimbadas `inicialDe: 2026-11-03`.
+// Nenhuma contagem se perdeu — ninguém contou. O que faltava era a cobrança no dia.
+//
+// A TRAVA É DO APP INTEIRO, por decisão do dono. O risco de travar quem só queria ver
+// outra coisa é real, e por isso a saída existe sempre: zero passa, desde que escrito o
+// porquê. Nunca há um estado em que a loja não consiga sair daqui — o que não há é sair
+// sem dizer quanto tem.
+// As 4 carnes e a resolução do catálogo por região vêm de _carnesChkResolverIds, logo
+// abaixo neste mesmo arquivo — a automação de entrada de carne já precisava exatamente
+// disto. Escrever a segunda cópia aqui foi o que a mutação pegou: com duas, o dia em que
+// São Paulo ganhar outro item só uma das duas é corrigida.
+const CARNE_OBRIG_DEF = [
+  { key: 'carne_sol',  label: 'Carne de Sol', icon: '🥩' },
+  { key: 'picanha',    label: 'Picanha',      icon: '🥩' },
+  { key: 'carne_seca', label: 'Carne Seca',   icon: '🥩' },
+  { key: 'camarao',    label: 'Camarão',      icon: '🦐' },
+];
+// Zero digitado por pressa e zero de verdade são o mesmo número. Abaixo disto não é
+// justificativa, é só burlar o campo — mesma régua do extra no app Caixa.
+const CARNE_ZERO_JUST_MIN = 10;
+let _carneObrigDia = null;      // { data, motivo } quando hoje é dia obrigatório
+let _carneObrigIds = null;      // item_id (RJ) -> catalogo_id (uuid) da região desta loja
+let _carneObrigFeito = false;
+
+function _carneObrigHojeISO() {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function _carneObrigSlug() { return LOJA_SLUG[loja] || String(loja || '').toLowerCase().replace(/ /g, '_'); }
+
+// chave da carne -> catalogo_id da região desta loja. _carnesChkResolverIds devolve o mapa
+// ao contrário (catalogo_id -> chave), porque é assim que a automação de entrada precisa;
+// aqui o que se tem é a carne e o que se quer é o id. Inverter é mais barato — e mais
+// seguro — do que manter uma segunda consulta ao catálogo viva no arquivo.
+async function _carneObrigResolverIds() {
+  const reg = _regiaoDaLoja();
+  if (_carneObrigIds && _carneObrigIds.reg === reg) return _carneObrigIds.map;
+  const porId = await _carnesChkResolverIds();
+  const map = {};
+  Object.entries(porId || {}).forEach(([catalogoId, chave]) => { map[chave] = catalogoId; });
+  // Mapa vazio não vira cache: numa falha de rede isso deixaria a loja sem conseguir salvar
+  // pelo resto da sessão, em silêncio. (_carnesChkResolverIds já se protege do mesmo jeito.)
+  if (!Object.keys(map).length) return {};
+  _carneObrigIds = { reg, map };
+  return map;
+}
+
+// Já contou hoje? Conta só o que tem valor gravado HOJE — contagem de ontem não serve, é
+// justamente o atraso que esta trava existe pra evitar.
+async function _carneObrigJaContou() {
+  const ids = await _carneObrigResolverIds();
+  const uuids = CARNE_OBRIG_DEF.map(c => ids[c.key]).filter(Boolean);
+  if (uuids.length < CARNE_OBRIG_DEF.length) return false;
+  const rows = await sbRequest('gn_contagens_pedido?loja_slug=eq.' + encodeURIComponent(_carneObrigSlug()) +
+    '&data_contagem=eq.' + _carneObrigHojeISO() +
+    '&catalogo_id=in.(' + uuids.join(',') + ')&select=catalogo_id,atual', { method: 'GET' });
+  const vistos = new Set((rows || []).filter(r => r.atual !== null && r.atual !== undefined).map(r => r.catalogo_id));
+  return uuids.every(u => vistos.has(u));
+}
+
+async function _carneObrigVerificar() {
+  try {
+    if (!loja || !usuarioAtual) return;
+    const hojeISO = _carneObrigHojeISO();
+    const dias = await sbRequest('gn_carne_contagem_obrigatoria?data=eq.' + hojeISO + '&select=data,motivo', { method: 'GET' });
+    if (!dias || !dias.length) return;
+    _carneObrigDia = dias[0];
+    if (await _carneObrigJaContou()) { _carneObrigFeito = true; return; }
+    _carneObrigAbrir();
+  } catch (e) {
+    // Falha de rede não pode trancar a loja fora do app: sem saber se hoje é obrigatório,
+    // o certo é deixar passar e cobrar no Painel, não impedir o trabalho.
+  }
+}
+
+function _carneObrigAbrir() {
+  if (document.getElementById('carneObrigOverlay')) return;
+  const esc = s => (window.escapeHtml ? window.escapeHtml(String(s)) : String(s));
+  const ov = document.createElement('div');
+  ov.id = 'carneObrigOverlay';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:99999;background:var(--s0,#0f1115);overflow:auto;padding:18px 14px 28px';
+  ov.innerHTML = `
+    <div style="max-width:460px;margin:0 auto">
+      <div style="text-align:center;margin-bottom:14px">
+        <div style="font-size:34px;line-height:1">🥩</div>
+        <div style="font-size:18px;font-weight:800;color:var(--t1,#fff);margin-top:6px">Contagem de carne obrigatória hoje</div>
+        <div style="font-size:12px;color:var(--t3,#9aa0a6);margin-top:5px;line-height:1.5">
+          ${_carneObrigDia && _carneObrigDia.motivo ? esc(_carneObrigDia.motivo) + '. ' : ''}Hoje é feriado ou dia marcado pelo Compras.
+          Deixar a contagem pra amanhã muda o valor da semana inteira — por isso o app só abre depois que as 4 carnes forem contadas.
+        </div>
+      </div>
+      <div id="carneObrigCampos">
+        ${CARNE_OBRIG_DEF.map(c => `
+          <div style="background:var(--s1,#1b1f26);border:1px solid var(--b1,#2b313c);border-radius:12px;padding:12px 13px;margin-bottom:9px">
+            <div style="display:flex;align-items:center;gap:9px">
+              <span style="font-size:19px">${c.icon}</span>
+              <span style="flex:1;font-size:14px;font-weight:700;color:var(--t1,#fff)">${c.label}</span>
+              <input id="carneObrig_${c.key}" type="text" inputmode="decimal" placeholder="0,00"
+                oninput="_carneObrigSync()"
+                style="width:104px;text-align:right;background:var(--s2,#232832);border:1px solid var(--b1,#2b313c);border-radius:9px;padding:9px 10px;color:var(--t1,#fff);font-size:16px;font-weight:700;font-family:inherit">
+              <span style="font-size:12px;color:var(--t3,#9aa0a6);font-weight:700">kg</span>
+            </div>
+            <div id="carneObrigJust_${c.key}" class="hidden" style="margin-top:9px">
+              <div style="font-size:11px;color:#f59e0b;font-weight:700;margin-bottom:4px">Zero? Escreva por que estava zerado.</div>
+              <textarea id="carneObrigJustTxt_${c.key}" rows="2" oninput="_carneObrigSync()"
+                placeholder="Ex: acabou no domingo e a entrega só vem amanhã"
+                style="width:100%;box-sizing:border-box;resize:vertical;background:var(--s2,#232832);border:1px solid #f59e0b;border-radius:9px;padding:8px 10px;color:var(--t1,#fff);font-size:13px;font-family:inherit"></textarea>
+            </div>
+          </div>`).join('')}
+      </div>
+      <div id="carneObrigAviso" style="font-size:11.5px;color:#f59e0b;line-height:1.5;margin:4px 2px 10px;min-height:17px"></div>
+      <button id="carneObrigBtn" onclick="_carneObrigSalvar()" disabled
+        style="width:100%;background:#16a34a;border:none;border-radius:12px;padding:15px;color:#fff;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit;opacity:.4">
+        Salvar a contagem e entrar
+      </button>
+      <div style="font-size:10.5px;color:var(--t4,#6b7280);text-align:center;margin-top:9px;line-height:1.5">
+        A contagem vai pro mesmo lugar da contagem de segunda — a aba Carnes do Check-list pega daqui.
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  _carneObrigSync();
+}
+
+// Um número é obrigatório em cada carne; zero só passa com o porquê escrito. Campo vazio
+// NÃO é zero: quem não digitou nada ainda não contou, e dizer "zero" por ele seria inventar
+// o número que esta tela existe pra ter.
+function _carneObrigEstado() {
+  const itens = CARNE_OBRIG_DEF.map(c => {
+    const el = document.getElementById('carneObrig_' + c.key);
+    const bruto = el ? String(el.value).trim() : '';
+    const num = bruto === '' ? null : parseFloat(bruto.replace(/\./g, '').replace(',', '.'));
+    const jt = document.getElementById('carneObrigJustTxt_' + c.key);
+    const just = jt ? jt.value.trim() : '';
+    return { key: c.key, label: c.label, bruto, num, just,
+             vazio: bruto === '', invalido: bruto !== '' && (!isFinite(num) || num < 0),
+             zero: num === 0, justCurta: just.length < CARNE_ZERO_JUST_MIN };
+  });
+  const faltam    = itens.filter(i => i.vazio).map(i => i.label);
+  const invalidos = itens.filter(i => i.invalido).map(i => i.label);
+  const semJust   = itens.filter(i => !i.vazio && !i.invalido && i.zero && i.justCurta).map(i => i.label);
+  return { itens, faltam, invalidos, semJust, ok: !faltam.length && !invalidos.length && !semJust.length };
+}
+
+function _carneObrigSync() {
+  const st = _carneObrigEstado();
+  st.itens.forEach(i => {
+    const box = document.getElementById('carneObrigJust_' + i.key);
+    if (box) box.classList.toggle('hidden', !i.zero);
+  });
+  const aviso = document.getElementById('carneObrigAviso');
+  if (aviso) {
+    aviso.textContent =
+      st.invalidos.length ? 'Valor inválido em: ' + st.invalidos.join(', ')
+      : st.semJust.length ? 'Escreva por que está zerado em: ' + st.semJust.join(', ')
+      : st.faltam.length  ? 'Falta contar: ' + st.faltam.join(', ')
+      : '';
+  }
+  const btn = document.getElementById('carneObrigBtn');
+  if (btn) { btn.disabled = !st.ok; btn.style.opacity = st.ok ? '1' : '.4'; }
+  return st;
+}
+
+async function _carneObrigSalvar() {
+  const st = _carneObrigSync();
+  if (!st.ok) return;
+  const btn = document.getElementById('carneObrigBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Salvando...'; }
+  try {
+    const ids = await _carneObrigResolverIds();
+    const slug = _carneObrigSlug();
+    const hojeISO = _carneObrigHojeISO();
+    const linhas = st.itens.map(i => ({
+      catalogo_id: ids[i.key], loja_slug: slug,
+      atual: i.num, data_contagem: hojeISO,
+      criado_por: usuarioAtual ? usuarioAtual.nome : '',
+      zero_justificativa: i.zero ? i.just : null,
+    })).filter(l => l.catalogo_id);
+    if (linhas.length < CARNE_OBRIG_DEF.length) throw new Error('catálogo incompleto');
+    await sbRequest('gn_contagens_pedido?on_conflict=catalogo_id,loja_slug,data_contagem', {
+      method: 'POST',
+      headers: { 'Prefer': 'return=minimal,resolution=merge-duplicates' },
+      body: JSON.stringify(linhas),
+    });
+    _carneObrigFeito = true;
+    const ov = document.getElementById('carneObrigOverlay');
+    if (ov) ov.remove();
+    showToast('🥩 Contagem de carne registrada. Obrigado!');
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Salvar a contagem e entrar'; }
+    const aviso = document.getElementById('carneObrigAviso');
+    if (aviso) aviso.textContent = 'Não deu pra salvar agora. Confira a internet e toque de novo.';
+  }
+}
+
 function _regiaoDaLoja() {
   return (window.gnRegiaoLoja ? window.gnRegiaoLoja(loja) : null) || 'RJ';
 }
@@ -8090,6 +8297,7 @@ async function confirmarLogin() {
     carregarPermissaoSemana();
     _iniciarVigiaHorario();
     render();
+    _carneObrigVerificar();
     loadChecklistFat(); // Carrega faturamento/vendas do check-list após login para home mostrar correto
     showToast('👋 Bem-vindo(a), ' + u.nome + '! (' + u.cargo + ')');
     setTimeout(_verificarAutoAlerta, 4000);
@@ -13261,9 +13469,14 @@ function confirmarEntrega(id){
 // apareceu como "JBS", "NOGMIX" e "NOGMIX - JBS" em meses diferentes, e o item nunca mudou.
 // Os 4 itens são vendidos em KG no catálogo, então a quantidade entra direto, sem conversão.
 const CARNES_CHK_ITEM_ID = { 207:'carne_sol', 209:'carne_seca', 392:'picanha', 237:'camarao' };
-let _carnesChkCatIds = null; // {catalogo_id (uuid): chave da carne}
+// Cacheado POR REGIÃO, não solto: o mestre pode trocar de loja dentro da mesma sessão, e
+// Itaquera/Guarulhos têm catálogo próprio. Com o cache sem região, a primeira loja aberta
+// definia o mapa e as seguintes resolviam pro item da região errada — em silêncio, que é o
+// pior jeito de errar um id de catálogo.
+let _carnesChkCatIds = null; // { reg, map:{catalogo_id (uuid): chave da carne} }
 async function _carnesChkResolverIds(){
-  if(_carnesChkCatIds) return _carnesChkCatIds;
+  const regAtual = _regiaoDaLoja();
+  if(_carnesChkCatIds && _carnesChkCatIds.reg === regAtual) return _carnesChkCatIds.map;
   // Os números de CARNES_CHK_ITEM_ID são os do catálogo do RIO. Em São Paulo a mesma carne é
   // outra linha, com item_id próprio — origem_item_id é o que liga uma na outra. Sem isso, a
   // entrega confirmada em Itaquera/Guarulhos não viraria entrada de carne nenhuma, porque o
@@ -13277,7 +13490,7 @@ async function _carnesChkResolverIds(){
   (rows||[]).forEach(r=>{ const k = CARNES_CHK_ITEM_ID[(reg === 'SP') ? r.origem_item_id : r.item_id]; if(k) map[r.id]=k; });
   // Não cacheia mapa vazio: numa falha de rede isso deixaria a automação morta pelo resto
   // da sessão, em silêncio (mesma armadilha já documentada no Check-list).
-  if(Object.keys(map).length) _carnesChkCatIds = map;
+  if(Object.keys(map).length) _carnesChkCatIds = { reg, map };
   return map;
 }
 // Segunda-feira da semana de uma data ISO — a semana das carnes vai de 2ª a domingo.
@@ -13499,6 +13712,9 @@ if (!verificarSessao()) {
     carregarPermissaoLoja();
     carregarPermissaoAbas();
     carregarPermissaoSemana();
+    // Sessão retomada (recarregou o app, voltou de outro app): a trava do feriado tem que
+    // valer aqui também — quem já estava logado é justamente quem não passa pelo login.
+    _carneObrigVerificar();
     // Deep-link de outros apps (ex.: Check-list → Auditoria de Estoque) via ?tab=contagem
     try {
       const tabParam = new URLSearchParams(location.search).get('tab');
