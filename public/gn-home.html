@@ -7742,10 +7742,199 @@ function _buildTextoVisitasSup(paraWpp) {
   return { texto: txt, titulo: `Relatório de Visitas — ${_visSupSelecionado}` };
 }
 
+// ── PDF de Visitas em formato de calendário ────────────────────────────────
+// Pedido do dono: "no relatório do PDF, quando for gerar, aparecer assim igual o
+// calendário, podendo selecionar dia, semana e mês, e no relatório ter a entrada e a
+// saída". O período é o mesmo escolhido na aba Relatório (Dia/Semana/Mês/Trimestre +
+// ‹ ›), então o PDF mostra exatamente o que está na tela, só que desenhado como o
+// calendário: um quadrado por dia, com cada loja, 📍 presencial / 💻 remoto e
+// entrada → saída. Embaixo, a tabela linha a linha com entrada, saída e duração.
+//
+// Remoto costuma vir em lote (o mesmo acompanhamento registrado em 11 lojas com o mesmo
+// horário). No quadrado esse lote vira UM bloco "💻 11 lojas · 07:45 → 17:51" com os
+// nomes em letra miúda — onze blocos iguais empilhados tornariam o calendário ilegível.
+// A tabela continua listando loja por loja.
+//
+// O "PDF no Whats" segue em texto (jsPDF), porque precisa de um arquivo pronto pra
+// anexar; o desenho em calendário depende da impressão do navegador.
+function _visSupPdfHtml() {
+  if (!_visSupSelecionado) return null;
+  const esc = window.gnPdfEsc;
+  const h5 = s => String(s || '').slice(0, 5);
+  const nomeLoja = l => LOJA_DISPLAY[_normLoja(l)] || l;
+  const corLoja = l => COR_LOJA[_normLoja(l)] || '#6b7280';
+  const DSEM = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+  const MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+  const iso = d => _visSupFmtISODate(d);
+  const deISO = _visSupDe, ateISO = _visSupAte;
+
+  const porData = {};
+  _visSupData.forEach(v => { (porData[v.data] = porData[v.data] || []).push(v); });
+  const ehReal = v => !_ehAusenciaVisitaLoja(v.loja) && v.hora_chegada !== 'PLAN';
+
+  // ── números (mesmas regras da aba Relatório) ──
+  const reaisAll = _visSupData.filter(ehReal);
+  const presenciais = reaisAll.filter(v => !_visEhRemoto(v));
+  const remotos = reaisAll.filter(_visEhRemoto);
+  const planosAll = _visSupData.filter(v => v.hora_chegada === 'PLAN');
+  const planosConf = planosAll.filter(p => _visSupData.some(r => r.data === p.data && r.loja === p.loja && ehReal(r) && !_visEhRemoto(r)));
+  const totalMins = gnVisitasMinutos(reaisAll);
+  const kpis = [
+    { label: 'Visitas presenciais', valor: String(presenciais.length), sub: `${new Set(presenciais.map(v => v.loja)).size} lojas` },
+    { label: 'Horas de acompanhamento', valor: totalMins > 0 ? _fmtDuracao(totalMins) : '—', sub: '1º ao último acesso do dia' },
+    { label: 'Planos cumpridos', valor: planosAll.length ? Math.round(planosConf.length / planosAll.length * 100) + '%' : '—', sub: planosAll.length ? `${planosConf.length}/${planosAll.length}` : 'sem plano' },
+  ];
+  if (remotos.length) kpis[0].sub += ` · ${remotos.length} remoto${remotos.length > 1 ? 's' : ''}`;
+
+  // ── conteúdo de um quadrado ──
+  function blocosDoDia(dataStr) {
+    const vs = porData[dataStr] || [];
+    const out = [];
+    const aus = vs.find(v => _ehAusenciaVisitaLoja(v.loja));
+    if (aus) {
+      const info = VIS_AUSENCIA_TIPOS[aus.loja];
+      out.push(`<div class="vb" style="background:${info.cor}">${info.emoji} ${esc(info.label)}</div>`);
+    }
+    const reais = vs.filter(ehReal).slice().sort((a, b) => h5(a.hora_chegada).localeCompare(h5(b.hora_chegada)));
+    // Agrupa remotos com o mesmo intervalo; presencial é sempre um bloco por visita.
+    const grupos = [];
+    reais.forEach(v => {
+      const remoto = _visEhRemoto(v);
+      const ent = h5(v.hora_chegada), sai = v.hora_saida ? h5(v.hora_saida) : '';
+      const g = remoto && grupos.find(x => x.remoto && x.ent === ent && x.sai === sai);
+      if (g) g.lojas.push(v.loja);
+      else grupos.push({ remoto, ent, sai, lojas: [v.loja] });
+    });
+    grupos.forEach(g => {
+      const horario = `${g.ent} → ${g.sai || 'em andamento'}`;
+      if (g.lojas.length > 2) {
+        out.push(`<div class="vb vb-rem"><b>💻 ${g.lojas.length} lojas</b><span class="vh">${horario}</span><span class="vn">${esc(g.lojas.map(nomeLoja).join(', '))}</span></div>`);
+      } else {
+        g.lojas.forEach(l => out.push(`<div class="vb" style="background:${corLoja(l)}"><b>${esc(nomeLoja(l))}</b><span class="vh">${g.remoto ? '💻' : '📍'} ${horario}</span></div>`));
+      }
+    });
+    vs.filter(v => v.hora_chegada === 'PLAN' && !reais.some(r => r.loja === v.loja && !_visEhRemoto(r)))
+      .forEach(p => out.push(`<div class="vb vb-plan" style="border-color:${corLoja(p.loja)}">📅 ${esc(nomeLoja(p.loja))} <i>${dataStr < iso(new Date()) ? 'não feita' : 'prevista'}</i></div>`));
+    return out.join('');
+  }
+  const celula = (d, fora) => {
+    const s = iso(d);
+    const hoje = s === iso(new Date());
+    return `<td class="cd${fora ? ' fora' : ''}${hoje ? ' hoje' : ''}"><div class="dn">${d.getDate()}</div>${fora ? '' : blocosDoDia(s)}</td>`;
+  };
+  const cab = cols => `<tr>${cols.map(c => `<th>${c}</th>`).join('')}</tr>`;
+
+  // Mês: grade domingo→sábado, igual à tela. Dias fora do mês ficam em branco (sem
+  // conteúdo) pra o PDF de um mês não mostrar visita de outro.
+  function gradeMes(ano, mesIdx) {
+    const ini = new Date(ano, mesIdx, 1);
+    const cur = new Date(ano, mesIdx, 1 - ini.getDay());
+    let linhas = '';
+    do {
+      let tr = '';
+      for (let i = 0; i < 7; i++) {
+        const fora = cur.getMonth() !== mesIdx || iso(cur) < deISO || iso(cur) > ateISO;
+        tr += celula(cur, fora);
+        cur.setDate(cur.getDate() + 1);
+      }
+      linhas += `<tr>${tr}</tr>`;
+    } while (cur.getMonth() === mesIdx);
+    return `<h2 class="sec mes-tit">📅 ${MESES[mesIdx]} ${ano}</h2>
+      <table class="cal"><thead>${cab(['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'])}</thead><tbody>${linhas}</tbody></table>`;
+  }
+
+  let calendario = '';
+  if (_visSupPeriodo === 'diaria') {
+    const d = new Date(deISO + 'T12:00');
+    calendario = `<table class="cal cal-dia"><thead>${cab([`${DSEM[d.getDay()]} ${deISO.split('-').reverse().join('/')}`])}</thead><tbody><tr>${celula(d, false)}</tr></tbody></table>`;
+  } else if (_visSupPeriodo === 'semanal') {
+    const ini = new Date(deISO + 'T12:00');
+    const dias = Array.from({ length: 7 }, (_, i) => new Date(ini.getFullYear(), ini.getMonth(), ini.getDate() + i));
+    calendario = `<table class="cal"><thead>${cab(dias.map(d => `${DSEM[d.getDay()]} ${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}`))}</thead><tbody><tr>${dias.map(d => celula(d, false)).join('')}</tr></tbody></table>`;
+  } else {
+    // Mês, trimestre ou intervalo De/Até: uma grade por mês tocado pelo período.
+    const a = new Date(deISO + 'T12:00'), b = new Date(ateISO + 'T12:00');
+    for (let m = new Date(a.getFullYear(), a.getMonth(), 1); m <= b; m = new Date(m.getFullYear(), m.getMonth() + 1, 1)) {
+      calendario += `<div class="mes">${gradeMes(m.getFullYear(), m.getMonth())}</div>`;
+    }
+  }
+
+  const legenda = `<div class="leg">📍 presencial · 💻 remoto · 📅 plano sem visita · horário = entrada → saída</div>`;
+
+  // ── tabela de detalhamento ──
+  const linhasTab = _visSupData.filter(v => v.hora_chegada !== 'PLAN')
+    .slice().sort((x, y) => (x.data + h5(x.hora_chegada)).localeCompare(y.data + h5(y.hora_chegada)))
+    .map(v => {
+      const d = new Date(v.data + 'T12:00');
+      const dataTxt = `${DSEM[d.getDay()]} ${v.data.split('-').reverse().slice(0, 2).join('/')}`;
+      if (_ehAusenciaVisitaLoja(v.loja)) {
+        const info = VIS_AUSENCIA_TIPOS[v.loja];
+        return `<tr><td>${dataTxt}</td><td colspan="5">${info.emoji} ${esc(info.label)}${v.obs ? ` <span class="obs">— ${esc(v.obs)}</span>` : ''}</td></tr>`;
+      }
+      const dur = _calcDuracaoMin(v.hora_chegada, v.hora_saida);
+      return `<tr><td>${dataTxt}</td>
+        <td><span class="pt" style="background:${corLoja(v.loja)}"></span>${esc(nomeLoja(v.loja))}${v.obs ? `<div class="obs">💬 ${esc(v.obs)}</div>` : ''}</td>
+        <td>${_visEhRemoto(v) ? '💻 Remoto' : '📍 Presencial'}</td>
+        <td class="num">${esc(h5(v.hora_chegada))}</td>
+        <td class="num">${v.hora_saida ? esc(h5(v.hora_saida)) : '<i>em andamento</i>'}</td>
+        <td class="num">${dur ? _fmtDuracao(dur) : '—'}</td></tr>`;
+    }).join('');
+  const tabela = linhasTab ? `<h2 class="sec">🕒 Entradas e saídas</h2>
+    <table class="det-tab"><thead><tr><th>Data</th><th>Loja</th><th>Tipo</th><th>Entrada</th><th>Saída</th><th>Duração</th></tr></thead><tbody>${linhasTab}</tbody></table>`
+    : `<div class="vazio">Nenhuma visita registrada nesse período.</div>`;
+
+  // Paisagem pra semana/mês/trimestre: sete colunas com loja + horário não cabem em
+  // retrato sem cortar o nome. As cores dos blocos precisam do print-color-adjust, senão
+  // o navegador imprime tudo branco.
+  const paisagem = _visSupPeriodo !== 'diaria';
+  const css = `<style>
+    *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    ${paisagem ? '@page{size:A4 landscape;margin:1cm}' : ''}
+    table.cal{table-layout:fixed;margin-bottom:8px}
+    table.cal thead th{text-align:center!important;font-size:8pt;padding:5px 2px;background:#f8f5ec}
+    table.cal td.cd{border:1px solid #e5e7eb;vertical-align:top;padding:3px;height:${_visSupPeriodo === 'semanal' || _visSupPeriodo === 'diaria' ? '90px' : '62px'}}
+    table.cal td.fora{background:#fafafa}
+    table.cal td.fora .dn{color:#d1d5db}
+    table.cal td.hoje{outline:2px solid ${window.GN_PDF_OURO};outline-offset:-2px}
+    .cal-dia td.cd{height:auto}
+    .dn{font-size:9pt;font-weight:800;margin-bottom:2px}
+    .vb{color:#fff;border-radius:4px;padding:2px 4px;margin-top:2px;font-size:7pt;line-height:1.25;word-break:break-word}
+    .vb b{display:block;font-size:7.5pt}
+    .vh{display:block;font-variant-numeric:tabular-nums;font-weight:600}
+    .vn{display:block;font-size:6.3pt;opacity:.92;margin-top:1px}
+    .vb-rem{background:#4f46e5}
+    .vb-plan{background:#fff;color:#92400e;border:1px dashed;font-weight:700}
+    .cal-dia .vb{font-size:9pt}.cal-dia .vb b{font-size:10pt}.cal-dia .vn{font-size:8pt}
+    .mes{page-break-inside:avoid;break-inside:avoid;margin-bottom:10px}
+    .mes-tit{margin-top:6px}
+    h2.sec{break-after:avoid;page-break-after:avoid}
+    table.det-tab thead{display:table-header-group}
+    table.det-tab tr{break-inside:avoid}
+    .leg{font-size:7.5pt;color:#888;margin:2px 0 14px}
+    table.det-tab{font-size:8.5pt}
+    table.det-tab td{padding:5px 8px;border-bottom:1px solid #eee}
+    table.det-tab thead th{text-align:left!important}
+    table.det-tab td.num{font-variant-numeric:tabular-nums;white-space:nowrap}
+    .pt{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;vertical-align:middle}
+    .obs{color:#888;font-size:8pt}
+    .vazio{text-align:center;color:#888;padding:20px}
+  </style>`;
+
+  const fmtBR = s => s.split('-').reverse().join('/');
+  return {
+    titulo: `Visitas — ${_visSupSelecionado}`,
+    tituloDoc: `Visitas ${_visSupSelecionado} — ${_visSupTitulo(deISO, ateISO, _visSupPeriodo)}`,
+    subtitulo: `${_visSupTitulo(deISO, ateISO, _visSupPeriodo)} · ${fmtBR(deISO)} a ${fmtBR(ateISO)} · gerado em ${window.gnPdfAgora()}`,
+    kpis,
+    html: css + calendario + legenda + tabela,
+    rodape: `GN Operações · Relatório de Visitas — ${_visSupSelecionado}`,
+  };
+}
+
 function gerarPDFVisitasSup() {
-  const r = _buildTextoVisitasSup();
+  const r = _visSupPdfHtml();
   if (!r) return;
-  gerarPDF(r.texto, r.titulo);
+  window.gnRelatorioPDF(r);
 }
 
 // Botão "📲 WhatsApp" — antes chamava enviarPDFVisitasSupWpp() (que gera e compartilha um
