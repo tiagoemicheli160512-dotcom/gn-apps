@@ -2564,7 +2564,7 @@ async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'mesAnt:comissoes', []),
       // Funcionário extra sai da despesa do Caixa; a data está no fechamento, não na despesa,
       // por isso vem aninhada a partir dele.
-      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?loja=eq.${encodeURIComponent(loja)}&data=gte.${iniISO}&data=lte.${fimISO}&select=data,gn_caixa_despesa(categoria,valor)`, H, 'mesAnt:extra', []),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?loja=eq.${encodeURIComponent(loja)}&data=gte.${iniISO}&data=lte.${fimISO}&select=data,gn_caixa_despesa(categoria,valor,nome,justificativa)`, H, 'mesAnt:extra', []),
     ]);
     const somaVenda = rows => (rows || []).reduce((s, r) => s + (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0), 0);
     const faturamento = somaVenda(vendaRows);
@@ -2599,7 +2599,10 @@ async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
     (caixaRows || []).forEach(fech => {
       const desps = Array.isArray(fech.gn_caixa_despesa) ? fech.gn_caixa_despesa : (fech.gn_caixa_despesa ? [fech.gn_caixa_despesa] : []);
       desps.forEach(d => {
-        if ((d && d.categoria) !== 'funcionario_extra') return;
+        // Mesma regra da aba 👷 Extra (ver _extraEhExtra): a Guarulhos lança extra como
+        // "Outros", e duas telas da mesma casa contando diferente é pior que as duas
+        // contando pouco. O nome e a justificativa vêm na consulta só pra isto.
+        if (!_extraEhExtra(d)) return;
         extraValor += parseFloat(d.valor) || 0; extraQtd++;
       });
     });
@@ -13030,6 +13033,26 @@ async function enviarPDFBancoWpp() {
 //
 // Maglia fica fora: a regra do CLAUDE.md é que ela só entra quando o pedido cita o nome, e
 // este não citou. Ela também nunca lançou extra nenhum.
+// A LOJA PODE LANÇAR O EXTRA NA CATEGORIA ERRADA, e uma lança. MEDIDO desde 01/10: a
+// Guarulhos põe quase todo extra em "outros", com o nome "EXTRA" ou "dobra fulano" — 31
+// lançamentos, R$ 4.300. Lendo só `categoria=funcionario_extra` ela aparecia em ÚLTIMO na
+// rede (R$ 500) quando é a PRIMEIRA (R$ 4.800), à frente da Campo Grande (R$ 4.668). Campo
+// Grande tem 2 lançamentos assim (R$ 200) e a Pedreira 1 (R$ 100).
+//
+// Conferido nos DOIS sentidos antes de alargar, porque filtro largo demais mente igual:
+//   - o que a regra PEGA dentro de "outros" é só extra: "EXTRA", "extra jonatan",
+//     "dobra daniella", "Dobra gerência", "dobra folga gerente", "Dobra chapeiro Mauro" —
+//     34 linhas, nenhum falso positivo;
+//   - o que ela DEIXA PASSAR em "outros" não é extra: mercado, consumação de músicos e
+//     banda, limpeza de vidros, segurança, filmagem de marketing, premiação, conserto.
+//
+// A regra em si mora em gn-lojas-config.js (gnDespesaEhExtra), porque o app Caixa usa a
+// MESMA pra avisar, na hora do lançamento, que a categoria está errada. Duas cópias viram
+// duas regras, e aí o aviso do Caixa e a conta do Painel discordam sobre o mesmo dinheiro.
+//
+// Declaração de função (não const) de propósito: o card "Desempenho do mês anterior" usa
+// isto e vive bem antes daqui no arquivo. As duas telas têm que contar igual.
+function _extraEhExtra(d) { return !!(window.gnDespesaEhExtra && window.gnDespesaEhExtra(d)); }
 const LOJA_FORA_EXTRA_GERENCIA = 'MAGLIA';
 // Acima de quantas vezes a média da rede (em % do faturamento) a loja vira aviso. Com 2, em
 // Out/26 só a Campo Grande entra — o alerta aponta um caso, não meia rede.
@@ -13067,14 +13090,19 @@ async function _loadExtraGerencia() {
   _extraGerLoaded = false; _extraGerData = null;
   const r = _monthRange(_extraGerOff);
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
-  // !inner + filtro na tabela aninhada: só volta fechamento que TEM extra, e dele só a
-  // despesa de extra. Sem isso viriam as 1.119 despesas do mês inteiro pra usar 206.
-  // A data mora no fechamento, não na despesa — por isso a consulta parte dele.
+  // !inner + filtro na tabela aninhada: só volta fechamento que TEM despesa das categorias
+  // pedidas, e dele só essas despesas. A data mora no fechamento, não na despesa — por isso
+  // a consulta parte dele.
+  //
+  // "outros" entra aqui porque é onde a Guarulhos lança o extra (ver _extraEhExtra); quem
+  // separa o que é extra do que é mercado é a regra, no laço abaixo, não a consulta. Custa
+  // as ~409 linhas de "outros" do mês em cima das ~247 de extra — o preço de não ler uma
+  // loja inteira errado.
   const [fechRows, fatRows] = await Promise.all([
     window.gnFetchJson(
       `${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${r.from}&data=lte.${r.to}` +
       `&select=loja,data,gn_caixa_despesa!inner(categoria,valor,nome,justificativa,foto)` +
-      `&gn_caixa_despesa.categoria=eq.funcionario_extra&order=data.asc`,
+      `&gn_caixa_despesa.categoria=in.(funcionario_extra,outros)&order=data.asc`,
       H, 'extraGerencia', null),
     window.gnFetchJson(
       `${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${r.from}&data_operacao=lte.${r.to}` +
@@ -13092,6 +13120,9 @@ async function _loadExtraGerencia() {
   lojas.forEach(k => { porLoja[k] = {
     k, total: 0, qtd: 0, fat: 0, pct: null, dias: 0,
     semNome: 0, semJust: 0, semFoto: 0, pessoas: [], repetidos: [], lancamentos: [],
+    // Quanto do extra desta loja veio lançado na categoria errada. Fica visível na tela e
+    // no relatório: o número mudou, e quem lê tem que saber de onde veio.
+    foraCat: 0, foraCatTotal: 0,
   }; });
 
   (fatRows || []).forEach(row => {
@@ -13105,15 +13136,17 @@ async function _loadExtraGerencia() {
     const desps = Array.isArray(fech.gn_caixa_despesa) ? fech.gn_caixa_despesa
                 : (fech.gn_caixa_despesa ? [fech.gn_caixa_despesa] : []);
     desps.forEach(d => {
-      if (!d || d.categoria !== 'funcionario_extra') return;
+      if (!_extraEhExtra(d)) return;
       const valor = parseFloat(d.valor) || 0;
       const nome = (d.nome || '').trim();
       const just = (d.justificativa || '').trim();
+      const foraCat = d.categoria !== 'funcionario_extra';
       c.total += valor; c.qtd++;
       if (!nome) c.semNome++;
       if (just.length < EXTRA_JUSTIFICATIVA_MIN) c.semJust++;
       if (!d.foto) c.semFoto++;
-      c.lancamentos.push({ data: fech.data, nome, valor, just, foto: d.foto || null });
+      if (foraCat) { c.foraCat++; c.foraCatTotal += valor; }
+      c.lancamentos.push({ data: fech.data, nome, valor, just, foto: d.foto || null, foraCat });
     });
   });
 
@@ -13186,6 +13219,9 @@ function _buildExtraPanel() {
   const acima    = pctRede ? comExtra.filter(k => _extraGerStatus(porLoja[k], pctRede) === 'acima') : [];
   const repetem  = comExtra.filter(k => porLoja[k].repetidos.length);
   const qtdRepet = repetem.reduce((t, k) => t + porLoja[k].repetidos.length, 0);
+  const foraCatL = comExtra.filter(k => porLoja[k].foraCat);
+  const foraCatN = foraCatL.reduce((t, k) => t + porLoja[k].foraCat, 0);
+  const foraCatV = foraCatL.reduce((t, k) => t + porLoja[k].foraCatTotal, 0);
 
   const cell = (rotulo, valor, cor, nota) => `<div style="flex:1;min-width:92px">
     <div style="font-size:9px;font-weight:800;letter-spacing:.8px;text-transform:uppercase;color:var(--t4)">${rotulo}</div>
@@ -13212,6 +13248,10 @@ function _buildExtraPanel() {
     </div>`;
   const AMBAR = { fundo: 'rgba(245,158,11,.10)', borda: 'rgba(245,158,11,.3)' };
   const avisosHtml =
+    (foraCatN ? bloco('var(--txt-amber)', AMBAR.fundo, AMBAR.borda,
+        `⚠ ${_fmtBRL(foraCatV)} de extra veio lançado como "Outros"`,
+        foraCatL.map(k => `${LOJA_DISPLAY[k] || k} <b style="color:var(--txt-amber)">${_fmtBRL(porLoja[k].foraCatTotal)}</b> <span style="color:var(--t4)">(${porLoja[k].foraCat} de ${porLoja[k].qtd})</span>`).join(' · '),
+        `Esta tela já soma esses ${foraCatN} lançamento${foraCatN === 1 ? '' : 's'} — eles estão nos valores acima. A categoria certa no Caixa é <b>Funcionário Extra</b>; lançado em "Outros", o gasto some do controle de quem olha por categoria.`) : '') +
     (acima.length ? bloco('var(--txt-red)', 'rgba(239,68,68,.08)', 'rgba(239,68,68,.25)',
         `⚠ ${acima.length} loja${acima.length === 1 ? '' : 's'} gasta${acima.length === 1 ? '' : 'm'} mais que o dobro da média da rede`,
         acima.map(k => `${LOJA_DISPLAY[k] || k} <b style="color:var(--txt-red)">${_extraPct(porLoja[k].pct)}</b> <span style="color:var(--t4)">(${_fmtBRL(porLoja[k].total)} sobre ${_fmtBRLs(porLoja[k].fat)})</span>`).join(' · '),
@@ -13253,7 +13293,7 @@ function _buildExtraPanel() {
           <div style="flex:1;min-width:0">
             <div style="display:flex;gap:8px;align-items:baseline">
               <span style="font-size:10.5px;font-weight:800;color:var(--t2);min-width:38px">${_carnesDM(l.data)}</span>
-              <span style="font-size:10.5px;color:${l.nome ? 'var(--t2)' : 'var(--txt-amber)'};flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${l.nome ? esc(l.nome) : 'sem nome'}</span>
+              <span style="font-size:10.5px;color:${l.nome ? 'var(--t2)' : 'var(--txt-amber)'};flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${l.nome ? esc(l.nome) : 'sem nome'}${l.foraCat ? ` <span title="Lançado no Caixa como Outros, não como Funcionário Extra" style="font-size:8.5px;font-weight:800;color:var(--txt-amber);border:1px solid rgba(245,158,11,.4);border-radius:4px;padding:0 3px">OUTROS</span>` : ''}</span>
               <span style="font-size:11px;font-weight:800;color:var(--t1);font-variant-numeric:tabular-nums">${_fmtBRL(l.valor)}</span>
             </div>
             <div style="font-size:9.5px;color:${l.just.length >= EXTRA_JUSTIFICATIVA_MIN ? 'var(--t3)' : 'var(--txt-amber)'};line-height:1.4;margin-top:1px">${l.just ? esc(l.just) : 'sem justificativa'}</div>
@@ -13265,7 +13305,8 @@ function _buildExtraPanel() {
           <span style="font-variant-numeric:tabular-nums;min-width:74px;text-align:right;font-weight:800;color:var(--t1)">${_fmtBRL(p.total)}</span>
         </div>`).join('');
     const btn = `<button onclick="_extraGerToggle('${k}')" style="margin-top:7px;width:100%;background:var(--fill-sutil2);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:5px 10px;color:var(--t2);font-size:10.5px;font-weight:700;cursor:pointer;font-family:inherit">${porDia ? '▲ Agrupar por pessoa' : '▼ Ver os ' + c.qtd + ' lançamento' + (c.qtd === 1 ? '' : 's') + ' por dia'}</button>`;
-    const avisoCard = [c.semNome ? `${c.semNome} sem nome` : '', c.semJust ? `${c.semJust} sem justificativa` : '',
+    const avisoCard = [c.foraCat ? `${_fmtBRL(c.foraCatTotal)} lançado como "Outros"` : '',
+                       c.semNome ? `${c.semNome} sem nome` : '', c.semJust ? `${c.semJust} sem justificativa` : '',
                        c.repetidos.length ? `${c.repetidos.length} nome${c.repetidos.length === 1 ? '' : 's'} repetindo ${EXTRA_REPETE_VEZES}× ou mais` : '']
       .filter(Boolean).join(' · ');
     return `<div style="background:var(--s1);border:1px solid var(--b1);border-left:3px solid ${cor};border-radius:11px;padding:11px 12px;margin-bottom:8px">
@@ -13305,6 +13346,13 @@ function _extraRelatorioTexto(wpp) {
   let msg = `${wpp ? '👷 ' : ''}${b('FUNCIONÁRIO EXTRA')}\n${range.label}${range.isCurrent ? ' (mês em andamento)' : ''}\n`;
   msg += `\nPago: ${_fmtBRL(totRede)} em ${qtdRede} lançamento${qtdRede === 1 ? '' : 's'}\n`;
   msg += `Da venda da rede: ${_extraPct(pctRede)}\n`;
+  const foraCatL = comExtra.filter(k => porLoja[k].foraCat);
+  if (foraCatL.length) {
+    const n = foraCatL.reduce((t, k) => t + porLoja[k].foraCat, 0);
+    const v = foraCatL.reduce((t, k) => t + porLoja[k].foraCatTotal, 0);
+    msg += `\n⚠ ${_fmtBRL(v)} em ${n} lançamento${n === 1 ? '' : 's'} veio lançado como "Outros" no Caixa, não como Funcionário Extra `;
+    msg += `(${foraCatL.map(k => (LOJA_DISPLAY[k] || k) + ' ' + _fmtBRL(porLoja[k].foraCatTotal)).join(', ')}). Já está somado acima.\n`;
+  }
   if (!comExtra.length) { msg += `\nNenhum extra pago no mês.\n`; return { msg, titulo: 'Funcionário extra · ' + range.label }; }
 
   comExtra.forEach(k => {
@@ -13312,13 +13360,14 @@ function _extraRelatorioTexto(wpp) {
     const fora = pctRede && c.pct !== null && c.pct > pctRede * EXTRA_ALERTA_FATOR;
     msg += `\n${wpp ? '🏪 ' : ''}${b(LOJA_DISPLAY[k] || k)} — ${_fmtBRL(c.total)} · ${_extraPct(c.pct)} da venda${fora ? ' ⚠ acima do dobro da média' : ''}\n`;
     msg += `  ${c.qtd} lançamento${c.qtd === 1 ? '' : 's'} em ${c.dias} dia${c.dias === 1 ? '' : 's'}`;
-    msg += (c.semNome ? ` · ${c.semNome} sem nome` : '') + (c.semJust ? ` · ${c.semJust} sem justificativa` : '') + '\n';
+    msg += (c.foraCat ? ` · ${c.foraCat} como "Outros"` : '')
+         + (c.semNome ? ` · ${c.semNome} sem nome` : '') + (c.semJust ? ` · ${c.semJust} sem justificativa` : '') + '\n';
     c.repetidos.forEach(p => { msg += `  ⚠ "${p.nome}" se repete ${p.vezes}× no mês (${_fmtBRL(p.total)})\n`; });
     if (wpp) {
       c.pessoas.forEach(p => { msg += `  ${p.semNome ? 'sem nome' : p.nome}: ${p.vezes}× ${_fmtBRL(p.total)}\n`; });
     } else {
       c.lancamentos.forEach(l => {
-        msg += `  ${_carnesDM(l.data)} · ${l.nome || 'sem nome'} · ${_fmtBRL(l.valor)} · ${l.just || 'sem justificativa'}\n`;
+        msg += `  ${_carnesDM(l.data)} · ${l.nome || 'sem nome'}${l.foraCat ? ' [Outros]' : ''} · ${_fmtBRL(l.valor)} · ${l.just || 'sem justificativa'}\n`;
       });
     }
   });

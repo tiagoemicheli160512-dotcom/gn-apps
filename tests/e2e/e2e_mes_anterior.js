@@ -130,6 +130,27 @@ const dia = (v) => ({ venda_salao: v, venda_delivery: 0 });
     r.dados.extraValor === 1500 && r.dados.extraQtd === 2);
   check('e mostra no card', /Funcionário extra/.test(r.html) && /1\.500,00/.test(r.html));
 
+  // O extra que a loja lançou na categoria errada. MEDIDO desde 01/10: a Guarulhos põe quase
+  // todo extra em "Outros", escrevendo "EXTRA" ou "dobra fulano" — 31 lançamentos, R$ 4.300.
+  // Este card e a aba 👷 Extra do Painel falam do MESMO dinheiro, então contam pela mesma
+  // regra (gnDespesaEhExtra, em gn-lojas-config.js): duas telas da mesma casa divergindo
+  // sobre o gasto da mesma loja é pior do que as duas contarem pouco.
+  caixa = [
+    { data: '2026-09-10', gn_caixa_despesa: [
+        { categoria: 'funcionario_extra', valor: 100, nome: 'Talita', justificativa: '' },
+        { categoria: 'outros', valor: 300, nome: 'EXTRA', justificativa: '' },
+        { categoria: 'outros', valor: 200, nome: 'dobra daniella', justificativa: '' },
+        { categoria: 'outros', valor: 150, nome: '', justificativa: 'Dobra folga do Fernando' },
+        { categoria: 'outros', valor: 777, nome: 'mercado', justificativa: '' },
+        { categoria: 'outros', valor: 888, nome: 'CONSUMAÇÃO MUSICOS', justificativa: '' },
+        { categoria: 'outros', valor: 444, nome: 'extrato bancario', justificativa: '' } ] },
+  ];
+  r = await abrir();
+  check('pega o extra lançado como "Outros" (R$ 750, não R$ 100)',
+    r.dados.extraValor === 750 && r.dados.extraQtd === 4, r.dados.extraValor + '/' + r.dados.extraQtd);
+  check('e o "Outros" que não é extra continua fora (mercado, músicos e extrato: R$ 2.109)',
+    r.dados.extraValor === 750 && !/2\.859|1\.527|1\.194/.test(r.html), r.dados.extraValor);
+
   // ── Relatório ────────────────────────────────────────────────────────────────────────
   const texto = await page.evaluate(() => {
     let capturado = null;
@@ -143,7 +164,10 @@ const dia = (v) => ({ venda_salao: v, venda_delivery: 0 });
   check('o relatório traz a loja e o mês', /BOULEVARD/.test(texto) && /Setembro/.test(texto));
   check('traz os dois meses e a variação', /Agosto/.test(texto) && /300\.000,00/.test(texto));
   check('traz as ocorrências', /Atestados/.test(texto) && /Faltas/.test(texto) && /Suspensões/.test(texto) && /Advertências/.test(texto));
-  check('e traz o funcionário extra com valor', /Funcionário extra/.test(texto) && /1\.500,00/.test(texto));
+  // R$ 750, não R$ 1.500: o relatório sai do mês que acabou de ser carregado, que é o do
+  // extra lançado como "Outros". Serve de prova a mais — o número corrigido chega ao
+  // relatório, não para na tela.
+  check('e traz o funcionário extra com valor', /Funcionário extra/.test(texto) && /750,00/.test(texto), texto.slice(0, 200));
 
   // ── O card dura o mês inteiro ────────────────────────────────────────────────────────
   // Antes ele sumia depois do dia 3. Com comparativo, ocorrências e relatório dentro, virou
