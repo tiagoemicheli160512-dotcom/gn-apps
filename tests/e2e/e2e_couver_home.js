@@ -22,6 +22,20 @@ const BANGU = [
   ag('2026-11-07', 800, 0), ag('2026-11-08', 800, 0), ag('2026-11-14', 800, 0), ag('2026-11-15', 800, 0),
   ag('2026-11-21', 700, 0), ag('2026-11-22', 800, 0), ag('2026-11-28', 800, 0), ag('2026-11-29', 600, 0),
 ];
+// Outras lojas no mesmo período, pra POSIÇÃO. Valores da rede em 31/10–01/11 (banco):
+// Nova América +1.510 (1º), Bangu +665 (2º), Caxias −177. São Gonçalo SEM couvert em 01/11:
+// o saldo não fecha, então fica fora do ranking (não vira o último colocado).
+// Norte Shopping arrecada MAIS couvert que o Bangu (2.500 × 2.065) mas paga mais cachê:
+// saldo +100. Pelo couvert ela passaria o Bangu; pelo saldo, fica atrás — é isso que
+// separa "ordem pelo saldo" (pedido) de "ordem pelo couvert".
+const OUTRAS = [
+  ag('2026-10-31', 1200, 1300, { loja: 'norte_shopping' }), ag('2026-11-01', 1200, 1200, { loja: 'norte_shopping' }),
+  ag('2026-10-31', 1100, 1710, { loja: 'nova_america' }), ag('2026-11-01', 1100, 2000, { loja: 'nova_america' }),
+  ag('2026-10-31', 700, 823, { loja: 'caxias' }), ag('2026-11-01', 800, 500, { loja: 'caxias' }),
+  ag('2026-10-31', 600, 900, { loja: 'sao_goncalo' }), ag('2026-11-01', 600, 0, { loja: 'sao_goncalo' }),
+  ag('2026-11-07', 900, 0, { loja: 'nova_america' }),
+];
+const REDE = BANGU.concat(OUTRAS);
 
 (async () => {
   const browser = await chromium.launch(CAMINHOS.CHROMIUM ? { executablePath: CAMINHOS.CHROMIUM } : {});
@@ -60,7 +74,17 @@ const BANGU = [
   check('mês até ontem: só 01/11 entra — saldo +R$ 530 (1.330 − 800)', /Novembro até ontem/i.test(r.blocos[1]) && /R\$\s?530,00/.test(r.blocos[1]) && /Cachê R\$\s?800,00/.test(r.blocos[1]), r.blocos[1]);
   check('o cachê que ainda vem aparece à parte: R$ 6.100 em 4 fins de semana', /Ainda vem R\$\s?6\.100,00 de cachê contratado em 4 fins de semana/.test(r.txt), r.txt);
   check('saldo positivo em verde', /txt-green/.test(r.html));
-  check('uma consulta só, só da loja, desde a segunda do último fim de semana', r.urls.length === 1 && /loja=eq\.bangu/.test(r.urls[0]) && /data=gte\.2026-10-26/.test(r.urls[0]), JSON.stringify(r.urls));
+  check('uma consulta só, da rede (a posição precisa das outras), desde a segunda do último fim de semana',
+    r.urls.length === 1 && !/loja=eq/.test(r.urls[0]) && /data=gte\.2026-10-26/.test(r.urls[0]), JSON.stringify(r.urls));
+
+  // ── Posição na rede (pelo saldo em R$) ───────────────────────────────────────────────
+  const rr = await montar(a.page, REDE);
+  check('posição no fim de semana pelo SALDO: Bangu 2º de 4 (pelo couvert seria 3º, atrás da Norte Shopping)', /2º de 4 na rede/.test(rr.blocos[0]), rr.blocos[0]);
+  check('posição no mês até ontem: Bangu 2º de 4 (só 01/11: NA +900, Bangu +530, NS 0, Caxias −300)', /2º de 4 na rede/.test(rr.blocos[1]), rr.blocos[1]);
+  check('loja sem couvert lançado (São Gonçalo) fica FORA do ranking, não em último', !/de 5/.test(rr.txt), rr.txt);
+  check('nenhum nome de outra loja no card', !/Nova Am|Caxias|São Gon|Norte/.test(rr.html));
+  const sg = await montar(a.page, REDE, { loja: 'SÃO GONÇALO' });
+  check('São Gonçalo vê "sem posição — o saldo não fechou" no fim de semana', /sem posição — o saldo não fechou/.test(sg.blocos[0]), sg.blocos[0]);
 
   // ── O MESMO saldo que o Painel calcula pro mesmo fim de semana ──────────────────────
   const painel = await a.page.evaluate(async (rows) => {
@@ -73,6 +97,38 @@ const BANGU = [
     return s ? { saldo: s.saldo, couver: s.couver, cache: s.cacheDevido, status: s.status } : null;
   }, BANGU);
   check('o Painel dá o mesmo saldo pro fim de semana (+665, positivo)', painel && painel.saldo === 665 && painel.couver === 2065 && painel.cache === 1400 && painel.status === 'positivo', JSON.stringify(painel));
+
+  // Painel: ranking e mês até ontem (pedido "fazer a mesma coisa no Painel").
+  const pn = await a.page.evaluate(async (rows) => {
+    const orig = window.gnFetchJson;
+    window.gnFetchJson = async (url) => /gn_trios_agenda/.test(url) ? rows : [];
+    const r0 = window.renderDashboard; window.renderDashboard = () => {};
+    const out = {};
+    try {
+      _triosPer = 'sem'; _triosGerOff = 0; await _loadTriosGerencia();
+      const h = document.createElement('div'); h.innerHTML = _buildTriosPanel();
+      out.rankSem = Array.from(h.querySelectorAll('.trios-rank-linha')).map(x => x.textContent.replace(/\s+/g, ' ').trim());
+      _triosPer = 'mes'; _triosGerOff = 0; await _loadTriosGerencia();
+      const m = _triosGerData.porSemana['BANGU|2026-11-01'];
+      out.mes = m ? { cache: m.cacheDevido, couver: m.couver, saldo: m.saldo, status: m.status } : null;
+      out.futuro = _triosGerData.futuro.BANGU ? { cache: _triosGerData.futuro.BANGU.cache, n: _triosGerData.futuro.BANGU.nFds } : null;
+      const h2 = document.createElement('div'); h2.innerHTML = _buildTriosPanel();
+      out.rankMes = Array.from(h2.querySelectorAll('.trios-rank-linha')).map(x => x.textContent.replace(/\s+/g, ' ').trim());
+      out.txtMes = h2.textContent.replace(/\s+/g, ' ');
+    } finally { window.gnFetchJson = orig; window.renderDashboard = r0; _triosPer = 'sem'; }
+    return out;
+  }, REDE);
+  check('Painel: ranking do fim de semana do melhor pro pior saldo, sem quem não fecha',
+    pn.rankSem.length === 4 && /^1º Nova América/.test(pn.rankSem[0]) && /^2º Bangu/.test(pn.rankSem[1]) && /^3º Norte Shopping/.test(pn.rankSem[2]) && /^4º Caxias/.test(pn.rankSem[3]) && /−R\$\s?177/.test(pn.rankSem[3]), JSON.stringify(pn.rankSem));
+  check('Painel: o mês conta só até ontem (Bangu: cachê 800, não 6.900; saldo +530)',
+    pn.mes && pn.mes.cache === 800 && pn.mes.saldo === 530 && pn.mes.status === 'positivo', JSON.stringify(pn.mes));
+  check('Painel: o cachê que ainda vem fica à parte (Bangu R$ 6.100 em 4 fins de semana)', pn.futuro && pn.futuro.cache === 6100 && pn.futuro.n === 4, JSON.stringify(pn.futuro));
+  check('Painel: o mês mostra o cachê futuro da rede à parte', /Ainda vem R\$\s?7\.000,00 de cachê contratado/.test(pn.txtMes), pn.txtMes.slice(0, 600));
+  check('Painel e card: a mesma posição no mês (Bangu 2º)', /^2º Bangu/.test(pn.rankMes[1] || ''), JSON.stringify(pn.rankMes));
+
+  // Painel: cancelamento e nota sem 10% sempre em vermelho (era laranja #E8580A).
+  const fontes = await a.page.evaluate(() => [_buildCancelPanel, _buildSem10Panel, _cancelRankingHtml, _sem10RankingHtml].map(f => f.toString()));
+  check('Painel: abas de cancelamento e nota sem 10% sem o laranja, em vermelho', fontes.every(f => !/E8580A/i.test(f)) && fontes.every(f => /txt-red/.test(f)));
 
   // ── Fim de semana sem couvert lançado: não inventa saldo ─────────────────────────────
   const sem = BANGU.map(x => x.data === '2026-11-01' ? ag('2026-11-01', 800, 0) : x);
@@ -97,7 +153,7 @@ const BANGU = [
   const garcom = await montar(a.page, BANGU, { cargo: 'garcom' });
   check('cargo fora da plateia não vê', garcom.html === '');
   const mestre = await montar(a.page, BANGU.map(x => Object.assign({}, x, { loja: 'pedreira' })), { loja: 'GERAL', cargo: 'mestre', isMaster: true, masterLoja: 'PEDREIRA' });
-  check('mestre olhando a Pedreira vê a agenda da Pedreira', /loja=eq\.pedreira/.test(mestre.urls[0] || '') && /665,00/.test(mestre.txt), mestre.txt);
+  check('mestre olhando a Pedreira vê os números da Pedreira', /665,00/.test(mestre.txt) && /1º de 1/.test(mestre.txt), mestre.txt);
   const falha = await montar(a.page, BANGU, { falhar: true });
   check('consulta que falha deixa recado, não some calado', /Não deu pra carregar/.test(falha.txt), falha.txt);
   check('nenhum erro de JavaScript', a.erros.length === 0, a.erros.join(' | '));
