@@ -124,6 +124,22 @@ const check = (n, c) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ? ok++ :
     /trilha do forr/i.test(String(modal.valorSelecionado)));
   check('e não cai em "+ Outro (digitar nome)"', modal.outroSelecionado === false);
 
+  // ── Novembro/2026: 6 apresentações entraram com cachê R$ 0 ────────────────────────────
+  // Três grafias que a normalização não alcançava: horário/anotação entre parênteses, espaço
+  // antes do % e "Trio" repetido — mais "Íris Pontal Trio" sem o "In". Nomes reais da agenda.
+  const novembro = await page.evaluate(() => [
+    ['Trio 100% Pé Serra (18 às 22 horas)', 700], ['Trio Rony do Forro (18 às 22 horas)', 600],
+    ['TRIO LUZIAH (Vai tocar pelo couvert artístico)', 800], ['Trio 100 % Pé Serra', 700],
+    ['Íris Pontal Trio', 800], ['Trio Amigos do Forró (18 às 22 horas)', 700], ['Trio Trio 100% Pé Serra', 700],
+  ].map(([n, esperado]) => ({ n, esperado, achou: _triosCacheFor(n) })));
+  novembro.forEach(x => check(`"${x.n}" acha R$ ${x.esperado}`, x.achou === x.esperado));
+  // A lista mora em gn-lojas-config.js desde que o Painel também edita a agenda: os dois apps
+  // têm que ver o MESMO objeto, não uma cópia que pode divergir.
+  const mesmaLista = await page.evaluate(() => TRIOS_CACHES === window.GN_TRIOS_CACHES && _triosCacheFor('Trio Remelexo') === window.gnTriosCacheFor('Trio Remelexo'));
+  check('o Estoque usa a lista compartilhada (gn-lojas-config.js), não uma cópia', mesmaLista);
+  const foraDaLista = await page.evaluate(() => _triosCacheFor('Banda que não existe (19h)'));
+  check('banda fora da lista continua dando 0 (e não o valor de outra)', foraDaLista === 0);
+
   await browser.close();
   console.log(`\n${ok} OK, ${falhou} falhou`);
   process.exit(falhou ? 1 : 0);
