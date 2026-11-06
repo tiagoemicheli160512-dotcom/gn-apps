@@ -260,6 +260,17 @@ const HOJE = '2026-11-05';
   // JBS/Nogmix
   const opJbs = await page.evaluate(() => { provisoesEntrega = [Object.assign({}, provisoesEntrega[0], { id: 'j', fornecedor: 'NOGMIX - JBS' })]; abrirTrocaFornecedorEntrega('j'); const m = document.getElementById('modalTrocaForn'); const o = Array.from(m.querySelectorAll('button[data-forn]')).map(b => b.dataset.forn); m.remove(); return o; });
   check('carnes: NOGMIX - JBS pode virar JBS, NOGMIX ou NOGMIX MATHEUS', JSON.stringify(opJbs) === JSON.stringify(['JBS', 'NOGMIX', 'NOGMIX MATHEUS']), JSON.stringify(opJbs));
+  // Sertanorte/Brasil Típico (06/11/2026): manteiga de garrafa e similares.
+  const opSerta = await page.evaluate(() => { provisoesEntrega = [Object.assign({}, provisoesEntrega[0], { id: 's', fornecedor: 'SERTANORTE', fornecedor_entregue: null })]; abrirTrocaFornecedorEntrega('s'); const m = document.getElementById('modalTrocaForn'); const o = Array.from(m.querySelectorAll('button[data-forn]')).map(b => b.dataset.forn); m.remove(); return o; });
+  check('Sertanorte pode virar Brasil Típico', JSON.stringify(opSerta) === JSON.stringify(['BRASIL TÍPICO']), JSON.stringify(opSerta));
+  check('e o nome vem reconhecido com caixa/espaço diferentes ("sertanorte ", "Brasil Típico")',
+    await page.evaluate(() => !!_epGrupoSubst('sertanorte ') && _epGrupoSubst('Brasil Típico') === _epGrupoSubst('SERTANORTE')));
+  check('Sertanorte não troca com carne nem descartável', await page.evaluate(() => !_epGrupoSubst('SERTANORTE').fornecedores.includes('JBS') && !_epGrupoSubst('SERTANORTE').fornecedores.includes('DMIC')));
+  await page.evaluate(async () => { await _epAplicarTrocaForn('s', 'BRASIL TÍPICO'); });
+  g = await gravado();
+  check('a troca grava "entregue por BRASIL TÍPICO" mantendo o pedido no SERTANORTE',
+    g.length && g[g.length - 1].corpo.fornecedor_entregue === 'BRASIL TÍPICO' &&
+    await page.evaluate(() => _epForn(provisoesEntrega[0]) === 'BRASIL TÍPICO' && /Pedido em SERTANORTE · entregue por BRASIL TÍPICO/.test(_epRessalvaForn(provisoesEntrega[0]))), JSON.stringify(g[g.length - 1]));
   check('fornecedor fora da lista (FRESCATO, PEIXE) não tem troca', await page.evaluate(() => _epGrupoSubst('FRESCATO') === null && _epGrupoSubst('DIFERENCIAL') === null));
   check('nome com espaço/caixa diferente é reconhecido', await page.evaluate(() => !!_epGrupoSubst('  nogmix  -  jbs ')));
 
