@@ -82,7 +82,40 @@ const RAZAO = (TOT_KG / (FAT_CONTOU / 1000)).toFixed(2).replace('.', ',');  // 0
   const txt = r.doc.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ');
 
   // ── 1. É o mesmo formato do relatório de vendas ───────────────────────────────────────
-  check('vira TABELA, não texto corrido', /<table>/.test(r.doc) && /<thead>/.test(r.doc), r.doc.slice(0, 160));
+  check('vira TABELA, não texto corrido', /<table[\s>]/.test(r.doc) && /<thead>/.test(r.doc), r.doc.slice(0, 160));
+
+  // "As colunas estão desalinhadas, nome e número — confunde." O estilo geral do PDF
+  // alinhava o TÍTULO à direita e deixava o número à esquerda. Mede na página renderizada:
+  // a borda direita do título e a do número da mesma coluna têm que coincidir.
+  const alin = await page.evaluate((doc) => {
+    const ifr = document.createElement('iframe'); ifr.style.width = '1000px'; ifr.style.height = '1400px';
+    document.body.appendChild(ifr);
+    ifr.contentDocument.open(); ifr.contentDocument.write(doc.replace(/<script>[\s\S]*?<\/script>/g, '')); ifr.contentDocument.close();
+    const d = ifr.contentDocument;
+    const medir = (tab) => {
+      const ths = Array.from(tab.querySelectorAll('thead th'));
+      const tr = Array.from(tab.querySelectorAll('tbody tr')).find(x => x.children.length === ths.length);
+      if (!tr) return null;
+      return ths.map((th, i) => {
+        const td = tr.children[i];
+        const rTh = d.createRange(); rTh.selectNodeContents(th.firstChild || th);
+        const rTd = d.createRange(); rTd.selectNodeContents(td);
+        const a = rTh.getBoundingClientRect(), b2 = rTd.getBoundingClientRect();
+        const esq = getComputedStyle(th).textAlign === 'left';
+        return Math.round(esq ? Math.abs(a.left - b2.left) : Math.abs(a.right - b2.right));
+      });
+    };
+    const tabs = d.querySelectorAll('table');
+    const res = { t1: medir(tabs[0]), t2: medir(tabs[1]), heads: Array.from(tabs[0].querySelectorAll('thead th')).map(th => th.textContent.replace(/\s+/g, ' ').trim()),
+                  blocos: tabs[1].querySelectorAll('tbody.bloco-loja').length, faixas: Array.from(tabs[1].querySelectorAll('tr.loja')).map(x => x.textContent.trim()) };
+    ifr.remove();
+    return res;
+  }, r.doc);
+  check('tabela por loja: título e número de cada coluna alinhados (≤ 2px)', alin.t1 && alin.t1.every(x => x <= 2), JSON.stringify(alin.t1));
+  // A 1ª coluna do detalhe é recuada de propósito: o corte fica "dentro" da faixa da loja.
+  check('tabela de onde sai cada número: colunas de número alinhadas ao título (≤ 2px)', alin.t2 && alin.t2.slice(1).every(x => x <= 2), JSON.stringify(alin.t2));
+  check('os cortes dizem que é saída ESTIMADA, em kg', alin.heads.filter(h => /saída estimada \(kg\)/.test(h)).length >= 4 && alin.heads.some(h => /^Carne de Sol/.test(h)), JSON.stringify(alin.heads));
+  check('no detalhe, cada loja num bloco separado, com faixa própria', alin.blocos >= 1 && alin.blocos === alin.faixas.length, JSON.stringify(alin));
   check('com o cabeçalho da marca GN e o título em ouro',
     /marca-gn/.test(r.doc) && /<h1>/.test(r.doc) && /Controle de Carnes/.test(txt));
   check('com a faixa de KPIs no topo, igual ao de vendas', /kpi-row/.test(r.doc) && /kpi-val/.test(r.doc));
