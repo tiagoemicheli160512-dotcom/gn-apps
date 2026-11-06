@@ -132,6 +132,8 @@ const FECH = [
   const itq = await montar({ loja: 'ITAQUERA' });
   check('Itaquera em 1º de 4 com 0,00%',
     /1º de 4/.test(itq.txt || '') && /0,00%/.test(itq.txt || ''), itq.txt);
+  check('cancelamento SEMPRE em vermelho, até o 1º lugar (decisão do dono)',
+    /txt-red/.test(itq.html || '') && !/txt-green/.test(itq.html || ''), (itq.html || '').slice(0, 300));
   check('mesmo em 1º com 0%, acusa o caixa fechado em branco',
     /1 caixa fechou sem lançar cancelamento/.test(itq.txt || ''), itq.txt);
   check('e avisa que o percentual está subestimado, em vez de elogiar',

@@ -125,6 +125,9 @@ const OUTRAS = ['Bangu', 'Pedreira', 'Caxias', 'Nova América', 'Maglia', 'Itaqu
   check('sem 10%: a Pedreira, sem nota, fica sem posição (como no Painel)…', /sem posição no ranking/.test(ped.sem10.txt) && !/º de/.test(ped.sem10.txt), ped.sem10.txt);
   check('…e o card cobra o caixa fechado em branco', /1 caixa fechou sem lançar nota sem 10%/.test(ped.sem10.txt), ped.sem10.txt);
   check('sem 10%: caixa assinado "não houve" conta como respondido', /Todos os 2 caixas fechados/.test(cx.sem10.txt), cx.sem10.txt);
+  // "Cancelamento e perda de 10% é sempre negativo, então tem que estar em vermelho sempre."
+  check('sem 10%: SEMPRE vermelho, até o 1º lugar (Caxias)', /txt-red/.test(cx.sem10.html) && !/txt-green|txt-amber\);font-weight:800">1º/.test(cx.sem10.html), cx.sem10.html.slice(0, 300));
+  check('sem 10%: e vermelho também sem posição (Pedreira)', /border-left:3px solid var\(--txt-red\)/.test(ped.sem10.html));
 
   // ── "Sem ver a posição das outras" ───────────────────────────────────────────────────
   const outrasNoHtml = r => OUTRAS.filter(n => n !== r.eu).filter(n => (r.vendas.html + r.sem10.html).includes(n));
