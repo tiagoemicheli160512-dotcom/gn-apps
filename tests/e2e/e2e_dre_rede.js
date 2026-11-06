@@ -43,7 +43,7 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
     Object.keys(_dreFatCache).forEach(k => delete _dreFatCache[k]);  // é const: limpa as chaves
     _dreRedeComp = o.comp || '2026-09';
     _dreRedeFat = {}; _dreRedeAberta = null; _dreRedeMsg = {}; _dreRedeCarregando = false;
-    session = { id: 1, nome: 'Tiago', cargo: 'mestre', loja: 'GERAL', permissoes: { master: true } };
+    session = o.sessao || { id: 1, nome: 'Tiago', cargo: 'mestre', loja: 'GERAL', permissoes: { master: true } };
     _dashTab = 'dre';
     // renderDashboard() desiste quando o painel está escondido, e ele nasce display:none.
     document.getElementById('dash-section').style.display = 'block';
@@ -80,14 +80,14 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
     return { txt: (el.textContent || '').replace(/\s+/g, ' '), html: el.innerHTML };
   });
 
-  const abrirESalvar = (loja, valores) => page.evaluate(async ({ loja, valores }) => {
+  const abrirESalvar = (loja, valores, cred) => page.evaluate(async ({ loja, valores, cred }) => {
     // _dreRedeAbrir é TOGGLE: chamar com a loja já aberta fecha o formulário, os campos somem
     // e o salvamento acha tudo vazio — o que, pelo código, LIMPA o mês. Foi o que fez esta
     // checagem falhar acusando o código.
     _dreRedeAberta = loja;
     renderDashboard();
-    document.getElementById('dre-rede-user').value = 'Tiago';
-    document.getElementById('dre-rede-pass').value = 'x';
+    document.getElementById('dre-rede-user').value = cred === false ? '' : 'Tiago';
+    document.getElementById('dre-rede-pass').value = cred === false ? '' : 'x';
     const id = loja.replace(/\W/g, '_');
     // Os campos nascem PREENCHIDOS com o que já está lançado (é o que permite corrigir um
     // mês). Então "salvar vazio" só existe se eu apagar os campos de verdade — passar {}
@@ -100,7 +100,7 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
     await _dreRedeSalvarLoja(loja);
     await new Promise(r => setTimeout(r, 60));
     return { db: window.__db, txt: document.getElementById('dash-section').textContent.replace(/\s+/g, ' ') };
-  }, { loja, valores });
+  }, { loja, valores, cred });
 
   // ── 1. A tela ────────────────────────────────────────────────────────────────────────
   await preparar({ linhaExiste: false, fat: { BANGU: 400000, CAXIAS: 300000 } });
@@ -149,12 +149,14 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
     /teto: R\$ 124\.000,00/.test((await page.evaluate(() => { _dreRedeAbrir('BANGU'); return document.getElementById('dash-section').textContent.replace(/\s+/g,' '); }))));
 
   // ── 4. Permissão ─────────────────────────────────────────────────────────────────────
-  await preparar({ linhaExiste: false, auth: [], fat: { BANGU: 400000 } });
+  // Quem não é mestre continua precisando de senha em todo lançamento.
+  const SUPERVISORA = { id: 2, nome: 'Rosa', cargo: 'supervisor', loja: 'GERAL', permissoes: {} };
+  await preparar({ linhaExiste: false, auth: [], fat: { BANGU: 400000 }, sessao: SUPERVISORA });
   await render();
   res = await abrirESalvar('BANGU', { cmv_pct: '1' });
   check('senha errada não grava nada', res.db.metodos.length === 0 && /incorret/i.test(res.txt));
 
-  await preparar({ linhaExiste: false, auth: [{ nome: 'Taynara', cargo: 'caixa' }], fat: { BANGU: 400000 } });
+  await preparar({ linhaExiste: false, auth: [{ nome: 'Taynara', cargo: 'caixa' }], fat: { BANGU: 400000 }, sessao: SUPERVISORA });
   await render();
   res = await abrirESalvar('BANGU', { cmv_pct: '1' });
   check('cargo sem permissão não grava, e a tela diz qual é o cargo',
@@ -192,6 +194,43 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
   const conf = await page.evaluate(() => window.__conf);
   check('despesa bem acima do faturamento pergunta antes, e cancelar não grava',
     conf.length === 1 && res.db.metodos.length === 0, JSON.stringify(conf));
+
+  // Lê o lançamento sem estourar quando nada foi gravado (é o que acontece se a regra quebrar).
+  const realDe = (res, k) => (((res.db || {}).all_data || {}).real || {})[k] || {};
+  // ── 7. Mestre logado: senha só pra ALTERAR (06/11/2026) ─────────────────────────────
+  // "Já estou logado como mestre, não acho necessário. Só se for ser feita alguma alteração
+  // no que já está preenchido aí sim pedir a senha pra confirmar a alteração."
+  await preparar({ linhaExiste: false, fat: { BANGU: 400000, CAXIAS: 300000 } });
+  let tela = await render();
+  check('o mestre vê que lançar mês novo não pede senha', /lançar um mês novo não pede senha/.test(tela.txt));
+  const autenticou = () => page.evaluate(() => window.__autenticou || 0);
+  await page.evaluate(() => { window.__autenticou = 0; const f = window.gnFetchJson;
+    window.gnFetchJson = async (u, h, c, fb, i) => { if (c === 'dreRede:auth') window.__autenticou++; return f(u, h, c, fb, i); }; });
+  res = await abrirESalvar('BANGU', { cmv_pct: '27.29', luz: '17454.70' }, false);
+  check('mestre lança mês novo SEM usuário e senha', realDe(res, 'BANGU|2026-09').cmv_pct === 27.29 && /Lançado/.test(res.txt), res.txt.slice(0, 200));
+  check('sem nem consultar a senha no banco', (await autenticou()) === 0);
+  check('e o lançamento fica no nome de quem está logado', realDe(res, 'BANGU|2026-09')._por === 'Tiago');
+  res = await abrirESalvar('CAXIAS', { folha_pct: '24.64' }, false);
+  check('e segue lançando a próxima loja sem senha (antes pedia de novo a cada loja)', !!realDe(res, 'CAXIAS|2026-09').folha_pct);
+
+  const nGrav = (await page.evaluate(() => window.__db.metodos.length));
+  res = await abrirESalvar('BANGU', { cmv_pct: '30', luz: '17454.70' }, false);
+  check('ALTERAR o que já estava lançado pede a senha, e não grava sem ela',
+    /já estava lançado/.test(res.txt) && /senha/.test(res.txt) && res.db.metodos.length === nGrav && realDe(res, 'BANGU|2026-09').cmv_pct === 27.29, res.txt.slice(0, 300));
+  res = await abrirESalvar('BANGU', {}, false);
+  check('limpar um mês lançado também é alteração e pede senha', !!realDe(res, 'BANGU|2026-09').cmv_pct && /senha/.test(res.txt));
+  res = await abrirESalvar('BANGU', { cmv_pct: '30', luz: '17454.70' });
+  check('com usuário e senha, a alteração grava', realDe(res, 'BANGU|2026-09').cmv_pct === 30 && (await autenticou()) === 1);
+  res = await abrirESalvar('BANGU', { cmv_pct: '30', luz: '17454.70' }, false);
+  check('salvar de novo sem mudar nada não pede senha nem grava', /Nada mudou/.test(res.txt) && (await autenticou()) === 1);
+
+  // Alguém lançou a loja enquanto a tela estava aberta: sem senha, não passa por cima.
+  await preparar({ linhaExiste: false, fat: { NORTE_SHOPPING: 400000 } });
+  await render();
+  await page.evaluate(() => { window.__db.linhaExiste = true; window.__db.all_data = { real: { 'PEDREIRA|2026-09': { cmv_pct: 31, _por: 'Outra pessoa' } } }; });
+  res = await abrirESalvar('PEDREIRA', { cmv_pct: '28' }, false);
+  check('se outra pessoa lançou enquanto a tela estava aberta, não sobrescreve sem senha',
+    realDe(res, 'PEDREIRA|2026-09').cmv_pct === 31 && /enquanto a tela estava aberta/.test(res.txt), res.txt.slice(0, 300));
 
   check('nenhum erro de JS', erros.length === 0);
   if (erros.length) erros.slice(0, 3).forEach(e => console.log('      ' + e.slice(0, 180)));

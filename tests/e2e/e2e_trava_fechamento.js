@@ -89,7 +89,9 @@ const estado = page => page.evaluate(() => {
     zIndex: ov ? getComputedStyle(ov).zIndex : null,
     bodyTravado: document.body.style.overflow === 'hidden',
     cardDentro: !!(ov && card && ov.contains(card)),
-    cardNoLugar: !!(card && card.previousElementSibling && card.previousElementSibling.id === 'mes-anterior-home-card'),
+    // O vizinho de cima é o card de vendas desde 06/11/2026, quando o card do mês fechado subiu
+    // pra cima das validades; o do fechamento ficou onde estava.
+    cardNoLugar: !!(card && card.previousElementSibling && card.previousElementSibling.id === 'venda-mes-home-card'),
     continuarVisivel: !!(btn && btn.style.display !== 'none'),
     temSair: !!(ov && /Não sou eu/.test(ov.innerText)),
   };
