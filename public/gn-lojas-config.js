@@ -1379,3 +1379,100 @@ window.gnVisitasMinutos = function (visitas) {
   const porDia = window.gnVisitasMinutosPorDia(visitas);
   return Object.keys(porDia).reduce((t, d) => t + porDia[d], 0);
 };
+
+// ═══ Trios: cachê por banda ═════════════════════════════════════════════════════════
+// Mora aqui desde 06/11/2026 porque dois apps cadastram e editam apresentação: o Estoque e
+// Pedidos (aba Trios) e o Painel de Gestão (aba Trios → Agenda). Uma lista só, senão a mesma
+// banda acaba com um valor em cada app.
+// Cachê por banda — UMA grafia por banda, a que aparece na agenda. A busca normaliza acento,
+// caixa e espaço (ver gnTriosCacheFor), então não é mais preciso cadastrar "Forro" além de
+// "Forró", nem a versão em CAIXA ALTA: a lista tinha 53 chaves pra 24 bandas por causa disso, e
+// mesmo assim uma grafia nova caía em cachê R$ 0 sem avisar.
+window.GN_TRIOS_CACHES = {
+  'Daniel Guerra': 800,
+  'Elcinho e Trio Forró Moderno': 800,
+  'Fátima Santos': 800,
+  'Íris Pontal In Trio': 800,
+  'Saulo Andrade': 800,
+  'Trio 100% Pé Serra': 700,
+  'Trio Alma Brasileira': 800,
+  'Trio Amigos do Forró': 700,
+  'Trio D Forró': 800,
+  'Trio Jacaña': 800,
+  'Trio Luiz e os Sorrisos': 800,
+  'Trio LUZIAH': 800,
+  'Trio O Xamego Bom': 800,
+  'Trio Peneirado': 800,
+  'Trio Pimenta Reino': 800,
+  'Trio Raça do Pajeu': 800,
+  'Trio Remelexo': 800,
+  'Trio Rony do Forró': 600,
+  'Trio Sabiá dos Três Forrozeiros': 600,
+  'Trio Silvas do Forró': 600,
+  'Trio SP Baião': 800,
+  'Trio Táxi Lunar': 800,
+  'Trio Trilha do Forró': 600,
+  'Trio ZABELÊ': 800,
+};
+
+// Grafias que a agenda usa e que a normalização NÃO alcança, porque mudam letra ou palavra —
+// apontam pra banda canônica acima. Não entram no seletor do modal, só na busca de cachê.
+// Acrescentar aqui quando aparecer uma grafia nova: é mais barato que descobrir depois que uma
+// apresentação do mês inteiro entrou com cachê zero.
+window.GN_TRIOS_APELIDOS = {
+  'Trio ZABELLE': 'Trio ZABELÊ',            // dois L — agenda de outubro
+  'ZABELÊ': 'Trio ZABELÊ',
+  'ZABELLE': 'Trio ZABELÊ',
+  'Elcinho Trio Forró Moderno': 'Elcinho e Trio Forró Moderno',   // sem o "e"
+  'Trio Silvas do Farro': 'Trio Silvas do Forró',                 // "Farro" por "Forró"
+  'Trio Amigos Forró': 'Trio Amigos do Forró',                    // sem o "do"
+  'Luiz e os Sorrisos': 'Trio Luiz e os Sorrisos',                // sem o "Trio"
+  'Sabiá dos Três Forrozeiros': 'Trio Sabiá dos Três Forrozeiros',
+  'Íris Pontal': 'Íris Pontal In Trio',
+  'Fátima Santos In Trio': 'Fátima Santos',
+  'Íris Pontal Trio': 'Íris Pontal In Trio',                      // sem o "In" — Caxias, 15/11/2026
+};
+
+// Normaliza o nome do trio pra comparar: minúscula, sem acento e com espaço colapsado. A agenda
+// vem digitada à mão todo mês, então a mesma banda aparece como "Trio Silvas do Forró",
+// "Trio Silvas do Forro" e "Trio Silvas  do Forro" (espaço duplo) — e o nome que não casava
+// exato caía em cachê R$ 0 silenciosamente, que é como 4 apresentações de outubro entraram
+// zeradas. Por isso a lista abaixo tinha ~15 entradas que eram só variação de acento: agora uma
+// grafia por banda basta, e variação de acento/espaço nova já nasce funcionando.
+//
+// 06/11/2026: em novembro, 6 apresentações entraram com cachê R$ 0 por três grafias que a
+// normalização ainda não alcançava — o horário entre parênteses no nome ("Trio Rony do Forro
+// (18 às 22 horas)"), o espaço antes do % ("Trio 100 % Pé Serra") e o "Trio" repetido ("Trio
+// Trio 100% Pé Serra"). O que está entre parênteses é anotação da agenda, não nome da banda.
+window.gnTriosNomeNorm = function (s) {
+  return String(s || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')   // tira acento
+    .replace(/\([^)]*\)/g, ' ')                         // anotação entre parênteses
+    .replace(/(\d)\s+%/g, '$1%')                        // "100 %" → "100%"
+    .replace(/\s+/g, ' ')                               // colapsa espaço
+    .trim().toLowerCase()
+    .replace(/^(trio\s+)+/, 'trio ');                    // "Trio Trio …" → "Trio …"
+};
+
+// Resolve a grafia da agenda pro nome canônico: primeiro a lista principal, depois os apelidos.
+window.gnTriosCanonico = function (artista) {
+  if (!artista) return null;
+  const N = window.gnTriosNomeNorm, C = window.GN_TRIOS_CACHES, A = window.GN_TRIOS_APELIDOS;
+  const alvo = N(artista);
+  const direto = Object.keys(C).find(k => N(k) === alvo);
+  if (direto) return direto;
+  const apelido = Object.keys(A).find(k => N(k) === alvo);
+  return apelido ? A[apelido] : null;
+};
+
+window.gnTriosCacheFor = function (artista) {
+  const canon = window.gnTriosCanonico(artista);
+  return canon ? (window.GN_TRIOS_CACHES[canon] || 0) : 0;
+};
+
+// Nomes pro seletor do modal: as bandas da lista principal, em ordem. Os apelidos ficam fora de
+// propósito — são a mesma banda escrita de outro jeito, e listá-los era o que fazia a mesma
+// banda aparecer 3 ou 4 vezes no seletor.
+window.gnTriosNomesUnicos = function () {
+  return Object.keys(window.GN_TRIOS_CACHES).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+};

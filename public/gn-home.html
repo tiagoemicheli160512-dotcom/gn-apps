@@ -13191,6 +13191,270 @@ const _TRIOS_STATUS = {
   vazio:     { cor: 'var(--t4)',        fundo: 'var(--s1)',            borda: 'var(--b1)',            rotulo: 'sem trio na agenda' },
 };
 
+/* ── Trios → Agenda: confirmar e editar pelo Painel ──────────────────────────────────────
+   "Queria trazer essa aba para o painel de gestão para poder fazer as confirmações de lá, é
+   mais prático pra mim." (06/11/2026). É a agenda da aba Trios do app Estoque e Pedidos, na
+   mesma tabela (gn_trios_agenda): o que se confirma ou corrige aqui aparece lá, e vice-versa.
+   Dono escolheu "confirmar e editar"; cadastrar e importar a agenda continuam no Estoque.
+
+   O cachê sugerido ao trocar de banda vem de GN_TRIOS_CACHES (gn-lojas-config.js), a mesma
+   lista do Estoque. E a apresentação com cachê R$ 0 é apontada no topo: foi assim que 6 shows
+   de novembro passaram despercebidos — o nome não casava com a lista e o valor entrava zerado.
+
+   Loja teste fora (é do Estoque, pra testar o cadastro). Maglia fora: não tem trio. */
+const TRIOS_AG_TESTE = 'loja_teste';
+let _triosVista = 'resultado';     // 'resultado' (o painel de couvert × cachê) | 'agenda'
+let _triosAgMes = null;            // 'AAAA-MM'
+let _triosAgLoja = null;           // trioSlug, ou null = todas
+let _triosAgRows = null;           // null = carregando · { erro } · array
+let _triosAgEditando = null;       // id da apresentação aberta pra editar
+let _triosAgMsg = {};              // id → { t, erro }
+let _triosAgSalvando = {};         // id → true enquanto grava
+let _triosAgAviso = null;          // aviso do topo, pra linha que saiu do mês ao ser editada
+
+function _triosSetVista(v) {
+  if (_triosVista === v) return;
+  _triosVista = v;
+  if (v === 'agenda' && _triosAgRows === null) _loadTriosAgenda();
+  renderDashboard();
+}
+function _triosAgMesPadrao() { const h = new Date(); return h.getFullYear() + '-' + String(h.getMonth() + 1).padStart(2, '0'); }
+function _triosAgNav(d) {
+  const [y, m] = (_triosAgMes || _triosAgMesPadrao()).split('-').map(Number);
+  const x = new Date(y, m - 1 + d, 1);
+  _triosAgMes = x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0');
+  _triosAgEditando = null; _triosAgMsg = {}; _triosAgAviso = null;
+  _loadTriosAgenda();
+}
+const _triosAgLojas = () => (window.GN_LOJAS || []).filter(l => l.trioSlug && l.userKey !== 'MAGLIA');
+const _triosAgLojaNome = slug => { const l = (window.GN_LOJAS || []).find(x => x.trioSlug === slug); return l ? l.display : slug; };
+
+async function _loadTriosAgenda() {
+  if (!_triosAgMes) _triosAgMes = _triosAgMesPadrao();
+  const mes = _triosAgMes;
+  _triosAgRows = null;
+  renderDashboard();
+  const [y, m] = mes.split('-').map(Number);
+  const prox = new Date(y, m, 1);
+  const lim = prox.getFullYear() + '-' + String(prox.getMonth() + 1).padStart(2, '0') + '-01';
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const rows = await window.gnFetchJson(
+    `${SB_URL}/rest/v1/gn_trios_agenda?data=gte.${mes}-01&data=lt.${lim}` +
+    `&select=id,data,horario_inicio,horario_fim,loja,artista,cache,confirmado,confirmado_por,confirmado_em,presenca_confirmada,couver_valor,banda_nao_veio` +
+    `&order=data.asc,horario_inicio.asc`, H, 'triosAgenda', null);
+  if (mes !== _triosAgMes) return;   // trocou de mês enquanto carregava
+  _triosAgRows = rows === null ? { erro: true } : rows.filter(r => r.loja !== TRIOS_AG_TESTE && r.loja !== 'maglia');
+  renderDashboard();
+}
+
+// Grava uma alteração numa apresentação e confere que a linha existia: um PATCH do PostgREST
+// que não casa com nenhuma linha devolve 200 com [] — sem return=representation a tela diria
+// "salvo" sem ter salvo (o mesmo buraco do _gnLojasUpsert).
+async function _triosAgGravar(id, patch) {
+  const r = await fetch(`${SB_URL}/rest/v1/gn_trios_agenda?id=eq.${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', Prefer: 'return=representation' },
+    body: JSON.stringify(patch),
+  });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const linhas = await r.json();
+  if (!Array.isArray(linhas) || linhas.length !== 1) throw new Error('apresentação não encontrada');
+  return linhas[0];
+}
+function _triosAgTrocar(linha) {
+  if (!Array.isArray(_triosAgRows)) return;
+  const i = _triosAgRows.findIndex(r => r.id === linha.id);
+  if (i >= 0) _triosAgRows[i] = Object.assign({}, _triosAgRows[i], linha);
+}
+
+async function _triosAgConfirmar(id) {
+  if (_triosAgSalvando[id] || !Array.isArray(_triosAgRows)) return;
+  const r = _triosAgRows.find(x => x.id === id);
+  if (!r) return;
+  const novo = !r.confirmado;
+  _triosAgSalvando[id] = true; delete _triosAgMsg[id]; renderDashboard();
+  try {
+    const linha = await _triosAgGravar(id, {
+      confirmado: novo,
+      confirmado_por: novo ? ((session && session.nome) || 'Painel') : null,
+      confirmado_em: novo ? new Date().toISOString() : null,
+    });
+    _triosAgTrocar(linha);
+  } catch (e) {
+    window.gnLogError && window.gnLogError('triosAgenda:confirmar', e);
+    _triosAgMsg[id] = { t: 'Não consegui gravar agora. Tente de novo.', erro: true };
+  } finally {
+    delete _triosAgSalvando[id];
+    renderDashboard();
+  }
+}
+
+function _triosAgEditar(id) {
+  _triosAgEditando = _triosAgEditando === id ? null : id;
+  delete _triosAgMsg[id];
+  renderDashboard();
+}
+// Trocar a banda sugere o cachê da tabela — só sugere: o campo fica editável, porque cachê
+// combinado diferente existe (e o Estoque já trabalha assim).
+function _triosAgBandaMudou(id) {
+  const sel = document.getElementById('trio-ag-banda-' + id);
+  const outro = document.getElementById('trio-ag-outro-' + id);
+  if (!sel) return;
+  if (outro) outro.style.display = sel.value === '__outro__' ? '' : 'none';
+  if (sel.value && sel.value !== '__outro__') {
+    const v = window.gnTriosCacheFor(sel.value);
+    const c = document.getElementById('trio-ag-cache-' + id);
+    if (c && v > 0) c.value = v;
+  }
+}
+async function _triosAgSalvar(id) {
+  if (_triosAgSalvando[id]) return;
+  const v = k => ((document.getElementById('trio-ag-' + k + '-' + id) || {}).value || '').trim();
+  const sel = v('banda');
+  const artista = sel === '__outro__' ? v('outro') : sel;
+  const data = v('data'), loja = v('loja');
+  const cacheRaw = v('cache');
+  const cache = cacheRaw === '' ? 0 : parseFloat(cacheRaw.replace(',', '.'));
+  const erro = t => { _triosAgMsg[id] = { t, erro: true }; renderDashboard(); };
+  if (!data || !loja || !artista) return erro('Preencha data, loja e banda.');
+  if (!isFinite(cache) || cache < 0) return erro('O cachê não pode ser negativo.');
+  _triosAgSalvando[id] = true; renderDashboard();
+  try {
+    const linha = await _triosAgGravar(id, { data, loja, artista, cache,
+      horario_inicio: v('hi') || null, horario_fim: v('hf') || null });
+    _triosAgTrocar(linha);
+    _triosAgEditando = null;
+    // Mudou de mês: a linha sai desta tela, então o aviso vai pro topo — senão ela sumiria
+    // sem explicação nenhuma.
+    const mesNovo = String(linha.data).slice(0, 7);
+    if (mesNovo !== _triosAgMes) {
+      const [ay, am, ad] = String(linha.data).slice(0, 10).split('-');
+      _triosAgAviso = `✓ ${linha.artista} (${_triosAgLojaNome(linha.loja)}) foi pra ${ad}/${am}/${ay} — saiu deste mês.`;
+    } else {
+      _triosAgMsg[id] = { t: '✓ Salvo.', erro: false };
+    }
+  } catch (e) {
+    window.gnLogError && window.gnLogError('triosAgenda:salvar', e);
+    _triosAgMsg[id] = { t: 'Não consegui salvar agora. Tente de novo.', erro: true };
+  } finally {
+    delete _triosAgSalvando[id];
+    renderDashboard();
+  }
+}
+
+function _triosAgFormHtml(r) {
+  const id = r.id;
+  const canon = window.gnTriosCanonico(r.artista);
+  const bandas = window.gnTriosNomesUnicos();
+  // min-width:0 + minmax(0,…): o campo de hora do celular tem largura mínima própria e, sem
+  // isso, o "Fim" vazava pra fora do cartão numa tela de 390px.
+  const inp = 'width:100%;min-width:0;box-sizing:border-box;background:var(--s1);border:1px solid rgba(0,0,0,.14);border-radius:8px;padding:7px 6px;font-size:12px;color:var(--t1);font-family:inherit';
+  const rot = t => `<div style="font-size:9.5px;font-weight:700;color:var(--t3);margin-bottom:2px">${t}</div>`;
+  const lojas = _triosAgLojas().map(l => `<option value="${l.trioSlug}"${l.trioSlug === r.loja ? ' selected' : ''}>${escapeHtml(l.display)}</option>`).join('');
+  const sv = _triosAgSalvando[id];
+  return `<div style="margin-top:8px;padding-top:9px;border-top:1px dashed rgba(0,0,0,.12)">
+    <div style="display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) minmax(0,1fr);gap:6px;margin-bottom:7px">
+      <div>${rot('Data')}<input type="date" id="trio-ag-data-${id}" value="${escapeHtml(String(r.data).slice(0, 10))}" style="${inp}"></div>
+      <div>${rot('Início')}<input type="time" id="trio-ag-hi-${id}" value="${escapeHtml(String(r.horario_inicio || '').slice(0, 5))}" style="${inp}"></div>
+      <div>${rot('Fim')}<input type="time" id="trio-ag-hf-${id}" value="${escapeHtml(String(r.horario_fim || '').slice(0, 5))}" style="${inp}"></div>
+    </div>
+    <div style="margin-bottom:7px">${rot('Loja')}<select id="trio-ag-loja-${id}" style="${inp}">${lojas}</select></div>
+    <div style="margin-bottom:7px">${rot('Banda')}
+      <select id="trio-ag-banda-${id}" onchange="_triosAgBandaMudou('${id}')" style="${inp}">
+        ${bandas.map(b => `<option value="${escapeHtml(b)}"${b === canon ? ' selected' : ''}>${escapeHtml(b)}</option>`).join('')}
+        <option value="__outro__"${canon ? '' : ' selected'}>+ Outra (digitar o nome)</option>
+      </select>
+      <input type="text" id="trio-ag-outro-${id}" value="${canon ? '' : escapeHtml(r.artista || '')}" placeholder="Nome da banda"
+        style="${inp};margin-top:5px;display:${canon ? 'none' : ''}">
+      ${canon && canon !== r.artista ? `<div style="font-size:9.5px;color:var(--t4);margin-top:3px">Na agenda está como “${escapeHtml(r.artista)}” — salvar grava o nome da lista.</div>` : ''}
+    </div>
+    <div style="margin-bottom:9px">${rot('Cachê (R$)')}<input type="number" inputmode="decimal" step="50" min="0" id="trio-ag-cache-${id}" value="${parseFloat(r.cache) || ''}" placeholder="0" style="${inp};text-align:right"></div>
+    <div style="display:flex;gap:6px">
+      <button onclick="_triosAgSalvar('${id}')" ${sv ? 'disabled' : ''} style="flex:1;background:#1A1D23;border:none;border-radius:9px;color:#fff;font-size:12px;font-weight:800;padding:9px;cursor:pointer;font-family:inherit;opacity:${sv ? '.6' : '1'}">${sv ? 'Salvando…' : 'Salvar'}</button>
+      <button onclick="_triosAgEditar('${id}')" style="background:var(--fill-sutil2);border:none;border-radius:9px;color:var(--t2);font-size:12px;font-weight:700;padding:9px 14px;cursor:pointer;font-family:inherit">Cancelar</button>
+    </div>
+  </div>`;
+}
+
+function _buildTriosAgendaPanel() {
+  if (!_triosAgMes) _triosAgMes = _triosAgMesPadrao();
+  const [y, m] = _triosAgMes.split('-').map(Number);
+  const MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+  const nav = `<div style="display:flex;align-items:center;justify-content:center;gap:12px;background:var(--s2);border:1px solid var(--b1);border-radius:12px;padding:8px 10px;margin-bottom:10px">
+    <button onclick="_triosAgNav(-1)" style="background:none;border:1px solid rgba(0,0,0,.15);border-radius:8px;color:var(--t2);font-size:14px;padding:2px 10px;cursor:pointer;font-family:inherit">‹</button>
+    <div style="text-align:center"><div style="font-size:9px;font-weight:800;color:var(--t4);letter-spacing:.8px">AGENDA DE TRIOS</div>
+      <div style="font-size:12px;font-weight:800;color:var(--t1)">${MESES[m - 1]} ${y}</div></div>
+    <button onclick="_triosAgNav(1)" style="background:none;border:1px solid rgba(0,0,0,.15);border-radius:8px;color:var(--t2);font-size:14px;padding:2px 10px;cursor:pointer;font-family:inherit">›</button>
+  </div>`;
+  if (_triosAgRows === null) return nav + _skelPanel(4);
+  if (_triosAgRows.erro) return nav + `<div style="font-size:12px;color:var(--t3);padding:14px">Não deu pra carregar a agenda agora. <button onclick="_loadTriosAgenda()" style="background:none;border:none;color:var(--t1);font-weight:800;text-decoration:underline;cursor:pointer;font-family:inherit">Tentar de novo</button></div>`;
+
+  const todas = _triosAgRows.filter(r => String(r.data).slice(0, 7) === _triosAgMes);
+  const rows = _triosAgLoja ? todas.filter(r => r.loja === _triosAgLoja) : todas;
+  const chip = (slug, nome) => `<button onclick="_triosAgLoja=${slug ? `'${slug}'` : 'null'};_triosAgEditando=null;renderDashboard()" style="flex-shrink:0;background:${_triosAgLoja === slug ? 'rgba(250,204,21,.16)' : 'var(--s1)'};border:1px solid ${_triosAgLoja === slug ? 'rgba(250,204,21,.45)' : 'var(--b1)'};border-radius:16px;padding:4px 10px;font-size:11px;font-weight:${_triosAgLoja === slug ? '800' : '600'};color:var(--t2);cursor:pointer;font-family:inherit">${escapeHtml(nome)}</button>`;
+  const lojasComShow = _triosAgLojas().filter(l => todas.some(r => r.loja === l.trioSlug));
+  const chips = `<div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;margin-bottom:10px">${chip(null, 'Todas')}${lojasComShow.map(l => chip(l.trioSlug, l.display)).join('')}</div>`;
+
+  const tot = rows.reduce((t, r) => t + (parseFloat(r.cache) || 0), 0);
+  const conf = rows.filter(r => r.confirmado).length;
+  const semValor = rows.filter(r => !(parseFloat(r.cache) > 0));
+  const cell = (rotulo, valor, cor) => `<div style="flex:1;min-width:86px"><div style="font-size:9px;font-weight:800;letter-spacing:.8px;text-transform:uppercase;color:var(--t4)">${rotulo}</div>
+    <div style="font-size:15px;font-weight:800;color:${cor};font-variant-numeric:tabular-nums;margin-top:2px">${valor}</div></div>`;
+  const resumo = `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:12px;padding:12px 14px;margin-bottom:10px">
+    <div style="display:flex;gap:12px;flex-wrap:wrap">
+      ${cell('Apresentações', rows.length, 'var(--t1)')}
+      ${cell('Cachê do mês', _fmtBRL(tot), 'var(--t1)')}
+      ${cell('Confirmadas', conf + '/' + rows.length, conf === rows.length && rows.length ? 'var(--txt-green)' : 'var(--t1)')}
+    </div>
+    ${semValor.length ? `<div style="margin-top:9px;background:rgba(239,68,68,.10);border:1px solid rgba(239,68,68,.3);border-radius:9px;padding:7px 10px;font-size:11px;font-weight:700;color:var(--txt-red)">⚠️ ${semValor.length} ${semValor.length === 1 ? 'apresentação' : 'apresentações'} com cachê R$ 0 — toque em ✏️ pra corrigir.</div>` : ''}
+  </div>`;
+
+  const DIAS = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+  const porDia = {};
+  rows.forEach(r => { const d = String(r.data).slice(0, 10); (porDia[d] = porDia[d] || []).push(r); });
+  const blocos = Object.keys(porDia).sort().map(d => {
+    const dt = new Date(d + 'T12:00:00');
+    const itens = porDia[d].map(r => {
+      const cache = parseFloat(r.cache) || 0;
+      const tabela = window.gnTriosCacheFor(r.artista);
+      const hora = r.horario_inicio ? String(r.horario_inicio).slice(0, 5) + (r.horario_fim ? '–' + String(r.horario_fim).slice(0, 5) : '') : '';
+      const sv = _triosAgSalvando[r.id];
+      const msg = _triosAgMsg[r.id];
+      const quando = r.confirmado_em ? new Date(r.confirmado_em) : null;
+      return `<div class="trio-ag-item" data-id="${escapeHtml(r.id)}" style="background:var(--s1);border:1px solid ${r.confirmado ? 'rgba(22,163,74,.3)' : 'var(--b1)'};border-radius:10px;padding:9px 11px;margin-top:6px">
+        <div style="display:flex;gap:8px;align-items:flex-start">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:12.5px;font-weight:800;color:var(--t1)">${escapeHtml(r.artista || '—')}</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:3px;align-items:center">
+              <span style="font-size:10.5px;font-weight:700;color:var(--t2)">${escapeHtml(_triosAgLojaNome(r.loja))}</span>
+              ${hora ? `<span style="font-size:10px;color:var(--t4)">${hora}</span>` : ''}
+              <span style="font-size:10.5px;font-weight:800;font-variant-numeric:tabular-nums;color:${cache > 0 ? 'var(--t1)' : 'var(--txt-red)'}">${cache > 0 ? _fmtBRL(cache) : 'sem cachê'}</span>
+              ${tabela > 0 && cache > 0 && tabela !== cache ? `<span style="font-size:9.5px;color:var(--txt-amber)">tabela ${_fmtBRL(tabela)}</span>` : ''}
+            </div>
+            ${r.confirmado ? `<div style="font-size:9.5px;color:var(--txt-green);margin-top:3px">✓ confirmado${r.confirmado_por ? ' por ' + escapeHtml(r.confirmado_por) : ''}${quando ? ' em ' + String(quando.getDate()).padStart(2, '0') + '/' + String(quando.getMonth() + 1).padStart(2, '0') : ''}</div>` : ''}
+          </div>
+          <div style="display:flex;flex-direction:column;gap:5px;align-items:stretch;flex-shrink:0">
+            <button onclick="_triosAgConfirmar('${r.id}')" ${sv ? 'disabled' : ''} style="background:${r.confirmado ? 'rgba(22,163,74,.14)' : '#16a34a'};border:1px solid ${r.confirmado ? 'rgba(22,163,74,.4)' : '#16a34a'};border-radius:8px;color:${r.confirmado ? 'var(--txt-green)' : '#fff'};font-size:11px;font-weight:800;padding:6px 10px;cursor:pointer;font-family:inherit;opacity:${sv ? '.6' : '1'}">${r.confirmado ? '✓ Confirmado' : 'Confirmar'}</button>
+            <button onclick="_triosAgEditar('${r.id}')" style="background:var(--s2);border:1px solid var(--b1);border-radius:8px;color:var(--t2);font-size:11px;font-weight:700;padding:5px 10px;cursor:pointer;font-family:inherit">✏️ Editar</button>
+          </div>
+        </div>
+        ${msg ? `<div style="font-size:10.5px;font-weight:700;margin-top:5px;color:${msg.erro ? 'var(--txt-red)' : 'var(--txt-green)'}">${escapeHtml(msg.t)}</div>` : ''}
+        ${_triosAgEditando === r.id ? _triosAgFormHtml(r) : ''}
+      </div>`;
+    }).join('');
+    return `<div style="margin-bottom:12px"><div style="font-size:11px;font-weight:800;color:var(--t3);text-transform:uppercase;letter-spacing:.4px">${DIAS[dt.getDay()]} ${String(dt.getDate()).padStart(2, '0')}/${String(dt.getMonth() + 1).padStart(2, '0')}</div>${itens}</div>`;
+  }).join('');
+
+  const aviso = _triosAgAviso ? `<div style="background:rgba(22,163,74,.10);border:1px solid rgba(22,163,74,.3);border-radius:10px;padding:8px 11px;margin-bottom:10px;font-size:11px;font-weight:700;color:var(--txt-green)">${escapeHtml(_triosAgAviso)}</div>` : '';
+  return nav + aviso + chips + resumo + (blocos || `<div style="font-size:12px;color:var(--t3);padding:14px;text-align:center">Nenhuma apresentação ${_triosAgLoja ? 'desta loja ' : ''}em ${MESES[m - 1].toLowerCase()}.</div>`) +
+    `<div style="font-size:10px;color:var(--t4);line-height:1.45;margin-top:4px">Mesma agenda da aba Trios do app Estoque e Pedidos. Cadastrar e importar a agenda continuam lá.</div>`;
+}
+
+function _buildTriosVistaToggle() {
+  const b = (v, rot) => `<button onclick="_triosSetVista('${v}')" style="flex:1;background:${_triosVista === v ? 'var(--t1)' : 'var(--s1)'};border:1px solid ${_triosVista === v ? 'var(--t1)' : 'var(--b1)'};border-radius:10px;padding:8px 10px;color:${_triosVista === v ? 'var(--s1)' : 'var(--t2)'};font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">${rot}</button>`;
+  return `<div style="display:flex;gap:8px;margin-bottom:10px">${b('resultado', '📊 Couvert × cachê')}${b('agenda', '📅 Agenda')}</div>`;
+}
+
 function _buildTriosPanel() {
   const reportBtns = _reportBtnsRowHtml('Trios');
   const perBtn = (p, rot) => `<button onclick="_triosSetPer('${p}')" style="flex:1;background:${_triosPer === p ? 'rgba(250,204,21,.14)' : 'var(--s1)'};border:1px solid ${_triosPer === p ? 'rgba(250,204,21,.4)' : 'var(--b1)'};border-radius:9px;padding:6px 10px;color:${_triosPer === p ? 'var(--t1)' : 'var(--t3)'};font-size:11.5px;font-weight:${_triosPer === p ? '800' : '600'};cursor:pointer;font-family:inherit">${rot}</button>`;
@@ -15843,7 +16107,7 @@ function renderDashboard() {
     content = _buildCarnesPanel();
 
   } else if (_dashTab==='trios') {
-    content = _buildTriosPanel();
+    content = _buildTriosVistaToggle() + (_triosVista === 'agenda' ? _buildTriosAgendaPanel() : _buildTriosPanel());
 
   } else if (_dashTab==='banco') {
     content = _buildBancoPanel();
@@ -15918,6 +16182,7 @@ function _setDashTab(t){
   if(t==='barris'&&!_barrisSemGerenciaLoaded) _loadBarrisSemanalGerencia();
   if(t==='carnes'&&!_carnesGerLoaded) _loadCarnesGerencia();
   if(t==='trios'&&!_triosGerLoaded) _loadTriosGerencia();
+  if(t==='trios'&&_triosVista==='agenda'&&_triosAgRows===null) _loadTriosAgenda();
   if(t==='banco'&&!_bancoGerLoaded) _loadBancoGerencia();
   if(t==='extra'&&!_extraGerLoaded) _loadExtraGerencia();
   renderDashboard();
