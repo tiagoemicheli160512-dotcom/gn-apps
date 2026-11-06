@@ -69,6 +69,13 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
   check('digitando a senha do fechamento: outro card carregando não tira o foco', foco === 'fecha-user-teste', foco);
   e = await estado();
   check('a visita entra no lugar dela (escala, visita, datas)', e.equipe.ids.join(',') === 'escala-dia-home-card,visita-supervisao-home-card,datas-especiais-home-card', e.equipe.ids.join(','));
+  // "Pode passar o card sim" (06/11): Advertência / Suspensão / Demissão em Equipe e agenda,
+  // depois das ocorrências.
+  await card('docs-rh-home-card', '<div>advertência</div>');
+  await card('ocorrencias-semana-home-card', '<div>ocorrências</div>');
+  e = await estado();
+  check('Advertência / Suspensão / Demissão entra em Equipe e agenda, logo depois das ocorrências',
+    e.equipe.ids.join(',') === 'escala-dia-home-card,visita-supervisao-home-card,ocorrencias-semana-home-card,docs-rh-home-card,datas-especiais-home-card', e.equipe.ids.join(','));
 
   // ── 5. Datas especiais: só a próxima, "+N datas" abre as outras ─────────────────────
   const datas = await page.evaluate(async () => {
