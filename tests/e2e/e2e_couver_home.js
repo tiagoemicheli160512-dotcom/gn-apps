@@ -74,6 +74,10 @@ const REDE = BANGU.concat(OUTRAS);
   check('mês até ontem: só 01/11 entra — saldo +R$ 530 (1.330 − 800)', /Novembro até ontem/i.test(r.blocos[1]) && /R\$\s?530,00/.test(r.blocos[1]) && /Cachê R\$\s?800,00/.test(r.blocos[1]), r.blocos[1]);
   check('o cachê que ainda vem aparece à parte: R$ 6.100 em 4 fins de semana', /Ainda vem R\$\s?6\.100,00 de cachê contratado em 4 fins de semana/.test(r.txt), r.txt);
   check('saldo positivo em verde', /txt-green/.test(r.html));
+  // Fase 2 da Home: o quadradinho "Couvert × cachê" leva os MESMOS saldos do card.
+  const tile = await a.page.evaluate(() => { const d = document.getElementById('couver-home-card').dataset.homeTile; return d ? JSON.parse(d) : null; });
+  check('quadradinho da Home: mês +R$ 530,00 em verde, fim de semana +R$ 665,00 no detalhe',
+    tile && tile.k === 'couvert' && tile.valor === '+R$ 530,00' && tile.cor === 'green' && /fim de semana \+R\$ 665,00/.test(tile.detalhe), JSON.stringify(tile));
   check('uma consulta só, da rede (a posição precisa das outras), desde a segunda do último fim de semana',
     r.urls.length === 1 && !/loja=eq/.test(r.urls[0]) && /data=gte\.2026-10-26/.test(r.urls[0]), JSON.stringify(r.urls));
 
