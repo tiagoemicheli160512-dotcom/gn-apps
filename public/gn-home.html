@@ -3828,6 +3828,96 @@ function _computePendenciasEssenciais(ctx) {
   return pend;
 }
 
+/* ── Painel: venda faltando no Check-list ────────────────────────────────────────────────
+   06/11/2026: o faturamento de outubro de Caxias saía R$ 370.436,18 no app contra ~R$ 395 mil
+   no sistema e no relatório da empresa. Causa: o Check-list de 10/10 estava com venda R$ 0,00
+   (editado em 30/10) enquanto o caixa daquele sábado fechou em R$ 27.128,91. Todo número de
+   faturamento do app (Home, Painel, DRE, ranking) soma o Check-list — um dia zerado some de
+   todos, sem erro nenhum na tela. Só foi percebido no fechamento do mês.
+
+   Este card cruza os dois lançamentos que a loja faz do MESMO dia: o caixa fechado
+   (gn_caixa_fechamento.total_sistema, que inclui o serviço) e a venda do Check-list (salão +
+   delivery, sem serviço — fica ~8,8% abaixo do caixa nos dias normais). Aponta o dia em que a
+   venda do Check-list ficou abaixo de METADE do caixa, ou nem existe. Metade e não 90%: a
+   relação varia com o delivery e com a gorjeta, e o caso que distorce o mês é o dia inteiro
+   faltando, não a diferença de centavos.
+
+   Período: do dia 1º do mês passado até ontem (hoje o Check-list ainda está sendo feito) —
+   cobre o mês que está fechando. Some quando não há nada. Maglia fora (CLAUDE.md). */
+const VENDA_FALTA_MIN_CAIXA = 1000;   // caixa abaixo disso é dia sem movimento, não falta
+const VENDA_FALTA_FRACAO = 0.5;
+let _vendaFaltaDados = null;   // null = não carregou · { erro } · { casos, de, ate }
+let _vendaFaltaIndo = false;
+
+async function _loadVendaFalta() {
+  if (_vendaFaltaIndo) return;
+  _vendaFaltaIndo = true;
+  try {
+    const h = new Date();
+    const de = _carnesISO(new Date(h.getFullYear(), h.getMonth() - 1, 1));
+    const ontem = new Date(h); ontem.setDate(ontem.getDate() - 1);
+    const ate = _carnesISO(ontem);
+    const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+    const [cx, chk] = await Promise.all([
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${de}&data=lte.${ate}&status=eq.FECHADO&select=loja,data,total_sistema`, H, 'vendaFalta:caixa', null),
+      window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${de}&data_operacao=lte.${ate}&select=loja,data_operacao,venda_salao,venda_delivery`, H, 'vendaFalta:chk', null),
+    ]);
+    if (!cx || !chk) { _vendaFaltaDados = { erro: true }; return; }
+    _vendaFaltaDados = { casos: _vendaFaltaCalcular(cx, chk), de, ate };
+  } catch (e) {
+    window.gnLogError && window.gnLogError('vendaFalta', e);
+    _vendaFaltaDados = { erro: true };
+  } finally {
+    _vendaFaltaIndo = false;
+    if (typeof renderDashboard === 'function') renderDashboard();
+  }
+}
+
+// Puro: recebe as linhas do caixa e do Check-list e devolve os dias com venda faltando.
+function _vendaFaltaCalcular(cxRows, chkRows) {
+  const lojas = (window.GN_LOJAS || []).filter(l => l.userKey !== 'MAGLIA');
+  const porChk = {}; lojas.forEach(l => { porChk[l.chkKey] = l; });
+  const porUser = {}; lojas.forEach(l => { porUser[l.userKey] = l; });
+  const caixa = {};    // 'USERKEY|data' → total (soma os turnos)
+  (cxRows || []).forEach(r => {
+    if (!porUser[r.loja]) return;
+    const k = r.loja + '|' + String(r.data).slice(0, 10);
+    caixa[k] = (caixa[k] || 0) + (parseFloat(r.total_sistema) || 0);
+  });
+  const venda = {};    // 'USERKEY|data' → salão + delivery
+  (chkRows || []).forEach(r => {
+    const l = porChk[r.loja];
+    if (!l) return;
+    const k = l.userKey + '|' + String(r.data_operacao).slice(0, 10);
+    venda[k] = (venda[k] || 0) + (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0);
+  });
+  return Object.keys(caixa).filter(k => caixa[k] >= VENDA_FALTA_MIN_CAIXA && !((venda[k] || 0) >= caixa[k] * VENDA_FALTA_FRACAO))
+    .map(k => { const [loja, data] = k.split('|'); return { loja, data, caixa: caixa[k], venda: venda[k] == null ? null : venda[k] }; })
+    .sort((a, b) => a.data.localeCompare(b.data) || a.loja.localeCompare(b.loja));
+}
+
+function _buildVendaFaltaCard() {
+  if (_vendaFaltaDados === null) { _loadVendaFalta(); return ''; }
+  const d = _vendaFaltaDados;
+  if (d.erro || !d.casos.length) return '';
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  const dm = iso => iso.slice(8, 10) + '/' + iso.slice(5, 7);
+  const somaFalta = d.casos.reduce((t, c) => t + Math.max(0, c.caixa - (c.venda || 0)), 0);
+  return `<div class="venda-falta-card" style="background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.3);border-left:3px solid #f59e0b;border-radius:14px;padding:14px 16px;margin:0 0 14px">
+    <div style="font-size:12px;font-weight:800;color:var(--t1);margin-bottom:2px">⚠️ Venda faltando no Check-list · ${d.casos.length} dia${d.casos.length > 1 ? 's' : ''}</div>
+    <div style="font-size:10px;color:var(--t3);margin-bottom:6px;line-height:1.45">O caixa do dia fechou, mas a venda do Check-list está zerada ou muito abaixo. Todo faturamento do app soma o Check-list — até corrigir, falta ~${_fmtBRL(somaFalta)} (valor do caixa, com serviço) no mês dessas lojas.</div>
+    ${d.casos.map(c => `<div class="venda-falta-linha" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-top:1px solid rgba(0,0,0,.06)">
+      <span style="display:flex;align-items:center;gap:7px;min-width:0">
+        <span style="width:8px;height:8px;border-radius:50%;background:${COR_LOJA[c.loja] || '#999'};flex-shrink:0"></span>
+        <span style="font-size:12px;font-weight:700;color:var(--t1)">${esc(LOJA_DISPLAY[c.loja] || c.loja)}</span>
+        <span style="font-size:11px;color:var(--t3)">${dm(c.data)}</span>
+      </span>
+      <span style="font-size:10.5px;color:var(--t2);text-align:right;font-variant-numeric:tabular-nums">caixa <b>${_fmtBRL(c.caixa)}</b> · Check-list <b style="color:var(--txt-red)">${c.venda == null ? 'sem lançamento' : _fmtBRL(c.venda)}</b></span>
+    </div>`).join('')}
+    <div style="font-size:9.5px;color:var(--t4);margin-top:6px">A gerência da loja corrige a venda do dia no Check-list. Período: ${dm(d.de)} a ${dm(d.ate)}.</div>
+  </div>`;
+}
+
 function _buildPendenciasEssenciaisCard(){
   const mapa = _dashPendenciasEssenciais || {};
   const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
@@ -16493,6 +16583,7 @@ function renderDashboard() {
       </div>
       ${_cardSeguro('alertas', _buildAlertasUrgentesCard)}
       ${_cardSeguro('pendencias', _buildPendenciasEssenciaisCard)}
+      ${_cardSeguro('vendaFalta', _buildVendaFaltaCard)}
       <div id="fecha-painel-card-holder">${_cardSeguro('fechamentoSemana', _buildFechamentoSemanalCard)}</div>
       ${_cardSeguro('cienciaMes', _buildCienciaMesCard)}
       ${_cardSeguro('ferias', _buildFeriasUmaSemanaCard)}
