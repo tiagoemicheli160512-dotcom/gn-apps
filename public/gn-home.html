@@ -2009,16 +2009,46 @@ function _dreRedeAbrir(loja) {
   renderDashboard();
 }
 
+/* Senha na DRE da rede (06/11/2026): "já estou logado como mestre, não acho necessário. Só se
+   for ser feita alguma alteração no que já está preenchido aí sim pedir a senha."
+   - mestre logado lançando um mês que a loja ainda NÃO tinha → grava direto, em nome dele;
+   - alterar (ou limpar) o que já estava lançado → pede usuário e senha, sempre;
+   - quem não é mestre → pede sempre, como antes.
+   A senha antes ia pro chão a cada loja: salvar redesenha o Painel e o campo voltava vazio. */
+function _dreRedeMestreLogado() {
+  const c = ((session && session.cargo) || '').toLowerCase();
+  return !!session && (c === 'mestre' || !!(session.permissoes && session.permissoes.master));
+}
+// O que está no banco é diferente do que vai ser gravado? Vazio → vazio não é alteração.
+function _dreRealMudou(antes, depois) {
+  if (!_dreTemReal(antes)) return false;
+  return DRE_CAMPOS.some(f => {
+    const a = _dreTem(antes[f.k]) ? parseFloat(antes[f.k]) : null;
+    const b = _dreTem(depois[f.k]) ? parseFloat(depois[f.k]) : null;
+    return a === null || b === null ? a !== b : Math.abs(a - b) > 0.0001;
+  });
+}
+
 async function _dreRedeSalvarLoja(loja) {
   const comp = _dreRedeComp;
   const user = ((document.getElementById('dre-rede-user') || {}).value || '').trim();
   const pass = ((document.getElementById('dre-rede-pass') || {}).value || '');
   const msg = (t, erro) => { _dreRedeMsg[loja] = { t, erro: !!erro }; renderDashboard(); };
-  if (!user || !pass) { msg('Preencha usuário e senha no topo da tela.', true); return; }
 
   const lido = _dreLerCampos(k => document.getElementById('dre-rede-' + loja.replace(/\W/g, '_') + '-' + k));
   if (lido.erro) { msg(lido.erro, true); return; }
   const real = lido.real;
+
+  const mestre = _dreRedeMestreLogado();
+  const jaTinha = _dreTemReal(_dreRealizado(loja, comp));
+  const altera = _dreRealMudou(_dreRealizado(loja, comp), real);
+  if (jaTinha && !altera) { msg('Nada mudou — o mês já estava lançado assim.', false); return; }
+  const precisaSenha = !mestre || altera;
+  if (precisaSenha && (!user || !pass)) {
+    msg(altera ? 'Este mês já estava lançado. Pra alterar, confirme com usuário e senha no topo da tela.'
+               : 'Preencha usuário e senha no topo da tela.', true);
+    return;
+  }
 
   // Despesa maior que o faturamento do mês é quase sempre dedo errado (um zero a mais).
   // Não bloqueia — mês ruim existe —, mas pede confirmação, que é o que separa engano de
@@ -2034,19 +2064,29 @@ async function _dreRedeSalvarLoja(loja) {
   msg('Salvando…', false);
   try {
     const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
-    const auth = await window.gnFetchJson(`${SB_URL}/rest/v1/rpc/verificar_login`, H, 'dreRede:auth', [],
-      { method: 'POST', body: JSON.stringify({ p_nome: user, p_senha: pass, p_app: 'gn-home:dre-rede' }) });
-    const cargo = (auth[0] && auth[0].cargo || '').toLowerCase();
-    if (!auth.length) { msg('Usuário ou senha incorretos.', true); return; }
-    if (!DRE_CARGOS_EDICAO.includes(cargo)) { msg(`${auth[0].nome} está como ${cargo || 'sem cargo'} — sem permissão pro DRE.`, true); return; }
+    let quem = (session && session.nome) || 'Mestre';
+    if (precisaSenha) {
+      const auth = await window.gnFetchJson(`${SB_URL}/rest/v1/rpc/verificar_login`, H, 'dreRede:auth', [],
+        { method: 'POST', body: JSON.stringify({ p_nome: user, p_senha: pass, p_app: 'gn-home:dre-rede' }) });
+      const cargo = (auth[0] && auth[0].cargo || '').toLowerCase();
+      if (!auth.length) { msg('Usuário ou senha incorretos.', true); return; }
+      if (!DRE_CARGOS_EDICAO.includes(cargo)) { msg(`${auth[0].nome} está como ${cargo || 'sem cargo'} — sem permissão pro DRE.`, true); return; }
+      quem = auth[0].nome || user;
+    }
 
     const atual = await _dreCarregar(true);
     if (atual === null) { msg('Sem conexão com o banco. Tente de novo.', true); return; }
+    // Relido do banco: se alguém lançou esta loja enquanto a tela estava aberta, gravar sem
+    // senha passaria por cima do lançamento dele — aí é alteração, e pede a senha.
+    if (!precisaSenha && _dreRealMudou(((atual.real || {})[loja + '|' + comp]) || {}, real)) {
+      msg('Alguém lançou este mês enquanto a tela estava aberta. Pra substituir, confirme com usuário e senha no topo.', true);
+      return;
+    }
     const dados = JSON.parse(JSON.stringify(atual || {}));
     dados.real = dados.real || {};
     const chave = loja + '|' + comp;
     if (Object.keys(real).length) {
-      dados.real[chave] = { ...real, _por: auth[0].nome || user, _em: new Date().toISOString() };
+      dados.real[chave] = { ...real, _por: quem, _em: new Date().toISOString() };
     } else {
       delete dados.real[chave];   // apagar tudo e salvar = limpar o mês daquela loja
     }
@@ -2150,7 +2190,9 @@ function _buildDreRedePanel() {
         style="background:var(--s2);border:1px solid rgba(0,0,0,.12);border-radius:9px;padding:8px 10px;font-size:12px;color:var(--t1);font-family:inherit;outline:none">
     </div>
     <div style="font-size:10px;color:var(--t3);margin:-6px 0 12px;line-height:1.4">
-      A senha é pedida uma vez e vale pra todos os lançamentos desta tela. Ela existe porque o aparelho fica logado o dia todo e isto é o balizador da rede.</div>
+      ${_dreRedeMestreLogado()
+        ? 'Logado como mestre: lançar um mês novo <b>não pede senha</b>. Ela só é pedida pra <b>alterar</b> o que já foi lançado.'
+        : 'A senha é pedida pra cada lançamento. Ela existe porque o aparelho fica logado o dia todo e isto é o balizador da rede.'}</div>
     ${linhas}`;
 }
 
