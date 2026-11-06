@@ -115,7 +115,7 @@ const linha = (o) => Object.assign({
     _triosHojeRecords = [{ id: 'A', couver_valor: 0 }, { id: 'B', couver_valor: 0 }];
     _triosHojeRecord = _triosHojeRecords[0];
     document.body.insertAdjacentHTML('beforeend',
-      '<input id="banda-hoje-qtd" value="10"><input id="banda-hoje-valor" value="150">' +
+      '<input id="banda-hoje-qtd" value="10"><input id="banda-hoje-valor" value="70">' +
       '<button id="banda-hoje-btn"></button><div id="banda-hoje-rec"></div>');
     const origToast = window.showToast; window.showToast = () => {};
     try { await _salvarCouvertBandaHoje(); } catch (e) {} finally { window.showToast = origToast; }
@@ -128,7 +128,7 @@ const linha = (o) => Object.assign({
   check('em TODAS as linhas do dia, não só na principal',
     salvou.length === 2 && salvou.every(r => r.m === true), JSON.stringify(salvou));
   check('e o valor continua indo só pra principal, sem contar duas vezes',
-    salvou[0].v === 150 && salvou[1].v === 0, JSON.stringify(salvou));
+    salvou[0].v === 70 && salvou[1].v === 0, JSON.stringify(salvou));
 
   const reais = erros.filter(e => !/createClient|Failed to fetch|supabase|NetworkError|net::/i.test(e));
   check('nenhum erro de JS', reais.length === 0, reais.slice(0, 3).join(' | '));

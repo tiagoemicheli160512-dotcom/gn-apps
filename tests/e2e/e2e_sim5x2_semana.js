@@ -228,11 +228,16 @@ const FOLGAS = [[1, 2], [2, 3], [0, 4], [3, 5], [1, 6], [4]];
     check(`equipe de ${n}: o nome sai numa linha só (é a quebra que estoura a folha)`,
       m.linhasDoNome === 1, JSON.stringify(m));
   }
-  for (const n of [40, 42, 45, 48, 52, 60]) {
+  // De 39 a 44 de um em um: é a faixa em que a estimativa antiga errava pra menos (a linha
+  // real sai ~0,7px mais alta) e a folha prometia uma página com 722–742px de grade.
+  for (const n of [39, 40, 41, 42, 43, 44, 45, 48, 52, 60]) {
     const m = await medeEquipe(n);
     check(`equipe de ${n}: o que a folha promete bate com o que ela faz`,
       m.diz2folhas === (m.alto > FOLHA), JSON.stringify(m));
   }
+
+  check('a medição não deixa quadro escondido na página do app',
+    await page.evaluate(() => document.querySelectorAll('iframe').length) === 0);
 
   // Nova América, a maior da rede: aí não cabe mesmo — e a folha fala isso.
   const nAm = await medeEquipe(52);
