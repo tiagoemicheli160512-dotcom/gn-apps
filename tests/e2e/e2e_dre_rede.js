@@ -12,11 +12,15 @@
 // coisas que fariam ela mentir: gravar sem a linha existir (um PATCH sem linha casada devolve
 // 204, "ok", e não grava nada — é EXATAMENTE o estado de hoje) e uma gravação apagar o que
 // outra pessoa lançou, já que DRE_CONFIG é uma linha só pra rede inteira.
+//
+// 06/11/2026: os campos passaram a ser os do relatório da empresa — CMV e % DP em %, água,
+// gás e luz em R$ — sem ocupação, impostos, outros nem lucro.
 const CAMINHOS = require('../_env');
 const { chromium } = require('playwright');
 const HOME = process.env.ARQ_HOME || CAMINHOS.pub('gn-home.html');
 let ok = 0, falhou = 0;
-const check = (n, c) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ? ok++ : falhou++; };
+const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ? ok++ : falhou++;
+  if (!c && extra !== undefined) console.log('      ' + String(extra).slice(0, 300)); };
 
 (async () => {
   const browser = await chromium.launch({ executablePath: CAMINHOS.CHROMIUM });
@@ -88,7 +92,7 @@ const check = (n, c) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ? ok++ :
     // Os campos nascem PREENCHIDOS com o que já está lançado (é o que permite corrigir um
     // mês). Então "salvar vazio" só existe se eu apagar os campos de verdade — passar {}
     // sem apagar mantinha o valor antigo na tela e regravava ele.
-    DRE_CONTAS.forEach(c => { const el = document.getElementById('dre-rede-' + id + '-' + c.k); if (el) el.value = ''; });
+    DRE_CAMPOS.forEach(f => { const el = document.getElementById('dre-rede-' + id + '-' + f.k); if (el) el.value = ''; });
     Object.keys(valores).forEach(k => {
       const el = document.getElementById('dre-rede-' + id + '-' + k);
       if (el) el.value = valores[k];
@@ -113,21 +117,19 @@ const check = (n, c) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ? ok++ :
     return el.textContent.replace(/\s+/g, ' '); });
   check('abrindo a loja, cada conta mostra o TETO calculado do faturamento dela',
     /teto: R\$ 116\.000,00/.test(teto));   // CMV 29% de 400.000
-  check('e as seis contas aparecem', DRE_CONTAS_OK(teto));
-
-  function DRE_CONTAS_OK(t) {
-    return ['CMV', 'Folha de pagamento', 'Ocupação', 'Utilidades', 'Impostos', 'Outros operacionais']
-      .every(l => t.indexOf(l) >= 0);
-  }
+  check('os campos são os do relatório: CMV (%), % DP (%), Água, Gás e Luz (R$)',
+    ['CMV (%)', '% DP (%)', 'Água (R$)', 'Gás (R$)', 'Luz (R$)'].every(l => teto.indexOf(l) >= 0));
+  check('e ocupação, impostos e outros não aparecem', !/Ocupação|Impostos|Outros operacionais/.test(teto));
 
   // ── 2. O caso de hoje: a linha NÃO existe ────────────────────────────────────────────
-  let res = await abrirESalvar('BANGU', { cmv: '110000', folha: '95000' });
+  let res = await abrirESalvar('BANGU', { cmv_pct: '27.29', folha_pct: '24.64', agua: '5308.16', gas: '6637.20', luz: '17454.70' });
   check('com a linha inexistente, grava com POST e não com PATCH (um PATCH sem linha casada devolve 204 e não grava nada)',
     res.db.metodos[res.db.metodos.length - 1] === 'POST');
   check('e o realizado chega no banco na chave loja|competência',
     !!(res.db.all_data && res.db.all_data.real && res.db.all_data.real['BANGU|2026-09']));
-  check('com os valores digitados',
-    res.db.all_data.real['BANGU|2026-09'].cmv === 110000 && res.db.all_data.real['BANGU|2026-09'].folha === 95000);
+  const rb = res.db.all_data.real['BANGU|2026-09'];
+  check('com os valores digitados, cada um na unidade em que chegou (27.29 é %, não vira 2729)',
+    rb.cmv_pct === 27.29 && rb.folha_pct === 24.64 && rb.agua === 5308.16 && rb.gas === 6637.2 && rb.luz === 17454.7, JSON.stringify(rb));
   check('e registrando quem lançou e quando',
     res.db.all_data.real['BANGU|2026-09']._por === 'Tiago' && !!res.db.all_data.real['BANGU|2026-09']._em);
   check('a tela confirma', /Lançado/.test(res.txt));
@@ -135,12 +137,12 @@ const check = (n, c) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ? ok++ :
   // ── 3. Uma loja não pode apagar a outra ──────────────────────────────────────────────
   // DRE_CONFIG é UMA linha pra rede inteira. Gravar o all_data que estava em memória é o
   // jeito clássico de apagar o que outra pessoa lançou enquanto esta tela estava aberta.
-  await preparar({ linhaExiste: true, allData: { pct: { REDE: { cmv: 31 } }, real: { 'CAXIAS|2026-09': { cmv: 90000, _por: 'Souza' } } },
+  await preparar({ linhaExiste: true, allData: { pct: { REDE: { cmv: 31 } }, real: { 'CAXIAS|2026-09': { cmv_pct: 30.5, _por: 'Souza' } } },
                    fat: { BANGU: 400000 } });
   await render();
-  res = await abrirESalvar('BANGU', { cmv: '110000' });
+  res = await abrirESalvar('BANGU', { cmv_pct: '27.5' });
   check('lançar uma loja NÃO apaga o que outra já tinha lançado',
-    res.db.all_data.real['CAXIAS|2026-09'] && res.db.all_data.real['CAXIAS|2026-09'].cmv === 90000);
+    res.db.all_data.real['CAXIAS|2026-09'] && res.db.all_data.real['CAXIAS|2026-09'].cmv_pct === 30.5);
   check('nem as % da rede que já estavam lá', res.db.all_data.pct.REDE.cmv === 31);
   check('e com a linha existente usa PATCH', res.db.metodos[res.db.metodos.length - 1] === 'PATCH');
   check('a % ajustada da rede manda no teto mostrado (31%, não os 29 do código)',
@@ -149,31 +151,47 @@ const check = (n, c) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ? ok++ :
   // ── 4. Permissão ─────────────────────────────────────────────────────────────────────
   await preparar({ linhaExiste: false, auth: [], fat: { BANGU: 400000 } });
   await render();
-  res = await abrirESalvar('BANGU', { cmv: '1' });
+  res = await abrirESalvar('BANGU', { cmv_pct: '1' });
   check('senha errada não grava nada', res.db.metodos.length === 0 && /incorret/i.test(res.txt));
 
   await preparar({ linhaExiste: false, auth: [{ nome: 'Taynara', cargo: 'caixa' }], fat: { BANGU: 400000 } });
   await render();
-  res = await abrirESalvar('BANGU', { cmv: '1' });
+  res = await abrirESalvar('BANGU', { cmv_pct: '1' });
   check('cargo sem permissão não grava, e a tela diz qual é o cargo',
     res.db.metodos.length === 0 && /caixa/.test(res.txt) && /sem permissão/.test(res.txt));
 
   // ── 5. Falhas que não podem passar por sucesso ───────────────────────────────────────
   await preparar({ linhaExiste: false, gravarFalha: true, fat: { BANGU: 400000 } });
   await render();
-  res = await abrirESalvar('BANGU', { cmv: '110000' });
+  res = await abrirESalvar('BANGU', { cmv_pct: '27.5' });
   check('se o banco recusar, a tela NÃO diz que lançou', !/Lançado/.test(res.txt) && /não consegui salvar/i.test(res.txt));
 
   // ── 6. Limpar e validar ──────────────────────────────────────────────────────────────
-  await preparar({ linhaExiste: true, allData: { real: { 'BANGU|2026-09': { cmv: 1, _por: 'x' } } }, fat: { BANGU: 400000 } });
+  await preparar({ linhaExiste: true, allData: { real: { 'BANGU|2026-09': { cmv_pct: 1, _por: 'x' } } }, fat: { BANGU: 400000 } });
   await render();
   res = await abrirESalvar('BANGU', {});   // todos os campos vazios
   check('salvar com tudo vazio limpa o mês daquela loja', !res.db.all_data.real['BANGU|2026-09']);
 
   await preparar({ linhaExiste: false, fat: { BANGU: 400000 } });
   await render();
-  res = await abrirESalvar('BANGU', { cmv: '-5' });
+  res = await abrirESalvar('BANGU', { luz: '-5' });
   check('valor negativo não grava', res.db.metodos.length === 0 && /não pode ser negativo/.test(res.txt));
+
+  // O R$ do CMV digitado no campo da % daria 110000% — recusa e explica.
+  await preparar({ linhaExiste: false, fat: { BANGU: 400000 } });
+  await render();
+  res = await abrirESalvar('BANGU', { cmv_pct: '110000' });
+  check('% acima de 100 não grava e explica que o campo é a % do relatório',
+    res.db.metodos.length === 0 && /CMV é em %/.test(res.txt), res.txt.slice(0, 300));
+
+  // Água+gás+luz muito acima do faturamento é quase sempre um zero a mais: pede confirmação.
+  await preparar({ linhaExiste: false, fat: { BANGU: 400000 } });
+  await render();
+  const perguntas = await page.evaluate(() => { window.__conf = []; window.confirm = t => { window.__conf.push(t); return false; }; });
+  res = await abrirESalvar('BANGU', { luz: '700000' });
+  const conf = await page.evaluate(() => window.__conf);
+  check('despesa bem acima do faturamento pergunta antes, e cancelar não grava',
+    conf.length === 1 && res.db.metodos.length === 0, JSON.stringify(conf));
 
   check('nenhum erro de JS', erros.length === 0);
   if (erros.length) erros.slice(0, 3).forEach(e => console.log('      ' + e.slice(0, 180)));

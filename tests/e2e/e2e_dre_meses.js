@@ -12,7 +12,8 @@ const CAMINHOS = require('../_env');
 const { chromium } = require('playwright');
 const HOME = process.env.ARQ_HOME || CAMINHOS.pub('gn-home.html');
 let ok = 0, falhou = 0;
-const check = (n, c) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ? ok++ : falhou++; };
+const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ? ok++ : falhou++;
+  if (!c && extra !== undefined) console.log('      ' + String(extra).slice(0, 300)); };
 
 const LOJA = 'ITAQUERA';
 const CARD = '2026-09';        // mês do card (o que fechou)
@@ -79,19 +80,22 @@ const ATRAS = '2026-07';       // mês de trás, inalcançável antes
   check('com o nome do mês por extenso, não AAAA-MM', /julho de 2026/.test((opts.find(o => o.v === ATRAS) || {}).t || ''));
 
   // ── Trocar o mês mostra a base e converte o valor em % ──────────────────────────
-  // O relatório da empresa vem em % (CMV 35,63%) e o campo é em R$ — sem a conferência na
-  // tela, a conversão fica na cabeça de quem digita, nove meses seguidos.
+  // CMV e DP entram em % (como vêm no relatório) e água/gás/luz em R$ — embaixo de cada
+  // campo aparece a outra unidade, pra conferir que o número caiu no campo certo.
   const base = await page.evaluate(async ([atras]) => {
     document.getElementById('dre-mes').value = atras;
     await _dreTrocarMes();
-    document.getElementById('dre-real-cmv').value = '160000';
+    document.getElementById('dre-real-cmv_pct').value = '36.38';
+    document.getElementById('dre-real-luz').value = '16000';
     _dreHintInput();
     return { base: document.getElementById('dre-base').textContent,
-             hint: document.getElementById('dre-hint-cmv').textContent,
+             hint: document.getElementById('dre-hint-cmv_pct').textContent,
+             hintLuz: document.getElementById('dre-hint-luz').textContent,
              escolhido: _dreMesEscolhido() };
   }, [ATRAS]);
   check('escolher o mês puxa o faturamento dele', /julho de 2026/.test(base.base) && /439\.837,13/.test(base.base));
-  check('e o valor digitado mostra quanto é em % do faturamento', base.hint === '36,38%');
+  check('a % digitada mostra quanto é em R$ do faturamento do mês', base.hint === '= R$ 160.012,75', base.hint);
+  check('e o R$ digitado mostra quanto é em %', base.hintLuz === '= 3,64%', base.hintLuz);
   check('o mês escolhido é o que vale', base.escolhido === ATRAS);
 
   // ── Salvar grava no mês ESCOLHIDO ─────────────────────────────────────────────
@@ -115,16 +119,16 @@ const ATRAS = '2026-07';       // mês de trás, inalcançável antes
   const segundo = await page.evaluate(async ([card]) => {
     document.getElementById('dre-mes').value = card;
     await _dreTrocarMes();
-    const limpoAoTrocar = document.getElementById('dre-real-cmv').value;
-    document.getElementById('dre-real-cmv').value = '175000';
+    const limpoAoTrocar = document.getElementById('dre-real-cmv_pct').value + document.getElementById('dre-real-luz').value;
+    document.getElementById('dre-real-cmv_pct').value = '35.5';
     await _dreSalvar();
     const real = (_dreAllData || {}).real || {};
     return { limpoAoTrocar, chaves: Object.keys(real).sort(),
-             julho: (real['ITAQUERA|2026-07'] || {}).cmv, setembro: (real['ITAQUERA|2026-09'] || {}).cmv };
+             julho: (real['ITAQUERA|2026-07'] || {}).cmv_pct, setembro: (real['ITAQUERA|2026-09'] || {}).cmv_pct };
   }, [CARD]);
   check('trocar de mês limpa o valor do mês anterior em vez de arrastá-lo', segundo.limpoAoTrocar === '');
   check('os dois meses convivem', segundo.chaves.join(',') === 'ITAQUERA|2026-07,ITAQUERA|2026-09');
-  check('cada um com o seu valor', segundo.julho === 160000 && segundo.setembro === 175000);
+  check('cada um com o seu valor', segundo.julho === 36.38 && segundo.setembro === 35.5);
 
   // ── A % continua sendo da loja, não do mês ──────────────────────────────────
   const pcts = await page.evaluate(() => Object.keys(((_dreAllData || {}).pct) || {}));

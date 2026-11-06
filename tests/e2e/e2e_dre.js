@@ -2,9 +2,13 @@
 //  comparativo. Quero colocar nele, como se fosse uma mini DRE, com essas porcentagens, com os
 //  campos editáveis, somente com senha mestre ou gerente ou supervisor. É possível?"
 //
-// Escolhas confirmadas com o dono: meta × realizado (o realizado é digitado, porque CMV, folha,
-// aluguel e impostos não existem em nenhuma outra tabela do app), e % com padrão da rede
+// Escolhas confirmadas com o dono: meta × realizado (o realizado é digitado, porque CMV, folha
+// e concessionárias não existem em nenhuma outra tabela do app), e % com padrão da rede
 // ajustável por loja.
+//
+// 06/11/2026: "as informações que eu recebo das despesas são só essas" — CMV e % DP em %,
+// água, gás e luz em R$. A DRE passou a pedir exatamente isso, sem ocupação, impostos,
+// outros e sem lucro: "só mostrar o comparativo do ideal para o real".
 const CAMINHOS = require('../_env');
 const { chromium } = require('playwright');
 const HOME = process.env.ARQ_HOME || CAMINHOS.pub('gn-home.html');
@@ -50,7 +54,7 @@ const escritas = [];
   });
   if (!existe) {
     console.log('FALHOU: o mini DRE não existe neste arquivo (contraprova esperada — é novo)');
-    console.log('\n0 OK, 22 falhou');
+    console.log('\n0 OK, 1 falhou');
     await browser.close(); process.exit(1);
   }
 
@@ -63,73 +67,85 @@ const escritas = [];
 
   const bloco = (loja) => page.evaluate((loja) => _dreBlocoHtml(loja, '2026-09', 316337.84, 'setembro'), loja);
 
-  // ── 1. As contas e as % do balizador ───────────────────────────────────────────────
+  // ── 1. As contas, no formato do relatório da empresa ──────────────────────────────
   const DRE_CONTAS_NOTAS = await page.evaluate(() => DRE_CONTAS.map(c => c.nota));
   const contas = await page.evaluate(() => ({
-    lista: DRE_CONTAS.map(c => c.k + ':' + c.pct),
-    soma: DRE_CONTAS.reduce((s, c) => s + c.pct, 0),
-    lucro: _dreLucroPct('BANGU'),
+    lista: DRE_CONTAS.map(c => c.k + ':' + c.pct + ':' + c.entra),
+    campos: DRE_CAMPOS.map(f => f.k + ':' + f.unidade),
+    semLucro: typeof _dreLucroPct === 'undefined',
   }));
-  check('as seis contas de despesa estão cadastradas com a % do balizador',
-    contas.lista.join(',') === 'cmv:29,folha:24,ocupacao:13,utilidades:4,impostos:13,outros:2');
-  check('o lucro não é cadastrado: é o que sobra de 100 (85% de despesa → 15% de lucro)',
-    contas.soma === 85 && contas.lucro === 15);
+  check('só as contas que o relatório traz, com a % ideal que já existia (CMV 29, DP 24, utilidades 4)',
+    contas.lista.join(',') === 'cmv:29:pct,folha:24:pct,utilidades:4:rs', contas.lista.join(','));
+  check('os campos são os do relatório: CMV e DP em %, água, gás e luz em R$',
+    contas.campos.join(',') === 'cmv_pct:%,folha_pct:%,agua:R$,gas:R$,luz:R$');
+  check('não existe mais conta de lucro', contas.semLucro);
 
   // ── 1b. O que entra em cada conta aparece NA TELA ──────────────────────────────────
-  // Sem isso, "Utilidades" não diz a ninguém que é onde vão água, luz e gás — e o tooltip
-  // (title) não existe no celular, que é onde a loja usa o app.
+  // O tooltip (title) não existe no celular, que é onde a loja usa o app.
   dreRow = null;
   await prep('BANGU', 'gerente');
   const comNota = await bloco('BANGU');
   const form = await page.evaluate(() => _dreFormHtml('BANGU', '2026-09'));
-  check('o card diz que água, luz e gás entram em Utilidades',
-    /Concessionárias: água, luz e gás/.test(comNota));
-  check('e o formulário de edição diz o mesmo, pra quem vai digitar',
-    /Concessionárias: água, luz e gás/.test(form));
-  check('toda conta tem a sua explicação visível, não só em tooltip',
+  check('toda conta tem a sua explicação visível, no card e no formulário',
     DRE_CONTAS_NOTAS.every(n => comNota.includes(n) && form.includes(n)));
-  check('aluguel e condomínio aparecem em Ocupação', /Aluguel, condomínio/.test(comNota));
+  check('o formulário tem um campo pra cada coisa do relatório, cada um com a unidade',
+    ['CMV real (%)', '% DP real (%)', 'Água real (R$)', 'Gás real (R$)', 'Luz real (R$)'].every(t => form.includes(t)));
+  check('ocupação, impostos e outros saíram', !/Ocupação|Impostos|Outros operacionais/.test(comNota + form));
 
-  // ── 2. Sem realizado: o card mostra o TETO de cada conta ───────────────────────────
+  // ── 2. Sem realizado: o card mostra o ideal (teto) de cada conta ───────────────────
   dreRow = null;
   await prep('BANGU', 'gerente');
   const semReal = await bloco('BANGU');
-  check('sem nada lançado, a coluna é a Meta', /Meta<\/span>/.test(semReal));
-  check('CMV 29% de R$ 316.337,84 = R$ 91.737,97', /91\.737,97/.test(semReal));
-  check('lucro alvo 15% = R$ 47.450,68', /47\.450,68/.test(semReal));
+  check('colunas Ideal, Real e Desvio', /Ideal<\/span>/.test(semReal) && /Real<\/span>/.test(semReal) && /Desvio<\/span>/.test(semReal));
+  check('CMV ideal 29% de R$ 316.337,84 = R$ 91.737,97', /29,00%/.test(semReal) && /91\.737,97/.test(semReal));
+  check('nenhuma linha de lucro', !/[Ll]ucro/.test(semReal));
   check('e o card explica que são tetos, não realizado', /teto<\/b> de cada conta/.test(semReal));
 
-  // ── 3. Com realizado: meta × realizado e desvio ────────────────────────────────────
-  dreRow = { pct: {}, real: { 'BANGU|2026-09': { cmv: 98420, folha: 71300, ocupacao: 41124, utilidades: 14900, impostos: 40980, outros: 7100 } } };
+  // ── 3. Com realizado: ideal × real e desvio ────────────────────────────────────────
+  // CMV e DP digitados em % (como chegam); água, gás e luz em R$ (valores de janeiro da foto).
+  dreRow = { pct: {}, real: { 'BANGU|2026-09': { cmv_pct: 31.11, folha_pct: 22.54, agua: 5308.16, gas: 6637.20, luz: 17454.70 } } };
   await prep('BANGU', 'gerente');
   const comReal = await bloco('BANGU');
-  check('com realizado lançado, a coluna vira Realizado', /Realizado<\/span>/.test(comReal));
-  check('CMV estourou a meta e aparece em vermelho (+R$ 6.682,03)',
-    /98\.420,00/.test(comReal) && /\+R\$ 6\.682,03/.test(comReal) && /#dc2626/.test(comReal));
-  check('folha ficou abaixo da meta e aparece em verde (−R$ 4.621,08)',
-    /−R\$ 4\.621,08/.test(comReal) && /#16a34a/.test(comReal));
-  // Lucro real = 316.337,84 − 273.824 = 42.513,84 · meta 47.450,68 → −4.936,84
-  check('o lucro real sai do faturamento menos os gastos (R$ 42.513,84)', /42\.513,84/.test(comReal));
-  check('e o desvio do lucro contra os 15% alvo (−R$ 4.936,84)', /−R\$ 4\.936,84/.test(comReal));
+  check('CMV real 31,11% vira R$ 98.412,70 sobre o faturamento',
+    /31,11%/.test(comReal) && /98\.412,70/.test(comReal));
+  check('CMV acima do ideal: +2,11 pp e +R$ 6.674,73, em vermelho',
+    /\+2,11 pp/.test(comReal) && /\+R\$ 6\.674,73/.test(comReal) && /#dc2626/.test(comReal));
+  check('DP abaixo do ideal: −1,46 pp e −R$ 4.618,53, em verde',
+    /−1,46 pp/.test(comReal) && /−R\$ 4\.618,53/.test(comReal) && /#16a34a/.test(comReal));
+  check('água + gás + luz = R$ 29.400,06 = 9,29% contra o ideal de 4% (+5,29 pp)',
+    /29\.400,06/.test(comReal) && /9,29%/.test(comReal) && /\+5,29 pp/.test(comReal));
+  check('e o card mostra quanto foi cada uma das três',
+    /Água R\$ 5\.308,16/.test(comReal) && /Gás R\$ 6\.637,20/.test(comReal) && /Luz R\$ 17\.454,70/.test(comReal));
+  check('continua sem lucro', !/[Ll]ucro/.test(comReal));
+
+  // Conta parcial: só a luz lançada ainda conta (é o mês em que a conta de gás não chegou).
+  dreRow = { pct: {}, real: { 'BANGU|2026-09': { luz: 13989.92 } } };
+  await prep('BANGU', 'gerente');
+  const soLuz = await bloco('BANGU');
+  check('só a luz lançada: a conta sai com ela e o CMV fica "não lançado"',
+    /Luz R\$ 13\.989,92/.test(soLuz) && /não lançado/.test(soLuz));
 
   // ── 4. % por loja sobrescrevendo o padrão da rede ─────────────────────────────────
-  dreRow = { pct: { REDE: { cmv: 29, folha: 24, ocupacao: 13, utilidades: 4, impostos: 13, outros: 2 },
-                    'NORTE SHOPPING': { ocupacao: 16, utilidades: 5 } }, real: {} };
+  dreRow = { pct: { REDE: { cmv: 29, folha: 24, utilidades: 4 },
+                    'NORTE SHOPPING': { utilidades: 5 } }, real: {} };
   await prep('NORTE SHOPPING', 'gerente');
   const shopping = await page.evaluate(() => ({
-    ocupacao: _drePct('NORTE SHOPPING', 'ocupacao'),
+    util: _drePct('NORTE SHOPPING', 'utilidades'),
     cmv: _drePct('NORTE SHOPPING', 'cmv'),
-    lucro: _dreLucroPct('NORTE SHOPPING'),
-    lucroBangu: _dreLucroPct('BANGU'),
     marcado: _dreTemAjusteLoja('NORTE SHOPPING'),
     bangu: _dreTemAjusteLoja('BANGU'),
   }));
-  check('a loja de shopping usa a ocupação dela (16%), não a da rede', shopping.ocupacao === 16);
+  check('a loja de shopping usa a % dela (5%), não a da rede', shopping.util === 5);
   check('e segue o padrão da rede no resto (CMV 29%)', shopping.cmv === 29);
-  check('o lucro alvo dela cai pra 11%, porque ocupação e utilidades comem mais',
-    shopping.lucro === 11 && shopping.lucroBangu === 15);
   check('o card avisa que a loja tem % ajustada, e a loja sem ajuste não avisa',
     shopping.marcado === true && shopping.bangu === false);
+
+  // ── 4b. WhatsApp: mesmos números, sem lucro ───────────────────────────────────────
+  dreRow = { pct: {}, real: { 'BANGU|2026-09': { cmv_pct: 31.11, folha_pct: 22.54, agua: 5308.16, gas: 6637.20, luz: 17454.70 } } };
+  await prep('BANGU', 'gerente');
+  const whats = await page.evaluate(() => _dreTextoWhats({ faturamento: 316337.84 }));
+  check('o texto do WhatsApp traz ideal × real de cada conta e nenhum lucro',
+    /CMV: ideal 29,00%/.test(whats) && /real 31,11%/.test(whats) && /\+2,11 pp/.test(whats) && !/[Ll]ucro/.test(whats));
 
   // ── 5. Edição: senha obrigatória e cargo ──────────────────────────────────────────
   const preencher = (pcts, reais) => page.evaluate(({ pcts, reais }) => {
@@ -141,7 +157,9 @@ const escritas = [];
     document.body.insertAdjacentHTML('beforeend', '<div id="_t">' + _dreFormHtml(_dreCtx.loja, _dreCtx.comp) + '</div>');
     DRE_CONTAS.forEach(c => {
       if (pcts && pcts[c.k] != null) document.getElementById('dre-pct-' + c.k).value = pcts[c.k];
-      if (reais && reais[c.k] != null) document.getElementById('dre-real-' + c.k).value = reais[c.k];
+    });
+    DRE_CAMPOS.forEach(f => {
+      if (reais && reais[f.k] != null) document.getElementById('dre-real-' + f.k).value = reais[f.k];
     });
   }, { pcts, reais });
   const limpar = () => page.evaluate(() => { const t = document.getElementById('_t'); if (t) t.remove(); });
@@ -156,7 +174,7 @@ const escritas = [];
 
   dreRow = { pct: {}, real: {} };
   await prep('BANGU', 'gerente');
-  await preencher(null, { cmv: 90000 });
+  await preencher(null, { cmv_pct: 27.29, luz: 17454.7 });
   const semSenha = await salvar('', '');
   check('não salva sem usuário e senha', /Preencha usuário e senha/.test(semSenha) && !escritas.length);
 
@@ -174,12 +192,13 @@ const escritas = [];
   const okGerente = await salvar('Carol', 'x');
   check('gerente com senha certa salva', okGerente === '' && escritas.length === 1);
   check('e o realizado foi gravado na competência da loja',
-    (dreRow.real['BANGU|2026-09'] || {}).cmv === 90000 && dreRow.real['BANGU|2026-09']._por === 'Carol');
+    (dreRow.real['BANGU|2026-09'] || {}).cmv_pct === 27.29 && dreRow.real['BANGU|2026-09'].luz === 17454.7 &&
+    dreRow.real['BANGU|2026-09']._por === 'Carol');
   await limpar();
 
   // ── 6. % igual ao padrão da rede não vira exceção congelada ───────────────────────
   escritas.length = 0;
-  dreRow = { pct: { REDE: { cmv: 29, folha: 24, ocupacao: 13, utilidades: 4, impostos: 13, outros: 2 } }, real: {} };
+  dreRow = { pct: { REDE: { cmv: 29, folha: 24, utilidades: 4 } }, real: {} };
   await prep('CAXIAS', 'gerente');
   await preencher(null, null);                       // mantém as % como vieram (= rede)
   await salvar('Carol', 'x');
@@ -188,10 +207,10 @@ const escritas = [];
   await limpar();
 
   await prep('CAXIAS', 'gerente');
-  await preencher({ ocupacao: 16 }, null);
+  await preencher({ utilidades: 5 }, null);
   await salvar('Carol', 'x');
   check('mudar uma % guarda só a conta que diferiu',
-    dreRow.pct.CAXIAS && dreRow.pct.CAXIAS.ocupacao === 16 && dreRow.pct.CAXIAS.cmv === undefined);
+    dreRow.pct.CAXIAS && dreRow.pct.CAXIAS.utilidades === 5 && dreRow.pct.CAXIAS.cmv === undefined);
   await limpar();
 
   // ── 7. Padrão da rede: só mestre/supervisor ───────────────────────────────────────
@@ -212,19 +231,29 @@ const escritas = [];
   await limpar();
 
   await prep('BANGU', 'mestre');
-  await preencher({ cmv: 27, outros: 4 }, null);
+  await preencher({ cmv: 27, folha: 25 }, null);
   login = { nome: 'Tiago', cargo: 'mestre' };
   await salvar('Tiago', 'x', true);
-  check('mestre aplica as % como padrão da rede', dreRow.pct.REDE.cmv === 27 && dreRow.pct.REDE.outros === 4);
+  check('mestre aplica as % como padrão da rede', dreRow.pct.REDE.cmv === 27 && dreRow.pct.REDE.folha === 25);
   await limpar();
 
-  // ── 8. Soma das despesas não pode comer o lucro inteiro ──────────────────────────
+  // ── 8. R$ digitado no campo da % ────────────────────────────────────────────────
+  // O CMV chega em % (27,29). Digitar o R$ no campo dele daria 98.420% — recusa e explica.
   escritas.length = 0;
   await prep('BANGU', 'mestre');
-  await preencher({ cmv: 60, folha: 45 }, null);
-  const somaRuim = await salvar('Tiago', 'x');
-  check('% que somam 100 ou mais são recusadas (não sobra lucro)',
-    /não sobra lucro/.test(somaRuim) && !escritas.length);
+  await preencher(null, { cmv_pct: 98420 });
+  const pctRuim = await salvar('Tiago', 'x');
+  check('% acima de 100 é recusada, dizendo que o campo é a % do relatório',
+    /CMV é em %/.test(pctRuim) && /não o R\$/.test(pctRuim) && !escritas.length);
+  await limpar();
+
+  // A conferência embaixo do campo mostra a outra unidade.
+  await prep('BANGU', 'mestre');
+  await preencher(null, { cmv_pct: 31.11, agua: 5308.16 });
+  const dicas = await page.evaluate(() => { _dreAtualizarPcts(316337.84);
+    return [document.getElementById('dre-hint-cmv_pct').textContent, document.getElementById('dre-hint-agua').textContent]; });
+  check('embaixo da % aparece o R$, e embaixo do R$ aparece a %',
+    dicas[0] === '= R$ 98.412,70' && dicas[1] === '= 1,68%', JSON.stringify(dicas));
   await limpar();
 
   await browser.close();
