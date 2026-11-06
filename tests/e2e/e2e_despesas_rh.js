@@ -227,7 +227,11 @@ const brl = v => v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFr
   check('período sem lançamento não quebra: diz que não teve despesa',
     vazio.n === 0 && /Nenhuma despesa/.test(vazio.html) && /Nenhuma despesa/.test(vazio.wpp));
   const trava = await page.evaluate(async () => {
-    S.despMode = 'dia'; S.despData = new Date(2026, 10, 5, 12, 0, 0, 0);
+    // HOJE de verdade, não uma data fixa: com "05/11/2026" cravado, a checagem passou a
+    // falhar sozinha na virada pra 06/11 (UTC), na main e em todo PR aberto — a trava é
+    // "não passar de hoje", e hoje muda.
+    const h = new Date();
+    S.despMode = 'dia'; S.despData = new Date(h.getFullYear(), h.getMonth(), h.getDate(), 12, 0, 0, 0);
     await carregarDespesas(); renderDespesas();
     return document.getElementById('content').innerHTML;
   });
