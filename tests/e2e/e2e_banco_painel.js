@@ -9,7 +9,7 @@
 //
 // Esta suíte cobra as regras que não podem divergir da aba Banco, porque é dela que o número
 // sai: os meses do ciclo (conferidos contra o PRÓPRIO _bhMesesDoCiclo do Check-list), o
-// legado que só soma no primeiro ciclo, o lançamento de férias que não conta, o nome antigo
+// mês anterior ao ciclo que não soma (desde 06/11/2026, nem no primeiro), o lançamento de férias que não conta, o nome antigo
 // que pertence a quem foi renomeado, e o saldo zerado que não vira linha.
 const CAMINHOS = require('../_env');
 const { chromium } = require('playwright');
@@ -222,19 +222,26 @@ const LOJAS = ['BANGU', 'CAXIAS', 'PEDREIRA', 'RANCHO', 'BOULEVARD', 'NOVA AMERI
     !!joana && joana.horas === -9 && joana.valor === 0 && joana.semValor === true);
   check('Bangu: a loja diz que 1 pessoa está sem salário do setor', B && B.semSalario === 1);
 
-  // ── 6. Legado: soma no primeiro ciclo, e só nele ───────────────────────────────────────
-  check('Pedreira: -18h — o legado de Mai/26 soma no primeiro ciclo (-10h) junto com Jul (-8h)',
-    P && P.neg === 18 && P.pessoas.length === 1);
-  check('Pedreira: Mai/26 aparece como legado', P && JSON.stringify(P.legado) === JSON.stringify(['2026-05']));
+  // ── 6. Mês anterior ao ciclo NÃO soma, nem no primeiro ciclo (06/11/2026) ────────────
+  // Até 06/11 o 1º ciclo de cada loja somava os meses de antes dele ("legado"). Decisão do
+  // dono: "não pode puxar meses antes, pois gera erro, e grande" — era o que punha −682,5h
+  // na Nova América, com só +80,7h do ciclo de verdade.
+  check('Pedreira: -8h — só Jul, do ciclo; Mai/26 (antes do 1º ciclo) não soma mais',
+    P && P.neg === 8 && P.pessoas.length === 1);
+  check('Pedreira: Mai/26 não é mais legado — é mês fora do ciclo',
+    P && P.legado.length === 0 && JSON.stringify(P.fora) === JSON.stringify(['2026-05']));
   check('Caxias: no SEGUNDO ciclo o legado não existe — Mar/26 não soma', C && C.pessoas.length === 0 && C.neg === 0);
   check('Caxias: Mar/26 é apontado como mês de outro ciclo', C && JSON.stringify(C.fora) === JSON.stringify(['2026-03']));
 
   // ── 7. Nome antigo é da mesma pessoa ──────────────────────────────────────────────────
-  check('Nova Iguaçu: uma linha só, +13h — o lançamento em "Carol" é de quem hoje é "Carol Marinho"',
-    R && R.pessoas.length === 1 && R.pessoas[0].horas === 13);
+  // O nome antigo continua sendo da mesma pessoa; Set/26 ("Carol", +9h) é que saiu do saldo,
+  // por ser anterior ao 1º mês do ciclo (Out/26).
+  check('Nova Iguaçu: uma linha só, +4h — Out/26; Set/26 é anterior ao ciclo e não soma',
+    R && R.pessoas.length === 1 && R.pessoas[0].horas === 4);
   check('Nova Iguaçu: a linha sai com o nome de hoje', R && R.pessoas[0].nome === 'Carol Marinho');
-  check('Nova Iguaçu: R$ 195,00 (13h × R$ 10,00 + 50%)', R && Math.abs(R.valorPos - 195) < 0.005);
-  check('Nova Iguaçu: Set/26 é legado do primeiro ciclo', R && JSON.stringify(R.legado) === JSON.stringify(['2026-09']));
+  check('Nova Iguaçu: R$ 60,00 (4h × R$ 10,00 + 50%)', R && Math.abs(R.valorPos - 60) < 0.005);
+  check('Nova Iguaçu: Set/26 aparece como mês fora do ciclo, não como legado',
+    R && R.legado.length === 0 && JSON.stringify(R.fora) === JSON.stringify(['2026-09']));
 
   // ── 8. Loja sem o 1º ciclo cadastrado ─────────────────────────────────────────────────
   check('Nova América: sem âncora não há ciclo', NA && NA.ciclo === null && NA.pessoas.length === 0);
@@ -245,12 +252,13 @@ const LOJAS = ['BANGU', 'CAXIAS', 'PEDREIRA', 'RANCHO', 'BOULEVARD', 'NOVA AMERI
   const html = await page.evaluate(() => { try { return _buildBancoPanel(); } catch (e) { return 'ERRO: ' + e.message; } });
   const txt = String(html).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
 
-  check('a tela soma a rede: -39h a compensar', /-39h/.test(txt));
-  check('a tela soma a rede: +18h a pagar', /\+18h/.test(txt));
-  check('a tela soma a rede: R$ 300,00 já pagos em hora negativa', /R\$ 300,00/.test(txt));
-  check('a tela soma a rede: R$ 270,00 em hora positiva com +50%', /R\$ 270,00/.test(txt));
-  check('a tela soma a rede: R$ 570,00 em jogo', /R\$ 570,00/.test(txt));
-  check('a tela diz 6 pessoas com saldo e 4 acima de ±8h', /6 pessoas/.test(txt) && /4 acima de ±8h/.test(txt));
+  // Sem o legado: Bangu -21/+3, Pedreira -8, Nova Iguaçu +4, Boulevard +2.
+  check('a tela soma a rede: -29h a compensar', /-29h/.test(txt));
+  check('a tela soma a rede: +9h a pagar', /\+9h/.test(txt));
+  check('a tela soma a rede: R$ 200,00 já pagos em hora negativa', /R\$ 200,00/.test(txt));
+  check('a tela soma a rede: R$ 135,00 em hora positiva com +50%', /R\$ 135,00/.test(txt));
+  check('a tela soma a rede: R$ 335,00 em jogo', /R\$ 335,00/.test(txt));
+  check('a tela diz 6 pessoas com saldo e 2 acima de ±8h', /6 pessoas/.test(txt) && /2 acima de ±8h/.test(txt));
   check('as -99h da Maglia não entram em nada', !/99h/.test(txt) && !txt.includes('Heitor'));
 
   // Molde das abas Carnes e Trios: um cartão por loja, em ordem alfabética, inclusive as
@@ -285,9 +293,9 @@ const LOJAS = ['BANGU', 'CAXIAS', 'PEDREIRA', 'RANCHO', 'BOULEVARD', 'NOVA AMERI
     ant.porLoja['BANGU'].ciclo.fim === '2026-09-25' && ant.porLoja['BANGU'].pos === 20);
   check('e Out/26, que era o saldo do ciclo vigente, passa a ser mês de outro ciclo',
     ant.porLoja && JSON.stringify(ant.porLoja['BANGU'].fora) === JSON.stringify(['2026-10']));
-  check('Caxias no ciclo anterior: as -30h de Mar/26 aparecem — é ali que o legado mora',
-    ant.porLoja && ant.porLoja['CAXIAS'].neg === 30 &&
-    JSON.stringify(ant.porLoja['CAXIAS'].legado) === JSON.stringify(['2026-03']));
+  check('Caxias no 1º ciclo: as -30h de Mar/26 (anteriores a ele) também não somam mais',
+    ant.porLoja && ant.porLoja['CAXIAS'].neg === 0 && ant.porLoja['CAXIAS'].legado.length === 0 &&
+    ant.porLoja['CAXIAS'].fora.includes('2026-03'));
   check('Pedreira e Nova Iguaçu dizem que o ciclo ainda não existia, em vez de fechar zeradas',
     ant.porLoja && ant.porLoja['PEDREIRA'].antes === true && ant.porLoja['RANCHO'].antes === true &&
     /ciclo ainda não existia/i.test(aTxt));
@@ -349,7 +357,7 @@ const LOJAS = ['BANGU', 'CAXIAS', 'PEDREIRA', 'RANCHO', 'BOULEVARD', 'NOVA AMERI
     } catch (e) { return { erro: String(e && e.message) }; }
   });
   check('o relatório existe e traz o total da rede',
-    rel && rel.pdf && /-39h/.test(rel.pdf.msg) && /R\$ 570,00/.test(rel.pdf.msg));
+    rel && rel.pdf && /-29h/.test(rel.pdf.msg) && /R\$ 335,00/.test(rel.pdf.msg));
   check('o PDF leva a lista inteira', rel && rel.pdf && rel.pdf.msg.includes('Bruno Dias'));
   check('o WhatsApp leva só quem passou de ±8h, e diz quantos ficaram de fora',
     rel && rel.wpp && !rel.wpp.msg.includes('Bruno Dias') && /e mais 1 com saldo até ±8h/.test(rel.wpp.msg));
@@ -359,7 +367,7 @@ const LOJAS = ['BANGU', 'CAXIAS', 'PEDREIRA', 'RANCHO', 'BOULEVARD', 'NOVA AMERI
   // ── 12. O raio-x da loja e a aba não são o mesmo número, e a tela diz qual é qual ──────
   // É a diferença que motivou a aba: o raio-x soma o PERÍODO escolhido no toggle, e a
   // Pedreira não lançou nada em Out/26 — o saldo dela está em Mai e Jul, dentro do ciclo.
-  // Olhando só o raio-x em Out, a loja parece limpa; são -18h.
+  // Olhando só o raio-x em Out, a loja parece limpa; são -8h (Jul).
   const rx = await page.evaluate(async ({ cfg, meses }) => {
     try {
       _dashBhCfg = { 'Pedreira': cfg };
@@ -374,7 +382,7 @@ const LOJAS = ['BANGU', 'CAXIAS', 'PEDREIRA', 'RANCHO', 'BOULEVARD', 'NOVA AMERI
   check('o raio-x do mês de Out/26 não acha saldo nenhum na Pedreira — o dela está nos meses anteriores do ciclo',
     /Nenhum saldo lançado no período/.test(rx));
   check('e o raio-x diz onde está o acumulado do ciclo', /aba ⏱ Banco do Painel/.test(rx));
-  check('enquanto a aba Banco mostra as -18h do ciclo da Pedreira', /-18h/.test(txt));
+  check('enquanto a aba Banco mostra as -8h do ciclo da Pedreira', /-8h/.test(txt));
 
   await browser.close();
   console.log(`\n${ok} OK, ${falhou} falhou`);
