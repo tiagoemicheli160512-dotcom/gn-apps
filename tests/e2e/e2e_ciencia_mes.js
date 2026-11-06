@@ -80,8 +80,10 @@ const prepara = (page, over) => page.evaluate(async ([s, comp]) => {
              visita: ids.indexOf('visita-supervisao-home-card'),
              docs: ids.indexOf('docs-rh-home-card') };
   });
-  check('o card de desempenho agora vem logo depois do card de vendas',
-    ordem.mes === ordem.venda + 1);
+  // 06/11/2026: subiu de novo, pra cima das validades e do card de vendas ("do jeito que
+  // tá não estão vendo"). Ver e2e_mes_anterior_operacao.js.
+  check('o card de desempenho vem antes do card de vendas (subiu pra cima das validades)',
+    ordem.mes >= 0 && ordem.mes < ordem.venda);
   check('e não mais lá embaixo, depois das visitas',
     ordem.mes < ordem.visita && ordem.mes < ordem.docs);
 
