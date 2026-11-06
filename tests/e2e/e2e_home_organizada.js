@@ -110,6 +110,17 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
   const fonte = require('fs').readFileSync(HOME, 'utf8');
   check('plural de manutenção corrigido ("manutençãoões" não existe mais)', !/manutenção\$\{[^}]*'ões'/.test(fonte));
 
+  // Foco (06/11): reorganizar a lista não pode tirar o cursor de um campo dentro de uma
+  // linha aberta — mover o nó faz o navegador perder o foco.
+  await card('pendencias-loja-home-card', '<input id="campo-teste">');
+  await marca('pendencias-loja-home-card', 'acao', { icone: '🔔', titulo: 'Pendências da loja', n: 4 });
+  await page.evaluate(() => { if (!_homeOrgAbertos.has('pendencias-loja-home-card')) _homeOrgToggle('pendencias-loja-home-card'); });
+  await page.focus('#campo-teste');
+  await card('contagem-segunda-home-card', 'contagem'); await marca('contagem-segunda-home-card', 'acao', { titulo: 'Contagem de segunda', n: 1 });
+  await page.evaluate(() => _homeOrganizar());
+  const foco = await page.evaluate(() => document.activeElement && document.activeElement.id);
+  check('digitando num campo de uma linha aberta: outro card chegando não tira o foco', foco === 'campo-teste', foco);
+
   check('nenhum erro de JavaScript', erros.length === 0, erros.join(' | '));
   await browser.close();
   console.log(`\n${ok} OK, ${falhou} falhou`);

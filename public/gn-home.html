@@ -3288,7 +3288,7 @@ function _homeOrganizar() {
   }
   const lista = secAcao.querySelector('.home-acao-lista');
   const okGaveta = secOk.querySelector('.home-ok-gaveta');
-  let nAcao = 0, nCasos = 0;
+  let nAcao = 0, nCasos = 0, antItem = null;
   const oks = [];
 
   HOME_ORG_IDS.forEach(id => {
@@ -3312,7 +3312,10 @@ function _homeOrganizar() {
         item.setAttribute('data-home-item', id);
         item.innerHTML = `<div class="home-acao-row"></div><div class="home-acao-gaveta" style="display:none;padding:2px 0 4px"></div>`;
       }
-      lista.appendChild(item);   // appendChild na ordem da lista = ordem de prioridade
+      // Na ordem da lista = ordem de prioridade. Só move o que está fora de ordem: mover um
+      // nó tira o foco de um campo dentro dele (mesma proteção da fase 3).
+      if (item.parentNode !== lista || item.previousElementSibling !== antItem) lista.insertBefore(item, antItem ? antItem.nextSibling : lista.firstChild);
+      antItem = item;
       const aberto = _homeOrgAbertos.has(id);
       const urg = info.urgente !== false;
       item.querySelector('.home-acao-row').innerHTML = `<div onclick="_homeOrgToggle('${id}')" style="display:flex;align-items:center;gap:10px;padding:11px 14px;cursor:pointer;border-top:1px solid rgba(0,0,0,.06)">
@@ -3416,15 +3419,8 @@ async function _renderPraHojeHome(mostrar, sess, isMasterAtivo) {
       url: 'gn-checklist.html',
     });
 
-    // 3. Manutenção parada — mesma régua do card de Pendências (aberta há mais de 5 dias).
-    const vistos = new Set(); const paradas = [];
-    (chkManut || []).forEach(r => (Array.isArray(r.manutencao) ? r.manutencao : []).forEach(m => {
-      if (!m || m.status === 'Resolvido') return;
-      const k = (m.descricao || '') + '|' + (m.setor || '');
-      if (vistos.has(k)) return;
-      vistos.add(k);
-      if (new Date(r.data_operacao + 'T00:00:00') < old5) paradas.push(m);
-    }));
+    // 3. Manutenção parada — a MESMA função do card de Pendências (aberta há mais de 5 dias).
+    const paradas = _manutParadasDaLoja(chkManut, allData, hoje, old5);
     if (paradas.length) {
       itens.push({ feito: false, titulo: `${paradas.length} ${paradas.length>1?'manutenções':'manutenção'} parada${paradas.length>1?'s':''} há mais de 5 dias`,
         detalhe: paradas.slice(0,2).map(m => m.descricao || m.setor || '—').join(' · '), url: 'gn-checklist.html' });
@@ -6102,6 +6098,36 @@ async function _enviarAlertaUrgente(loja, confirmMsg, motivo) {
 // Card "Pendências desta loja" — mesma versão do feed de alertas do Painel de Gestão
 // (⚠ Atenção), só que escopada a uma única loja e com fetches próprios, pra aparecer
 // logo no início do Home de cada loja (staff normal e mestre navegando a loja).
+// Manutenções pendentes de UMA loja — a régua única da Home (cards "Pra fazer hoje" e
+// "Pendências da loja"), igual à do Painel e do app Manutenção: o Check-list repete o item
+// pendente todo dia até resolver, então vale o STATUS da ocorrência mais recente e a DATA
+// da mais antiga (quando foi aberto); somam-se os itens oficiais lançados pelo RH.
+// 06/11/2026: o "Pra fazer hoje" contava por conta própria e dava 7 no Bangu contra 9 das
+// Pendências — contava item já resolvido (o resolvido era pulado e a ocorrência pendente
+// de antes entrava no lugar) e media o tempo pela ocorrência mais recente (= hoje).
+function _manutPendentesDaLoja(chkRows, lojaAllData, hojeISO) {
+  const newest = new Map(), oldest = new Map();
+  (chkRows || []).forEach(row => {   // chkRows em ordem decrescente de data
+    if (!Array.isArray(row.manutencao)) return;
+    row.manutencao.forEach(m => {
+      if (!m) return;
+      const k = `${m.setor}|${m.tipo}|${(m.descricao || '').trim().toLowerCase()}`;
+      const withMeta = { ...m, _data: row.data_operacao };
+      if (!newest.has(k)) newest.set(k, withMeta);
+      oldest.set(k, withMeta);
+    });
+  });
+  const chk = [...newest.entries()].map(([k, n]) => ({ ...n, _data: oldest.get(k)._data }));
+  const oficiais = (Array.isArray((lojaAllData || {}).manut_oficial_items) ? lojaAllData.manut_oficial_items : [])
+    .map(m => ({ ...m, _data: m.created_at ? m.created_at.split('T')[0] : hojeISO }));
+  return [...chk, ...oficiais].filter(m => m.status !== 'Resolvido');
+}
+function _manutParadasDaLoja(chkRows, lojaAllData, hojeISO, old5) {
+  return _manutPendentesDaLoja(chkRows, lojaAllData, hojeISO)
+    .filter(m => m._data && new Date(m._data + 'T00:00:00') < old5)
+    .sort((a, b) => String(a._data).localeCompare(String(b._data)));   // a mais antiga primeiro
+}
+
 async function _renderPendenciasLojaHome(mostrar, sess, isMasterAtivo) {
   const el = document.getElementById('pendencias-loja-home-card');
   if (!el) return;
@@ -6178,23 +6204,8 @@ async function _renderPendenciasLojaHome(mostrar, sess, isMasterAtivo) {
       }
     }
 
-    const _newestManut = new Map(), _oldestManut = new Map();
-    (chkManutRows||[]).forEach(row=>{
-      if (!Array.isArray(row.manutencao)) return;
-      row.manutencao.forEach(m=>{
-        if (!m) return;
-        const k = `${m.setor}|${m.tipo}|${(m.descricao||'').trim().toLowerCase()}`;
-        const withMeta = {...m, _data: row.data_operacao};
-        if (!_newestManut.has(k)) _newestManut.set(k, withMeta);
-        _oldestManut.set(k, withMeta);
-      });
-    });
-    const manutChk = [..._newestManut.entries()].map(([k,newest])=>({...newest, _data:_oldestManut.get(k)._data}));
     const lojaAllData = (lojaRows[0] && lojaRows[0].all_data) || {};
-    const manutOficiais = (Array.isArray(lojaAllData.manut_oficial_items) ? lojaAllData.manut_oficial_items : [])
-      .map(m=>({...m, _data: m.created_at ? m.created_at.split('T')[0] : hoje}));
-    const manutTodos = [...manutChk, ...manutOficiais].filter(m=>m.status!=='Resolvido');
-    const manutParada = manutTodos.filter(m=>m._data && new Date(m._data+'T00:00:00')<old5).length;
+    const manutParada = _manutParadasDaLoja(chkManutRows, lojaAllData, hoje, old5).length;
 
     const confMap = lojaAllData.caixa_conferencias || {};
     const caixaSemConferencia = (caixaRows||[])
