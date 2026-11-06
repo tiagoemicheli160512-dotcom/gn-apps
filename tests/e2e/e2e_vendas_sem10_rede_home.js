@@ -2,15 +2,16 @@
 //  acrescentar a posição de vendas também, e notas sem 10%. Acho importante a loja ter essa
 //  visão, sem ver a posição das outras."
 //
-// Dois cards ao lado do "Cancelamento na rede", saindo da MESMA consulta:
-//  - VENDAS: posição pelo CRESCIMENTO contra o mesmo trecho do mês passado (01 até ontem
-//    contra 01 até o mesmo dia). Pelo faturamento a ordem seria o tamanho da loja — o
-//    fixture tem a loja GRANDE crescendo pouco e a PEQUENA crescendo muito, pra a ordem
-//    pelo faturamento e a ordem pelo crescimento darem respostas opostas;
-//  - NOTA SEM 10%: valor das notas sobre o faturamento do mês, menor é melhor, com a mesma
-//    cobrança de caixa fechado em branco (sem nota e sem assinatura) antes do elogio.
+// Dois cards ao lado do "Cancelamento na rede", saindo da MESMA consulta. A posição é a
+// DO PAINEL DE GESTÃO ("vem do painel de gestão", decisão do dono):
+//  - VENDAS: ordem pelo faturamento do mês entre as 12 lojas, como o "#N no ranking de
+//    faturamento" do Painel — Maglia inclusa na ordem (ranking individual, CLAUDE.md),
+//    mas sem card. O crescimento contra o mesmo trecho do mês passado vem junto, até o
+//    último dia que a loja lançou, dos dois lados;
+//  - NOTA SEM 10%: ordem pelo 10% não cobrado em reais, menor primeiro, só quem lançou
+//    nota — o "Ranking · 10% não cobrado" do Painel. Sem nota: sem posição, e o card diz
+//    se os caixas foram assinados ou ficaram em branco.
 //  - "sem ver a posição das outras": nenhum nome de outra loja pode estar no HTML.
-//  - Maglia fora (CLAUDE.md).
 const CAMINHOS = require('../_env');
 const { chromium } = require('playwright');
 const HOME = process.env.ARQ_HOME || process.env.ARQ || CAMINHOS.pub('gn-home.html');
@@ -34,7 +35,8 @@ const FAT = [
   dia('2026-10-04', 'Caxias', 30000),
   // Fora do trecho comparado: 05/10 (mês passado depois do dia 04) e hoje 05/11.
   dia('2026-10-05', 'Bangu', 999999), dia('2026-11-05', 'Pedreira', 999999),
-  // Maglia crescendo 1000%: se entrasse, seria 1ª e empurraria todo mundo.
+  // Maglia: entra na ORDEM do faturamento (como no Painel), mas não no crescimento da rede
+  // (+1000% — se entrasse, o +3,1% da rede viraria outro número).
   dia('2026-10-01', 'Maglia', 1000), dia('2026-11-01', 'Maglia', 11000),
   // Nova América: venda só no mês atual — sem base de comparação, sem posição.
   dia('2026-11-01', 'Nova América', 30000),
@@ -90,37 +92,38 @@ const OUTRAS = ['Bangu', 'Pedreira', 'Caxias', 'Nova América', 'Maglia', 'Itaqu
   check('os dois lugares dos cards existem na Home',
     await page.evaluate(() => !!document.getElementById('vendas-rede-home-card') && !!document.getElementById('sem10-rede-home-card')));
 
-  // ── Vendas ───────────────────────────────────────────────────────────────────────────
+  // ── Vendas: posição pelo faturamento do mês (hoje incluído, como no Painel) ────────
+  // Faturamento 01–05/11: Pedreira 1.014.999 · Bangu 110.000 · Caxias 40.000 ·
+  // Nova América 30.000 · Maglia 11.000 → 5 lojas com venda.
   const ped = await montar({ loja: 'PEDREIRA' });
-  check('vendas: a Pedreira (pequena, +50%) é 1ª de 3 — posição pelo crescimento, não pelo tamanho',
-    /\+50,0%/.test(ped.vendas.txt) && /1º de 3/.test(ped.vendas.txt), ped.vendas.txt);
   const bg = await montar({ loja: 'BANGU' });
-  check('vendas: o Bangu (grande, +10%) é 2º de 3', /\+10,0%/.test(bg.vendas.txt) && /2º de 3/.test(bg.vendas.txt), bg.vendas.txt);
   const cx = await montar({ loja: 'CAXIAS' });
-  check('vendas: Caxias (−20%) é 3º de 3, em vermelho', /−20,0%/.test(cx.vendas.txt) && /3º de 3/.test(cx.vendas.txt) && /txt-red/.test(cx.vendas.html), cx.vendas.txt);
-  check('vendas: loja que não lançou ontem é comparada até o último dia dela, dos dois lados',
-    /01\/11 a 03\/11/.test(cx.vendas.txt) && /de 01\/10 a 03\/10/.test(cx.vendas.txt) && /04\/11 ainda não foi lançado/.test(cx.vendas.txt) && !/−50/.test(cx.vendas.txt), cx.vendas.txt);
-  // rede: atual 110+15+40 = 165 mil; anterior 100+10+50 = 160 mil → +3,1%
-  check('vendas: média da rede ponderada pela venda: +3,1% (média das % daria +13,3%)',
-    /rede em \+3,1%/.test(bg.vendas.txt) && !/13,3%/.test(bg.vendas.txt), bg.vendas.txt);
-  check('vendas: compara 01 a 04/11 contra 01 a 04/10 (hoje e 05/10 de fora)',
-    /01\/11 a 04\/11/.test(bg.vendas.txt) && /de 01\/10 a 04\/10/.test(bg.vendas.txt) && /R\$\s?110\.000/.test(bg.vendas.txt), bg.vendas.txt);
   const na = await montar({ loja: 'NOVA AMERICA' });
-  check('vendas: loja sem venda no mês passado fica sem posição (não vira +∞%)', /sem posição/.test(na.vendas.txt) && !/º de/.test(na.vendas.txt), na.vendas.txt);
+  check('vendas: a posição é a do faturamento do mês (Pedreira 1ª de 5)', /1º de 5 em faturamento/.test(ped.vendas.txt), ped.vendas.txt);
+  check('vendas: o Bangu é 2º de 5 e mostra o faturamento do mês (R$ 110.000)',
+    /2º de 5 em faturamento/.test(bg.vendas.txt) && /R\$\s?110\.000,00 vendidos no mês/.test(bg.vendas.txt), bg.vendas.txt);
+  check('vendas: a Maglia conta na ORDEM do faturamento, como no Painel (5 lojas, Nova América 4ª)', /4º de 5/.test(na.vendas.txt), na.vendas.txt);
+  check('vendas: Caxias 3º de 5', /3º de 5/.test(cx.vendas.txt), cx.vendas.txt);
+  check('vendas: o crescimento vem junto (Bangu +10,0%, Pedreira +50,0%, Caxias −20,0%)',
+    /\+10,0% contra o mês passado/.test(bg.vendas.txt) && /\+50,0%/.test(ped.vendas.txt) && /−20,0%/.test(cx.vendas.txt), bg.vendas.txt);
+  check('vendas: crescimento da rede ponderado e sem a Maglia: +3,1% (com ela, ou pela média das %, sairia outro número)',
+    /rede em \+3,1%/.test(bg.vendas.txt), bg.vendas.txt);
+  check('vendas: o crescimento compara 01 a 04/11 contra 01 a 04/10 (hoje e 05/10 de fora)',
+    /01\/11 a 04\/11: R\$\s?110\.000/.test(bg.vendas.txt) && /01\/10 a 04\/10: R\$\s?100\.000/.test(bg.vendas.txt), bg.vendas.txt);
+  check('vendas: loja que não lançou ontem é comparada até o último dia dela, dos dois lados',
+    /01\/11 a 03\/11/.test(cx.vendas.txt) && /01\/10 a 03\/10/.test(cx.vendas.txt) && /04\/11 ainda não foi lançado/.test(cx.vendas.txt) && !/−50/.test(cx.vendas.txt), cx.vendas.txt);
+  check('vendas: sem venda no mês passado, tem posição mas não tem crescimento (não vira +∞%)',
+    /Sem venda lançada no mesmo trecho do mês passado/.test(na.vendas.txt) && !/∞|Infinity|NaN/.test(na.vendas.txt), na.vendas.txt);
   const mg = await montar({ loja: 'MAGLIA' });
   check('vendas e sem 10%: a Maglia não tem card', mg.vendas.html === '' && mg.sem10.html === '');
-  check('vendas: a Maglia (+1000%) não entra na conta da rede', /1º de 3/.test(ped.vendas.txt));
 
-  // ── Nota sem 10% ─────────────────────────────────────────────────────────────────────
-  // Faturamento do mês até HOJE: Bangu 110.000; Pedreira 15.000 + 999.999 (hoje) = 1.014.999;
-  // Caxias 40.000. Bangu 1.100/110.000 = 1,00%; Caxias 400/40.000 = 1,00%; Pedreira 0%.
-  check('sem 10%: o Bangu vê 1,00% e o 10% que não entrou (R$ 110)',
-    /1,00%/.test(bg.sem10.txt) && /R\$\s?110,00 de 10% que não entrou/.test(bg.sem10.txt) && /2 notas/.test(bg.sem10.txt), bg.sem10.txt);
-  check('sem 10%: nota de outubro não entra (Caxias segue com 1,00%, não 126%)', /1,00%/.test(cx.sem10.txt) && !/126/.test(cx.sem10.txt), cx.sem10.txt);
-  // 4 lojas, não 3: a Nova América tem venda no mês (só não tem no mês passado, por isso
-  // fica fora da posição de VENDAS) — na nota sem 10% basta faturamento, como no cancelamento.
-  check('sem 10%: a Pedreira é 1ª de 4 com 0%…', /1º de 4/.test(ped.sem10.txt) && /0,00%/.test(ped.sem10.txt), ped.sem10.txt);
-  check('…mas o card cobra o caixa fechado em branco em vez de elogiar', /1 caixa fechou sem lançar nota sem 10%/.test(ped.sem10.txt), ped.sem10.txt);
+  // ── Nota sem 10%: ordem pelo 10% em reais, só quem lançou ────────────────────────────
+  check('sem 10%: Caxias (R$ 40 de 10%) é 1ª de 2', /R\$\s?40,00 de 10% que não entrou/.test(cx.sem10.txt) && /1º de 2/.test(cx.sem10.txt), cx.sem10.txt);
+  check('sem 10%: o Bangu (R$ 110 de 10%, 2 notas) é 2º de 2',
+    /R\$\s?110,00 de 10% que não entrou/.test(bg.sem10.txt) && /2º de 2/.test(bg.sem10.txt) && /2 notas/.test(bg.sem10.txt), bg.sem10.txt);
+  check('sem 10%: nota de outubro não entra (Caxias segue com R$ 40, não R$ 5.040)', !/5\.040/.test(cx.sem10.txt), cx.sem10.txt);
+  check('sem 10%: a Pedreira, sem nota, fica sem posição (como no Painel)…', /sem posição no ranking/.test(ped.sem10.txt) && !/º de/.test(ped.sem10.txt), ped.sem10.txt);
+  check('…e o card cobra o caixa fechado em branco', /1 caixa fechou sem lançar nota sem 10%/.test(ped.sem10.txt), ped.sem10.txt);
   check('sem 10%: caixa assinado "não houve" conta como respondido', /Todos os 2 caixas fechados/.test(cx.sem10.txt), cx.sem10.txt);
 
   // ── "Sem ver a posição das outras" ───────────────────────────────────────────────────
@@ -150,7 +153,7 @@ const OUTRAS = ['Bangu', 'Pedreira', 'Caxias', 'Nova América', 'Maglia', 'Itaqu
   const garcom = await montar({ loja: 'BANGU', cargo: 'garcom' });
   check('cargo fora da plateia não vê os cards', garcom.vendas.html === '' && garcom.sem10.html === '');
   const mestre = await montar({ loja: 'GERAL', cargo: 'mestre', isMaster: true, masterLoja: 'CAXIAS' });
-  check('mestre olhando uma loja vê os cards dela', /3º de 3/.test(mestre.vendas.txt), mestre.vendas.txt);
+  check('mestre olhando uma loja vê os cards dela', /3º de 5/.test(mestre.vendas.txt), mestre.vendas.txt);
 
   // ── Dia 1: nada fechado no mês ainda ─────────────────────────────────────────────────
   const ctx2 = await browser.newContext({ viewport: { width: 390, height: 900 } });
@@ -166,7 +169,7 @@ const OUTRAS = ['Bangu', 'Pedreira', 'Caxias', 'Nova América', 'Maglia', 'Itaqu
     try { await _renderCancelRedeHome(true, { loja: 'BANGU', cargo: 'gerente' }, false); } finally { window.gnFetchJson = orig; }
     return document.getElementById('vendas-rede-home-card').textContent.replace(/\s+/g, ' ');
   }, FAT);
-  check('dia 1 do mês: o card de vendas avisa que a posição aparece amanhã', /começou hoje/.test(dia1) && !/º de/.test(dia1), dia1);
+  check('dia 1 do mês: o card de vendas avisa que a comparação aparece amanhã', /começou hoje/.test(dia1), dia1);
 
   check('nenhum erro de JavaScript na Home', erros.length === 0, erros.join(' | '));
   await browser.close();

@@ -6068,18 +6068,19 @@ function _cancelRedeHomeHtml(d, loja) {
    Mesma regra do cancelamento: a loja vê a PRÓPRIA posição e a média da rede. Nenhum nome
    de outra loja chega aqui — nem no HTML.
 
-   VENDA é posicionada pelo CRESCIMENTO contra o mesmo trecho do mês passado (01 até ontem
-   contra 01 até o mesmo dia), não pelo faturamento. Pelo faturamento a ordem é o tamanho
-   da loja: Bangu seria sempre a primeira e a menor sempre a última, e posição que ninguém
-   consegue mudar não serve pra cobrar. É a mesma comparação do card "Venda do mês", logo
-   abaixo. Até ontem porque o dia de hoje ainda não fechou — contar meio dia contra um dia
-   inteiro do mês passado derrubaria todo mundo.
+   A POSIÇÃO É A DO PAINEL DE GESTÃO ("vem do painel de gestão", decisão do dono): a loja
+   e quem cobra a loja têm que estar falando do mesmo número.
+     · VENDA: ordem pelo FATURAMENTO do mês, entre as 12 lojas — o "#N no ranking de
+       faturamento" do card de cada loja no Painel, que inclui a Maglia (ela aparece no
+       ranking individual; só fica fora do consolidado, CLAUDE.md). O crescimento contra o
+       mesmo trecho do mês passado vem junto, como contexto.
+     · NOTA SEM 10%: ordem pelo 10% não cobrado em REAIS, menor primeiro, só entre quem
+       lançou nota — o "Ranking · 10% não cobrado" da aba Sem 10% (_sem10RankingHtml).
+       Loja sem nota no período não tem posição ali, e aqui também não: em vez dela, o card
+       diz se os caixas foram assinados "não houve" ou ficaram em branco.
 
-   NOTA SEM 10% é posicionada pelo valor das notas sobre o faturamento do mês — quanto
-   menor, melhor, como o cancelamento. E com a mesma cobrança antes do elogio: caixa
-   fechado sem nota lançada e sem assinatura de "não houve" deixa o número subestimado.
-
-   Maglia fora das duas (regra do CLAUDE.md: só entra quando citada; e não usa o Caixa). */
+   A Maglia não vê os cards (o pedido não a citou), e fica fora da nota sem 10%, que ela
+   não usa. */
 function _vendasRedeHomePeriodo() {
   const iso = d => d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
   const hoje = new Date();
@@ -6104,13 +6105,16 @@ function _vendasRedeHomeCalcular(fatRows, vp) {
   // mês atual soma 4 dias contra 5 do anterior. Medido em 06/11, no Bangu: −29,1% assim,
   // contra −19,4% comparando 01–04 com 01–04 — o número do card "Venda do mês", logo abaixo.
   const lojas = {};
-  _lojasFatConsolidado(LOJAS_TODAS).forEach(k => {
-    lojas[k] = { k, porDiaAtual: {}, porDiaAnt: {}, atual: 0, anterior: 0, ultimo: 0, diasAtual: 0, diasAnt: 0 };
+  LOJAS_TODAS.forEach(k => {
+    lojas[k] = { k, fatMes: 0, porDiaAtual: {}, porDiaAnt: {}, atual: 0, anterior: 0, ultimo: 0, diasAtual: 0, diasAnt: 0 };
   });
-  if (vp.temDados) fatRows.forEach(r => {
+  fatRows.forEach(r => {
     const l = lojas[_normLoja(r.loja)], d = r.data_operacao;
     if (!l || !d) return;
     const v = _redeVendaDia(r), dd = +d.slice(8, 10);
+    // Faturamento do mês, o mesmo número do Painel (soma das datas do mês, hoje incluído).
+    if (d >= vp.mesDe && d <= vp.hoje) l.fatMes += v;
+    if (!vp.temDados) return;
     if (d >= vp.mesDe && d <= vp.ate) l.porDiaAtual[dd] = (l.porDiaAtual[dd] || 0) + v;
     else if (d >= vp.antDe && d < vp.mesDe) l.porDiaAnt[dd] = (l.porDiaAnt[dd] || 0) + v;
   });
@@ -6119,12 +6123,14 @@ function _vendasRedeHomeCalcular(fatRows, vp) {
     Object.entries(l.porDiaAtual).forEach(([dd, v]) => { if (+dd <= l.ultimo) { l.atual += v; if (v > 0) l.diasAtual++; } });
     Object.entries(l.porDiaAnt).forEach(([dd, v]) => { if (+dd <= l.ultimo) { l.anterior += v; if (v > 0) l.diasAnt++; } });
   });
-  // Sem venda num dos dois lados não há crescimento a calcular: fica sem posição, em vez de
-  // entrar como +∞% ou −100% e distorcer a ordem.
-  const ordem = Object.values(lojas).filter(l => l.atual > 0 && l.anterior > 0)
-    .map(l => { l.pct = (l.atual - l.anterior) / l.anterior * 100; return l; })
-    .sort((a, b) => b.pct - a.pct);
-  const sa = ordem.reduce((t, l) => t + l.atual, 0), sp = ordem.reduce((t, l) => t + l.anterior, 0);
+  // Crescimento: só com venda nos dois lados (senão seria +∞% ou −100%).
+  Object.values(lojas).forEach(l => { l.pct = l.atual > 0 && l.anterior > 0 ? (l.atual - l.anterior) / l.anterior * 100 : null; });
+  // Posição: a do Painel, pelo faturamento do mês. Sem venda no mês, sem posição.
+  const ordem = Object.values(lojas).filter(l => l.fatMes > 0).sort((a, b) => b.fatMes - a.fatMes);
+  // Crescimento da rede: as 11 do consolidado, ponderado pela venda — a Maglia nunca soma
+  // no total da rede (CLAUDE.md).
+  const cons = Object.values(lojas).filter(l => l.k !== LOJA_FORA_CONSOLIDADO && l.pct !== null);
+  const sa = cons.reduce((t, l) => t + l.atual, 0), sp = cons.reduce((t, l) => t + l.anterior, 0);
   return { vp, lojas, ordem, redePct: sp > 0 ? (sa - sp) / sp * 100 : null };
 }
 
@@ -6149,10 +6155,11 @@ function _sem10RedeHomeCalcular(fatRows, fechRows, vp) {
     l.fechados++;
     if (!ns.length && !r.sem_nota10_por) l.emBranco++;
   });
-  const ordem = Object.values(lojas).filter(l => l.fat > 0)
-    .map(l => { l.pct = l.valor / l.fat * 100; return l; })
-    .sort((a, b) => a.pct - b.pct);
-  const sv = ordem.reduce((t, l) => t + l.valor, 0), sf = ordem.reduce((t, l) => t + l.fat, 0);
+  Object.values(lojas).forEach(l => { l.dez = l.valor * 0.10; l.pct = l.fat > 0 ? l.valor / l.fat * 100 : null; });
+  // Mesma ordem do "Ranking · 10% não cobrado" do Painel: em reais, menor primeiro, só quem
+  // lançou nota.
+  const ordem = Object.values(lojas).filter(l => l.notas > 0).sort((a, b) => a.dez - b.dez);
+  const sv = Object.values(lojas).reduce((t, l) => t + l.valor, 0), sf = Object.values(lojas).reduce((t, l) => t + l.fat, 0);
   return { vp, lojas, ordem, redePct: sf > 0 ? sv / sf * 100 : null };
 }
 
@@ -6176,36 +6183,38 @@ function _vendasRedeHomeHtml(v, loja) {
   if (!eu) return '';
   const vp = v.vp;
   const dm = iso => String(iso).slice(8,10) + '/' + String(iso).slice(5,7);
-  if (!vp.temDados) return _redeCaixa(VENDAS_REDE_TITULO, 'O mês começou hoje — a posição em vendas aparece a partir de amanhã, com o primeiro dia fechado.');
+  const p2 = n => String(n).padStart(2, '0');
   const { pos, n, cor } = _redePos(v.ordem, loja);
   const sinal = x => (x >= 0 ? '+' : '−') + Math.abs(x).toFixed(1).replace('.', ',') + '%';
   const linhaPos = !pos
-    ? `<div style="font-size:11px;color:var(--t3)">${eu.atual > 0 ? 'Sem venda lançada no mesmo trecho do mês passado' : 'Sem venda lançada no mês'} — sem posição na rede.</div>`
-    : `<div style="font-size:11.5px;color:var(--t2)"><b style="color:${cor};font-weight:800">${pos}º de ${n}</b> na rede${v.redePct !== null ? ` · rede em <b style="font-variant-numeric:tabular-nums">${sinal(v.redePct)}</b>` : ''}</div>`;
-  const incompleta = pos && eu.diasAnt < eu.diasAtual
-    ? `<div style="font-size:9.5px;color:var(--txt-amber);font-weight:700;margin-top:6px">⚠️ O mês passado tem só ${eu.diasAnt} dia(s) lançado(s) nesse trecho, contra ${eu.diasAtual} agora — o crescimento sai maior do que é.</div>` : '';
-  // O trecho é o da PRÓPRIA loja: até o último dia que ela lançou.
-  const p2 = n => String(n).padStart(2, '0');
-  const fimAtual = eu.ultimo ? `${p2(eu.ultimo)}/${vp.mesDe.slice(5,7)}` : dm(vp.ate);
-  const fimAnt = eu.ultimo ? `${p2(Math.min(eu.ultimo, +vp.antAte.slice(8,10) || eu.ultimo))}/${vp.antDe.slice(5,7)}` : dm(vp.antAte);
-  const faltaOntem = eu.ultimo && eu.ultimo < vp.diaFim
-    ? `<div style="font-size:9.5px;color:var(--t3);margin-top:4px">${p2(vp.diaFim)}/${vp.mesDe.slice(5,7)} ainda não foi lançado — a comparação vai até ${fimAtual}, dos dois lados.</div>` : '';
+    ? `<div style="font-size:11px;color:var(--t3)">Sem venda lançada no mês — sem posição na rede.</div>`
+    : `<div style="font-size:11.5px;color:var(--t2)"><b style="color:${cor};font-weight:800">${pos}º de ${n}</b> em faturamento na rede</div>`;
+  // Contexto: o crescimento, até o último dia que a loja lançou, dos dois lados (de manhã o
+  // dia de ontem ainda não foi lançado — comparar 4 dias com 5 inventa uma queda).
+  let cresc = '';
+  if (!vp.temDados) cresc = `<div style="font-size:10.5px;color:var(--t3);margin-top:5px">O mês começou hoje — a comparação com o mês passado aparece a partir de amanhã.</div>`;
+  else if (eu.pct !== null) {
+    const fimAtual = `${p2(eu.ultimo)}/${vp.mesDe.slice(5,7)}`;
+    const fimAnt = `${p2(Math.min(eu.ultimo, new Date(+vp.antDe.slice(0,4), +vp.antDe.slice(5,7), 0).getDate()))}/${vp.antDe.slice(5,7)}`;
+    const corC = eu.pct >= 0 ? 'var(--txt-green)' : 'var(--txt-red)';
+    cresc = `<div style="font-size:10.5px;color:var(--t3);margin-top:5px;font-variant-numeric:tabular-nums">
+        <b style="color:${corC}">${sinal(eu.pct)}</b> contra o mês passado (${dm(vp.mesDe)} a ${fimAtual}: ${_fmtBRL(eu.atual)} · ${dm(vp.antDe)} a ${fimAnt}: ${_fmtBRL(eu.anterior)})${v.redePct !== null ? ` · rede em <b>${sinal(v.redePct)}</b>` : ''}
+      </div>`
+      + (eu.ultimo < vp.diaFim ? `<div style="font-size:9.5px;color:var(--t3);margin-top:3px">${p2(vp.diaFim)}/${vp.mesDe.slice(5,7)} ainda não foi lançado — a comparação vai até ${fimAtual}, dos dois lados.</div>` : '')
+      + (eu.diasAnt < eu.diasAtual ? `<div style="font-size:9.5px;color:var(--txt-amber);font-weight:700;margin-top:3px">⚠️ O mês passado tem só ${eu.diasAnt} dia(s) lançado(s) nesse trecho, contra ${eu.diasAtual} agora — o crescimento sai maior do que é.</div>` : '');
+  } else if (eu.atual > 0) cresc = `<div style="font-size:10.5px;color:var(--t3);margin-top:5px">Sem venda lançada no mesmo trecho do mês passado — sem comparação.</div>`;
   return `<div class="rede-card" data-rede="vendas" style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid ${cor};border-radius:18px;padding:14px 16px;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05)">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px">
       <div style="font-size:12px;font-weight:800;color:var(--t1)">${VENDAS_REDE_TITULO}</div>
-      <div style="font-size:10px;font-weight:800;color:var(--t4);flex-shrink:0;font-variant-numeric:tabular-nums">${dm(vp.mesDe)} a ${fimAtual}</div>
+      <div style="font-size:10px;font-weight:800;color:var(--t4);flex-shrink:0;font-variant-numeric:tabular-nums">${dm(vp.mesDe)} a ${dm(vp.hoje)}</div>
     </div>
     <div style="display:flex;align-items:baseline;gap:8px;margin:6px 0 4px">
-      <div style="font-size:26px;font-weight:800;color:${cor};font-variant-numeric:tabular-nums;line-height:1">${pos ? sinal(eu.pct) : '—'}</div>
-      <div style="font-size:10px;color:var(--t3)">contra o mesmo período do mês passado</div>
+      <div style="font-size:24px;font-weight:800;color:${cor};font-variant-numeric:tabular-nums;line-height:1">${eu.fatMes > 0 ? _fmtBRL(eu.fatMes) : '—'}</div>
+      <div style="font-size:10px;color:var(--t3)">vendidos no mês</div>
     </div>
     ${linhaPos}
-    <div style="font-size:10.5px;color:var(--t3);margin-top:5px;font-variant-numeric:tabular-nums">
-      ${_fmtBRL(eu.atual)} agora · ${_fmtBRL(eu.anterior)} de ${dm(vp.antDe)} a ${fimAnt}
-    </div>
-    ${faltaOntem}
-    ${incompleta}
-    <div style="font-size:9px;color:var(--t4);margin-top:6px;line-height:1.4">A posição é pelo crescimento, não pelo tamanho da venda — assim loja grande e loja pequena disputam igual. Cada loja é comparada até o último dia que lançou; o dia de hoje não entra.</div>
+    ${cresc}
+    <div style="font-size:9px;color:var(--t4);margin-top:6px;line-height:1.4">Mesma posição do Painel de Gestão: o ranking de faturamento do mês.</div>
   </div>`;
 }
 
@@ -6216,28 +6225,32 @@ function _sem10RedeHomeHtml(s10, loja) {
   const dm = iso => String(iso).slice(8,10) + '/' + String(iso).slice(5,7);
   const pc = x => x.toFixed(2).replace('.', ',') + '%';
   const { pos, n, cor } = _redePos(s10.ordem, loja);
-  const linhaPos = !pos
-    ? `<div style="font-size:11px;color:var(--t3)">Sem faturamento lançado no período — sem posição na rede.</div>`
-    : `<div style="font-size:11.5px;color:var(--t2)"><b style="color:${cor};font-weight:800">${pos}º de ${n}</b> na rede${s10.redePct !== null ? ` · rede em <b style="font-variant-numeric:tabular-nums">${pc(s10.redePct)}</b>` : ''}</div>`;
+  // Sem nota no período não há posição (o Painel também não põe no ranking). O que se diz
+  // no lugar depende de os caixas terem sido assinados "não houve" ou não.
+  const linhaPos = pos
+    ? `<div style="font-size:11.5px;color:var(--t2)"><b style="color:${cor};font-weight:800">${pos}º de ${n}</b> na rede${s10.redePct !== null ? ` · rede em <b style="font-variant-numeric:tabular-nums">${pc(s10.redePct)}</b> do faturamento` : ''}</div>`
+    : `<div style="font-size:11px;color:var(--t3)">Nenhuma nota sem 10% no período — sem posição no ranking (só entra quem lançou nota, como no Painel).</div>`;
   const cobertura = eu.emBranco > 0
-    ? `<div style="font-size:10px;color:var(--txt-amber);margin-top:8px;line-height:1.45">⚠️ ${eu.emBranco} caixa${eu.emBranco > 1 ? 's' : ''} fechou sem lançar nota sem 10% e sem ninguém assinar que não houve — enquanto isso, este percentual está subestimado.</div>`
+    ? `<div style="font-size:10px;color:var(--txt-amber);margin-top:8px;line-height:1.45">⚠️ ${eu.emBranco} caixa${eu.emBranco > 1 ? 's' : ''} fechou sem lançar nota sem 10% e sem ninguém assinar que não houve — enquanto isso, este número está subestimado.</div>`
     : `<div style="font-size:10px;color:var(--t4);margin-top:8px;line-height:1.45">${eu.fechados > 0
         ? `Todos os ${eu.fechados} caixas fechados no período têm nota lançada ou assinatura de que não houve.`
         : 'Nenhum caixa fechado no período.'}</div>`;
-  return `<div class="rede-card" data-rede="sem10" onclick="navTo('gn-caixa.html')" style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid ${cor};border-radius:18px;padding:14px 16px;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05);cursor:pointer">
+  const corNum = pos ? cor : 'var(--t3)';
+  return `<div class="rede-card" data-rede="sem10" onclick="navTo('gn-caixa.html')" style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid ${pos ? cor : 'var(--t4)'};border-radius:18px;padding:14px 16px;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05);cursor:pointer">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px">
       <div style="font-size:12px;font-weight:800;color:var(--t1)">${SEM10_REDE_TITULO}</div>
       <div style="font-size:10px;font-weight:800;color:var(--t4);flex-shrink:0;font-variant-numeric:tabular-nums">${dm(vp.mesDe)} a ${dm(vp.hoje)}</div>
     </div>
     <div style="display:flex;align-items:baseline;gap:8px;margin:6px 0 4px">
-      <div style="font-size:26px;font-weight:800;color:${cor};font-variant-numeric:tabular-nums;line-height:1">${eu.fat > 0 ? pc(eu.pct) : '—'}</div>
-      <div style="font-size:10px;color:var(--t3)">do faturamento</div>
+      <div style="font-size:24px;font-weight:800;color:${corNum};font-variant-numeric:tabular-nums;line-height:1">${_fmtBRL(eu.dez)}</div>
+      <div style="font-size:10px;color:var(--t3)">de 10% que não entrou</div>
     </div>
     ${linhaPos}
     <div style="font-size:10.5px;color:var(--t3);margin-top:5px;font-variant-numeric:tabular-nums">
-      ${_fmtBRL(eu.valor)} em ${eu.notas} nota${eu.notas === 1 ? '' : 's'} · ${_fmtBRL(eu.valor * 0.10)} de 10% que não entrou${eu.fat > 0 ? ` · de ${_fmtBRL(eu.fat)} vendidos` : ''}
+      ${eu.notas} nota${eu.notas === 1 ? '' : 's'} · ${_fmtBRL(eu.valor)}${eu.pct !== null ? ` · ${pc(eu.pct)} do faturamento` : ''}
     </div>
     ${cobertura}
+    <div style="font-size:9px;color:var(--t4);margin-top:6px;line-height:1.4">Mesma posição do Painel de Gestão: o ranking do 10% não cobrado.</div>
   </div>`;
 }
 
