@@ -34,6 +34,10 @@ const FAT = [
   // filtro de faturamento > 0) e a regra do CLAUDE.md passaria à toa.
   { loja: 'Maglia',       venda_salao: 100000, venda_delivery: 0 },
   // Norte Shopping de fora de propósito: cancela e não tem faturamento lançado.
+  // Venda ANTES do corte (15/10). A consulta agora começa no mês passado (o card de vendas
+  // precisa dele), então o corte do cancelamento tem que ser aplicado na CONTA: se esta
+  // linha entrar, o faturamento do Bangu vai de 100 mil pra 1,1 milhão e o % despenca.
+  { loja: 'Bangu', data_operacao: '2026-10-10', venda_salao: 1000000, venda_delivery: 0 },
 ];
 const FECH = [
   // Itaquera: 0 cancelado (1º) MAS um caixa fechado em branco.
@@ -115,8 +119,14 @@ const FECH = [
     /15\/10/.test(bangu.txt || '') && /controle de cancelamento entrou no ar/.test(bangu.txt || ''), bangu.txt);
   check('o período mostrado é 15/10 a 26/10, não 01/10',
     /15\/10 a 26\/10/.test(bangu.txt || '') && !/01\/10 a/.test(bangu.txt || ''), bangu.txt);
-  check('as duas consultas do card saem com o período cortado',
-    bangu.urls.length === 2 && bangu.urls.every(u => /2026-10-15/.test(u)), JSON.stringify(bangu.urls));
+  // Mudou de propósito com os cards de vendas e nota sem 10%: a leitura começa no mês
+  // passado (crescimento da venda), e o corte de 15/10 passou a ser aplicado na conta. O
+  // que importa — o % não somar dia anterior ao controle — é cobrado pela venda de 10/10
+  // do fixture: se ela entrasse, o Bangu sairia com 0,05% e não com os 0,50% abaixo.
+  check('continua sendo uma consulta de venda e uma de fechamento, só',
+    bangu.urls.length === 2 && bangu.urls.some(u => /checklist_diario/.test(u)) && bangu.urls.some(u => /gn_caixa_fechamento/.test(u)), JSON.stringify(bangu.urls));
+  check('venda de antes de 15/10 não entra no % de cancelamento (o corte vale na conta)',
+    /0,50%/.test(bangu.txt || '') && !/0,05%/.test(bangu.txt || ''), bangu.txt);
 
   // ── Itaquera: 1º com 0%, mas caixa em branco — o caso perigoso ──────────────────────
   const itq = await montar({ loja: 'ITAQUERA' });
