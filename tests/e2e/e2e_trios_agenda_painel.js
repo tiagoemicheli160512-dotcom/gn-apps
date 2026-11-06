@@ -177,6 +177,38 @@ const BASE = [
   t = await tela();
   check('› vai pra dezembro e mostra o que foi movido pra lá', /Dezembro 2026/.test(t.txt) && t.itens.some(x => x.id === 'a2'));
 
+  // ── 4b. A confirmação da LOJA (presença), igual à aba Trios do Estoque ─────────────────
+  // "Eu não sei se a loja confirmou, preciso que essa informação venha também." Hoje = 06/11.
+  await page.evaluate(() => {
+    _triosAgMes = '2026-11'; _triosAgLoja = null; _triosAgEditando = null; _triosAgMsg = {}; _triosAgAviso = null;
+    _triosAgRows = [
+      { id: 'p1', data: '2026-11-01', loja: 'bangu', artista: 'Trio Remelexo', cache: 800, confirmado: true, confirmado_por: 'Tiago',
+        presenca_confirmada: true, couver_valor: 1330, banda_nao_veio: false },
+      { id: 'p2', data: '2026-11-01', loja: 'caxias', artista: 'Trio D Forró', cache: 800, confirmado: true,
+        presenca_confirmada: true, couver_valor: 500, banda_nao_veio: false },
+      { id: 'p3', data: '2026-11-01', loja: 'boulevard', artista: 'Trio Peneirado', cache: 800, confirmado: false,
+        presenca_confirmada: false, couver_valor: 0, banda_nao_veio: true, banda_nao_veio_motivo: 'carro quebrou' },
+      { id: 'p4', data: '2026-11-01', loja: 'pedreira', artista: 'Trio Alma Brasileira', cache: 800, confirmado: false,
+        presenca_confirmada: false, couver_valor: 0, banda_nao_veio: false },
+      { id: 'p5', data: '2026-11-14', loja: 'pedreira', artista: 'Trio Táxi Lunar', cache: 800, confirmado: false,
+        presenca_confirmada: false, couver_valor: 0, banda_nao_veio: false },
+    ];
+    renderDashboard();
+  });
+  t = await tela();
+  const it = id => (t.itens.find(x => x.id === id) || {}).t || '';
+  check('presença confirmada pela loja aparece, com o couvert e o saldo (+R$ 530)',
+    /Presença confirmada pela loja/.test(it('p1')) && /Couvert R\$ 1\.330,00/.test(it('p1')) && /\+R\$ 530,00/.test(it('p1')), it('p1'));
+  check('saldo negativo sai com sinal de menos (couvert 500 − cachê 800)', /−R\$ 300,00/.test(it('p2')), it('p2'));
+  check('banda que não veio aparece com o motivo', /banda não veio — carro quebrou/.test(it('p3')), it('p3'));
+  check('show que já aconteceu sem resposta da loja fica apontado', /Loja ainda não confirmou/.test(it('p4')), it('p4'));
+  check('show que ainda vem não cobra a loja', !/Loja ainda não confirmou|Presença confirmada/.test(it('p5')), it('p5'));
+  check('a sua confirmação e a da loja são coisas separadas na mesma linha',
+    /✓ confirmado por Tiago/.test(it('p1')) && /Presença confirmada pela loja/.test(it('p1')));
+  check('resumo: "Loja confirmou 3/4" — só dos shows que já aconteceram (o de 14/11 fica fora)',
+    /Loja confirmou\s*3\/4/.test(t.txt), t.txt.slice(0, 400));
+  check('a consulta traz o motivo de a banda não ter vindo', gets.some(u => /banda_nao_veio_motivo/.test(u)));
+
   // ── 5. Falha ao carregar ─────────────────────────────────────────────────────────────
   await page.evaluate(() => { const o = window.gnFetchJson; window.gnFetchJson = async (u, h, c, fb) => /trios/.test(c) ? fb : o(u, h, c, fb); _loadTriosAgenda(); });
   await esperar();

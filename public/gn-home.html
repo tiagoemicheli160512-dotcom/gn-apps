@@ -13240,7 +13240,7 @@ async function _loadTriosAgenda() {
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
   const rows = await window.gnFetchJson(
     `${SB_URL}/rest/v1/gn_trios_agenda?data=gte.${mes}-01&data=lt.${lim}` +
-    `&select=id,data,horario_inicio,horario_fim,loja,artista,cache,confirmado,confirmado_por,confirmado_em,presenca_confirmada,couver_valor,banda_nao_veio` +
+    `&select=id,data,horario_inicio,horario_fim,loja,artista,cache,confirmado,confirmado_por,confirmado_em,presenca_confirmada,couver_valor,banda_nao_veio,banda_nao_veio_motivo` +
     `&order=data.asc,horario_inicio.asc`, H, 'triosAgenda', null);
   if (mes !== _triosAgMes) return;   // trocou de mês enquanto carregava
   _triosAgRows = rows === null ? { erro: true } : rows.filter(r => r.loja !== TRIOS_AG_TESTE && r.loja !== 'maglia');
@@ -13376,6 +13376,31 @@ function _triosAgFormHtml(r) {
   </div>`;
 }
 
+// O que a LOJA disse do show, igual à aba Trios do Estoque: presença confirmada (com o couvert
+// lançado e o resultado couvert − cachê), banda que não veio, ou — do dia do show em diante —
+// que a loja ainda não confirmou. Show que ainda vem não tem o que mostrar.
+function _triosAgLojaStatusHtml(r, hoje) {
+  const pill = (txt, cor, fundo, borda) => `<span style="font-size:10px;font-weight:700;border-radius:6px;padding:2px 7px;color:${cor};background:${fundo};border:1px solid ${borda}">${txt}</span>`;
+  const verde = ['var(--txt-green)', 'rgba(22,163,74,.10)', 'rgba(22,163,74,.28)'];
+  const verm  = ['var(--txt-red)', 'rgba(239,68,68,.10)', 'rgba(239,68,68,.3)'];
+  const amb   = ['var(--txt-amber)', 'rgba(245,158,11,.12)', 'rgba(245,158,11,.32)'];
+  let partes = [];
+  if (r.banda_nao_veio) {
+    partes.push(pill('✗ Loja: banda não veio' + (r.banda_nao_veio_motivo ? ' — ' + escapeHtml(r.banda_nao_veio_motivo) : ''), ...verm));
+  } else if (r.presenca_confirmada) {
+    partes.push(pill('✓ Presença confirmada pela loja', ...verde));
+    const couver = parseFloat(r.couver_valor) || 0, cache = parseFloat(r.cache) || 0;
+    if (couver > 0) {
+      const res = couver - cache;
+      partes.push(pill('Couvert ' + _fmtBRL(couver), 'var(--t2)', 'var(--s2)', 'var(--b1)'));
+      partes.push(pill((res >= 0 ? '+' : '−') + _fmtBRL(Math.abs(res)), ...(res >= 0 ? verde : verm)));
+    }
+  } else if (String(r.data).slice(0, 10) <= hoje) {
+    partes.push(pill('⏳ Loja ainda não confirmou a presença', ...amb));
+  }
+  return partes.length ? `<div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:5px">${partes.join('')}</div>` : '';
+}
+
 function _buildTriosAgendaPanel() {
   if (!_triosAgMes) _triosAgMes = _triosAgMesPadrao();
   const [y, m] = _triosAgMes.split('-').map(Number);
@@ -13397,6 +13422,12 @@ function _buildTriosAgendaPanel() {
 
   const tot = rows.reduce((t, r) => t + (parseFloat(r.cache) || 0), 0);
   const conf = rows.filter(r => r.confirmado).length;
+  // A confirmação da LOJA é outra coisa: a presença da banda no dia, marcada pelo Check-list
+  // (aba Banda) — é a que aparece como "✓ Presença confirmada" no Estoque. Só conta a partir do
+  // dia do show: antes dele não há o que a loja confirmar.
+  const hoje = _triosHojeISO();
+  const jaFoi = rows.filter(r => String(r.data).slice(0, 10) <= hoje);
+  const lojaResp = jaFoi.filter(r => r.presenca_confirmada || r.banda_nao_veio).length;
   const semValor = rows.filter(r => !(parseFloat(r.cache) > 0));
   const cell = (rotulo, valor, cor) => `<div style="flex:1;min-width:86px"><div style="font-size:9px;font-weight:800;letter-spacing:.8px;text-transform:uppercase;color:var(--t4)">${rotulo}</div>
     <div style="font-size:15px;font-weight:800;color:${cor};font-variant-numeric:tabular-nums;margin-top:2px">${valor}</div></div>`;
@@ -13405,7 +13436,9 @@ function _buildTriosAgendaPanel() {
       ${cell('Apresentações', rows.length, 'var(--t1)')}
       ${cell('Cachê do mês', _fmtBRL(tot), 'var(--t1)')}
       ${cell('Confirmadas', conf + '/' + rows.length, conf === rows.length && rows.length ? 'var(--txt-green)' : 'var(--t1)')}
+      ${jaFoi.length ? cell('Loja confirmou', lojaResp + '/' + jaFoi.length, lojaResp === jaFoi.length ? 'var(--txt-green)' : 'var(--txt-amber)') : ''}
     </div>
+    ${jaFoi.length ? `<div style="font-size:9.5px;color:var(--t4);margin-top:6px">"Confirmadas" é a sua confirmação; "Loja confirmou" é a presença marcada pela loja, contada só nos shows que já aconteceram.</div>` : ''}
     ${semValor.length ? `<div style="margin-top:9px;background:rgba(239,68,68,.10);border:1px solid rgba(239,68,68,.3);border-radius:9px;padding:7px 10px;font-size:11px;font-weight:700;color:var(--txt-red)">⚠️ ${semValor.length} ${semValor.length === 1 ? 'apresentação' : 'apresentações'} com cachê R$ 0 — toque em ✏️ pra corrigir.</div>` : ''}
   </div>`;
 
@@ -13431,6 +13464,7 @@ function _buildTriosAgendaPanel() {
               <span style="font-size:10.5px;font-weight:800;font-variant-numeric:tabular-nums;color:${cache > 0 ? 'var(--t1)' : 'var(--txt-red)'}">${cache > 0 ? _fmtBRL(cache) : 'sem cachê'}</span>
               ${tabela > 0 && cache > 0 && tabela !== cache ? `<span style="font-size:9.5px;color:var(--txt-amber)">tabela ${_fmtBRL(tabela)}</span>` : ''}
             </div>
+            ${_triosAgLojaStatusHtml(r, hoje)}
             ${r.confirmado ? `<div style="font-size:9.5px;color:var(--txt-green);margin-top:3px">✓ confirmado${r.confirmado_por ? ' por ' + escapeHtml(r.confirmado_por) : ''}${quando ? ' em ' + String(quando.getDate()).padStart(2, '0') + '/' + String(quando.getMonth() + 1).padStart(2, '0') : ''}</div>` : ''}
           </div>
           <div style="display:flex;flex-direction:column;gap:5px;align-items:stretch;flex-shrink:0">
