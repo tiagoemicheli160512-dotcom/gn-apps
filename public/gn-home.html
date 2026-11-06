@@ -497,6 +497,8 @@
   <div id="sem10-rede-home-card"></div>
   <!-- Couvert × cachê do trio: o último fim de semana e o mês, com a conta do Painel. -->
   <div id="couver-home-card"></div>
+  <!-- Banco de horas da loja: o mesmo cartão da aba ⏱ Banco do Painel, só da loja. -->
+  <div id="banco-home-card"></div>
 
   <!-- Aviso de eleição — acima do card de venda de propósito: é o primeiro recado do mês -->
   <div id="eleicoes-escala-home-card"></div>
@@ -6368,6 +6370,63 @@ function _couverHomeHtml(d) {
   </div>`;
 }
 
+/* ── BANCO DE HORAS NA HOME DA LOJA ──────────────────────────────────────────────────────
+   "Quero que leve essa informação do banco para o app home lojas, igual fizemos nos
+    cancelamentos, couver e etc, sem precisar colocar ranking."
+
+   O MESMO cartão da aba ⏱ Banco do Painel (_bancoLojaCartaoHtml) com o MESMO cálculo
+   (_bancoGerCenarioDaLoja): ciclo vigente, a compensar (hora já paga), a pagar (+50%), prazo
+   pra fechar e as pessoas com saldo. Sem ranking, sem as outras lojas — a consulta já sai
+   recortada pela loja.
+
+   A escala (setor → salário → R$) vem da linha da loja em gn_comissoes: a Home da loja não
+   carrega o Painel. Maglia fora (CLAUDE.md; e ela não tem banco de horas). */
+let _bancoHomeEstado = null;   // { loja, c } do último carregamento, pro abrir/fechar
+let _bancoHomeAberto = false;
+function _bancoHomeToggle() {
+  _bancoHomeAberto = !_bancoHomeAberto;
+  const el = document.getElementById('banco-home-card');
+  if (el && _bancoHomeEstado) el.innerHTML = _bancoHomeHtml(_bancoHomeEstado.loja, _bancoHomeEstado.c);
+}
+function _bancoHomeHtml(loja, c) {
+  return `<div class="rede-card" data-rede="banco" style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid #8b5cf6;border-radius:18px;padding:14px 16px 8px;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05)">
+    <div style="font-size:12px;font-weight:800;color:var(--t1);margin-bottom:8px">⏱ Banco de horas da loja</div>
+    ${_bancoLojaCartaoHtml(loja, c, { aberto: _bancoHomeAberto, toggle: '_bancoHomeToggle()' })}
+    <div style="font-size:9px;color:var(--t4);margin:2px 0 6px;line-height:1.4">Mesmo cálculo da aba Banco do Painel de Gestão. A compensar = hora que a loja já pagou e ainda não recebeu de volta; a pagar = hora que sobrar no fim do ciclo, com +50%.</div>
+  </div>`;
+}
+async function _renderBancoHome(mostrar, sess, isMasterAtivo) {
+  const el = document.getElementById('banco-home-card');
+  if (!el) return;
+  const cargo = (sess && sess.cargo || '').toLowerCase();
+  const ehMestreNaLoja = isMasterAtivo && masterLoja;
+  if (!mostrar || !sess || (!CANCEL_REDE_CARGOS.includes(cargo) && !ehMestreNaLoja)) { el.innerHTML = ''; return; }
+  const loja = ehMestreNaLoja ? masterLoja : sess.loja;
+  if (!LOJAS_LISTA.includes(loja) || loja === LOJA_FORA_BANCO_GERENCIA) { el.innerHTML = ''; return; }
+  const titulo = '⏱ Banco de horas da loja';
+  if (!_bancoHomeEstado || _bancoHomeEstado.loja !== loja) el.innerHTML = _redeCaixa(titulo, 'Carregando o banco de horas…');
+  const chkKey = LOJA_DB_KEY[loja] || loja, comKey = LOJA_COM_KEY[loja] || loja;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  try {
+    const [bh, com] = await Promise.all([
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_banco_horas?loja=eq.${encodeURIComponent(chkKey)}&select=mes,registros`, H, 'bancoHome:bh', null),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(comKey)}&select=loja,all_data`, H, 'bancoHome:escala', null),
+    ]);
+    // Sem o banco não há o que mostrar; sem a escala o saldo em horas segue certo e o
+    // cartão diz "sem salário" no R$ — o mesmo comportamento do Painel.
+    if (!bh) { el.innerHTML = _redeCaixa(titulo, 'Não deu pra carregar agora. Abra de novo daqui a pouco.'); return; }
+    let cfg = null; const porMes = {};
+    bh.forEach(r => { if (r.mes === 'CONFIG') cfg = r.registros || {}; else porMes[r.mes] = Array.isArray(r.registros) ? r.registros : []; });
+    const c = _bancoGerCenarioDaLoja(loja, cfg, porMes, _carnesISO(new Date()), 0, com || []);
+    if (!_bancoHomeEstado || _bancoHomeEstado.loja !== loja) _bancoHomeAberto = false;
+    _bancoHomeEstado = { loja, c };
+    el.innerHTML = _bancoHomeHtml(loja, c);
+  } catch (e) {
+    window.gnLogError && window.gnLogError('bancoHome', e);
+    el.innerHTML = _redeCaixa(titulo, 'Não deu pra carregar agora. Abra de novo daqui a pouco.');
+  }
+}
+
 async function _renderCancelRedeHome(mostrar, sess, isMasterAtivo) {
   // Três cards, uma consulta: cancelamento, vendas e nota sem 10%. Cada card decide sozinho
   // se aparece — uma loja fora do controle de cancelamento ainda vê a posição em vendas.
@@ -6541,6 +6600,7 @@ function _refreshPermUI(sess) {
   _renderCancelamentosOntemHome(_mostrarCards, sess, isMaster);
   _renderCancelRedeHome(_mostrarCards, sess, isMaster);
   _renderCouverHome(_mostrarCards, sess, isMaster);
+  _renderBancoHome(_mostrarCards, sess, isMaster);
   _renderAvisoEleicoesHome(_mostrarCards, sess, isMaster);
   _renderVendaMesHome(_mostrarCards, sess, isMaster);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
@@ -6802,6 +6862,7 @@ function showHome(sess) {
   _renderCancelamentosOntemHome(_mostrarCards, sess, isMaster);
   _renderCancelRedeHome(_mostrarCards, sess, isMaster);
   _renderCouverHome(_mostrarCards, sess, isMaster);
+  _renderBancoHome(_mostrarCards, sess, isMaster);
   _renderAvisoEleicoesHome(_mostrarCards, sess, isMaster);
   _renderVendaMesHome(_mostrarCards, sess, isMaster);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
@@ -13451,8 +13512,9 @@ function _bancoGerNav(dir) {
 // das 129 pessoas com saldo (medido) — gente que saiu no meio do ciclo, ou que não está na
 // semana que a loja já preencheu lá na frente. Sem setor não há salário, e sem salário o
 // saldo aparece em horas sem R$, dizendo por quê.
-function _bancoGerCadastro(comKey) {
-  const linha = (_dashComissoesAll || []).find(x => x.loja === comKey);
+function _bancoGerCadastro(comKey, comissoesRows) {
+  // `comissoesRows` vem da Home da loja, que não carrega o Painel; no Painel é a lista dele.
+  const linha = (comissoesRows || _dashComissoesAll || []).find(x => x.loja === comKey);
   const allData = (linha && linha.all_data) || {};
   const porNome = new Map();     // norm(nome) → {nome, setor, _nomesAnteriores:[]}
   Object.keys(allData).filter(k => /^\d+$/.test(k)).map(Number).sort((a, b) => a - b)
@@ -13473,7 +13535,7 @@ function _bancoGerCadastro(comKey) {
 
 // Cenário de UMA loja no ciclo em vista: função pura sobre o que o loader já buscou.
 // `off` é 0 pro ciclo vigente, -1 pro anterior, e assim por diante.
-function _bancoGerCenarioDaLoja(k, cfg, porMes, hoje, off) {
+function _bancoGerCenarioDaLoja(k, cfg, porMes, hoje, off, comissoesRows) {
   const comKey = LOJA_COM_KEY[k] || k;
   const c = {
     k, ancora: (cfg && cfg.periodo_inicio) || null, ciclo: null, meses: [], legado: [],
@@ -13501,7 +13563,7 @@ function _bancoGerCenarioDaLoja(k, cfg, porMes, hoje, off) {
   const noSaldo = new Set(mesesSaldo);
   c.mesesForaDoCiclo = mesesDaLoja.filter(m => !noSaldo.has(m)).sort();
 
-  const { porNome, apelidos } = _bancoGerCadastro(comKey);
+  const { porNome, apelidos } = _bancoGerCadastro(comKey, comissoesRows);
   const salSetor = (cfg && cfg.salariosSetor) || {};
   const soma = new Map();        // norm(nome canônico) → {nome, horas}
   mesesSaldo.forEach(m => (porMes[m] || []).forEach(reg => {
@@ -13590,6 +13652,74 @@ function _bancoGerStatus(c) {
   return c.neg >= c.pos ? 'compensar' : 'pagar';
 }
 
+// O cartão de uma loja da aba ⏱ Banco. Função à parte porque a Home da loja mostra o MESMO
+// cartão ("levar essa informação do banco para o app home lojas") — duas cópias do HTML
+// viram dois jeitos de ler o mesmo saldo. `opts.aberto` mostra a lista inteira e
+// `opts.toggle` é o onclick do botão de abrir/fechar.
+function _bancoCell(rotulo, valor, cor, nota) {
+  return `<div style="flex:1;min-width:92px">
+    <div style="font-size:9px;font-weight:800;letter-spacing:.8px;text-transform:uppercase;color:var(--t4)">${rotulo}</div>
+    <div style="font-size:15px;font-weight:800;color:${cor};font-variant-numeric:tabular-nums;margin-top:2px">${valor}</div>
+    ${nota ? `<div style="font-size:9px;color:var(--t4);margin-top:1px">${nota}</div>` : ''}
+  </div>`;
+}
+function _bancoLojaCartaoHtml(k, c, opts) {
+  const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
+  const cell = _bancoCell;
+  const e = _BANCO_STATUS[_bancoGerStatus(c)] || _BANCO_STATUS.zerado;
+  const cor = COR_LOJA[k] || '#8b5cf6';
+  if (!c.ciclo) return `<div style="background:var(--s1);border:1px solid var(--b1);border-left:3px solid ${cor};border-radius:11px;padding:10px 12px;margin-bottom:8px;display:flex;align-items:center;gap:10px">
+    <span style="font-size:12px;font-weight:700;color:var(--t2);flex:1">${LOJA_DISPLAY[k] || k}</span>
+    <span style="font-size:10px;color:${e.cor}">${e.rotulo}</span></div>`;
+
+  const aberto = !!(opts && opts.aberto);
+  const graves = c.pessoas.filter(p => Math.abs(p.horas) > BH_GER_LIMITE_ALERTA);
+  // Sem ninguém acima de ±8h a lista inteira é curta — esconder metade dela não economiza
+  // nada e deixaria a loja parecendo vazia.
+  const visiveis = aberto || !graves.length ? c.pessoas : graves;
+  const detalhe = !c.pessoas.length
+    ? `<div style="font-size:10.5px;color:var(--t4);padding:2px 0">Ninguém com saldo positivo ou negativo neste ciclo.</div>`
+    : visiveis.map(p => {
+        const alerta = Math.abs(p.horas) > BH_GER_LIMITE_ALERTA;
+        return `<div style="display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--t3);padding:2px 0">
+          <span style="font-weight:800;color:var(--t2);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${alerta ? '⚠️ ' : ''}${esc(p.nome)}</span>
+          <span style="color:var(--t4);white-space:nowrap">${esc(p.setor || 'sem setor na escala')}</span>
+          <span style="font-variant-numeric:tabular-nums;min-width:70px;text-align:right;color:var(--t2)">${p.semValor ? '<span style="color:var(--txt-amber)">sem salário</span>' : _fmtBRL(p.valor)}</span>
+          <span style="font-variant-numeric:tabular-nums;min-width:54px;text-align:right;font-weight:800;color:${p.horas > 0 ? 'var(--txt-green)' : 'var(--txt-red)'}">${_bhGerHoras(p.horas)}</span>
+        </div>`;
+      }).join('');
+  const maisBtn = graves.length && c.pessoas.length > graves.length
+    ? `<button onclick="${(opts && opts.toggle) || `_bancoGerToggle('${k}')`}" style="margin-top:7px;width:100%;background:var(--fill-sutil2);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:5px 10px;color:var(--t2);font-size:10.5px;font-weight:700;cursor:pointer;font-family:inherit">${aberto ? '▲ Mostrar só os ' + graves.length + ' acima de ±' + BH_GER_LIMITE_ALERTA + 'h' : '▼ Ver as outras ' + (c.pessoas.length - graves.length) + ' com saldo menor'}</button>`
+    : '';
+  const legadoHtml = c.legado.length
+    ? `<div style="font-size:9.5px;color:#8a6d1f;background:rgba(234,179,8,.08);border:1px solid rgba(234,179,8,.25);border-radius:8px;padding:6px 8px;margin-top:7px;line-height:1.45">
+        ↩ ${c.legado.map(_gnBhMesLabel).join(', ')} ${c.legado.length === 1 ? 'é lançamento' : 'são lançamentos'} anterior${c.legado.length === 1 ? '' : 'es'} ao 1º mês do ciclo. Soma${c.legado.length === 1 ? '' : 'm'} neste, que é o primeiro da loja, e o próximo nasce sem ${c.legado.length === 1 ? 'ele' : 'eles'}.</div>`
+    : '';
+  const foraHtml = c.mesesForaDoCiclo.length
+    ? `<div style="font-size:9.5px;color:var(--t4);margin-top:6px">${c.mesesForaDoCiclo.map(_gnBhMesLabel).join(', ')} ${c.mesesForaDoCiclo.length === 1 ? 'é de outro ciclo' : 'são de outros ciclos'} e não ${c.mesesForaDoCiclo.length === 1 ? 'entra' : 'entram'} neste saldo.</div>`
+    : '';
+  const prazo = c.diasPraFechar >= 0
+    ? `fecha em ${c.diasPraFechar} dia${c.diasPraFechar === 1 ? '' : 's'}`
+    : `fechou em ${_bhGerBR(c.ciclo.fim)}`;
+  const prazoCor = c.diasPraFechar >= 0 && c.diasPraFechar <= BH_GER_PRAZO_CRITICO_DIAS ? 'var(--txt-red)' : 'var(--t4)';
+  return `<div style="background:var(--s1);border:1px solid var(--b1);border-left:3px solid ${cor};border-radius:11px;padding:11px 12px;margin-bottom:8px">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:7px">
+      <span style="font-size:12.5px;font-weight:800;color:var(--t1);flex:1">${LOJA_DISPLAY[k] || k}</span>
+      <span style="font-size:9px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:${e.cor};background:${e.fundo};border:1px solid ${e.borda};border-radius:6px;padding:2px 7px">${e.rotulo}</span>
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:7px">
+      ${cell('A compensar', _bhGerHoras(-c.neg), c.neg ? 'var(--txt-red)' : 'var(--t4)', c.neg ? _fmtBRL(c.valorNeg) + ' já pagos' : '')}
+      ${cell('A pagar', _bhGerHoras(c.pos), c.pos ? 'var(--txt-green)' : 'var(--t4)', c.pos ? _fmtBRL(c.valorPos) + ' com +50%' : '')}
+      ${cell('Ciclo', _bhGerBR(c.ciclo.inicio) + ' → ' + _bhGerBR(c.ciclo.fim), 'var(--t2)', `<span style="color:${prazoCor}">${prazo}</span>`)}
+    </div>
+    <div style="font-size:9.5px;color:var(--t4);margin-bottom:4px">${c.pessoas.length} pessoa${c.pessoas.length === 1 ? '' : 's'} com saldo${graves.length ? ` · ${graves.length} acima de ±${BH_GER_LIMITE_ALERTA}h` : ''}${c.semSalario ? ` · ${c.semSalario} sem salário do setor` : ''}</div>
+    <div style="border-top:1px solid var(--b1);padding-top:6px">${detalhe}</div>
+    ${maisBtn}
+    ${legadoHtml}
+    ${foraHtml}
+  </div>`;
+}
+
 function _buildBancoPanel() {
   const reportBtns = _reportBtnsRowHtml('Banco');
   if (!_bancoGerLoaded || !_bancoGerData) return reportBtns + _skelPanel(5);
@@ -13666,61 +13796,8 @@ function _buildBancoPanel() {
             'Há saldo a acertar, mas ainda com prazo — dá pra compensar na escala em vez de pagar.', '') : '');
 
   // ── Cartão por loja ───────────────────────────────────────────────────────────────
-  const cardsHtml = lojas.map(k => {
-    const c = porLoja[k];
-    const e = st(_bancoGerStatus(c));
-    const cor = COR_LOJA[k] || '#8b5cf6';
-    if (!c.ciclo) return `<div style="background:var(--s1);border:1px solid var(--b1);border-left:3px solid ${cor};border-radius:11px;padding:10px 12px;margin-bottom:8px;display:flex;align-items:center;gap:10px">
-      <span style="font-size:12px;font-weight:700;color:var(--t2);flex:1">${LOJA_DISPLAY[k] || k}</span>
-      <span style="font-size:10px;color:${e.cor}">${e.rotulo}</span></div>`;
-
-    const aberto = _bancoGerAberto.has(k);
-    const graves = c.pessoas.filter(p => Math.abs(p.horas) > BH_GER_LIMITE_ALERTA);
-    // Sem ninguém acima de ±8h a lista inteira é curta — esconder metade dela não economiza
-    // nada e deixaria a loja parecendo vazia.
-    const visiveis = aberto || !graves.length ? c.pessoas : graves;
-    const detalhe = !c.pessoas.length
-      ? `<div style="font-size:10.5px;color:var(--t4);padding:2px 0">Ninguém com saldo positivo ou negativo neste ciclo.</div>`
-      : visiveis.map(p => {
-          const alerta = Math.abs(p.horas) > BH_GER_LIMITE_ALERTA;
-          return `<div style="display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--t3);padding:2px 0">
-            <span style="font-weight:800;color:var(--t2);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${alerta ? '⚠️ ' : ''}${esc(p.nome)}</span>
-            <span style="color:var(--t4);white-space:nowrap">${esc(p.setor || 'sem setor na escala')}</span>
-            <span style="font-variant-numeric:tabular-nums;min-width:70px;text-align:right;color:var(--t2)">${p.semValor ? '<span style="color:var(--txt-amber)">sem salário</span>' : _fmtBRL(p.valor)}</span>
-            <span style="font-variant-numeric:tabular-nums;min-width:54px;text-align:right;font-weight:800;color:${p.horas > 0 ? 'var(--txt-green)' : 'var(--txt-red)'}">${_bhGerHoras(p.horas)}</span>
-          </div>`;
-        }).join('');
-    const maisBtn = graves.length && c.pessoas.length > graves.length
-      ? `<button onclick="_bancoGerToggle('${k}')" style="margin-top:7px;width:100%;background:var(--fill-sutil2);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:5px 10px;color:var(--t2);font-size:10.5px;font-weight:700;cursor:pointer;font-family:inherit">${aberto ? '▲ Mostrar só os ' + graves.length + ' acima de ±' + BH_GER_LIMITE_ALERTA + 'h' : '▼ Ver as outras ' + (c.pessoas.length - graves.length) + ' com saldo menor'}</button>`
-      : '';
-    const legadoHtml = c.legado.length
-      ? `<div style="font-size:9.5px;color:#8a6d1f;background:rgba(234,179,8,.08);border:1px solid rgba(234,179,8,.25);border-radius:8px;padding:6px 8px;margin-top:7px;line-height:1.45">
-          ↩ ${c.legado.map(_gnBhMesLabel).join(', ')} ${c.legado.length === 1 ? 'é lançamento' : 'são lançamentos'} anterior${c.legado.length === 1 ? '' : 'es'} ao 1º mês do ciclo. Soma${c.legado.length === 1 ? '' : 'm'} neste, que é o primeiro da loja, e o próximo nasce sem ${c.legado.length === 1 ? 'ele' : 'eles'}.</div>`
-      : '';
-    const foraHtml = c.mesesForaDoCiclo.length
-      ? `<div style="font-size:9.5px;color:var(--t4);margin-top:6px">${c.mesesForaDoCiclo.map(_gnBhMesLabel).join(', ')} ${c.mesesForaDoCiclo.length === 1 ? 'é de outro ciclo' : 'são de outros ciclos'} e não ${c.mesesForaDoCiclo.length === 1 ? 'entra' : 'entram'} neste saldo.</div>`
-      : '';
-    const prazo = c.diasPraFechar >= 0
-      ? `fecha em ${c.diasPraFechar} dia${c.diasPraFechar === 1 ? '' : 's'}`
-      : `fechou em ${_bhGerBR(c.ciclo.fim)}`;
-    const prazoCor = c.diasPraFechar >= 0 && c.diasPraFechar <= BH_GER_PRAZO_CRITICO_DIAS ? 'var(--txt-red)' : 'var(--t4)';
-    return `<div style="background:var(--s1);border:1px solid var(--b1);border-left:3px solid ${cor};border-radius:11px;padding:11px 12px;margin-bottom:8px">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:7px">
-        <span style="font-size:12.5px;font-weight:800;color:var(--t1);flex:1">${LOJA_DISPLAY[k] || k}</span>
-        <span style="font-size:9px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:${e.cor};background:${e.fundo};border:1px solid ${e.borda};border-radius:6px;padding:2px 7px">${e.rotulo}</span>
-      </div>
-      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:7px">
-        ${cell('A compensar', _bhGerHoras(-c.neg), c.neg ? 'var(--txt-red)' : 'var(--t4)', c.neg ? _fmtBRL(c.valorNeg) + ' já pagos' : '')}
-        ${cell('A pagar', _bhGerHoras(c.pos), c.pos ? 'var(--txt-green)' : 'var(--t4)', c.pos ? _fmtBRL(c.valorPos) + ' com +50%' : '')}
-        ${cell('Ciclo', _bhGerBR(c.ciclo.inicio) + ' → ' + _bhGerBR(c.ciclo.fim), 'var(--t2)', `<span style="color:${prazoCor}">${prazo}</span>`)}
-      </div>
-      <div style="font-size:9.5px;color:var(--t4);margin-bottom:4px">${c.pessoas.length} pessoa${c.pessoas.length === 1 ? '' : 's'} com saldo${graves.length ? ` · ${graves.length} acima de ±${BH_GER_LIMITE_ALERTA}h` : ''}${c.semSalario ? ` · ${c.semSalario} sem salário do setor` : ''}</div>
-      <div style="border-top:1px solid var(--b1);padding-top:6px">${detalhe}</div>
-      ${maisBtn}
-      ${legadoHtml}
-      ${foraHtml}
-    </div>`;
-  }).join('');
+  // O cartão é o mesmo que a Home da loja mostra (_bancoLojaCartaoHtml).
+  const cardsHtml = lojas.map(k => _bancoLojaCartaoHtml(k, porLoja[k], { aberto: _bancoGerAberto.has(k) })).join('');
 
   return reportBtns + navHtml + resumoHtml + avisosHtml + cardsHtml;
 }

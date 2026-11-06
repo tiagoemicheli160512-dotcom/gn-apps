@@ -5111,6 +5111,31 @@ async function carregarBancoHoras(forcar){
   _bhAtualizarBadge();
 }
 
+/* ─── Gravação da linha CONFIG do banco de horas ─── */
+// A linha CONFIG guarda TRÊS coisas de donos diferentes: o ciclo (periodo_inicio/fim), os
+// salários por setor e a marca salarioIncompletoDesde. Cada uma era gravada mandando a linha
+// INTEIRA com o que a tela tinha em memória — e quando a memória estava vazia (leitura que
+// falhou no celular, ou aba Banco ainda não carregada), a gravação apagava as outras duas.
+// Foi o que aconteceu com o Norte Shopping em 06/11/2026 às 09:15: a checagem de salário leu
+// vazio, concluiu "sem salário" e gravou só a marca — ciclo e salários sumiram.
+//
+// Agora toda gravação passa por aqui: lê a linha ATUAL do banco, aplica só o que mudou e
+// grava. Se a leitura falhar, NÃO grava nada (lança o erro) — é melhor não salvar a marca
+// do que apagar o ciclo e os salários da loja.
+async function _bhConfigGravar(patch, remover){
+  const { data, error } = await sb.from('gn_banco_horas').select('registros').eq('loja', LOJA).eq('mes', 'CONFIG').maybeSingle();
+  if (error) throw error;
+  const atual = Object.assign({}, (data && data.registros) || {});
+  (remover || []).forEach(k => { delete atual[k]; });
+  const novo = Object.assign(atual, patch || {});
+  const { error: e2 } = await sb.from('gn_banco_horas').upsert(
+    { loja: LOJA, mes: 'CONFIG', registros: novo, updated_at: new Date().toISOString() },
+    { onConflict: 'loja,mes' }
+  );
+  if (e2) throw e2;
+  return novo;
+}
+
 /* ─── Salvar configuração ─── */
 async function salvarConfigBancoHoras(){
   // Cadastro é só da primeira vez. Depois a data é âncora do histórico inteiro: mudá-la
@@ -5124,15 +5149,10 @@ async function salvarConfigBancoHoras(){
   // O fim não é mais digitado: ele É início + 6 meses − 1 dia. Digitar os dois foi como a
   // Campo Grande ficou com um "ciclo" de um mês só (25/08 → 25/09) — agora não dá mais.
   const fim = _bhFimDoCiclo(inicio);
-  _bhConfig = {periodo_inicio:inicio, periodo_fim:fim, salariosSetor:_bhConfig?.salariosSetor||{}};
   const ef = document.getElementById('bh-config-fim');
   if(ef) ef.value = fim;
   try{
-    const {error} = await sb.from('gn_banco_horas').upsert(
-      {loja:LOJA, mes:'CONFIG', registros:_bhConfig, updated_at:new Date().toISOString()},
-      {onConflict:'loja,mes'}
-    );
-    if(error) throw error;
+    _bhConfig = await _bhConfigGravar({periodo_inicio:inicio, periodo_fim:fim});
     showToast('✓ Período configurado','success');
   }catch(e){
     showToast('⚠️ Erro ao salvar configuração','error');
@@ -5408,14 +5428,8 @@ async function salvarSalariosSetor(){
     const v = parseFloat(inp.value);
     if(s&&!isNaN(v)&&v>0) salariosSetor[s]=v;
   });
-  if(!_bhConfig) _bhConfig={};
-  _bhConfig.salariosSetor = salariosSetor;
   try{
-    const {error} = await sb.from('gn_banco_horas').upsert(
-      {loja:LOJA, mes:'CONFIG', registros:_bhConfig, updated_at:new Date().toISOString()},
-      {onConflict:'loja,mes'}
-    );
-    if(error) throw error;
+    _bhConfig = await _bhConfigGravar({salariosSetor});
     showToast('✓ Salários salvos','success');
     renderBancoHoras();
     _logAuditoriaChk('SALVAR_SALARIOS_SETOR',{setores:Object.keys(salariosSetor)});
@@ -16956,7 +16970,11 @@ async function _checarSalarioIncompleto() {
   if (!_temAcessoAbaChecklist('escala')) return null;
   let registros;
   try {
-    const { data } = await sb.from('gn_banco_horas').select('registros').eq('loja', LOJA).eq('mes', 'CONFIG').maybeSingle();
+    // O `error` precisa ser olhado: o cliente do Supabase NÃO lança exceção quando a
+    // consulta falha, devolve { data: null, error }. Era aí que a leitura falha virava
+    // "loja sem salário" — e a gravação logo abaixo apagava a linha.
+    const { data, error } = await sb.from('gn_banco_horas').select('registros').eq('loja', LOJA).eq('mes', 'CONFIG').maybeSingle();
+    if (error) return null;
     registros = (data && data.registros) || {};
   } catch (e) { return null; }
   const salariosSetor = registros.salariosSetor || {};
@@ -16965,13 +16983,7 @@ async function _checarSalarioIncompleto() {
     // Limpa o rastro de "desde quando" de uma pendência já resolvida — evita escalar
     // direto pro bloqueio total se cair abaixo de 5 setores de novo no futuro.
     if (registros.salarioIncompletoDesde) {
-      const { salarioIncompletoDesde, ...resto } = registros;
-      try {
-        await sb.from('gn_banco_horas').upsert(
-          { loja: LOJA, mes: 'CONFIG', registros: resto, updated_at: new Date().toISOString() },
-          { onConflict: 'loja,mes' }
-        );
-      } catch (e) {}
+      try { await _bhConfigGravar({}, ['salarioIncompletoDesde']); } catch (e) {}
     }
     return null;
   }
@@ -16984,12 +16996,7 @@ async function _checarSalarioIncompleto() {
   let desde = registros.salarioIncompletoDesde;
   if (!desde) {
     desde = hoje;
-    try {
-      await sb.from('gn_banco_horas').upsert(
-        { loja: LOJA, mes: 'CONFIG', registros: { ...registros, salarioIncompletoDesde: desde }, updated_at: new Date().toISOString() },
-        { onConflict: 'loja,mes' }
-      );
-    } catch (e) {}
+    try { await _bhConfigGravar({ salarioIncompletoDesde: desde }); } catch (e) {}
   }
   const hard = desde < hoje;
   return {
@@ -17414,14 +17421,8 @@ async function _salvarInlineHardSalario(containerId) {
     showToast('Preencha pelo menos ' + SALARIO_MIN_SETORES + ' funções.', 'error');
     return;
   }
-  if (!_bhConfig) _bhConfig = {};
-  _bhConfig.salariosSetor = salariosSetor;
   try {
-    const { error } = await sb.from('gn_banco_horas').upsert(
-      { loja: LOJA, mes: 'CONFIG', registros: _bhConfig, updated_at: new Date().toISOString() },
-      { onConflict: 'loja,mes' }
-    );
-    if (error) throw error;
+    _bhConfig = await _bhConfigGravar({ salariosSetor });
     showToast('✓ Salários salvos', 'success');
     _logAuditoriaChk('SALVAR_SALARIOS_SETOR', { setores: Object.keys(salariosSetor) });
     _atualizarPendenciasEssenciais();
@@ -18536,7 +18537,20 @@ async function _salvarCouvertBandaHoje(){
   const registros = _triosHojeRecords || [];
   if(!registros.length) return;
   const qtd   = parseFloat(document.getElementById('banda-hoje-qtd')?.value) || 0;
-  const valor = parseFloat(document.getElementById('banda-hoje-valor')?.value) || 0;
+  let valor   = parseFloat(document.getElementById('banda-hoje-valor')?.value) || 0;
+  // O campo Valor é o TOTAL do dia (quantidade × R$ 7) e vem calculado sozinho, mas dá pra
+  // digitar por cima. Em 01/11 o Boulevard digitou 7 (o preço por pessoa) com 88 pessoas: o
+  // dia ficou com R$ 7 de couvert em vez de R$ 616. Medido na base: em TODOS os outros
+  // lançamentos o valor é exatamente quantidade × R$ 7. Quando não bate, pergunta antes.
+  const esperado = qtd * BANDA_COUVERT_VALOR;
+  if (qtd > 0 && Math.abs(valor - esperado) >= 0.01) {
+    const br = v => 'R$ ' + v.toFixed(2).replace('.', ',');
+    if (confirm(`O couvert de ${qtd} pessoa${qtd === 1 ? '' : 's'} dá ${br(esperado)} (${qtd} × ${br(BANDA_COUVERT_VALOR)}).\n\nVocê digitou ${br(valor)}.\n\nOK = salvar ${br(esperado)}\nCancelar = escolher outra opção`)) {
+      valor = esperado;
+    } else if (!confirm(`Salvar mesmo assim ${br(valor)} de couvert pra ${qtd} pessoa${qtd === 1 ? '' : 's'}?`)) {
+      return;
+    }
+  }
   const btn   = document.getElementById('banda-hoje-btn');
   if(btn){ btn.disabled=true; btn.textContent='Salvando...'; }
   try{
