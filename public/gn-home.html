@@ -6152,6 +6152,48 @@ function _manutParadasDaLoja(chkRows, lojaAllData, hojeISO, old5) {
     .sort((a, b) => String(a._data).localeCompare(String(b._data)));   // a mais antiga primeiro
 }
 
+// A REDE inteira, loja por loja, com a mesma régua de _manutPendentesDaLoja. Fonte única
+// do número de manutenção do Painel: o card "N manutenções pendentes", o chip "🔧 N
+// manut." do topo e o atalho do app Manutenção. Antes o chip e o atalho contavam só o
+// Check-list de HOJE — deixavam de fora quem ainda não abriu o Check-list do dia e os
+// itens do RH (37 contra 72 em 07/11/2026).
+// manutRows: checklist_diario dos últimos 30 dias (data desc), com `loja`.
+// lojasOfRows: gn_lojas com `loja` (chave de comissões) e all_data.manut_oficial_items.
+function _manutRedeResumo(manutRows, lojasOfRows, hojeISO) {
+  const old5 = new Date(); old5.setDate(old5.getDate() - 5);
+  const chkPor = {}, allPor = {};
+  (manutRows || []).forEach(r => { const k = _normLoja(r.loja); (chkPor[k] = chkPor[k] || []).push(r); });
+  (lojasOfRows || []).forEach(lr => { const k = _COM_KEY_TO_LOJA[lr.loja]; if (k) allPor[k] = lr.all_data || {}; });
+  const porLoja = {}, paradaPorLoja = {};
+  let total = 0, paradas = 0;
+  LOJAS_LISTA.forEach(k => {
+    const pend = _manutPendentesDaLoja(chkPor[k], allPor[k], hojeISO);
+    const par = pend.filter(m => m._data && new Date(m._data + 'T00:00:00') < old5).length;
+    porLoja[k] = pend.length; total += pend.length;
+    if (par) paradaPorLoja[k] = par;
+    paradas += par;
+  });
+  return { porLoja, total, paradaPorLoja, paradas };
+}
+// Busca e calcula uma vez por minuto: o chip e o atalho pedem juntos ao abrir a Home.
+let _manutRedeCache = null;
+function _manutRedeCarregar() {
+  if (_manutRedeCache && Date.now() - _manutRedeCache.ts < 60000) return _manutRedeCache.p;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const d = new Date(), iso = x => x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0');
+  const from30 = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+  const p = Promise.all([
+    window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?select=data_operacao,loja,manutencao&data_operacao=gte.${from30}&order=data_operacao.desc`, H, 'manutRede:chk', null),
+    // Só a lista de manutenção oficial, não o all_data inteiro.
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?select=loja,manut:all_data->manut_oficial_items`, H, 'manutRede:lojas', null),
+  ]).then(([chk, lojas]) => {
+    if (!chk || !lojas) { _manutRedeCache = null; return null; }
+    return _manutRedeResumo(chk, lojas.map(l => ({ loja: l.loja, all_data: { manut_oficial_items: l.manut } })), iso(d));
+  });
+  _manutRedeCache = { ts: Date.now(), p };
+  return p;
+}
+
 async function _renderPendenciasLojaHome(mostrar, sess, isMasterAtivo) {
   const el = document.getElementById('pendencias-loja-home-card');
   if (!el) return;
@@ -7806,16 +7848,10 @@ async function loadBadges(sess, isMaster) {
 }
 
 async function loadManutBadge() {
-  const hoje=(d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'))(new Date());
-  const res=await fetch(
-    `${SB_URL}/rest/v1/checklist_diario?select=manutencao&data_operacao=eq.${hoje}`,
-    {headers:{apikey:SB_KEY,Authorization:'Bearer '+SB_KEY}}
-  );
-  const rows=await res.json();
-  let pend=0;
-  for(const r of (rows||[])){
-    if(Array.isArray(r.manutencao)) pend+=r.manutencao.filter(m=>m.status!=='Resolvido').length;
-  }
+  // Mesmo número do card de manutenção do Painel (_manutRedeResumo).
+  const r = await _manutRedeCarregar();
+  if (!r) { setBadge('manutencao', '—'); return; }
+  const pend = r.total;
   if(pend>0) setBadge('manutencao',`${pend} pendente${pend>1?'s':''}`, 'o');
   else setBadge('manutencao','Tudo resolvido','g');
 }
@@ -8145,12 +8181,13 @@ async function _renderHealthChips() {
   const weekDates = _weekRange(0).dates;
 
   try {
-    const [cxRows, clRows, fatData, visitasChkRows, visitasManutRows] = await Promise.all([
+    const [cxRows, clRows, fatData, visitasChkRows, visitasManutRows, manutRede] = await Promise.all([
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=eq.${hoje}&select=loja,status`, H, 'chips:cxRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hoje}&select=loja,manutencao`, H, 'chips:clRows', []),
       _fetchFat(weekDates).catch(e=>{ window.gnLogError('chips:fatData', e); return null; }),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_chk_visitas?data=eq.${hoje}&select=id,loja,visitante,cargo,hora_chegada,hora_saida,tipo_visita`, H, 'chips:visitasChkRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_manut_visitas?data=eq.${hoje}&select=id,loja,oficial,hora_chegada,hora_saida`, H, 'chips:visitasManutRows', []),
+      _manutRedeCarregar().catch(() => null),
     ]);
     // Une visitas de gn_chk_visitas (visitantes externos, app check-list) e gn_manut_visitas
     // (equipe de manutenção, app manutenção) num único feed. hora_saida nula = em andamento.
@@ -8164,16 +8201,11 @@ async function _renderHealthChips() {
 
     const lojasComCaixa = new Set((cxRows || []).filter(r => r.status === 'FECHADO').map(r => r.loja));
     const lojasComChk   = new Set((clRows  || []).map(r => _normLoja(r.loja)));
-    let manutPend = 0;
+    // Mesmo número do card de manutenção do Painel e do atalho do app (_manutRedeResumo).
+    // Sem ele (consulta falhou), o chip simplesmente não aparece — melhor que outro número.
+    const manutPend = manutRede ? manutRede.total : 0;
     const manutPorLoja = {};
-    (clRows || []).forEach(r => {
-      if (!Array.isArray(r.manutencao)) return;
-      const mk = _normLoja(r.loja);
-      if (!LOJAS_LISTA.includes(mk)) return;
-      const n = r.manutencao.filter(m => m && m.status !== 'Resolvido').length;
-      manutPend += n;
-      if (n > 0) manutPorLoja[mk] = (manutPorLoja[mk] || 0) + n;
-    });
+    if (manutRede) Object.entries(manutRede.porLoja).forEach(([k, n]) => { if (n > 0) manutPorLoja[k] = n; });
     const visitasAndamento = (visitasRows || []).filter(r => !r.horaSaida);
 
     const fatTotal = fatData ? _lojasFatConsolidado().reduce((s,k) => s + (fatData[k]||0), 0) : null;
@@ -8248,16 +8280,17 @@ async function _loadLojaHealthChips(loja) {
   const range = _weekRange(0);
 
   try {
-    const [todayRows, weekFat] = await Promise.all([
+    const [todayRows, weekFat, manutRede] = await Promise.all([
       window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(LOJA_DB_KEY[loja]||loja)}&data_operacao=eq.${hoje}&select=venda_salao,venda_delivery,manutencao`, H, 'chips:lojaTodayRows', []),
-      _fetchFat(range.dates).catch(e=>{ window.gnLogError('chips:lojaWeekFat', e); return {}; })
+      _fetchFat(range.dates).catch(e=>{ window.gnLogError('chips:lojaWeekFat', e); return {}; }),
+      _manutRedeCarregar().catch(() => null),
     ]);
 
     const fatHoje = (todayRows||[]).reduce((t,r) => t + (parseFloat(r.venda_salao)||0) + (parseFloat(r.venda_delivery)||0), 0);
     const fatSem  = (weekFat||{})[loja] || 0;
 
-    let manutPend = 0;
-    (todayRows||[]).forEach(r => { if (Array.isArray(r.manutencao)) manutPend += r.manutencao.filter(m => m && m.status !== 'Resolvido').length; });
+    // Mesma régua do card de Pendências da loja e do Painel (_manutRedeResumo).
+    const manutPend = manutRede ? (manutRede.porLoja[loja] || 0) : 0;
 
     const chip = (txt, bg, clr) => `<span style="display:inline-flex;align-items:center;gap:4px;background:${bg};border-radius:20px;padding:4px 10px;font-size:10px;font-weight:700;color:var(--t1)">${txt}</span>`;
     const chips = [];
@@ -10894,26 +10927,9 @@ async function _loadDashAll() {
     // preservando a data de registro original (mais antiga) para o alerta de "há X dias".
     // Também soma os itens "oficiais" lançados direto pelo RH (gn_lojas.all_data.manut_oficial_items),
     // que o card antigo não incluía.
-    const _newestManut=new Map(), _oldestManut=new Map();
-    (manutRows||[]).forEach(row=>{
-      if(!Array.isArray(row.manutencao)) return;
-      const mk=_normLoja(row.loja);
-      row.manutencao.forEach(m=>{
-        if(!m) return;
-        const k=`${mk}|${m.setor}|${m.tipo}|${(m.descricao||'').trim().toLowerCase()}`;
-        const withMeta={...m, _loja:mk, _data:row.data_operacao};
-        if(!_newestManut.has(k)) _newestManut.set(k,withMeta); // rows vêm desc → primeiro = status atual
-        _oldestManut.set(k,withMeta); // sobrescrito até o fim → última = data de registro original
-      });
-    });
-    const manutDedup=[..._newestManut.entries()].map(([k,newest])=>({...newest,_data:_oldestManut.get(k)._data}));
-    const manutOficiais=[];
-    (lojasOfRows||[]).forEach(lr=>{
-      const mk=_COM_KEY_TO_LOJA[lr.loja];
-      const items=lr.all_data?.manut_oficial_items;
-      if(!mk || !Array.isArray(items)) return;
-      items.forEach(m=>manutOficiais.push({...m, _loja:mk, _data:m.created_at?m.created_at.split('T')[0]:hoje}));
-    });
+    // A conta inteira mora em _manutRedeResumo — a MESMA que o chip do topo e o atalho do
+    // app Manutenção usam (07/11/2026: o chip e o atalho diziam 37, este card 72).
+    const _manutRede = _manutRedeResumo(manutRows, lojasOfRows, hoje);
     // Férias de gerência/sub-gerência das lojas (gn_lojas.all_data.ferias_gerencia)
     // e da Equipe central — Supervisor/Administrador/Mestre (linha sentinela
     // EQUIPE_CONFIG) — reaproveita o mesmo lojasOfRows já buscado acima, sem
@@ -10932,10 +10948,7 @@ async function _loadDashAll() {
     });
     _dashFeriasTodas = feriasTodas;
 
-    const manutTodos=[...manutDedup, ...manutOficiais].filter(m=>m.status!=='Resolvido');
-    const byManut = {}; LOJAS_LISTA.forEach(k=>{byManut[k]=0;});
-    manutTodos.forEach(m=>{ if(Object.prototype.hasOwnProperty.call(byManut,m._loja)) byManut[m._loja]++; });
-    _dashManut = byManut;
+    _dashManut = _manutRede.porLoja;
     _dashChk   = new Set((chkRows||[]).map(r=>_normLoja(r.loja)).filter(l=>LOJAS_LISTA.includes(l)));
 
     // Buffet/rodízio: soma as quantidades de todos os caixas (os dois turnos) do período
@@ -11086,15 +11099,10 @@ async function _loadDashAll() {
     _dashContratosVencendo = contratosVencendo;
     _dashFuncCount = funcCount;
 
-    const old5 = new Date(); old5.setDate(old5.getDate()-5);
-    _dashManutCrit = manutTodos.filter(m=>m._data && new Date(m._data+'T00:00:00')<old5).length;
-    const manutParada = {};
-    manutTodos.forEach(m=>{
-      if (!m._data || new Date(m._data+'T00:00:00')>=old5) return;
-      if (!LOJAS_LISTA.includes(m._loja)) return;
-      manutParada[m._loja] = (manutParada[m._loja]||0)+1;
-    });
-    _dashManutParada = manutParada;
+    // "Há mais de 5 dias" conta só as lojas da rede, como o total ao lado (antes somava
+    // também loja fora de LOJAS_LISTA e podia passar do total da lista).
+    _dashManutCrit = _manutRede.paradas;
+    _dashManutParada = _manutRede.paradaPorLoja;
 
     // Fechamento de caixa sem conferência — cruza gn_caixa_fechamento (status FECHADO)
     // com gn_lojas.all_data.caixa_conferencias (mesma estrutura usada em gn-rh.html),
