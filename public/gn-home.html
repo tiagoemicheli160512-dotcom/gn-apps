@@ -246,7 +246,7 @@
     .dash-tab.on{background:var(--cor);border-color:var(--cor);color:#1A1D23;box-shadow:0 2px 10px rgba(0,0,0,.3)}
     .period-row{display:flex;align-items:center;gap:7px;margin-bottom:12px}
     .period-toggle{display:flex;background:var(--fill-sutil);border:1px solid rgba(0,0,0,.07);border-radius:8px;overflow:hidden;flex-shrink:0}
-    .period-toggle button{padding:5px 10px;font-size:11px;font-weight:700;background:none;border:none;color:var(--t4);font-family:inherit;cursor:pointer;transition:all .15s}
+    .period-toggle button{padding:5px 10px;font-size:11px;font-weight:700;background:none;border:none;color:var(--t3);font-family:inherit;cursor:pointer;transition:all .15s}
     .period-toggle button.on{background:var(--cor);color:#1A1D23}
     .period-arrow{background:var(--fill-sutil);border:1px solid rgba(0,0,0,.07);border-radius:8px;padding:5px 11px;font-size:16px;line-height:1;color:var(--t3);font-family:inherit;cursor:pointer;flex-shrink:0;transition:background .15s}
     .period-arrow:active{background:rgba(0,0,0,.12)}
@@ -257,6 +257,11 @@
        agora encolhe com reticências e, em tela estreita, os botões ficam mais justos e o
        "· atual" some (a seta › desabilitada já diz que é o período atual). */
     .period-label{min-width:0;overflow:hidden;text-overflow:ellipsis}
+    /* Com quatro períodos (Dia · Semana · Mês · Trimestre) o seletor ganha a linha inteira e
+       a navegação ‹ período › 📄 desce pra de baixo — junto não cabia em celular. */
+    .period-row{flex-wrap:wrap;row-gap:8px}
+    .period-toggle{flex:1 1 100%}
+    .period-toggle button{flex:1;padding-left:4px;padding-right:4px}
     @media (max-width:360px){
       .period-row{gap:4px}
       .period-toggle button{padding:5px 7px}
@@ -956,9 +961,26 @@ let _healthChipsTimer = null; // declarado aqui (não perto de _renderHealthChip
 // (que dependem do restante do script rodar) só voltavam depois de uma navegação que
 // desse tempo do script inteiro já ter executado uma vez sem cair nesse branch.
 let _dashTab  = 'fat';  // 'fat' | 'att' | 'metas'
-let _dashPer  = 'sem';  // 'sem' | 'mes'
+let _dashPer  = 'sem';  // 'dia' | 'sem' | 'mes' | 'tri3' (07/11/2026: Dia e Trimestre no seletor)
 let _dashWoff = 0;      // week offset (0=current week)
 let _dashMoff = 0;      // month offset (0=current month)
+let _dashDoff = 0;      // day offset (0=hoje)
+let _dashToff = 0;      // trimestre offset (0=trimestre atual, regra de _trimestreRange)
+// O período navegado do Painel, seja qual for o tipo — mesmas funções de período do
+// relatório (_relRange), então Painel, relatório e raio-x falam do mesmo intervalo.
+function _dashOff() { return _dashPer === 'dia' ? _dashDoff : _dashPer === 'sem' ? _dashWoff : _dashPer === 'tri3' ? _dashToff : _dashMoff; }
+function _dashSetOff(v) { if (_dashPer === 'dia') _dashDoff = v; else if (_dashPer === 'sem') _dashWoff = v; else if (_dashPer === 'tri3') _dashToff = v; else _dashMoff = v; }
+function _dashRangeOf(off) { return _relRange(_dashPer, off); }
+// A grade "Dia a dia" e a mini-tendência dos cards são sempre de UMA semana: a navegada no
+// Semanal, a que contém o dia no Diário, e a atual no Mensal e no Trimestre (como antes).
+function _dashSemanaOff() {
+  if (_dashPer === 'sem') return _dashWoff;
+  if (_dashPer === 'dia') { const dow = (new Date().getDay() + 6) % 7; return Math.floor((dow + _dashDoff) / 7); }
+  return 0;
+}
+// A meta cadastrada é UM número por loja, comparado com a semana e com o mês. Contra um
+// dia ou um trimestre ela não quer dizer nada — nesses dois a comparação não aparece.
+function _dashMetaDe(k) { return (_dashPer === 'sem' || _dashPer === 'mes') ? (_dashMetas[k] || 0) : 0; }
 let _dashFat     = null; // {lojaKey: total} for selected period
 let _dashFatPrev = null; // {lojaKey: total} for previous period
 let _dashFatPrevParcial = false; // true quando _dashFatPrev foi cortado nos mesmos dias já decorridos do período atual
@@ -10233,9 +10255,10 @@ async function _fetchBuffet(dates) {
   if (!dates || !dates.length) return porLoja;
   const from = dates[0], to = dates[dates.length - 1];
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
-  const rows = await window.gnFetchJson(
-    `${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${from}&data=lte.${to}&select=loja,data,feijoada_inteira,feijoada_meia,rodizio_inteira,rodizio_meia`,
-    H, 'rel:buffet', []);
+  // Em pedaços: no Trimestre (relatório e Painel) passa de 1.000 fechamentos.
+  const rows = await _fetchEmPedacos(dates, (de, ate) =>
+    `${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${de}&data=lte.${ate}&select=loja,data,feijoada_inteira,feijoada_meia,rodizio_inteira,rodizio_meia`,
+    H, 'rel:buffet');
   (rows || []).forEach(r => {
     const acc = porLoja[_normLoja(r.loja)];
     if (!acc || (window.GN_BUFFET_FORA || []).includes(r.loja)) return;
@@ -10244,6 +10267,29 @@ async function _fetchBuffet(dates) {
     acc.feijoada    += v.feijoada;    acc.rodizio    += v.rodizio;    acc.total += v.total;
   });
   return porLoja;
+}
+
+// Período longo (trimestre) em pedaços de até 31 dias: o banco devolve no máximo 1.000
+// linhas por consulta e um trimestre passa disso (12 lojas × 90 dias) — o total sairia
+// cortado sem erro nenhum. Mesma ideia do relatório, que já busca o trimestre mês a mês.
+// Mesma ideia pra qualquer consulta de linhas por período: junta os pedaços. Falha num
+// pedaço vira lista vazia daquele pedaço (como o fallback [] da consulta única de antes).
+async function _fetchEmPedacos(dates, urlDe, H, ctx) {
+  if (!dates || !dates.length) return [];
+  const partes = [];
+  for (let i = 0; i < dates.length; i += 31) partes.push(dates.slice(i, i + 31));
+  const res = await Promise.all(partes.map(p => window.gnFetchJson(urlDe(p[0], p[p.length - 1]), H, ctx, [])));
+  return res.reduce((a, r) => a.concat(r || []), []);
+}
+
+async function _fetchFatLongo(dates) {
+  if (!dates || dates.length <= 31) return _fetchFat(dates);
+  const partes = [];
+  for (let i = 0; i < dates.length; i += 31) partes.push(dates.slice(i, i + 31));
+  const res = await Promise.all(partes.map(p => _fetchFat(p)));
+  const soma = {};
+  res.forEach(r => Object.keys(r).forEach(k => { soma[k] = (soma[k] || 0) + (r[k] || 0); }));
+  return soma;
 }
 
 async function _fetchFat(dates) {
@@ -10603,10 +10649,10 @@ function _raioxMapearDecl(rows, campoPor, campoEm) {
 // Equipe é a única exceção e aparece sempre: é o denominador de tudo o mais no card.
 const _raioxCache = {};
 function _raioxChaveCache() {
-  return _dashPer + ':' + (_dashPer === 'sem' ? _dashWoff : _dashMoff);
+  return _dashPer + ':' + _dashOff();
 }
 function _raioxPeriodoAtual() {
-  return _dashPer === 'sem' ? _weekRange(_dashWoff) : _monthRange(_dashMoff);
+  return _dashRangeOf(_dashOff());
 }
 // Recalcular 12 lojas a cada render (e renderDashboard roda a cada toque em chip) é
 // trabalho repetido sobre dados que não mudaram — o cache morre quando o período muda.
@@ -10669,9 +10715,10 @@ async function _raioxCancelDoPeriodo(dates) {
   const chave = dates[0] + '|' + dates[dates.length - 1];
   if (_raioxCancelCache[chave]) return _raioxCancelCache[chave];
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
-  const rows = await window.gnFetchJson(
-    `${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${dates[0]}&data=lte.${dates[dates.length - 1]}` +
-    `&select=loja,data,gn_caixa_cancelamento(valor,motivo,motivo_categoria,autorizado_por,foto)`, H, 'raiox:cancel', []);
+  // Em pedaços: no Trimestre passa de 1.000 fechamentos e o raio-x sairia cortado.
+  const rows = await _fetchEmPedacos(dates, (de, ate) =>
+    `${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${de}&data=lte.${ate}` +
+    `&select=loja,data,gn_caixa_cancelamento(valor,motivo,motivo_categoria,autorizado_por,foto)`, H, 'raiox:cancel');
   return (_raioxCancelCache[chave] = _raioxMapearCancel(rows));
 }
 
@@ -10685,8 +10732,8 @@ async function _raioxAbrir(lojaKey) {
   if (!LOJAS_LISTA.includes(lojaKey)) return;
   _raioxLoja = lojaKey;
   // Abre casando com o que está navegado no Painel, e dali navega livre.
-  _raioxPer = _dashPer === 'sem' ? 'sem' : 'mes';
-  _raioxOff = _dashPer === 'sem' ? _dashWoff : _dashMoff;
+  _raioxPer = _dashPer;
+  _raioxOff = _dashOff();
   const ex = document.getElementById('_raiox-modal');
   if (ex) ex.remove();
   const modal = document.createElement('div');
@@ -10855,17 +10902,19 @@ async function _loadDashAll() {
   // chega, só o cartão dela precisa aparecer — por isso redesenha no fim.
   _cienteCarregar(true).then(() => { if (!_dashLoading) renderDashboard(); }).catch(() => {});
   _fechaCarregarRespostas(true).then(() => { if (!_dashLoading) renderDashboard(); }).catch(() => {});
-  const range     = _dashPer==='sem' ? _weekRange(_dashWoff)   : _monthRange(_dashMoff);
-  const prevRange = _dashPer==='sem' ? _weekRange(_dashWoff-1) : _monthRange(_dashMoff-1);
-  const range2    = _dashPer==='sem' ? _weekRange(_dashWoff-2)  : _monthRange(_dashMoff-2);
-  const range3    = _dashPer==='sem' ? _weekRange(_dashWoff-3)  : _monthRange(_dashMoff-3);
+  const range     = _dashRangeOf(_dashOff());
+  // No Diário o "anterior" é o MESMO dia da semana passada (sábado com sábado): sábado
+  // contra sexta mede o calendário, não a loja.
+  const prevRange = _dashPer === 'dia' ? _dashRangeOf(_dashOff()-7) : _dashRangeOf(_dashOff()-1);
+  const range2    = _dashRangeOf(_dashOff()-2);
+  const range3    = _dashRangeOf(_dashOff()-3);
   // Quando o período selecionado é o atual (em andamento), comparar o total parcial
   // de hoje contra a semana/mês anterior INTEIRO sempre dá uma "queda" enorme e falsa
   // (ex.: -100% numa terça-feira). Corta o período anterior nos mesmos dias já
   // decorridos no atual, pra comparação ser dia-a-dia equivalente.
-  const diasDecorridos = _dashPer==='sem'
-    ? (d => d===0?7:d)(new Date().getDay())
-    : new Date().getDate();
+  // Quantos dias do período atual já começaram (vale pra semana, mês, trimestre e dia).
+  const _hojeIsoDec = (d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'))(new Date());
+  const diasDecorridos = range.dates.filter(d => d <= _hojeIsoDec).length;
   const prevRangeCompDates = range.isCurrent ? prevRange.dates.slice(0, diasDecorridos) : prevRange.dates;
   const precisaCompSeparada = prevRangeCompDates.length !== prevRange.dates.length;
   // Data local (não UTC) — toISOString() usa UTC, então a partir de ~21h no horário do
@@ -10882,7 +10931,10 @@ async function _loadDashAll() {
   const hojeDate = new Date();
   const mesCorrenteStr = hojeDate.getFullYear()+'-'+String(hojeDate.getMonth()+1).padStart(2,'0');
   try {
-    const weekRange = _weekRange(_dashPer==='sem' ? _dashWoff : 0);
+    const weekRange = _weekRange(_dashSemanaOff());
+    // Tendência no Diário: os 4 dias SEGUIDOS. O "anterior" do Diário é o mesmo dia da semana
+    // passada (comparação do KPI), então o ponto de ontem da linha precisa da sua consulta.
+    const pTend1 = _dashPer === 'dia' ? _fetchFatLongo(_dashRangeOf(_dashOff()-1).dates).catch(() => null) : Promise.resolve(null);
     const trinta = new Date(); trinta.setDate(trinta.getDate()-30);
     const from30 = trinta.toISOString().slice(0,10);
     const _errCb = label => e => { window.gnLogError('dash:'+label, e); _dashLoadHadError = true; };
@@ -10890,11 +10942,11 @@ async function _loadDashAll() {
     const catorze = new Date(); catorze.setDate(catorze.getDate()-14);
     const from14 = catorze.toISOString().slice(0,10);
     const [fatCur, fatPrv, fatPrvComp, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows, comissoesAllRows, bhConfigRows, cancelRows, caixaFechadosRows, alertasUrgentesRows, visitasPassadasRows, provisoesRows, carnesRows, trioAgendaOntemRows, bhMesesRows, buffetRows, presencaRows, correcaoRows] = await Promise.all([
-      _fetchFat(range.dates).catch(e=>{ _errCb('fatCur')(e); return {}; }),
-      _fetchFat(prevRange.dates).catch(e=>{ _errCb('fatPrv')(e); return {}; }),
-      precisaCompSeparada ? _fetchFat(prevRangeCompDates).catch(e=>{ _errCb('fatPrvComp')(e); return {}; }) : Promise.resolve(null),
-      _fetchFat(range2.dates).catch(e=>{ _errCb('fat2')(e); return {}; }),
-      _fetchFat(range3.dates).catch(e=>{ _errCb('fat3')(e); return {}; }),
+      _fetchFatLongo(range.dates).catch(e=>{ _errCb('fatCur')(e); return {}; }),
+      _fetchFatLongo(prevRange.dates).catch(e=>{ _errCb('fatPrv')(e); return {}; }),
+      precisaCompSeparada ? _fetchFatLongo(prevRangeCompDates).catch(e=>{ _errCb('fatPrvComp')(e); return {}; }) : Promise.resolve(null),
+      _fetchFatLongo(range2.dates).catch(e=>{ _errCb('fat2')(e); return {}; }),
+      _fetchFatLongo(range3.dates).catch(e=>{ _errCb('fat3')(e); return {}; }),
       window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?select=data_operacao,loja,manutencao&data_operacao=gte.${from30}&order=data_operacao.desc`, H, 'dash:manutRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?data_operacao=eq.${hoje}&select=loja`, H, 'dash:chkRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?select=loja,all_data`, H, 'dash:lojasOfRows', []),
@@ -10907,7 +10959,8 @@ async function _loadDashAll() {
       // Cancelamentos do período, aninhados no fechamento porque a DATA mora no
       // fechamento e não no cancelamento — mesma forma da consulta de funcionário extra
       // em _renderMesAnteriorHome.
-      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${range.dates[0]}&data=lte.${range.dates[range.dates.length-1]}&select=loja,data,turno,status,total_sistema,sem_cancelamento_por,sem_cancelamento_em,sem_transferencia_por,sem_transferencia_em,sem_nota10_por,sem_nota10_em,gn_caixa_cancelamento(valor,motivo,motivo_categoria,autorizado_por,foto),gn_caixa_transferencia(mesa_origem,mesa_destino,motivo,autorizado_por,foto),gn_caixa_gorjeta(mesa,garcom,valor)`, H, 'dash:cancelRows', []),
+      // Em pedaços de até 31 dias: no Trimestre passa de 1.000 fechamentos (≈360/mês).
+      _fetchEmPedacos(range.dates, (de, ate) => `${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${de}&data=lte.${ate}&select=loja,data,turno,status,total_sistema,sem_cancelamento_por,sem_cancelamento_em,sem_transferencia_por,sem_transferencia_em,sem_nota10_por,sem_nota10_em,gn_caixa_cancelamento(valor,motivo,motivo_categoria,autorizado_por,foto),gn_caixa_transferencia(mesa_origem,mesa_destino,motivo,autorizado_por,foto),gn_caixa_gorjeta(mesa,garcom,valor)`, H, 'dash:cancelRows'),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?status=eq.FECHADO&data=gte.${from30}&select=id,loja,data,turno`, H, 'dash:caixaFechadosRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_alertas_urgentes?order=criado_em.desc&limit=50&select=id,loja,criado_por,criado_em,resolvido,resolvido_por,resolvido_em,motivo,cargos`, H, 'dash:alertasUrgentesRows', []),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_chk_visitas?data=gte.${from14}&data=lt.${hoje}&select=loja,data,hora_chegada`, H, 'dash:visitasPassadasRows', []),
@@ -11152,7 +11205,8 @@ async function _loadDashAll() {
     _dashDeclTransfPer = _raioxMapearDecl(cancelRows, 'sem_transferencia_por', 'sem_transferencia_em');
     _dashDeclSem10Per = _raioxMapearDecl(cancelRows, 'sem_nota10_por', 'sem_nota10_em');
     _dashPresencaHoje = presencaRows || []; _dashCorrecoes = correcaoRows || [];
-    const spark={}; LOJAS_LISTA.forEach(k=>{spark[k]=[(fat3[k]||0),(fat2[k]||0),(fatPrv[k]||0),(fatCur[k]||0)];});
+    const fatTend1 = (await pTend1) || fatPrv;
+    const spark={}; LOJAS_LISTA.forEach(k=>{spark[k]=[(fat3[k]||0),(fat2[k]||0),(fatTend1[k]||0),(fatCur[k]||0)];});
     _dashSparkData=spark;
     _dashAlertasUrgentes = alertasUrgentesRows || [];
     _dashPendenciasEssenciais = _computePendenciasEssenciais({
@@ -11224,7 +11278,9 @@ function _buildTendenciaChart() {
   const xs=totals.map((_,i)=>padX+i/(totals.length-1)*(w-padX*2));
   const ys=totals.map(v=>h-padY-((v-min)/range)*(h-padY*2));
   const pts=xs.map((x,i)=>`${x.toFixed(1)},${ys[i].toFixed(1)}`).join(' ');
-  const periodLbl=_dashPer==='sem'?['3 sem. atrás','2 sem. atrás','sem. passada','esta semana']:['3 meses atrás','2 meses atrás','mês passado','este mês'];
+  // No Diário o rótulo é a própria data: o Diário abre em ontem, então "hoje/ontem" fixos mentiriam.
+  const periodLbl=({ dia:[3,2,1,0].map(i => _dashRangeOf(_dashOff()-i).label), sem:['3 sem. atrás','2 sem. atrás','sem. passada','esta semana'],
+    tri3:['3 trim. atrás','2 trim. atrás','trim. passado','este trim.'] })[_dashPer] || ['3 meses atrás','2 meses atrás','mês passado','este mês'];
   const pontos=xs.map((x,i)=>`
     <circle cx="${x.toFixed(1)}" cy="${ys[i].toFixed(1)}" r="3" fill="#FACC15"/>
     <text x="${x.toFixed(1)}" y="${(ys[i]-8).toFixed(1)}" text-anchor="middle" font-size="9" font-weight="700" fill="#1A1D23">${_fmtBRLs(totals[i])}</text>
@@ -11263,7 +11319,7 @@ function _buildBiTab(fat, maxVal, loading) {
 
   const linhas = LOJAS_LISTA.map(k=>{
     const v = fat[k]||0;
-    const meta = _dashMetas[k]||0;
+    const meta = _dashMetaDe(k)||0;
     const chkOk = _dashChk ? _dashChk.has(k) : null;
     const manut = _dashManut ? (_dashManut[k]||0) : 0;
     const saude = _calcIndiceSaude(v, meta, maxVal, chkOk, manut);
@@ -11315,11 +11371,11 @@ function _buildKPIRow() {
   const dStr=delta===null?'—':(delta>=0?'+':'')+delta+'%';
   const dClr=delta===null?'var(--t4)':delta>=0?'#4ade80':'#f87171';
   let mSum=0,mN=0;
-  LOJAS_LISTA.forEach(k=>{if(_dashMetas[k]>0){mSum+=Math.min(100,Math.round((fat[k]||0)/_dashMetas[k]*100));mN++;}});
+  LOJAS_LISTA.forEach(k=>{if(_dashMetaDe(k)>0){mSum+=Math.min(100,Math.round((fat[k]||0)/_dashMetaDe(k)*100));mN++;}});
   const avgM=mN>0?Math.round(mSum/mN):null;
   const mClr=avgM===null?'var(--t4)':avgM>=100?'#4ade80':avgM>=75?'#fbbf24':'#f87171';
-  const stAbove=LOJAS_LISTA.filter(k=>_dashMetas[k]>0&&(fat[k]||0)>=_dashMetas[k]).length;
-  const stMN=LOJAS_LISTA.filter(k=>_dashMetas[k]>0).length;
+  const stAbove=LOJAS_LISTA.filter(k=>_dashMetaDe(k)>0&&(fat[k]||0)>=_dashMetaDe(k)).length;
+  const stMN=LOJAS_LISTA.filter(k=>_dashMetaDe(k)>0).length;
   const chkN=_dashChk?LOJAS_LISTA.filter(l=>_dashChk.has(l)).length:null;
   const chkClr=chkN===null?'var(--t4)':chkN===LOJAS_LISTA.length?'#4ade80':chkN>0?'#fbbf24':'#f87171';
   const t=(lbl,val,sub,vc='var(--t1)',onclick)=>`<div class="kpi-tile"${onclick?` onclick="${onclick}" style="cursor:pointer"`:''}>
@@ -11328,7 +11384,7 @@ function _buildKPIRow() {
     ${sub?`<div class="kpi-tile-sub">${sub}</div>`:''}
   </div>`;
   const totalPStr=totalP>0?_fmtBRLs(totalP):null;
-  const anteriorLbl=_dashFatPrevParcial?'mesmos dias · anterior':'anterior';
+  const anteriorLbl=_dashPer==='dia'?'mesmo dia da semana passada':_dashFatPrevParcial?'mesmos dias · anterior':'anterior';
   // Herdado do antigo card "Faturamento total": quem do consolidado está sem venda no
   // período (a Maglia não conta — não é do consolidado).
   const semDados=lojasConsolidado.filter(k=>!(fat[k]>0));
@@ -11340,7 +11396,7 @@ function _buildKPIRow() {
   const varCor=delta===null?'var(--t3)':delta>=0?'#15803d':'#dc2626';
   const varHtml=delta!==null?`<b style="color:${varCor}">${delta>=0?'▲':'▼'} ${Math.abs(delta)}%</b> vs ${totalPStr||'—'} (${anteriorLbl})`:'';
   const metaTile=avgM!==null?`<div style="grid-column:1/-1">${t('% Média Meta',avgM+'%',`${stAbove}/${stMN} acima da meta`,mClr)}</div>`:'';
-  const metaAviso=avgM===null?`<div class="kpi-meta-aviso" onclick="_setDashTab('metas')" style="grid-column:1/-1;cursor:pointer;font-size:10.5px;color:var(--t3);padding:2px 2px 0">🎯 Nenhuma meta cadastrada — <b style="color:var(--t2)">configurar ›</b></div>`:'';
+  const metaAviso=avgM===null&&(_dashPer==='sem'||_dashPer==='mes')?`<div class="kpi-meta-aviso" onclick="_setDashTab('metas')" style="grid-column:1/-1;cursor:pointer;font-size:10.5px;color:var(--t3);padding:2px 2px 0">🎯 Nenhuma meta cadastrada — <b style="color:var(--t2)">configurar ›</b></div>`:'';
   return `<div class="kpi-row">
     ${t('Faturamento',`<span title="${_fmtBRL(total)}">${_fmtBRLs(total)||'—'}</span>`,varHtml+avisoSemDados)}
     ${t('CHK Hoje',chkN!==null?chkN+'/'+LOJAS_LISTA.length:'—',chkN===LOJAS_LISTA.length?'todas em dia':chkN>0?'algumas sem checklist · toque para ver':'nenhum hoje',chkClr,chkN!==null&&chkN<LOJAS_LISTA.length?"_openChipDetail('dashChk')":null)}
@@ -11354,7 +11410,7 @@ function _buildBarChart(sorted) {
   return sorted.map(k=>{
     const v=fat?(fat[k]||0):0; if(!v) return '';
     const cor=COR_LOJA[k]||'#888';
-    const meta=_dashMetas[k]||0;
+    const meta=_dashMetaDe(k)||0;
     const vP=fatP?(fatP[k]||0):0;
     const d=vP>0?Math.round((v-vP)/vP*100):null;
     const dClr=d===null?'var(--t4)':d>=0?'#4ade80':'#f87171';
@@ -11380,7 +11436,7 @@ function _buildTableView(sorted) {
   const rows=sorted.map(k=>{
     const v=fat?(fat[k]||0):0;
     const vP=fatP?(fatP[k]||0):0;
-    const meta=_dashMetas[k]||0;
+    const meta=_dashMetaDe(k)||0;
     const d=vP>0?Math.round((v-vP)/vP*100):null;
     const mp=meta>0?Math.round(v/meta*100):null;
     const mpC=mp===null?'var(--t4)':mp>=100?'#4ade80':mp>=75?'#fbbf24':'#f87171';
@@ -15622,7 +15678,7 @@ function _buildAlertsFeed() {
 
 // ── Relatórios da aba Atenção (Alertas) ────────────────────────────────────
 function _alertasPeriodoLabel(){
-  const range = _dashPer==='sem' ? _weekRange(_dashWoff) : _monthRange(_dashMoff);
+  const range = _dashRangeOf(_dashOff());
   return range.label;
 }
 function _alertasRelatorioTexto(){
@@ -15903,7 +15959,7 @@ function _buildPresencaPanel() {
   const d = _presencaMacroDados();
   const esc = s2 => window.escapeHtml(String(s2 == null ? '' : s2));
   const dm = iso => String(iso || '').slice(8, 10) + '/' + String(iso || '').slice(5, 7);
-  const periodo = _dashPer === 'sem' ? _weekRange(_dashWoff).label : _monthRange(_dashMoff).label;
+  const periodo = _dashRangeOf(_dashOff()).label;
 
   const kpis = `<div class="kpi-row">
     <div class="kpi-tile" style="border-left-color:var(--txt-green)">
@@ -15969,7 +16025,7 @@ function _buildSem10Panel() {
   const d = _sem10MacroDados();
   const esc = s => window.escapeHtml(String(s == null ? '' : s));
   const dm = iso => String(iso || '').slice(8, 10) + '/' + String(iso || '').slice(5, 7);
-  const periodo = _dashPer === 'sem' ? _weekRange(_dashWoff).label : _monthRange(_dashMoff).label;
+  const periodo = _dashRangeOf(_dashOff()).label;
 
   const kpis = `<div class="kpi-row">
     <div class="kpi-tile" style="border-left-color:var(--txt-red)">
@@ -16052,7 +16108,7 @@ function _sem10RelatorioTexto(wpp) {
   const d = _sem10MacroDados();
   const b = s => wpp ? '*' + s + '*' : s;
   const dm = iso => String(iso || '').slice(8, 10) + '/' + String(iso || '').slice(5, 7);
-  const periodo = _dashPer === 'sem' ? _weekRange(_dashWoff).label : _monthRange(_dashMoff).label;
+  const periodo = _dashRangeOf(_dashOff()).label;
   let msg = `${wpp ? '💸 ' : ''}${b('NOTAS SEM 10%')}\n${periodo}\n`;
   msg += `\n10% não cobrado: ${_fmtBRL(d.dez)}\nValor das notas: ${_fmtBRL(d.valor)} (${d.qtd} nota${d.qtd === 1 ? '' : 's'})\n`;
   d.lojas.forEach(l => {
@@ -16092,7 +16148,7 @@ function _buildCancelPanel() {
   const d = _cancelMacroDados();
   const esc = s => window.escapeHtml(String(s == null ? '' : s));
   const dm = iso => String(iso || '').slice(8, 10) + '/' + String(iso || '').slice(5, 7);
-  const periodo = _dashPer === 'sem' ? _weekRange(_dashWoff).label : _monthRange(_dashMoff).label;
+  const periodo = _dashRangeOf(_dashOff()).label;
 
   const kpis = `<div class="kpi-row">
     <div class="kpi-tile" style="border-left-color:var(--txt-red)">
@@ -16457,7 +16513,7 @@ function _cancelMacroAbrirFoto(url) {
 // ninguém. O que vai é se a nota TEM foto, que é o que diz se dá pra conferir.
 function _cancelRelatorioTexto(wpp) {
   const d = _cancelMacroDados();
-  const periodo = _dashPer === 'sem' ? _weekRange(_dashWoff).label : _monthRange(_dashMoff).label;
+  const periodo = _dashRangeOf(_dashOff()).label;
   const b = t => wpp ? `*${t}*` : t;
   const i = t => wpp ? `_${t}_` : t;
   let msg = `${wpp ? '🧾 ' : ''}${b(`NOTAS CANCELADAS — ${periodo}`)}\n\n`;
@@ -16586,7 +16642,7 @@ function gerarPDFCancel() {
   // Com os KPIs no topo, como o relatório do Painel: o número que a direção procura
   // primeiro não devia estar no meio de um parágrafo.
   const d = _cancelMacroDados();
-  const periodo = _dashPer === 'sem' ? _weekRange(_dashWoff).label : _monthRange(_dashMoff).label;
+  const periodo = _dashRangeOf(_dashOff()).label;
   window.gnRelatorioPDF({
     titulo: r.titulo,
     texto: r.msg,
@@ -16612,7 +16668,7 @@ function _sortTable(col){
 function _setViewMode(m){ _dashViewMode=m; renderDashboard(); }
 
 function _buildDiaGrid() {
-  const wr = _weekRange(_dashPer === 'sem' ? _dashWoff : 0);
+  const wr = _weekRange(_dashSemanaOff());
   const hoje = new Date().toISOString().slice(0, 10);
   const dias = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
   let fatTotal = 0, comTotal = 0;
@@ -16723,7 +16779,7 @@ function renderDashboard() {
     }
   }
 
-  const range   = _dashPer==='sem' ? _weekRange(_dashWoff) : _monthRange(_dashMoff);
+  const range   = _dashRangeOf(_dashOff());
   const fat     = _dashFat;
   const loading = fat===null;
   let total=0, storesWithData=0, maxVal=0;
@@ -16741,8 +16797,10 @@ function renderDashboard() {
   const periodRow = `
     <div class="period-row">
       <div class="period-toggle">
-        <button class="${_dashPer==='sem'?'on':''}" onclick="_setPer('sem')">Semanal</button>
-        <button class="${_dashPer==='mes'?'on':''}" onclick="_setPer('mes')">Mensal</button>
+        <button class="${_dashPer==='dia'?'on':''}" onclick="_setPer('dia')">Dia</button>
+        <button class="${_dashPer==='sem'?'on':''}" onclick="_setPer('sem')">Semana</button>
+        <button class="${_dashPer==='mes'?'on':''}" onclick="_setPer('mes')">Mês</button>
+        <button class="${_dashPer==='tri3'?'on':''}" onclick="_setPer('tri3')">Trimestre</button>
       </div>
       <button class="period-arrow" onclick="_dashNav(-1)">‹</button>
       <div class="period-label"><b>${range.label}</b>${range.isCurrent?'<span class="period-curr">· atual</span>':''}</div>
@@ -16764,7 +16822,7 @@ function renderDashboard() {
         let va=0,vb=0;
         if(_dashSortBy==='fat'){va=fat?(fat[a]||0):0;vb=fat?(fat[b]||0):0;}
         else if(_dashSortBy==='delta'){const pa=_dashFatPrev&&(_dashFatPrev[a]||0)>0?((fat?fat[a]||0:0)-(_dashFatPrev[a]||0))/(_dashFatPrev[a]||1):0;const pb=_dashFatPrev&&(_dashFatPrev[b]||0)>0?((fat?fat[b]||0:0)-(_dashFatPrev[b]||0))/(_dashFatPrev[b]||1):0;va=pa;vb=pb;}
-        else if(_dashSortBy==='meta'){const ma=_dashMetas[a]||0,mb=_dashMetas[b]||0;va=ma>0?(fat?(fat[a]||0):0)/ma:-1;vb=mb>0?(fat?(fat[b]||0):0)/mb:-1;}
+        else if(_dashSortBy==='meta'){const ma=_dashMetaDe(a)||0,mb=_dashMetaDe(b)||0;va=ma>0?(fat?(fat[a]||0):0)/ma:-1;vb=mb>0?(fat?(fat[b]||0):0)/mb:-1;}
         else if(_dashSortBy==='nome'){return _dashSortDir==='asc'?(LOJA_DISPLAY[a]||a).localeCompare(LOJA_DISPLAY[b]||b):(LOJA_DISPLAY[b]||b).localeCompare(LOJA_DISPLAY[a]||a);}
         return _dashSortDir==='asc'?va-vb:vb-va;
       }
@@ -16787,7 +16845,7 @@ function renderDashboard() {
       const cards=sorted.map(k=>{
         const v    = fat?(fat[k]||0):null;
         const vP   = _dashFatPrev?(_dashFatPrev[k]||0):0;
-        const meta = _dashMetas[k]||0;
+        const meta = _dashMetaDe(k)||0;
         const cor  = COR_LOJA[k]||'#888';
         const nome = LOJA_DISPLAY[k]||k;
         const hasData = v&&v>0;
@@ -16830,7 +16888,7 @@ function renderDashboard() {
         // Mini dia a dia por loja
         let diaGrid='';
         {
-          const wr=_weekRange(_dashPer==='sem'?_dashWoff:0);
+          const wr=_weekRange(_dashSemanaOff());
           const _hoje=(d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'))(new Date());
           const dAbr=['S','T','Q','Q','S','S','D'];
           const fatDL=_dashFatDiaLoja?(_dashFatDiaLoja[k]||{}):null;
@@ -17177,11 +17235,14 @@ function _setDashTab(t){
   renderDashboard();
 }
 function _navToAtt(){ const el=document.getElementById('dash-section'); if(el)el.scrollIntoView({behavior:'smooth'}); _setDashTab('att'); }
-function _setPer(p){ _dashPer=p; _dashFat=null; _dashFatPrev=null; _dashFatDia=null; _dashComDia=null; _dashFatDiaLoja=null; _dashComDiaLoja=null; _dashRelSel.clear(); renderDashboard(); _loadDashAll(); }
+function _setPer(p){
+  // O Diário abre em ONTEM: a venda do dia só é lançada no Check-list à noite, e "hoje"
+  // passaria o dia inteiro zerado (▼ 100%, todas as lojas "sem dados"). A › leva a hoje.
+  if (p === 'dia' && _dashPer !== 'dia') _dashDoff = -1;
+  _dashPer=p; _dashFat=null; _dashFatPrev=null; _dashFatDia=null; _dashComDia=null; _dashFatDiaLoja=null; _dashComDiaLoja=null; _dashRelSel.clear(); renderDashboard(); _loadDashAll(); }
 function _toggleDashSel(k){ if(_dashRelSel.has(k)) _dashRelSel.delete(k); else _dashRelSel.add(k); renderDashboard(); }
 function _dashNav(dir){
-  if(_dashPer==='sem') _dashWoff=Math.min(0,_dashWoff+dir);
-  else                 _dashMoff=Math.min(0,_dashMoff+dir);
+  _dashSetOff(Math.min(0,_dashOff()+dir));
   _dashFat=null; _dashFatPrev=null; _dashFatDia=null; _dashComDia=null; _dashFatDiaLoja=null; _dashComDiaLoja=null;
   renderDashboard(); _loadDashAll();
 }
@@ -17283,8 +17344,10 @@ async function _relCarregarPeriodo(per) {
   // Só reaproveita _dashFat (sem consulta nova) quando período E offset batem exatamente
   // com o que está navegado no Painel agora — senão (inclusive Diário e Trimestral, que
   // não têm equivalente no Painel) busca direto.
-  const dashOff = per==='sem' ? _dashWoff : per==='mes' ? _dashMoff : null;
-  const usaDashAtual = per === _dashPer && off === dashOff;
+  const dashOff = per === _dashPer ? _dashOff() : null;
+  // O Diário do Painel compara com o mesmo dia da semana passada; o relatório, com o dia
+  // anterior — então no Diário o relatório busca o dele em vez de reaproveitar.
+  const usaDashAtual = per === _dashPer && off === dashOff && per !== 'dia';
   const range     = _relRange(per, off);
   const prevRange = _relRange(per, off-1);
   let fat, fatPrev, mesesFat = null;
@@ -17441,7 +17504,7 @@ async function _gerarRelatorio() {
   // Sempre abre casando com o que está navegado no Painel agora (Diário e 3 Meses não têm
   // equivalente lá, então começam em hoje / nos 3 meses até o mês atual) — dali em diante
   // _relNav navega livre.
-  window._relOffsets = { dia: 0, sem: _dashWoff, mes: _dashMoff, tri3: 0 };
+  window._relOffsets = { dia: _dashDoff, sem: _dashWoff, mes: _dashMoff, tri3: _dashToff };
   await _relCarregarPeriodo(_dashPer);
 
   const ex = document.getElementById('_rel-modal');
