@@ -54,9 +54,7 @@ const estado = page => page.evaluate(() => {
     const { ctx, page, erros } = await abrir(browser, largura);
     const e = await estado(page);
     check(`${rotulo}: os 5 grupos cabem inteiros na linha, sem rolar`, e.gruposCabem, JSON.stringify(e));
-    // A 320 px a página já passava da tela ANTES dos grupos (botão 📄 do período e a tabela
-    // do dia a dia, medido na versão de 07/11 em produção) — problema à parte, fora daqui.
-    if (largura >= 360) check(`${rotulo}: sem rolagem de lado na página`, !e.paginaLarga, JSON.stringify(e));
+    check(`${rotulo}: sem rolagem de lado na página`, !e.paginaLarga, JSON.stringify(e));
     await page.click('.dash-grupo[data-grupo="dre"]');
     check(`${rotulo}: DRE a um toque`, await page.evaluate(() => _dashTab === 'dre'));
     await page.click('.dash-grupo[data-grupo="vendas"]');
