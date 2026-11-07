@@ -128,7 +128,11 @@ const FAT_SEMANA = [
   const r = await montar({});
 
   check('a aba 🥩 Carnes existe na barra do Painel',
-    await page.evaluate(() => /_setDashTab\('carnes'\)/.test(document.documentElement.innerHTML)));
+    // 07/11/2026: as abas viraram grupos — a de Carnes mora em "🛠 Operação" e o botão só é
+    // desenhado com o grupo aberto, por isso a checagem é na lista de grupos.
+    await page.evaluate(() => typeof DASH_GRUPOS !== 'undefined'
+      ? DASH_GRUPOS.some(g => g.abas.some(a => a[0] === 'carnes' && /Carnes/.test(a[1])))
+      : /_setDashTab\('carnes'\)/.test(document.documentElement.innerHTML)));
   check('a aba abre na semana passada: 19/10 – 25/10',
     /19\/10 – 25\/10/.test(r.txt), r.txt.slice(0, 160));
   check('a consulta cobre a semana inteira, não só a segunda',
