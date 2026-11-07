@@ -179,6 +179,13 @@ window.GN_BUFFET_OBRIGATORIO = ['BOULEVARD', 'BANGU', 'SÃO GONÇALO', 'PEDREIRA
 // A Maglia é operação independente e não trabalha com buffet/rodízio: nem vê o campo.
 window.GN_BUFFET_FORA = ['MAGLIA']; // userKey
 
+// RODÍZIO: lojas que SERVEM rodízio (07/11/2026, definido pelo dono). Nas demais o campo
+// de rodízio nem aparece no fechamento do caixa — a Nova América lançou 10 "meias de
+// rodízio" em 06/11 e o Rancho 43 em 02/11, sem servirem rodízio; os dois foram zerados.
+// A feijoada continua pra toda loja de buffet. GN_BUFFET_OBRIGATORIO é subconjunto daqui.
+window.GN_BUFFET_RODIZIO = ['BANGU', 'BOULEVARD', 'ITAQUERA', 'SÃO GONÇALO', 'PEDREIRA', 'CAMPO GRANDE']; // userKey
+window.gnBuffetTemRodizio = function(userKey) { return window.GN_BUFFET_RODIZIO.includes(userKey); };
+
 // Quais quantidades travam o fechamento do caixa naquele dia, por loja.
 // A FEIJOADA é obrigatória em TODA loja que trabalha com buffet (não depende da lista
 // acima), nos dias em que ela é servida; o RODÍZIO só nas lojas de GN_BUFFET_OBRIGATORIO.
