@@ -614,6 +614,9 @@ window.gnCancelamentoLiberado = function (loja) {
 window.gnTransferenciaLiberada = function (loja) {
   return !window.gnLojaForaDe(window.GN_TRANSFERENCIA_FORA, loja);
 };
+// Garçom da nota sem 10% escolhido da escala (gn-caixa.html, _carregarGarconsEscala). A
+// Maglia fica de fora porque o pedido não citou ela (ver CLAUDE.md): continua digitando.
+window.GN_GARCOM_LISTA_FORA = ['MAGLIA'];
 window.gnSem10Liberado = function (loja) {
   return !window.gnLojaForaDe(window.GN_SEM10_FORA, loja);
 };
@@ -1487,10 +1490,11 @@ window.gnTriosNomesUnicos = function () {
 // ── EXCLUSÃO DE FUNCIONÁRIO — motivo obrigatório + últimos dias trabalhados ─────────────
 //
 // Caso real (Nova América, S40): um garçom foi excluído da escala por engano e continuou
-// trabalhando quatro semanas — as notas de 10% dele seguiam entrando no Caixa todo dia,
+// trabalhando quatro semanas — as notas sem 10% em nome dele seguiam entrando no Caixa,
 // mas ele não entrava no rateio. A confirmação era só "toque de novo", e nada na tela
 // mostrava que aquela pessoa tinha trabalhado ontem. Agora, antes de excluir, a tela diz
-// os últimos dias com presença na escala e a última nota de 10% no Caixa, e pede o motivo
+// os últimos dias com presença na escala e as últimas notas sem 10% lançadas em nome dele
+// no Caixa (a nota diz quem atendeu a mesa — prova de que a pessoa trabalhou), e pede o motivo
 // — que fica gravado na auditoria e na própria vaga (_removidoMotivo).
 //
 // As duas telas que excluem (Gorjetas e Check-list) usam esta mesma função, pra regra e o
@@ -1538,9 +1542,10 @@ window.gnUltimosDiasEscala = function (allData, nome, ateIdx, hojeISO, max) {
   }
   return out;
 };
-// Últimos dias com nota de 10% no Caixa em nome da pessoa. O Caixa grava só o primeiro
-// nome do garçom ("ESMAEL"), então a comparação é pelo primeiro nome — pode trazer um
-// homônimo, por isso a tela diz "nota no nome de X", e não "X trabalhou".
+// Últimos dias com nota sem 10% (gn_caixa_gorjeta) lançada em nome da pessoa. Até nov/2026 o
+// Caixa gravava o nome digitado ("ESMAEL"); depois passa a gravar o nome da escala. A
+// comparação é pelo primeiro nome pra cobrir os dois — pode trazer um homônimo, por isso a
+// tela diz "nota em nome de", e não "trabalhou".
 window.gnUltimasGorjetasCaixa = async function (lojaUserKey, nome, hojeISO, max) {
   const primeiro = window.gnNomeEscalaNorm(nome).split(' ')[0];
   if (!lojaUserKey || !primeiro) return [];
@@ -1594,7 +1599,7 @@ window.gnConfirmarExclusaoFunc = function (opts) {
         <div style="font-size:12px;color:${mut};margin-bottom:12px">Sai desta semana e das próximas. As semanas passadas não mudam.</div>
         <div style="font-size:12px;font-weight:700;margin-bottom:4px">Últimos dias com presença na escala</div>
         <div data-exc="escala" style="font-size:13px;margin-bottom:10px;color:${mut}">consultando…</div>
-        <div style="font-size:12px;font-weight:700;margin-bottom:4px">Últimas notas de 10% no Caixa (pelo primeiro nome)</div>
+        <div style="font-size:12px;font-weight:700;margin-bottom:4px">Últimas notas sem 10% em nome dele no Caixa</div>
         <div data-exc="caixa" style="font-size:13px;margin-bottom:6px;color:${mut}">${o.gorjetas ? 'consultando…' : 'não consultado'}</div>
         <div data-exc="alerta" style="display:none;font-size:12px;font-weight:700;color:#B91C1C;margin-bottom:6px"></div>
         <div style="font-size:12px;font-weight:700;margin:12px 0 6px">Motivo da exclusão</div>
@@ -1639,7 +1644,7 @@ window.gnConfirmarExclusaoFunc = function (opts) {
       el.style.color = '';
       el.innerHTML = lista(dias, 'nenhuma nos últimos 45 dias');
     });
-    // Nota de 10% depois do último dia de escala é exatamente o caso que esta tela existe
+    // Nota em nome dele depois do último dia de escala é exatamente o caso que esta tela existe
     // pra pegar: a pessoa está trabalhando e a escala não sabe.
     Promise.all([pEsc, pCx]).then(([esc, cx]) => {
       if (fim || !cx || !cx[0]) return;
@@ -1647,7 +1652,7 @@ window.gnConfirmarExclusaoFunc = function (opts) {
       if (cx[0] > ultEsc) {
         const al = $('alerta');
         al.style.display = '';
-        al.textContent = `Há nota de 10% em ${window.gnFmtDiaCurto(cx[0])}, depois do último dia de escala — confira se a pessoa ainda está trabalhando antes de excluir.`;
+        al.textContent = `Há nota sem 10% em nome dele em ${window.gnFmtDiaCurto(cx[0])}, depois do último dia de escala — confira se a pessoa ainda está trabalhando antes de excluir.`;
       }
     });
   });
