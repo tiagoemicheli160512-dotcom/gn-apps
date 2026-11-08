@@ -1091,22 +1091,30 @@ function removerFuncionario(i, btnEl){
   // dele). Sem nome, não há o que excluir — só avisa e sai.
   if(!nomeAtual){ showToast('Vaga já está vazia — nada pra excluir.'); return; }
 
-  // Se tem nome, exige clique de confirmação (sem usar confirm() nativo, que pode ser bloqueado)
-  if(nomeAtual && btnEl && !btnEl.dataset.confirmando){
-    btnEl.dataset.confirmando='1';
-    const textoOriginal=btnEl.textContent;
-    btnEl.textContent='⚠️ Toque de novo p/ confirmar';
-    btnEl.style.background='#8B0000';
-    setTimeout(()=>{
-      if(btnEl.dataset.confirmando){
-        delete btnEl.dataset.confirmando;
-        btnEl.textContent=textoOriginal;
-        btnEl.style.background='var(--rdk)';
-      }
-    },3000);
-    return;
-  }
+  // Diálogo com motivo obrigatório e os últimos dias trabalhados (gnConfirmarExclusaoFunc,
+  // gn-lojas-config.js). Antes era só "toque de novo", e foi assim que um garçom da Nova
+  // América saiu da escala por engano e ficou quatro semanas fora do rateio trabalhando.
+  if(btnEl && btnEl.dataset.confirmando) return;
+  if(btnEl) btnEl.dataset.confirmando='1';
+  const hoje=gnHojeLocalISO();
+  const lojaUser=(GN_LOJAS.find(l=>l.comKey===LOJA)||{}).userKey;
+  gnConfirmarExclusaoFunc({
+    nome:nomeAtual,
+    diasEscala:gnUltimosDiasEscala(state.allData,nomeAtual,state.semIdx,hoje),
+    gorjetas:gnUltimasGorjetasCaixa(lojaUser,nomeAtual,hoje),
+  }).then(r=>{
+    if(btnEl) delete btnEl.dataset.confirmando;
+    if(!r) return;
+    // O diálogo fica aberto o tempo que a pessoa quiser; nesse meio a semana pode ter
+    // sincronizado. Só exclui se a vaga ainda é de quem foi mostrado no diálogo.
+    const wdAgora=getWD(state.semIdx);
+    if(((wdAgora.funcs[i]&&wdAgora.funcs[i].nome)||'').trim()!==nomeAtual){ showToast('A escala mudou enquanto o aviso estava aberto — nada foi excluído.'); return; }
+    _removerFuncionarioConfirmado(i,nomeAtual,r.motivo);
+  });
+}
 
+function _removerFuncionarioConfirmado(i,nomeAtual,motivo){
+  const wd=getWD(state.semIdx);
   // _removidoNome junto do _removidoEm: a vaga anônima (só com a hora da exclusão) não diz
   // QUEM saiu, e o app Check-list, que reinsere na semana atual quem está na semana anterior,
   // não tinha como saber que aquela vaga foi esvaziada de propósito — trazia a pessoa de
@@ -1115,7 +1123,7 @@ function removerFuncionario(i, btnEl){
   const agora=Date.now();
   const wd2={...wd};
   wd2.funcs=[...wd2.funcs];
-  wd2.funcs[i]={id:i,nome:'',tipo:'CLT / MENSALISTA',dias:Array(7).fill('PRESENTE'),_removidoEm:agora,_removidoNome:nomeAtual};
+  wd2.funcs[i]={id:i,nome:'',tipo:'CLT / MENSALISTA',dias:Array(7).fill('PRESENTE'),_removidoEm:agora,_removidoNome:nomeAtual,_removidoMotivo:motivo};
   wd2._lastEdit = agora;
   state.allData[String(state.semIdx)]=wd2;
   // Semana futura é projeção herdada, não registro do que aconteceu: quem sai da loja tem
@@ -1124,9 +1132,9 @@ function removerFuncionario(i, btnEl){
   _removerDeSemanasFuturasGor(nomeAtual, state.semIdx, agora);
   sv('allData',state.allData);
   const semanaLabel='S'+String(CAL[state.semIdx]?.num||'?').padStart(2,'0');
-  const entry={ts:new Date().toLocaleString('pt-BR'),usuario:usuarioAtual,semana:semanaLabel,desc:'Funcionário removido'};
+  const entry={ts:new Date().toLocaleString('pt-BR'),usuario:usuarioAtual,semana:semanaLabel,desc:'Funcionário removido ('+nomeAtual+' — '+gnExclusaoMotivoRotulo(motivo)+')'};
   logEntries.unshift(entry);
-  _logAuditoriaCom('EXCLUIR_FUNCIONARIO',{nome:nomeAtual,semana:semanaLabel});
+  _logAuditoriaCom('EXCLUIR_FUNCIONARIO',{nome:nomeAtual,semana:semanaLabel,motivo});
   if(logEntries.length>100) logEntries=logEntries.slice(0,100);
   sv('log',logEntries);
   if(state.visibleSlots) delete state.visibleSlots[i];
@@ -2322,7 +2330,7 @@ async function _logAuditoriaCom(acao, detalhes){
 function _fmtDetalhesAuditoriaCom(acao, d){
   if(!d) return '';
   try{
-    if(acao==='EXCLUIR_FUNCIONARIO')     return `${d.nome||''} — ${d.semana||''}`;
+    if(acao==='EXCLUIR_FUNCIONARIO')     return `${d.nome||''} — ${d.semana||''}${d.motivo?' — '+(window.gnExclusaoMotivoRotulo?gnExclusaoMotivoRotulo(d.motivo):d.motivo):''}`;
     if(acao==='CONFIRMAR_SAIDA')         return `${d.semana||''} — ${fmtBRL(d.valor||0)} · ${d.motivo||''}`;
     if(acao==='EXCLUIR_SAIDA')           return `${d.semana||''} — ${fmtBRL(d.valor||0)} · ${d.motivo||''}`;
     if(acao==='ALTERAR_VALOR_DISTRIBUIR')return `${d.semana||''} — ${fmtBRL(d.valor||0)}`;

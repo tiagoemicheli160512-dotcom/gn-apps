@@ -8375,27 +8375,42 @@ function removeComissoesFunc(i,btnEl){
   // nesse aparelho) esconde esse funcionário pra sempre daqui em diante.
   if(!nomeAtual){ showToast('Vaga já está vazia — nada pra excluir.','error'); return; }
 
-  // Exige clique de confirmação quando há nome preenchido (evita exclusão acidental)
-  if(nomeAtual && btnEl && !btnEl.dataset.confirmando){
-    btnEl.dataset.confirmando='1';
-    const textoOriginal=btnEl.textContent;
-    btnEl.textContent='⚠️ Toque de novo p/ confirmar';
-    btnEl.style.background='#8B0000';
-    setTimeout(()=>{
-      if(btnEl.dataset.confirmando){
-        delete btnEl.dataset.confirmando;
-        btnEl.textContent=textoOriginal;
-        btnEl.style.background='';
-      }
-    },3000);
-    return;
-  }
+  // Diálogo com motivo obrigatório e os últimos dias trabalhados — o mesmo do app Gorjetas
+  // (gnConfirmarExclusaoFunc, gn-lojas-config.js). Antes era só "toque de novo".
+  if(btnEl && btnEl.dataset.confirmando) return;
+  if(btnEl) btnEl.dataset.confirmando='1';
+  const hoje=gnHojeLocalISO();
+  const lojaKey=comissoesLojaKey();
+  const lojaUser=(GN_LOJAS.find(l=>l.comKey===lojaKey)||{}).userKey;
+  const semIdx=comissoesWeekIdx;
+  gnConfirmarExclusaoFunc({
+    nome:nomeAtual,
+    diasEscala:fetchComissoesAllData(lojaKey).then(all=>{
+      // A semana aberta aqui pode ter edição ainda não salva: ela vale mais que a da nuvem.
+      const a={...(all||{})}; if(semIdx!=null && comissoesWD) a[String(semIdx)]=comissoesWD;
+      return gnUltimosDiasEscala(a,nomeAtual,semIdx,hoje);
+    }),
+    gorjetas:gnUltimasGorjetasCaixa(lojaUser,nomeAtual,hoje),
+  }).then(r=>{
+    if(btnEl) delete btnEl.dataset.confirmando;
+    if(!r) return;
+    if(!comissoesWD || comissoesWeekIdx!==semIdx || ((comissoesWD.funcs[i]&&comissoesWD.funcs[i].nome)||'').trim()!==nomeAtual){
+      showToast('A escala mudou enquanto o aviso estava aberto — nada foi excluído.','error'); return;
+    }
+    _removeComissoesFuncConfirmado(i,nomeAtual,r.motivo);
+  });
+}
 
+function _removeComissoesFuncConfirmado(i,nomeAtual,motivo){
   // _removidoNome guarda quem saiu da vaga: sem isso, a vaga fica anônima e a fusão
   // automática (_comissoesMesclarFuncsFaltantes) reinsere a pessoa a partir da semana
   // anterior no render seguinte, desfazendo a exclusão.
-  const mutator=wd=>{ wd={...wd}; wd.funcs=[...wd.funcs]; wd.funcs[i]={id:i,nome:'',tipo:'CLT / MENSALISTA',setor:'',dias:Array(7).fill('PRESENTE'),_removidoEm:Date.now(),_removidoNome:nomeAtual}; return wd; };
+  const mutator=wd=>{ wd={...wd}; wd.funcs=[...wd.funcs]; wd.funcs[i]={id:i,nome:'',tipo:'CLT / MENSALISTA',setor:'',dias:Array(7).fill('PRESENTE'),_removidoEm:Date.now(),_removidoNome:nomeAtual,_removidoMotivo:motivo}; return wd; };
   comissoesWD=mutator(comissoesWD);
+  // O Check-list não registrava exclusão nenhuma na auditoria — só o app Gorjetas. Por isso
+  // o caso da Nova América só foi achado pelo lado de lá.
+  const semNum=(typeof COMISSOES_CAL!=='undefined' && COMISSOES_CAL[comissoesWeekIdx] && COMISSOES_CAL[comissoesWeekIdx].num);
+  _logAuditoriaChk('EXCLUIR_FUNCIONARIO',{nome:nomeAtual,semana:'S'+String(semNum||'?').padStart(2,'0'),motivo});
   delete comissoesVisibleSlots[i];
   delete comissoesExpanded[i];
   renderComissoesFuncs();
@@ -13096,6 +13111,7 @@ const HISTORICO_AUDIT_ACOES = {
   CONFIRMAR_PRESENCA_BANDA: { icon: '🎸', label: 'Confirmou presença da banda',      cor: '#4ade80' },
   BANDA_NAO_VEIO:           { icon: '⚠️', label: 'Registrou banda não veio',         cor: '#f87171' },
   EXCLUIR_FOTO_FUNC:        { icon: '🗑️', label: 'Excluiu foto de funcionário',      cor: '#f87171' },
+  EXCLUIR_FUNCIONARIO:      { icon: '🗑️', label: 'Removeu funcionário da escala',    cor: '#f87171' },
 };
 
 async function _logAuditoriaChk(acao, detalhes){
@@ -13119,6 +13135,7 @@ function _formatarDetalhesAuditoriaChk(acao, d){
     if(acao==='CONFIRMAR_PRESENCA_BANDA') return d.artista||'';
     if(acao==='BANDA_NAO_VEIO')           return `${d.artista||''} — ${d.motivo||''}`;
     if(acao==='EXCLUIR_FOTO_FUNC')        return `${d.funcionario||''} — ${d.tipo||''}`;
+    if(acao==='EXCLUIR_FUNCIONARIO')      return `${d.nome||''} — ${d.semana||''}${d.motivo?' — '+gnExclusaoMotivoRotulo(d.motivo):''}`;
   }catch(e){}
   return '';
 }
