@@ -158,6 +158,9 @@ input[type=date], .card input[type=date] { background:var(--graf2) !important; c
 }
 
 .form-group { flex: 1; }
+/* Nome comprido da escala não pode alargar a linha além da tela. */
+#dezGarcomBox { min-width: 0; }
+#dezGarcomSel { text-overflow: ellipsis; }
 
 .form-group label {
   display: block;
@@ -1091,14 +1094,18 @@ select option { background: var(--graf2); color: var(--txt); }
         <div class="dval" id="dezRep">R$ 0,00</div>
       </div>
     </div>
+    <!-- Garçom numa linha só dele: com a lista da escala, o nome completo precisa caber
+         ("ESMAEL DA SILVA ATHAIDE"); espremido entre Mesa e Valor, em 320 px virava "BRUNO…". -->
+    <div class="form-row">
+      <div class="form-group" id="dezGarcomBox">
+        <label>Garçom</label>
+        <input id="dezGarcom" type="text" placeholder="Nome">
+      </div>
+    </div>
     <div class="form-row">
       <div class="form-group">
         <label>Mesa</label>
         <input id="dezMesa" type="text" placeholder="Nº mesa">
-      </div>
-      <div class="form-group">
-        <label>Garçom</label>
-        <input id="dezGarcom" type="text" placeholder="Nome">
       </div>
       <div class="form-group" style="max-width:110px">
         <label>Valor</label>
@@ -1817,6 +1824,7 @@ async function carregarFilhos() {
     sb(`gn_caixa_transferencia?fechamento_id=eq.${fid}&select=*&order=criado_em`).catch(() => []),
   ]);
   S.comprovantes = c || []; S.saidas = s || []; S.supr = n || []; S.notas10 = d || [];
+  _carregarGarconsEscala();   // sem await: a lista de garçons não segura a abertura do caixa
   S.cancel = cancel || [];
   S.transf = transf || [];
   S._saidasFechId = fid;
@@ -4514,10 +4522,95 @@ async function addTransferencia() {
   }
 }
 
+// ── GARÇOM DA NOTA SEM 10% — escolhido da escala ─────────────────────────────
+// O campo era texto livre, e a mesma pessoa entrava com grafias diferentes ("ISMAEL" num
+// dia, "ESMAEL" no outro — Nova América, out/2026). Nome digitado não liga a nota a
+// ninguém: o aviso de exclusão do Check-list/Gorjetas não acha as notas, e a loja não
+// percebe que um garçom está trabalhando fora da escala. Agora a lista vem da escala da
+// semana do caixa (gn_comissoes, cadastrada no Check-list ou no Gorjetas), e quem não está
+// nela entra como "Extra", com o nome digitado e a marca (EXTRA) — continua sendo possível
+// lançar, mas fica visível que a pessoa não está na escala.
+// Sem escala (falha de rede, semana sem ninguém, loja fora da regra), volta o campo de
+// texto de antes: nota de cliente não pode deixar de ser lançada por causa disto.
+const GARCOM_EXTRA = '__EXTRA__';
+S.garcons = null; S._garconsChave = '';
+async function _carregarGarconsEscala() {
+  const fora = !S.fech || !S.loja || window.gnLojaForaDe(window.GN_GARCOM_LISTA_FORA, S.loja);
+  const comKey = LOJA_COM_MAP[S.loja];
+  const idx = S.fech ? _comSemIdx(S.fech.data) : null;
+  if (fora || !comKey || idx == null) { S.garcons = null; S._garconsChave = ''; renderGarcomCampo(); return; }
+  const chave = comKey + '|' + idx;
+  if (S._garconsChave === chave && S.garcons) return;   // mesma semana: não apaga a escolha em andamento
+  try {
+    // Só as duas semanas que interessam, não o all_data inteiro (centenas de KB no 4G da loja).
+    const r = await sb(`gn_comissoes?loja=eq.${encodeURIComponent(comKey)}&select=cur:all_data->"${idx}"->funcs,ant:all_data->"${idx - 1}"->funcs`);
+    const nomesDe = fs => (Array.isArray(fs) ? fs : []).filter(f => f && f.nome && f.nome.trim());
+    // Semana que ainda ninguém abriu herda da anterior — mesma regra do app Gorjetas.
+    let fs = nomesDe(r && r[0] && r[0].cur);
+    if (!fs.length) fs = nomesDe(r && r[0] && r[0].ant);
+    const vistos = new Set();
+    const lista = [];
+    fs.forEach(f => {
+      const nome = f.nome.trim().replace(/\s+/g, ' ');
+      const k = window.gnNomeEscalaNorm(nome);
+      if (vistos.has(k)) return; vistos.add(k);
+      lista.push({ nome, salao: String(f.setor || '').trim().toLowerCase() === 'salão' });
+    });
+    lista.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+    S.garcons = lista.length ? lista : null;
+    S._garconsChave = chave;
+  } catch (e) {
+    if (window.gnLogError) window.gnLogError('caixa:garconsEscala', e);
+    S.garcons = null; S._garconsChave = '';
+  }
+  renderGarcomCampo();
+}
+function renderGarcomCampo() {
+  const box = $('dezGarcomBox'); if (!box) return;
+  const esc = window.gnPdfEsc;
+  if (!S.garcons) {
+    if ($('dezGarcom') && !$('dezGarcomSel')) return;
+    box.innerHTML = '<label>Garçom</label><input id="dezGarcom" type="text" placeholder="Nome">';
+    return;
+  }
+  const opt = g => `<option value="${esc(g.nome)}">${esc(g.nome)}</option>`;
+  const salao = S.garcons.filter(g => g.salao), outros = S.garcons.filter(g => !g.salao);
+  const grupos = salao.length && outros.length
+    ? `<optgroup label="Salão">${salao.map(opt).join('')}</optgroup><optgroup label="Outros setores">${outros.map(opt).join('')}</optgroup>`
+    : S.garcons.map(opt).join('');
+  box.innerHTML = `<label>Garçom</label>
+    <select id="dezGarcomSel" onchange="_garcomMudou()">
+      <option value="">Escolha…</option>${grupos}
+      <option value="${GARCOM_EXTRA}">Extra (fora da escala)</option>
+    </select>
+    <input id="dezGarcom" type="text" placeholder="Nome do extra" style="display:none;margin-top:6px">`;
+}
+function _garcomMudou() {
+  const extra = $('dezGarcomSel').value === GARCOM_EXTRA;
+  const inp = $('dezGarcom');
+  inp.style.display = extra ? '' : 'none';
+  if (extra) inp.focus(); else inp.value = '';
+}
+// O nome que vai pra nota, ou false quando falta escolher (já avisou com toast).
+function _garcomEscolhido() {
+  const sel = $('dezGarcomSel');
+  if (!sel) return ($('dezGarcom') && $('dezGarcom').value.trim()) || null;
+  if (!sel.value) { toast('Escolha o garçom'); sel.focus(); return false; }
+  if (sel.value !== GARCOM_EXTRA) return sel.value;
+  const nome = $('dezGarcom').value.trim().replace(/\s+/g, ' ');
+  if (!nome) { toast('Digite o nome do extra'); $('dezGarcom').focus(); return false; }
+  return nome.toUpperCase() + ' (EXTRA)';
+}
+function _limparGarcom() {
+  const sel = $('dezGarcomSel'); if (sel) sel.value = '';
+  const inp = $('dezGarcom'); if (inp) { inp.value = ''; if (sel) inp.style.display = 'none'; }
+}
+
 async function addNota10() {
   const v = parseMoney($('dezVal').value); if (v <= 0) { toast('Valor inválido'); return; }
-  const body = { fechamento_id: S.fech.id, mesa: $('dezMesa').value.trim() || null, garcom: $('dezGarcom').value.trim() || null, valor: v };
-  $('dezVal').value = ''; $('dezMesa').value = ''; $('dezGarcom').value = '';
+  const garcom = _garcomEscolhido(); if (garcom === false) return;
+  const body = { fechamento_id: S.fech.id, mesa: $('dezMesa').value.trim() || null, garcom, valor: v };
+  $('dezVal').value = ''; $('dezMesa').value = ''; _limparGarcom();
   try {
     const row = await sb('gn_caixa_gorjeta', { method: 'POST', prefer: 'return=representation', body });
     S.notas10.push(row[0]);
