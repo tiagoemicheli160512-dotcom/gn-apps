@@ -1483,3 +1483,172 @@ window.gnTriosCacheFor = function (artista) {
 window.gnTriosNomesUnicos = function () {
   return Object.keys(window.GN_TRIOS_CACHES).sort((a, b) => a.localeCompare(b, 'pt-BR'));
 };
+
+// ── EXCLUSÃO DE FUNCIONÁRIO — motivo obrigatório + últimos dias trabalhados ─────────────
+//
+// Caso real (Nova América, S40): um garçom foi excluído da escala por engano e continuou
+// trabalhando quatro semanas — as notas de 10% dele seguiam entrando no Caixa todo dia,
+// mas ele não entrava no rateio. A confirmação era só "toque de novo", e nada na tela
+// mostrava que aquela pessoa tinha trabalhado ontem. Agora, antes de excluir, a tela diz
+// os últimos dias com presença na escala e a última nota de 10% no Caixa, e pede o motivo
+// — que fica gravado na auditoria e na própria vaga (_removidoMotivo).
+//
+// As duas telas que excluem (Gorjetas e Check-list) usam esta mesma função, pra regra e o
+// texto nunca divergirem entre elas.
+window.GN_EXCLUSAO_MOTIVOS = [
+  { id: 'DEMISSAO',      rotulo: 'Demissão' },
+  { id: 'TRANSFERENCIA', rotulo: 'Transferência de loja' },
+  { id: 'ERRO_CADASTRO', rotulo: 'Erro de cadastro' },
+];
+window.gnExclusaoMotivoRotulo = function (id) {
+  const m = window.GN_EXCLUSAO_MOTIVOS.find(x => x.id === id);
+  return m ? m.rotulo : (id || '');
+};
+// Status que querem dizer "a pessoa estava na loja trabalhando". FOLGA, FÉRIAS e banco de
+// horas também pagam, mas não provam presença — e é presença que interessa a quem exclui.
+window.GN_DIA_TRABALHADO = ['PRESENTE', 'HORISTA', 'JOVEM APRENDIZ', 'MEIO TURNO'];
+// Data de um dia da semana da escala. Usa o calendário compartilhado quando carregado (o dia
+// traz o próprio ano); sem ele, a mesma âncora do _buildCAL do app Gorjetas: índice 0 =
+// segunda 05/01/2026, de 7 em 7 — que é o que o calendário dá, índice por índice.
+window.gnSemanaDiaISO = function (semIdx, d) {
+  const sem = typeof COMISSOES_CAL !== 'undefined' ? COMISSOES_CAL[Number(semIdx)] : null;
+  const dia = sem && sem.days && sem.days[Number(d)];
+  if (dia && dia.y) return `${dia.y}-${String(dia.m).padStart(2, '0')}-${String(dia.d).padStart(2, '0')}`;
+  const dt = new Date(Date.UTC(2026, 0, 5 + Number(semIdx) * 7 + Number(d)));
+  return dt.toISOString().slice(0, 10);
+};
+// Últimos dias com presença na escala, do mais recente pro mais antigo. Só conta dia que
+// já passou (até hojeISO): a escala nasce toda PRESENTE, e o resto da semana corrente
+// ainda não aconteceu.
+window.gnUltimosDiasEscala = function (allData, nome, ateIdx, hojeISO, max) {
+  const alvo = window.gnNomeEscalaNorm(nome);
+  const out = [];
+  if (!alvo || !allData) return out;
+  const lim = max || 5;
+  for (let w = Number(ateIdx); w >= 0 && w > Number(ateIdx) - 10 && out.length < lim; w--) {
+    const wd = allData[String(w)];
+    if (!wd || !Array.isArray(wd.funcs)) continue;
+    const f = wd.funcs.find(x => x && x.nome && window.gnNomeEscalaNorm(x.nome) === alvo);
+    if (!f || !Array.isArray(f.dias)) continue;
+    for (let d = 6; d >= 0 && out.length < lim; d--) {
+      const iso = window.gnSemanaDiaISO(w, d);
+      if (hojeISO && iso > hojeISO) continue;
+      if (window.GN_DIA_TRABALHADO.includes(f.dias[d])) out.push(iso);
+    }
+  }
+  return out;
+};
+// Últimos dias com nota de 10% no Caixa em nome da pessoa. O Caixa grava só o primeiro
+// nome do garçom ("ESMAEL"), então a comparação é pelo primeiro nome — pode trazer um
+// homônimo, por isso a tela diz "nota no nome de X", e não "X trabalhou".
+window.gnUltimasGorjetasCaixa = async function (lojaUserKey, nome, hojeISO, max) {
+  const primeiro = window.gnNomeEscalaNorm(nome).split(' ')[0];
+  if (!lojaUserKey || !primeiro) return [];
+  const hoje = hojeISO || new Date().toISOString().slice(0, 10);
+  const ini = new Date(Date.parse(hoje + 'T12:00:00Z') - 45 * 864e5).toISOString().slice(0, 10);
+  const H = { apikey: window.GN_SB_KEY, Authorization: 'Bearer ' + window.GN_SB_KEY };
+  const url = `${window.GN_SB_URL}/rest/v1/gn_caixa_fechamento?loja=eq.${encodeURIComponent(lojaUserKey)}`
+    + `&data=gte.${ini}&data=lte.${hoje}&select=data,gn_caixa_gorjeta(garcom)&order=data.desc`;
+  const rows = await window.gnFetchJson(url, H, 'exclusao:gorjetas', []);
+  const dias = [];
+  (rows || []).forEach(r => {
+    const tem = (r.gn_caixa_gorjeta || []).some(n => window.gnNomeEscalaNorm(n && n.garcom).split(' ')[0] === primeiro);
+    if (tem && !dias.includes(r.data)) dias.push(r.data);
+  });
+  return dias.slice(0, max || 5);
+};
+window.gnFmtDiaCurto = function (iso) {
+  const [y, m, d] = String(iso).split('-');
+  const sem = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'][new Date(Date.UTC(+y, +m - 1, +d)).getUTCDay()];
+  return `${sem} ${d}/${m}`;
+};
+window.gnHojeLocalISO = function () {
+  const t = new Date();
+  return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+};
+// Abre o diálogo e devolve uma Promise: {motivo} quando confirmado, null quando cancelado.
+// diasEscala e gorjetas podem ser lista ou Promise de lista.
+window.gnConfirmarExclusaoFunc = function (opts) {
+  const o = opts || {};
+  const esc = window.gnPdfEsc;
+  return new Promise(resolve => {
+    // Um diálogo por vez: dois abertos e o segundo confirmado excluiria quem o primeiro mostrou.
+    if (document.getElementById('gn-exclusao-func')) { resolve(null); return; }
+    const ov = document.createElement('div');
+    ov.id = 'gn-exclusao-func';
+    ov.setAttribute('role', 'dialog');
+    ov.setAttribute('aria-modal', 'true');
+    ov.style.cssText = 'position:fixed;inset:0;z-index:10050;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px';
+    const txt = 'var(--t1,var(--txt,#1A1D23))', mut = 'var(--t2,var(--txt2,#3D4451))';
+    const bg = 'var(--s2,var(--bg2,#FFFFFF))', bd = 'var(--b3,var(--bd3,#C7CCD4))';
+    const lista = (dias, vazio) => dias && dias.length
+      ? dias.map(window.gnFmtDiaCurto).join(' · ')
+      : `<span style="color:${mut}">${vazio}</span>`;
+    const motivos = window.GN_EXCLUSAO_MOTIVOS.map(m => `
+      <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid ${bd};border-radius:10px;cursor:pointer;font-size:14px;color:${txt}">
+        <input type="radio" name="gn-exc-motivo" value="${m.id}" style="width:18px;height:18px;margin:0"> ${esc(m.rotulo)}
+      </label>`).join('');
+    ov.innerHTML = `
+      <div style="background:${bg};color:${txt};border-radius:14px;max-width:420px;width:100%;max-height:calc(100vh - 32px);overflow:auto;padding:18px;box-shadow:0 10px 40px rgba(0,0,0,.35);font-family:inherit">
+        <div style="font-size:16px;font-weight:800;margin-bottom:4px">Excluir ${esc(o.nome)}?</div>
+        <div style="font-size:12px;color:${mut};margin-bottom:12px">Sai desta semana e das próximas. As semanas passadas não mudam.</div>
+        <div style="font-size:12px;font-weight:700;margin-bottom:4px">Últimos dias com presença na escala</div>
+        <div data-exc="escala" style="font-size:13px;margin-bottom:10px;color:${mut}">consultando…</div>
+        <div style="font-size:12px;font-weight:700;margin-bottom:4px">Últimas notas de 10% no Caixa (pelo primeiro nome)</div>
+        <div data-exc="caixa" style="font-size:13px;margin-bottom:6px;color:${mut}">${o.gorjetas ? 'consultando…' : 'não consultado'}</div>
+        <div data-exc="alerta" style="display:none;font-size:12px;font-weight:700;color:#B91C1C;margin-bottom:6px"></div>
+        <div style="font-size:12px;font-weight:700;margin:12px 0 6px">Motivo da exclusão</div>
+        <div style="display:flex;flex-direction:column;gap:6px">${motivos}</div>
+        <div style="display:flex;gap:8px;margin-top:16px">
+          <button type="button" data-exc="cancelar" style="flex:1;padding:12px;border-radius:10px;border:1px solid ${bd};background:transparent;color:${txt};font-weight:700;font-size:14px;cursor:pointer">Cancelar</button>
+          <button type="button" data-exc="confirmar" disabled style="flex:1;padding:12px;border-radius:10px;border:0;background:#B91C1C;color:#fff;font-weight:800;font-size:14px;cursor:pointer;opacity:.45">Excluir</button>
+        </div>
+      </div>`;
+    document.body.appendChild(ov);
+    const $ = s => ov.querySelector(`[data-exc="${s}"]`);
+    const btnOk = $('confirmar');
+    let fim = false;
+    const fechar = v => { if (fim) return; fim = true; ov.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
+    const onKey = e => { if (e.key === 'Escape') fechar(null); };
+    document.addEventListener('keydown', onKey);
+    ov.addEventListener('click', e => { if (e.target === ov) fechar(null); });
+    ov.querySelectorAll('input[name="gn-exc-motivo"]').forEach(r => r.addEventListener('change', () => {
+      btnOk.disabled = false; btnOk.style.opacity = '1';
+    }));
+    $('cancelar').addEventListener('click', () => fechar(null));
+    btnOk.addEventListener('click', () => {
+      const sel = ov.querySelector('input[name="gn-exc-motivo"]:checked');
+      if (!sel) return;
+      fechar({ motivo: sel.value });
+    });
+    // Escala e Caixa podem chegar depois (o Check-list só tem a semana aberta em memória);
+    // o diálogo já abre e cada lista se preenche quando chegar.
+    const pEsc = Promise.resolve(o.diasEscala).catch(() => null);
+    const pCx = o.gorjetas ? Promise.resolve(o.gorjetas).catch(() => null) : Promise.resolve(undefined);
+    pEsc.then(dias => {
+      if (fim) return;
+      const el = $('escala');
+      if (dias == null) { el.textContent = 'não foi possível consultar'; return; }
+      el.style.color = '';
+      el.innerHTML = lista(dias, 'nenhum nas últimas semanas');
+    });
+    pCx.then(dias => {
+      if (fim || dias === undefined) return;
+      const el = $('caixa');
+      if (dias == null) { el.textContent = 'não foi possível consultar'; return; }
+      el.style.color = '';
+      el.innerHTML = lista(dias, 'nenhuma nos últimos 45 dias');
+    });
+    // Nota de 10% depois do último dia de escala é exatamente o caso que esta tela existe
+    // pra pegar: a pessoa está trabalhando e a escala não sabe.
+    Promise.all([pEsc, pCx]).then(([esc, cx]) => {
+      if (fim || !cx || !cx[0]) return;
+      const ultEsc = (esc || [])[0] || '';
+      if (cx[0] > ultEsc) {
+        const al = $('alerta');
+        al.style.display = '';
+        al.textContent = `Há nota de 10% em ${window.gnFmtDiaCurto(cx[0])}, depois do último dia de escala — confira se a pessoa ainda está trabalhando antes de excluir.`;
+      }
+    });
+  });
+};
