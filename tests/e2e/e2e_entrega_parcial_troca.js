@@ -273,6 +273,26 @@ const HOJE = '2026-11-05';
     await page.evaluate(() => _epForn(provisoesEntrega[0]) === 'BRASIL TÍPICO' && /Pedido em SERTANORTE · entregue por BRASIL TÍPICO/.test(_epRessalvaForn(provisoesEntrega[0]))), JSON.stringify(g[g.length - 1]));
   check('fornecedor fora da lista (FRESCATO, PEIXE) não tem troca', await page.evaluate(() => _epGrupoSubst('FRESCATO') === null && _epGrupoSubst('DIFERENCIAL') === null));
   check('nome com espaço/caixa diferente é reconhecido', await page.evaluate(() => !!_epGrupoSubst('  nogmix  -  jbs ')));
+  // Top Alto/Nutrimax (09/11/2026): SÓ a Margarina Balde 15 L (item 187; em SP o item 1187,
+  // que aponta pro 187 por origem_item_id). Os dois vendem gim, batata, açúcar, feijão —
+  // nada disso pode ganhar a troca.
+  const opMarg = await page.evaluate(() => { provisoesEntrega = [Object.assign({}, provisoesEntrega[0], { id: 'm', fornecedor: 'TOP ALTO', fornecedor_entregue: null, gn_catalogo: { produto: 'Margarina Balde 15 L', und: 'BB', item_id: 187, origem_item_id: null } })]; abrirTrocaFornecedorEntrega('m'); const m = document.getElementById('modalTrocaForn'); const o = Array.from(m.querySelectorAll('button[data-forn]')).map(b => b.dataset.forn); m.remove(); return o; });
+  check('Margarina Balde 15 L da Top Alto pode virar Nutrimax', JSON.stringify(opMarg) === JSON.stringify(['NUTRIMAX']), JSON.stringify(opMarg));
+  await page.evaluate(async () => { await _epAplicarTrocaForn('m', 'NUTRIMAX'); });
+  g = await gravado();
+  check('a troca grava "entregue por NUTRIMAX" mantendo o pedido na TOP ALTO',
+    g.length && g[g.length - 1].corpo.fornecedor_entregue === 'NUTRIMAX' &&
+    await page.evaluate(() => /Pedido em TOP ALTO · entregue por NUTRIMAX/.test(_epRessalvaForn(provisoesEntrega[0]))), JSON.stringify(g[g.length - 1]));
+  check('em SP a margarina (item 1187, origem 187) também troca',
+    await page.evaluate(() => !!_epGrupoSubst('TOP ALTO', { gn_catalogo: { item_id: 1187, origem_item_id: 187 } })));
+  check('batata e gim da Top Alto NÃO ganham a troca pela Nutrimax',
+    await page.evaluate(() => !_epGrupoSubst('TOP ALTO', { gn_catalogo: { produto: 'Batata Palito 9 mm Cx 10 Kg', item_id: 199 } })
+      && !_epGrupoSubst('TOP ALTO', { gn_catalogo: { produto: 'Gim Beefeter garrafa 700ml', item_id: 31 } })));
+  check('açúcar e feijão da Nutrimax NÃO ganham a troca pela Top Alto',
+    await page.evaluate(() => !_epGrupoSubst('NUTRIMAX', { gn_catalogo: { item_id: 164 } }) && !_epGrupoSubst('NUTRIMAX', { gn_catalogo: { item_id: 121 } })));
+  check('sem saber o item, grupo restrito não casa', await page.evaluate(() => _epGrupoSubst('TOP ALTO') === null));
+  await page.evaluate(async () => { window.__gravado = []; await _epAplicarTrocaForn('m', 'TOP ALTO'); provisoesEntrega[0].gn_catalogo = { produto: 'Batata', item_id: 199 }; window.__gravado = []; await _epAplicarTrocaForn('m', 'NUTRIMAX'); });
+  check('trocar a batata pela Nutrimax é barrado mesmo chamando direto', (await gravado()).length === 0);
 
   // ── 9. A tela de verdade ─────────────────────────────────────────────────────────────
   const tela = await page.evaluate(() => {
