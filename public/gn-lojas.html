@@ -963,11 +963,22 @@ const EP_FORN_SUBSTITUTOS = [
   // pedido no SERTANORTE → entregue pelo BRASIL TÍPICO; quando ele entrar no catálogo, a
   // volta passa a valer sozinha.
   { tipo: 'Manteiga de garrafa e similares (Sertanorte/Brasil Típico)', fornecedores: ['SERTANORTE', 'BRASIL TÍPICO'] },
+  // 09/11/2026: "Top Alto poder trocar pela Nutrimax, manteiga de balde 15 l". Os dois
+  // vendem muita coisa que NÃO se substitui (Top Alto: gim, batata; Nutrimax: açúcar,
+  // feijão, frango) — então este grupo vale SÓ pro item listado em `itens` (item_id do
+  // catálogo do Rio; em SP o item equivalente casa por origem_item_id). No catálogo o
+  // nome é "Margarina Balde 15 L" (item 187).
+  { tipo: 'Margarina balde 15 L', fornecedores: ['TOP ALTO', 'NUTRIMAX'], itens: [187] },
 ];
 function _epNormForn(f) { return String(f || '').trim().toUpperCase().replace(/\s+/g, ' '); }
-function _epGrupoSubst(forn) {
+// `prov` (opcional) é a provisão: um grupo com `itens` só vale pra esses itens do catálogo.
+// Sem a provisão, grupo restrito a item não casa — não dá pra saber de que item se trata.
+function _epGrupoSubst(forn, prov) {
   const n = _epNormForn(forn);
-  return EP_FORN_SUBSTITUTOS.find(g => g.fornecedores.some(x => _epNormForn(x) === n)) || null;
+  const cat = prov && prov.gn_catalogo;
+  const ids = cat ? [cat.item_id, cat.origem_item_id].filter(x => x != null).map(Number) : [];
+  return EP_FORN_SUBSTITUTOS.find(g => g.fornecedores.some(x => _epNormForn(x) === n)
+    && (!g.itens || g.itens.some(i => ids.includes(Number(i))))) || null;
 }
 // Fornecedor que de fato está entregando o item. É por ele que a Entrega agrupa e pede a
 // nota: o item que veio pela IEV entra na nota da IEV, não na da DMIC.
@@ -11244,7 +11255,7 @@ function render() {
                 ✅ Confirmar Recebimento
               </button>
               ${prov.parcial_origem?`<button onclick="encerrarRestanteEntrega('${prov.id}')" style="width:100%;background:rgba(217,119,6,.08);border:1px solid rgba(217,119,6,.35);border-radius:13px;padding:9px;color:var(--txt-amber);font-weight:800;font-size:12px;margin-top:8px">🏁 Finalizar — o restante não vai chegar</button>`:''}
-              ${_epGrupoSubst(prov.fornecedor)?`<button onclick="abrirTrocaFornecedorEntrega('${prov.id}')" style="width:100%;background:none;border:1px dashed rgba(124,58,237,.4);border-radius:11px;padding:8px;color:var(--txt-purple);font-weight:700;font-size:11px;margin-top:8px">🔁 ${prov.fornecedor_entregue?'Trocar de novo o fornecedor':'Veio por outro fornecedor?'}</button>`:''}
+              ${_epGrupoSubst(prov.fornecedor, prov)?`<button onclick="abrirTrocaFornecedorEntrega('${prov.id}')" style="width:100%;background:none;border:1px dashed rgba(124,58,237,.4);border-radius:11px;padding:8px;color:var(--txt-purple);font-weight:700;font-size:11px;margin-top:8px">🔁 ${prov.fornecedor_entregue?'Trocar de novo o fornecedor':'Veio por outro fornecedor?'}</button>`:''}
               ${atrasadaParaExclusao?`<button onclick="solicitarExclusaoEntrega('${prov.id}')" style="width:100%;background:rgba(220,38,38,.08);border:1px solid rgba(220,38,38,.35);border-radius:13px;padding:9px;color:var(--txt-red);font-weight:800;font-size:12px;margin-top:8px">🗑️ Solicitar exclusão</button>`:''}
             </div>`;
           }).join('');
@@ -12882,7 +12893,7 @@ async function carregarEntregas(silent) {
     // Semana/Mês/Trimestre (_epHistJanelaDias).
     const desde=new Date(Date.now()-_epHistJanelaDias*86400000).toISOString();
     const [rowsPend,rowsHist]=await Promise.all([
-      sbRequest('gn_provisoes?loja_slug=eq.'+slug+'&status=eq.AGUARDANDO&select=*,gn_catalogo(produto,und),gn_pedidos(data_pedido)&order=data_entrega',{method:'GET'}),
+      sbRequest('gn_provisoes?loja_slug=eq.'+slug+'&status=eq.AGUARDANDO&select=*,gn_catalogo(produto,und,item_id,origem_item_id),gn_pedidos(data_pedido)&order=data_entrega',{method:'GET'}),
       _epFetchHistorico(slug, desde)
     ]);
     provisoesEntrega=rowsPend||[];
@@ -13631,7 +13642,7 @@ function encerrarRestanteEntrega(id) {
 function abrirTrocaFornecedorEntrega(id) {
   const prov = provisoesEntrega.find(p => p.id === id);
   if (!prov) return;
-  const grupo = _epGrupoSubst(prov.fornecedor);
+  const grupo = _epGrupoSubst(prov.fornecedor, prov);
   if (!grupo) { showToast('Este fornecedor não tem substituto cadastrado.'); return; }
   const atual = _epForn(prov);
   const opcoes = grupo.fornecedores.filter(f => _epNormForn(f) !== _epNormForn(atual));
@@ -13656,7 +13667,7 @@ function abrirTrocaFornecedorEntrega(id) {
 async function _epAplicarTrocaForn(id, forn) {
   const prov = provisoesEntrega.find(p => p.id === id);
   if (!prov) return;
-  const grupo = _epGrupoSubst(prov.fornecedor);
+  const grupo = _epGrupoSubst(prov.fornecedor, prov);
   // Reconfere a regra aqui também: a função é global, e o tipo é a trava que o dono pediu.
   if (!grupo || !grupo.fornecedores.some(f => _epNormForn(f) === _epNormForn(forn))) { showToast('⚠️ Só dá pra trocar por fornecedor do mesmo tipo.'); return; }
   const valor = _epNormForn(forn) === _epNormForn(prov.fornecedor) ? null : forn;
