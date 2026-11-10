@@ -121,6 +121,20 @@ const estado = page => page.evaluate(() => {
     await a.page.waitForTimeout(300);
     const e2 = await estado(a.page);
     check('recolher o card dentro da trava não deixa a tela vazia', e2.travado && /Entre pra responder|responda sobre a semana/i.test(e2.texto), e2.texto.slice(0,160));
+    // Nova América, 10/11/2026 (primeira terça depois da Home em grupos): o arranjo de
+    // "🗂 Fechamentos" puxava o card de volta pra Home — que fica escondida atrás da trava — e
+    // o gerente ficava preso numa tela só com título e "Não sou eu — sair". Qualquer mudança
+    // no card (é o observador dele que dispara o arranjo) fazia isso; aqui, os dois caminhos.
+    await a.page.evaluate(() => { _homeOrganizarGrupos(); _homeOrganizar(); });
+    await a.page.waitForTimeout(200);
+    await a.page.evaluate(() => { const c = document.getElementById('fechamento-semana-home-card'); c.appendChild(document.createElement('span')); });
+    await a.page.waitForTimeout(300);
+    const e3 = await estado(a.page);
+    check('o arranjo da Home em grupos NÃO tira o card de dentro da trava', e3.travado && e3.cardDentro, JSON.stringify(e3));
+    check('…e as perguntas (ou o login) continuam na tela da trava', /Entre pra responder|responda sobre a semana/i.test(e3.texto), e3.texto.slice(0,160));
+    // Defesa do outro lado: se alguém ainda assim tirar o card, a próxima reavaliação devolve.
+    await a.page.evaluate(() => { document.getElementById('home-screen').appendChild(document.getElementById('fechamento-semana-home-card')); _gateReavaliar(); });
+    check('se o card for tirado da trava, a reavaliação seguinte devolve', (await estado(a.page)).cardDentro);
     await a.ctx.close();
   }
 
