@@ -49,13 +49,25 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
     window.__toasts = []; showToast = (m) => window.__toasts.push(String(m));
     const orig = sb.from.bind(sb);
     window.__gravacoes = 0;
+    // As colunas de verdade de checklist_diario (information_schema, 12/11/2026).
+    window.__COLUNAS_REAIS = 'id,data_operacao,loja,venda_salao,venda_delivery,checklist,faltas,manutencao,updated_at,created_at,faltas_funcionarios,abertura,fechamento,carnes,semana_inicio,semana_fim,supervisao,repique,dinheiro_caixa,despesas,banda,vendas,checklist_pct,retiradas,supervisao_cozinha,entradas_manuais,auditorias_padrao,concluido_em,dia_fechado_em,dia_fechado_por,iniciado_em'.split(',');
     sb.from = t => {
       if (t !== 'checklist_diario') return orig(t);
       const leitura = { eq() { return this; },
         single: async () => ({ data: window.__srv ? JSON.parse(JSON.stringify(window.__srv)) : null, error: window.__srv ? null : { message: 'sem linha' } }),
         maybeSingle: async () => ({ data: window.__srv ? JSON.parse(JSON.stringify(window.__srv)) : null, error: null }) };
+      // Igual ao PostgREST: pedir coluna que não existe é erro 42703 na leitura INTEIRA. O
+      // servidor de mentira aceitava qualquer coisa, e foi por isso que esta suíte passou com
+      // o SELECT pedindo obs_abertura/obs_checklist/obs_fechamento — que não existem. Em
+      // produção, saveAll não salvou nada em loja nenhuma de 11 a 12/11/2026.
       return {
-        select: () => leitura,
+        select: (cols) => {
+          const ruins = String(cols || '*').split(',').map(c => c.trim()).filter(c => c && c !== '*' && !window.__COLUNAS_REAIS.includes(c));
+          if (!ruins.length) return leitura;
+          window.__colunaInexistente = ruins;
+          const erro = { data: null, error: { code: '42703', message: 'column checklist_diario.' + ruins[0] + ' does not exist' } };
+          return { eq() { return this; }, single: async () => erro, maybeSingle: async () => erro };
+        },
         upsert: async p => { window.__gravacoes++; window.__srv = Object.assign({}, window.__srv || {}, JSON.parse(JSON.stringify(p))); return { error: null }; },
         update: p => ({ eq() { return this; }, then(res) { window.__srv = Object.assign({}, window.__srv || {}, p); res({ error: null }); } }),
       };
@@ -75,7 +87,6 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
       retiradas: [], entradas_manuais: [], faltas: [], faltas_funcionarios: [],
       supervisao: { nota_salao: 7 }, supervisao_cozinha: {}, auditorias_padrao: {},
       banda: { nome: 'TRIO ERRADO', valor: 800, consumo: 0, qtd_couvert: 0 }, vendas: {},
-      obs_abertura: 'texto antigo', obs_checklist: '', obs_fechamento: '',
       venda_salao: 0, venda_delivery: 0, repique: 0, iniciado_em: {}, concluido_em: {}, manutencao: [] };
   }, { S0, item0: item(false), item1: item(false) });
 
@@ -96,7 +107,6 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
   await celular(`(r, S0) => {
     r.abertura[S0][0] = { checked: true, naoConforme: false, problema: '', fotoBase64: '', fotoName: '' };
     r.despesas[0].valor = 180;
-    r.obs_abertura = 'texto corrigido pelo celular';
     r.banda.nome = 'TRIO CERTO';
     r.supervisao.nota_salao = 9;
   }`);
@@ -104,16 +114,17 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
   let r = await lojaSalva();
   let b = await banco();
   check('o salvamento do computador da loja funciona', r.ok === true, JSON.stringify(r));
+  check('saveAll só pede ao banco colunas que existem (12/11: obs_* derrubava todo salvamento)',
+    !(await page.evaluate(() => window.__colunaInexistente)), JSON.stringify(await page.evaluate(() => window.__colunaInexistente)));
   check('item marcado pelo celular NÃO volta a desmarcado', b.abertura[S0][0].checked === true, JSON.stringify(b.abertura[S0][0]));
   check('valor de despesa corrigido pelo celular NÃO volta ao antigo', b.despesas.find(d => d.id === 'd1').valor === 180, JSON.stringify(b.despesas));
-  check('observação corrigida pelo celular fica', b.obs_abertura === 'texto corrigido pelo celular', b.obs_abertura);
   check('nome da banda corrigido pelo celular fica', b.banda.nome === 'TRIO CERTO', JSON.stringify(b.banda));
   check('nota da supervisão corrigida pelo celular fica', b.supervisao.nota_salao === 9, JSON.stringify(b.supervisao));
   // E a tela da loja acompanha.
   const tela = await page.evaluate((S0) => ({ item: state.abertura[S0][0].checked, desp: state.despesas.find(d => d.id === 'd1').valor,
-    obs: state.obs_abertura, obsCampo: (document.getElementById('obs-abertura') || {}).value, banda: state.banda.nome }), S0);
+    banda: state.banda.nome, bandaCampo: (document.getElementById('banda-nome') || {}).value }), S0);
   check('o computador da loja passa a ter a correção em memória', tela.item === true && tela.desp === 180 && tela.banda === 'TRIO CERTO', JSON.stringify(tela));
-  check('e o campo na tela mostra o texto corrigido', tela.obsCampo === 'texto corrigido pelo celular', tela.obsCampo);
+  check('e a tela mostra a correção (o salvamento redesenha os campos)', tela.bandaCampo === undefined || tela.bandaCampo === 'TRIO CERTO', tela.bandaCampo);
   check('a loja é avisada de que a tela foi atualizada por outro aparelho', r.toasts.some(t => /outro aparelho/.test(t)), r.toasts.join(' | '));
   const vagas = await page.evaluate((S0) => ({ n: Object.keys(state.abertura[S0]).filter(k => /^\d+$/.test(k)).length, esperado: SETORES_ABERTURA[S0].items.length,
     outros: Object.keys(SETORES_ABERTURA).every(s => state.abertura[s] && Object.keys(state.abertura[s]).length >= SETORES_ABERTURA[s].items.length) }), S0);
@@ -124,12 +135,12 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
 
   // ══ 2. O que a loja EDITOU continua subindo ═════════════════════════════════════════
   await semear(); await lojaAbre();
-  await page.evaluate((S0) => { toggleCheck('abertura', S0, 1, { checked: true }); state.obs_abertura = 'escrito pela loja'; }, S0);
+  await page.evaluate((S0) => { toggleCheck('abertura', S0, 1, { checked: true }); state.supervisao = { ...state.supervisao, nota_salao: 4 }; }, S0);
   await celular(`(r, S0) => { r.abertura[S0][0] = { checked: true, naoConforme: true, problema: 'vazando', fotoBase64: '', fotoName: '' }; }`);
   await lojaSalva(); b = await banco();
   check('a loja marca o item 1 e o celular o item 0 do mesmo setor: os dois ficam',
     b.abertura[S0][0].checked === true && b.abertura[S0][0].problema === 'vazando' && b.abertura[S0][1].checked === true, JSON.stringify([b.abertura[S0][0], b.abertura[S0][1]]));
-  check('o texto que a loja escreveu sobe', b.obs_abertura === 'escrito pela loja', b.obs_abertura);
+  check('a nota que a loja deu sobe', b.supervisao.nota_salao === 4, JSON.stringify(b.supervisao));
 
   // ══ 3. DESMARCAR na loja continua funcionando ═══════════════════════════════════════
   await semear();
