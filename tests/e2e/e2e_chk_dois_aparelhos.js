@@ -184,6 +184,43 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
   const outroDia = await page.evaluate(() => { state.data = '2026-11-10'; const v = _chkRebasearDia(window.__srv); state.data = '2026-11-11'; return v; });
   check('retrato de um dia não é usado em outro dia', outroDia === false);
 
+  // ══ 7. Recuperação de 12/11: marcações que ficaram só no aparelho ═══════════════════
+  // O salvamento ficou parado 4h30. O aparelho guardou as marcações; o servidor ficou com o
+  // item DESMARCADO (salvamento antes da pane, ou outro aparelho depois da correção). Ao
+  // reabrir o app, o servidor vencia item a item e apagava o trabalho da manhã.
+  await semear();
+  await page.evaluate((S0) => {
+    // Como o boot: vagas em branco + o que estava guardado no localStorage.
+    state.checklist = {}; state.abertura = {}; state.fechamento = {}; state.despesas = []; _chkBase = null;
+    initAllStates();
+    state.abertura[S0][0] = { checked: true, naoConforme: false, problema: '', fotoBase64: '', fotoName: '' };
+    state.abertura[S0][1] = { checked: false, naoConforme: true, problema: 'pia entupida', fotoBase64: '', fotoName: '' };
+    state.despesas = [{ id: 'd1', categoria: 'gas', nome: 'Gás', valor: 100 }, { id: 'd2', categoria: 'gelo', nome: 'Gelo', valor: 50 },
+      { id: 'dManha', categoria: 'outros', nome: 'Lançada de manhã', valor: 33 }];
+  }, S0);
+  const rec = await page.evaluate(async (S0) => {
+    _chkGuardarPendentes();
+    await loadSupabaseDay('2026-11-11');
+    const memoria = { i0: state.abertura[S0][0].checked, i1: state.abertura[S0][1].naoConforme, prob: state.abertura[S0][1].problema,
+      manha: state.despesas.some(d => d.id === 'dManha'), d1: state.despesas.find(d => d.id === 'd1').valor };
+    await saveAll({ silencioso: true });
+    return memoria;
+  }, S0);
+  b = await banco();
+  check('ao reabrir, a marcação guardada no aparelho NÃO é apagada pelo item desmarcado do servidor', rec.i0 === true && rec.i1 === true && rec.prob === 'pia entupida', JSON.stringify(rec));
+  check('a despesa lançada durante a pane continua', rec.manha === true, JSON.stringify(rec));
+  check('…e tudo isso SOBE no salvamento seguinte', b.abertura[S0][0].checked === true && b.abertura[S0][1].naoConforme === true && b.despesas.some(d => d.id === 'dManha'),
+    JSON.stringify([b.abertura[S0][0], b.abertura[S0][1], b.despesas.map(d => d.id)]));
+  check('o que o servidor tem e o aparelho não mexeu continua do servidor', b.despesas.find(d => d.id === 'd1').valor === 100 && b.banda.nome === 'TRIO ERRADO', JSON.stringify(b.despesas));
+  // Item que o aparelho deixou em branco não "desmarca" o servidor.
+  await semear();
+  await page.evaluate((S0) => { window.__srv.abertura[S0][2].checked = true; state.abertura = {}; _chkBase = null; initAllStates(); }, S0);
+  await page.evaluate(async () => { _chkGuardarPendentes(); await loadSupabaseDay('2026-11-11'); await saveAll({ silencioso: true }); });
+  b = await banco();
+  check('item marcado no servidor e em branco no aparelho continua marcado', b.abertura[S0][2].checked === true, JSON.stringify(b.abertura[S0][2]));
+  // Navegar de dia (não é abertura do app) não usa a preservação.
+  check('a preservação é só da abertura do app (consumida na primeira carga)', await page.evaluate(() => _chkPendentesAntes === null));
+
   const errosReais = erros.filter(e => !/Failed to fetch|NetworkError|ERR_/i.test(e));
   check('sem erro de JavaScript', errosReais.length === 0, errosReais.join(' | '));
   await browser.close();

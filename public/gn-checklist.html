@@ -5935,10 +5935,18 @@ async function loadSupabaseDay(data){
     const {data:rows,error}=await sb.from('checklist_diario')
       .select('*').eq('data_operacao',data).eq('loja',LOJA).single();
     if(error||!rows) return false;
+    // O que este aparelho tinha guardado (localStorage) e o servidor não tem: na abertura do
+    // app, mergeState deixava o servidor vencer item a item e isso se perdia — ver
+    // _chkPreservarPendentes.
+    const _pend = _chkPendentesAntes;
+    _chkPendentesAntes = null;
+    // Retrato do que está NO SERVIDOR: é contra ele que saveAll sabe o que este aparelho
+    // mudou (ver _chkRebasearDia e _chkBaseTirar). ANTES do mergeState: ele põe em `state`
+    // os próprios arrays de `rows` (state.despesas = rows.despesas), e a preservação abaixo
+    // empurra itens neles — tirado depois, o retrato já incluiria o que o servidor não tem.
+    _chkBaseTirar(rows);
     mergeState(rows);
-    // Retrato do dia como ficou depois de receber o servidor: é contra ele que saveAll
-    // sabe o que este aparelho mudou (ver _chkRebasearDia).
-    _chkBaseTirar();
+    if(_pend) _chkPreservarPendentes(_pend, rows);
     restoreUI();
     return true;
   }catch(e){ return false; }
@@ -6127,10 +6135,65 @@ const CHK_COLS_REBASE = {
 let _chkBase = null;   // { chave:'data|loja', cols:{ chaveDoState: cópia } }
 function _chkBaseChave(){ return (state.data || '') + '|' + (LOJA || ''); }
 function _chkClone(v){ return v === undefined ? undefined : JSON.parse(JSON.stringify(v)); }
-function _chkBaseTirar(){
+// `servRow` (opcional): a linha como veio do banco. Na CARGA o retrato tem que ser o do
+// servidor, não o `state` já mesclado — o state carrega junto o que este aparelho tinha
+// guardado e ainda não subiu, e um retrato dele faria essas edições parecerem "não mexi"
+// e serem trocadas pelo servidor no salvamento seguinte (12/11/2026: quatro horas e meia
+// de marcações sem subir, na recuperação do salvamento parado). Depois de um salvamento
+// bem-sucedido o state É o que está no servidor, e aí vale tirar dele mesmo.
+function _chkBaseTirar(servRow){
   const cols = {};
-  Object.values(CHK_COLS_REBASE).forEach(k => { cols[k] = _chkClone(state[k]); });
+  Object.entries(CHK_COLS_REBASE).forEach(([col, k]) => {
+    cols[k] = servRow ? (Object.prototype.hasOwnProperty.call(servRow, col) ? _chkClone(servRow[col]) : undefined) : _chkClone(state[k]);
+  });
   _chkBase = { chave: _chkBaseChave(), cols };
+}
+// ── O QUE FICOU SÓ NO APARELHO NÃO PODE SER APAGADO NA ABERTURA ──────────────────────
+// De 08:11 a 12:44 de 12/11/2026 o salvamento ficou parado em todas as lojas (coluna
+// inexistente no SELECT de saveAll). O que as lojas marcaram ficou só no aparelho. Ao
+// reabrir o app, mergeState faz o servidor vencer em todo campo: item que o servidor já
+// tinha como desmarcado (de um salvamento antes das 08:11, ou de outro aparelho depois da
+// correção) apagava a marcação guardada. Uma marcação não vence uma vaga em branco por
+// acaso — é trabalho feito. Então, SÓ na abertura do dia a partir do que estava guardado:
+//   - item marcado (ou "não conforme") aqui e desmarcado no servidor → fica o daqui;
+//   - despesa/retirada/entrada/falta com id que o servidor não tem → fica.
+// O resto continua como sempre (o servidor manda). Desmarcar num aparelho e o outro, que
+// estava com a marcação guardada sem subir, reabrir depois: a marcação volta. É o lado
+// seguro do erro — refazer um desmarcar é um toque; refazer uma abertura inteira, não.
+let _chkPendentesAntes = null;
+function _chkGuardarPendentes(){
+  _chkPendentesAntes = {
+    data: state.data,
+    grupos: { checklist: _chkClone(state.checklist), abertura: _chkClone(state.abertura), fechamento: _chkClone(state.fechamento) },
+    listas: { despesas: _chkClone(state.despesas), retiradas: _chkClone(state.retiradas), entradasManuais: _chkClone(state.entradasManuais), faltas: _chkClone(state.faltas) },
+  };
+}
+function _chkPreservarPendentes(p, rows){
+  if(!p || p.data !== state.data) return 0;
+  let n = 0;
+  const marcado = v => v && typeof v === 'object' && (v.checked === true || v.naoConforme === true);
+  Object.entries(p.grupos).forEach(([g, loc]) => {
+    Object.keys(loc || {}).forEach(sec => {
+      const ls = loc[sec]; if(!ls || typeof ls !== 'object') return;
+      Object.keys(ls).forEach(i => {
+        const li = ls[i];
+        if(!marcado(li)) return;
+        const atual = state[g] && state[g][sec] && state[g][sec][i];
+        if(marcado(atual)) return;
+        if(!state[g][sec]) state[g][sec] = {};
+        const limpo = { ...li }; delete limpo[MARCA_NAO_VISTO];
+        state[g][sec][i] = { ...(atual && typeof atual === 'object' ? atual : {}), ...limpo };
+        n++;
+      });
+    });
+  });
+  Object.entries(p.listas).forEach(([k, loc]) => {
+    if(!Array.isArray(loc) || !Array.isArray(state[k])) return;
+    const ids = new Set(state[k].map(x => x && String(x.id)));
+    loc.forEach(x => { if(x && x.id != null && !ids.has(String(x.id))){ state[k].push(x); n++; } });
+  });
+  if(n){ try{ autoSave(); }catch(_){} }
+  return n;
 }
 // Igualdade de conteúdo, sem depender da ordem das chaves (o jsonb do banco reordena).
 function _chkIgual(a, b){
@@ -16250,6 +16313,8 @@ async function initAppWithLoja(){
   mostrarAvisoGuiaSeNecessario();
   _renderTabsRecentes();
   _atualizarFaltaHoje();
+  // O que o aparelho tinha guardado do dia, antes de o servidor ser mesclado por cima.
+  _chkGuardarPendentes();
   const [todayFound,,docsFound] = await Promise.all([
     loadSupabaseDay(hoje),
     loadSupabaseWeek(state.semanaInicio),
