@@ -93,6 +93,32 @@ const espera = ms => new Promise(r => setTimeout(r, ms));
   check('com "Não salvou" na tela, rolar pra baixo não esconde', !h.oculto, JSON.stringify(h));
   await page.evaluate(() => { localStorage.removeItem('gn_cl_last_err_' + LOJA); _updateLastSaveIndicator(); });
 
+  // ══ 4b. Descer devagar no topo não treme (print da loja, 12/11/2026) ═══════════════
+  // Em scrollY 25 a grade de abas fechava, o navegador levava a rolagem pra 0 e a regra
+  // "≤ 24 reabre" reabria — fechava e reabria a cada passo do dedo, bem onde fica a data.
+  await page.evaluate(() => { document.querySelectorAll('details.dados-grupo').forEach(d => d.open = false); switchTab('dados', document.querySelector('.tab-btn')); });
+  await rolar(0); await espera(200);
+  await page.evaluate(() => { window.__trocas = 0; window.__col = document.body.classList.contains('tabs-collapsed');
+    new MutationObserver(() => { const c = document.body.classList.contains('tabs-collapsed'); if (c !== window.__col) { window.__trocas++; window.__col = c; } })
+      .observe(document.body, { attributes: true, attributeFilter: ['class'] }); });
+  await page.mouse.move(195, 600);
+  for (let i = 0; i < 14; i++) { await page.mouse.wheel(0, 6); await espera(40); }
+  await espera(300);
+  const dev = await page.evaluate(() => { const hb = document.getElementById('chk-header').getBoundingClientRect().bottom;
+    const d = document.querySelector('.dados-data-linha').getBoundingClientRect();
+    return { trocas: window.__trocas, col: document.body.classList.contains('tabs-collapsed'), y: scrollY, hdr: Math.round(hb), dataTopo: Math.round(d.top), dataBase: Math.round(d.bottom) }; });
+  check('descendo devagar, a grade de abas fecha UMA vez só (sem vaivém)', dev.trocas === 1 && dev.col, JSON.stringify(dev));
+  for (let i = 0; i < 6; i++) { await page.mouse.wheel(0, -2); await page.mouse.wheel(0, 2); await espera(30); }
+  await espera(200);
+  check('mexendo o dedo pra cima e pra baixo ali, continua fechada', await page.evaluate(() => window.__trocas === 1 && document.body.classList.contains('tabs-collapsed')));
+  await rolar(0); await espera(200);
+  const dt = await page.evaluate(() => { const hb = document.getElementById('chk-header').getBoundingClientRect().bottom; const d = document.querySelector('.dados-data-linha').getBoundingClientRect(); return { hdr: Math.round(hb), topo: Math.round(d.top), base: Math.round(d.bottom), col: document.body.classList.contains('tabs-collapsed') }; });
+  check('com a grade fechada no topo, a linha da data fica inteira abaixo do cabeçalho', dt.topo >= dt.hdr && dt.base < 844, JSON.stringify(dt));
+  await page.evaluate(() => scrollTo(0, 200)); await espera(150);
+  for (let i = 0; i < 30 && await page.evaluate(() => scrollY > 0); i++) { await page.mouse.wheel(0, -40); await espera(40); }
+  await espera(300);
+  check('voltando ao topo pela rolagem, a grade reabre', await page.evaluate(() => !document.body.classList.contains('tabs-collapsed')));
+
   // ══ 5. Computador e 320 px ═════════════════════════════════════════════════════════
   await page.setViewportSize({ width: 1024, height: 800 });
   await rolar(0); await rolar(500); await rolar(1200); await espera(300);
