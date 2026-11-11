@@ -5936,6 +5936,9 @@ async function loadSupabaseDay(data){
       .select('*').eq('data_operacao',data).eq('loja',LOJA).single();
     if(error||!rows) return false;
     mergeState(rows);
+    // Retrato do dia como ficou depois de receber o servidor: é contra ele que saveAll
+    // sabe o que este aparelho mudou (ver _chkRebasearDia).
+    _chkBaseTirar();
     restoreUI();
     return true;
   }catch(e){ return false; }
@@ -6088,6 +6091,110 @@ async function refreshManutStatus(){
   }
 }
 
+// ── CADA APARELHO SÓ REGRAVA O QUE ELE MESMO MUDOU ────────────────────────────────────
+// "Fui fazer uma correção pelo celular, na loja de Campo Grande, e a loja estava fazendo
+//  pelo computador; salvei, mas voltou ao antigo." (11/11/2026)
+//
+// O dia é uma linha só no banco, e saveAll grava a linha inteira. Na mesclagem logo abaixo,
+// o que existe dos dois lados fica com a versão DESTE aparelho ({...servidor, ...local}) —
+// certo quando este aparelho acabou de editar, errado quando ele só está com a tela aberta:
+// o computador da loja, parado com o valor antigo, regravava o antigo por cima da correção
+// feita no celular a cada tick de 30 s, sem erro e com "Salvo ✓" na tela.
+//
+// O que faltava era saber o que este aparelho MUDOU. `_chkBase` é o retrato do dia tirado
+// na última vez em que ele esteve igual ao servidor (carga ou salvamento). Antes de mesclar,
+// tudo que continua igual ao retrato é trocado pelo valor do servidor — este aparelho não
+// mexeu, então não tem voto. O que ele mexeu continua vencendo, como sempre. Quando os dois
+// mexeram no MESMO campo, continua valendo o daqui (não há como adivinhar, e é a regra que
+// a loja já conhece) — mas a comparação desce até o item, então duas pessoas em itens
+// diferentes do mesmo setor não se atropelam mais.
+//
+// Sem retrato (app aberto sem conexão, dia que nunca carregou), nada disto roda e a
+// mesclagem é a de antes: o defeito possível é o antigo, nunca um novo.
+// coluna do banco → chave em `state`. Manutenção, horas de início/fim e carnes ficam de
+// fora: já têm mesclagem própria, com regra diferente (status só avança, vale a primeira hora).
+const CHK_COLS_REBASE = {
+  checklist:'checklist', abertura:'abertura', fechamento:'fechamento',
+  supervisao:'supervisao', supervisao_cozinha:'supervisaoCozinha', auditorias_padrao:'auditoriasPadrao',
+  faltas:'faltas', retiradas:'retiradas', entradas_manuais:'entradasManuais',
+  faltas_funcionarios:'faltasFuncionarios', despesas:'despesas', banda:'banda', vendas:'vendas',
+  obs_abertura:'obs_abertura', obs_checklist:'obs_checklist', obs_fechamento:'obs_fechamento',
+  venda_salao:'vendaSalao', venda_delivery:'vendaDelivery', repique:'repique',
+};
+let _chkBase = null;   // { chave:'data|loja', cols:{ chaveDoState: cópia } }
+function _chkBaseChave(){ return (state.data || '') + '|' + (LOJA || ''); }
+function _chkClone(v){ return v === undefined ? undefined : JSON.parse(JSON.stringify(v)); }
+function _chkBaseTirar(){
+  const cols = {};
+  Object.values(CHK_COLS_REBASE).forEach(k => { cols[k] = _chkClone(state[k]); });
+  _chkBase = { chave: _chkBaseChave(), cols };
+}
+// Igualdade de conteúdo, sem depender da ordem das chaves (o jsonb do banco reordena).
+function _chkIgual(a, b){
+  if(a === b) return true;
+  if(a == null || b == null) return a == null && b == null;
+  if(typeof a !== 'object' || typeof b !== 'object') return a === b;
+  const aa = Array.isArray(a), ab = Array.isArray(b);
+  if(aa !== ab) return false;
+  if(aa){ if(a.length !== b.length) return false; return a.every((x, i) => _chkIgual(x, b[i])); }
+  const ka = Object.keys(a).filter(k => a[k] !== undefined), kb = Object.keys(b).filter(k => b[k] !== undefined);
+  if(ka.length !== kb.length) return false;
+  return ka.every(k => Object.prototype.hasOwnProperty.call(b, k) && _chkIgual(a[k], b[k]));
+}
+// local = o que está neste aparelho; base = o retrato; serv = o que está no banco agora.
+// Desce SEMPRE até o campo: nunca troca um bloco inteiro pelo do banco. O estado local tem
+// coisa que o banco não tem (as vagas em branco que initAllStates cria, a marca de "não
+// visto"), e trocar o bloco apagaria isso e quebraria a tela.
+function _chkRebase(local, base, serv){
+  if(serv === undefined || serv === null) return local;          // banco sem o valor: fica o daqui
+  const obj = o => o && typeof o === 'object' && !Array.isArray(o);
+  const tem = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+  if(obj(local) && obj(serv)){
+    const b = obj(base) ? base : {};
+    const out = {};
+    Object.keys(local).forEach(k => {
+      out[k] = tem(serv, k) ? _chkRebase(local[k], b[k], serv[k]) : local[k];
+    });
+    Object.keys(serv).forEach(k => {
+      if(tem(local, k)) return;
+      if(tem(b, k)) return;                 // estava no retrato e não está aqui: eu tirei
+      out[k] = _chkClone(serv[k]);          // novo no banco
+    });
+    return out;
+  }
+  const lista = a => Array.isArray(a) && a.every(x => x && typeof x === 'object' && x.id != null);
+  if(lista(local) && lista(serv)){
+    const bArr = lista(base) ? base : [];
+    const porId = arr => new Map(arr.map(x => [String(x.id), x]));
+    const bM = porId(bArr), sM = porId(serv), lM = porId(local);
+    const out = [];
+    local.forEach(l => {
+      const id = String(l.id);
+      if(sM.has(id)){ out.push(_chkRebase(l, bM.get(id), sM.get(id))); return; }
+      // Sumiu do banco: se eu não mexi, outro aparelho apagou; se mexi (ou é novo daqui), fica.
+      if(bM.has(id) && _chkIgual(l, bM.get(id))) return;
+      out.push(l);
+    });
+    serv.forEach(x => { const id = String(x.id); if(!lM.has(id) && !bM.has(id)) out.push(_chkClone(x)); });
+    return out;
+  }
+  // Valor simples (ou formas diferentes dos dois lados): não mexi → vale o banco; mexi →
+  // vale o daqui, mesmo que o banco também tenha mudado, como sempre valeu.
+  return _chkIgual(local, base) ? _chkClone(serv) : local;
+}
+// Aplica o rebase em `state` a partir da linha do servidor. Devolve true se algo deste
+// aparelho foi atualizado com o que veio de outro.
+function _chkRebasearDia(servRow){
+  if(!_chkBase || _chkBase.chave !== _chkBaseChave() || !servRow) return false;
+  let mudou = false;
+  Object.entries(CHK_COLS_REBASE).forEach(([col, k]) => {
+    if(!Object.prototype.hasOwnProperty.call(servRow, col)) return;
+    const novo = _chkRebase(state[k], _chkBase.cols[k], servRow[col]);
+    if(!_chkIgual(novo, state[k])){ state[k] = novo; mudou = true; }
+  });
+  return mudou;
+}
+
 // opts.silencioso: quem chama ja vai dar a sua propria mensagem (ex.: o salvamento da
 // foto) e dois toasts seguidos so atrapalham. Devolve true/false porque agora tem gente
 // que precisa saber se a gravacao chegou mesmo ao servidor antes de dizer que chegou.
@@ -6116,7 +6223,7 @@ async function saveAll(opts){
     let _servRow = null, _caixaTemDados = false;
     try {
       const { data, error: eServ } = await sb.from('checklist_diario')
-        .select('dinheiro_caixa,checklist,abertura,fechamento,faltas,retiradas,entradas_manuais,despesas,supervisao,supervisao_cozinha,auditorias_padrao,faltas_funcionarios,iniciado_em,concluido_em,dia_fechado_em,dia_fechado_por')
+        .select('dinheiro_caixa,checklist,abertura,fechamento,faltas,retiradas,entradas_manuais,despesas,supervisao,supervisao_cozinha,auditorias_padrao,faltas_funcionarios,iniciado_em,concluido_em,dia_fechado_em,dia_fechado_por,banda,vendas,obs_abertura,obs_checklist,obs_fechamento,venda_salao,venda_delivery,repique')
         .eq('data_operacao', state.data).eq('loja', LOJA).maybeSingle();
       if (eServ) throw eServ;
       _servRow = data;
@@ -6195,6 +6302,10 @@ async function saveAll(opts){
       });
       return out;
     };
+    // Antes de mesclar: o que este aparelho NÃO mudou desde a última vez que esteve igual
+    // ao servidor passa a valer o que está no servidor (ver _chkRebasearDia). Depois disso a
+    // mesclagem de sempre roda igual — "o daqui vence" só sobra pro que foi editado aqui.
+    const _veioDeOutro = _chkRebasearDia(_servRow);
     if (_servRow) {
       state.checklist = _mesclarGrupoChk(state.checklist, _servRow.checklist, 'checklist');
       state.abertura = _mesclarGrupoChk(state.abertura, _servRow.abertura, 'abertura');
@@ -6390,6 +6501,18 @@ async function saveAll(opts){
     _limparFalhaSalvar();
     // A linha chegou ao servidor: o que este aparelho tinha de foto pendente esta gravado.
     _okServidor = true;
+    // O dia agora é igual ao do servidor: novo retrato. Só aqui — numa falha, o retrato
+    // antigo tem que continuar valendo, senão a edição que não subiu viraria "não mexi".
+    _chkBaseTirar();
+    if(_veioDeOutro){
+      autoSave();
+      // Mostra na tela o que outro aparelho salvou. Com alguém digitando, não: redesenhar
+      // derruba o foco e o que estava sendo escrito. O dado já está certo em memória e no
+      // banco; a tela acompanha no próximo salvamento sem campo em edição.
+      const _ae = document.activeElement;
+      const _digitando = !!(_ae && (_ae.tagName === 'INPUT' || _ae.tagName === 'TEXTAREA' || _ae.tagName === 'SELECT'));
+      if(!_digitando){ try{ restoreUI(); }catch(_){} showToast('🔄 Atualizado com o que outro aparelho salvou','info'); }
+    }
     _pendNoEnvio.forEach(k => _fotoPendente.delete(k));
     try{
       localStorage.setItem('gn_cl_last_save_'+LOJA,'✓ Salvo às '+hh);

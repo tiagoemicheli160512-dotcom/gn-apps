@@ -1684,15 +1684,65 @@ function mergeBrutos(local,remoto,semIdx){
   return out;
 }
 
+// ── CADA APARELHO SÓ REGRAVA O FUNCIONÁRIO QUE ELE MESMO MUDOU ─────────────────────────
+// "Fui fazer uma correção pelo celular, na loja de Campo Grande [aba Dados → Funcionários,
+//  Emanoel], e a loja estava fazendo pelo computador; salvei, mas voltou ao antigo." (11/11/2026)
+//
+// mergeWD decide quem vence pelo _lastEdit da SEMANA: quem editou a semana por último leva
+// todos os funcionários dela ({...antigo, ...recente}). Então bastava o computador da loja,
+// aberto com a cópia de antes, mexer em QUALQUER coisa da semana — a folga de outra pessoa
+// — pra semana dele ficar "mais recente" e a cópia velha dele do Emanoel subir por cima da
+// correção feita no celular. Sem erro, com "✓ Sync" na tela.
+//
+// O que faltava era saber o que este aparelho MUDOU. `baseSync` guarda, por semana, a
+// assinatura de cada vaga como estava no servidor na última sincronização. Na mesclagem:
+//   - vaga igual à assinatura aqui → este aparelho não mexeu → vale o servidor;
+//   - vaga igual à assinatura no servidor → só este aparelho mexeu → vale o daqui;
+//   - os dois mexeram, ou não há assinatura → a regra de antes (_lastEdit da semana).
+// O mesmo vale pro bloco de distribuição/saídas da semana, que tinha o mesmo defeito: uma
+// saída confirmada num aparelho era apagada pelo outro que editasse uma folga depois.
+// É só assinatura (uns 30 KB), não uma segunda cópia do all_data no localStorage.
+function _assinatura(v){
+  const norm = x => {
+    if(x === null || x === undefined) return null;
+    if(Array.isArray(x)) return x.map(norm);
+    if(typeof x === 'object'){ const o = {}; Object.keys(x).sort().forEach(k => { if(x[k] !== undefined) o[k] = norm(x[k]); }); return o; }
+    return x;
+  };
+  const t = JSON.stringify(norm(v));
+  let h1 = 5381, h2 = 52711;
+  for(let i = 0; i < t.length; i++){ const c = t.charCodeAt(i); h1 = ((h1 << 5) + h1) ^ c; h2 = ((h2 << 5) + h2) ^ c; }
+  return (h1 >>> 0).toString(36) + (h2 >>> 0).toString(36) + t.length.toString(36);
+}
+function _metaWD(wd){ return { dist: wd.dist, vDist: wd.vDist, saldoSaida: wd.saldoSaida, motivo: wd.motivo, saidas: wd.saidas }; }
+// Guarda a assinatura do que ESTÁ NO SERVIDOR. Só chamar com o all_data que veio de lá ou
+// que acabou de subir: assinatura de coisa que ainda não subiu faria a edição pendente
+// parecer "não mexi" e ela seria trocada pelo servidor na mesclagem seguinte.
+function _baseSyncGravar(allData){
+  const o = {};
+  Object.keys(allData || {}).forEach(k => {
+    if(!/^\d+$/.test(k)) return;
+    const wd = allData[k] || {};
+    o[k] = { f: (wd.funcs || []).map(_assinatura), m: _assinatura(_metaWD(wd)) };
+  });
+  sv('baseSync', o);
+}
+
 function mergeWD(local,remoto,semIdx){
   if(!remoto) return local; if(!local) return remoto;
   const tsL=local._lastEdit||0, tsR=remoto._lastEdit||0;
   const rec=tsL>tsR?local:remoto, ant=tsL>tsR?remoto:local;
   const brutos=mergeBrutos(local.brutos,remoto.brutos,semIdx);
   const maxLen=Math.max((local.funcs||[]).length,(remoto.funcs||[]).length);
+  const base=(ld('baseSync',null)||{})[String(semIdx)]||null;
   const funcs=[];
   for(let i=0;i<maxLen;i++){
     const fL=local.funcs?.[i],fR=remoto.funcs?.[i];
+    const hB=base&&base.f?base.f[i]:undefined;
+    if(hB!==undefined&&fL!==undefined&&fR!==undefined){
+      if(_assinatura(fL)===hB){funcs.push(fR);continue;}   // não mexi nesta vaga: vale o servidor
+      if(_assinatura(fR)===hB){funcs.push(fL);continue;}   // o servidor não mudou: vale o daqui
+    }
     const nL=fL?.nome?.trim(),nR=fR?.nome?.trim();
     if(fL&&fL._removidoEm&&!nL&&fL._removidoEm>=tsR){funcs.push(fL);continue;}
     if(fR&&fR._removidoEm&&!nR&&fR._removidoEm>=tsL){funcs.push(fR);continue;}
@@ -1701,7 +1751,13 @@ function mergeWD(local,remoto,semIdx){
     else if(nL&&nR){ const fw=tsL>tsR?fL:fR, fa=tsL>tsR?fR:fL; funcs.push({...fa,...fw}); }
     else funcs.push(fL||fR||{id:i,nome:'',tipo:'CLT / MENSALISTA',dias:Array(7).fill('PRESENTE')});
   }
-  return {brutos,funcs,dist:rec.dist!=null?rec.dist:ant.dist,vDist:rec.vDist,saldoSaida:rec.saldoSaida,motivo:rec.motivo||ant.motivo,saidas:rec.saidas||ant.saidas||[],_lastEdit:Math.max(tsL,tsR)};
+  // Distribuição e saídas: mesma regra das vagas. Quem não mexeu no bloco não tem voto.
+  let mRec=rec, mAnt=ant;
+  if(base&&base.m){
+    if(_assinatura(_metaWD(local))===base.m){ mRec=remoto; mAnt=local; }
+    else if(_assinatura(_metaWD(remoto))===base.m){ mRec=local; mAnt=remoto; }
+  }
+  return {brutos,funcs,dist:mRec.dist!=null?mRec.dist:mAnt.dist,vDist:mRec.vDist,saldoSaida:mRec.saldoSaida,motivo:mRec.motivo||mAnt.motivo,saidas:mRec.saidas||mAnt.saidas||[],_lastEdit:Math.max(tsL,tsR)};
 }
 // all_data guarda as semanas em chaves numéricas ("0","1",...), mas também guarda coisas de
 // outros apps na mesma linha — ferias_geral (histórico de férias, aba Férias do Check-list e
@@ -1755,6 +1811,8 @@ async function _syncNow(){
     // Só limpa depois do PATCH dar certo — numa falha de rede eles têm que continuar
     // marcados, senão a próxima mesclagem apagaria o que ainda não subiu.
     brutosDirty = new Set(); sv('brutosDirty',[]);
+    // O servidor agora é igual a este aparelho: nova assinatura (ver _baseSyncGravar).
+    _baseSyncGravar(state.allData);
     syncStatus='ok'; sv('lastSync',new Date().toISOString()); window._lastSyncErr=null; syncPendente=false;
     render();
   }catch(e){
@@ -1776,6 +1834,9 @@ async function carregarDaNuvem(silent,forcarRemoto){
       // Sempre merge — nunca sobrescreve local sem comparar timestamps
       state.allData=mergeAllData(state.allData,parsed);
       sv('allData',state.allData);
+      // Assinatura do que VEIO do servidor, não do mesclado: o que este aparelho ainda tem
+      // de diferente continua contando como edição dele.
+      _baseSyncGravar(parsed);
     }
     syncStatus='ok'; sv('lastSync',new Date().toISOString());
     atualizarSyncUI(); render();
