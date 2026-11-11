@@ -100,6 +100,12 @@ const BH = [
     /R\$\s?110,00/.test(e.tiles.sem10) && /10% perdido em 2 notas/.test(e.tiles.sem10) && /R\$\s?110,00\s*de 10% que não entrou/.test(await txtCard('sem10-rede-home-card')), e.tiles.sem10);
   check('cancelamento: o % do card (550 de 110.000 = 0,50%)', /0,50%/.test(e.tiles.cancel) && /0,50%/.test(await txtCard('cancel-rede-home-card')), e.tiles.cancel);
   check('banco de horas: −12h +13h, com o prazo do ciclo', /−12h \+13h/.test(e.tiles.banco) && /ciclo fecha em \d+ dias/.test(e.tiles.banco), e.tiles.banco);
+  // 12/11/2026: na Pedreira o quadradinho saía "−585h01 +118…". A partir de 10 h ficam só as
+  // horas cheias, e valor comprido encolhe a fonte; nenhum quadradinho pode sair cortado.
+  const curtas = await page.evaluate(() => [_bhHorasCurtas(585 + 1/60), _bhHorasCurtas(118 + 20/60), _bhHorasCurtas(9.5), _bhHorasCurtas(-12)]);
+  check('banco: a partir de 10 h só horas cheias; abaixo, com minutos', JSON.stringify(curtas) === JSON.stringify(['585h', '118h', '9h30', '12h']), JSON.stringify(curtas));
+  const cortes = await page.evaluate(() => [...document.querySelectorAll('.home-tile')].map(t => { const v = t.children[1]; return v && v.scrollWidth > v.clientWidth + 1 ? t.dataset.tile : null; }).filter(Boolean));
+  check('nenhum quadradinho com o valor cortado', cortes.length === 0, cortes.join(','));
   check('meta de hoje: o quadradinho existe', /Meta de hoje/.test(e.tiles.meta), e.tiles.meta);
   check('a venda do mês aparece em UM quadradinho só (não duplica)', e.ordem.filter(k => k === 'venda').length === 1 && !e.ordem.includes('vendas'));
   check('começa tudo fechado: nenhum card de resultado à vista', Object.values(e.vis).every(v => !v), JSON.stringify(e.vis));
