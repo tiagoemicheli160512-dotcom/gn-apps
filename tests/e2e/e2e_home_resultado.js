@@ -99,10 +99,10 @@ const BH = [
   check('nota sem 10%: R$ 110,00 perdido em 2 notas, igual ao número grande do card',
     /R\$\s?110,00/.test(e.tiles.sem10) && /10% perdido em 2 notas/.test(e.tiles.sem10) && /R\$\s?110,00\s*de 10% que não entrou/.test(await txtCard('sem10-rede-home-card')), e.tiles.sem10);
   check('cancelamento: o % do card (550 de 110.000 = 0,50%)', /0,50%/.test(e.tiles.cancel) && /0,50%/.test(await txtCard('cancel-rede-home-card')), e.tiles.cancel);
-  // 12/11/2026: o quadradinho mostra só o SALDO (−12h +13h = +1h); a compensar e a pagar,
-  // separados, ficam no cartão que abre ao tocar.
-  check('banco de horas: só o saldo (+1h), escrito "saldo", com o prazo do ciclo',
-    /\+1h\b/.test(e.tiles.banco) && !/−12h/.test(e.tiles.banco) && /saldo · ciclo fecha em \d+ dias/.test(e.tiles.banco), e.tiles.banco);
+  // 12/11/2026: um saldo único foi testado e desfeito a pedido do dono — a loja corre atrás
+  // dos dois ao longo do ciclo, então a compensar e a pagar ficam separados no quadradinho.
+  check('banco de horas: −12h +13h separados (não o saldo), com o prazo do ciclo',
+    /−12h \+13h/.test(e.tiles.banco) && /ciclo fecha em \d+ dias/.test(e.tiles.banco), e.tiles.banco);
   const cardBanco = await txtCard('banco-home-card');
   check('… e o cartão do banco continua com a compensar e a pagar separados', /12h/.test(cardBanco) && /13h/.test(cardBanco), cardBanco.slice(0, 200));
   // 12/11/2026: na Pedreira o quadradinho saía "−585h01 +118…". A partir de 10 h ficam só as
