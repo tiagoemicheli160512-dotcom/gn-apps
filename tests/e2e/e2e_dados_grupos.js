@@ -28,8 +28,10 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
   await ctx.route('**/rest/v1/**', r => r.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
   const page = await ctx.newPage();
   const erros = []; page.on('pageerror', e => erros.push(String(e)));
-  const abrir = async () => {
-    await page.goto('file://' + CHK);
+  const abrir = async (recarregar) => {
+    // Recarregar por file:// às vezes perde as últimas escritas de localStorage (Chromium,
+    // ver CAMINHOS.recarregarPreservando). A gravação quem confere é a suíte, antes.
+    if (recarregar) await CAMINHOS.recarregarPreservando(page); else await page.goto('file://' + CHK);
     await page.waitForFunction(() => { try { return typeof restoreUI === 'function' && typeof _dadosResumo === 'function'; } catch (e) { return false; } }, null, { timeout: 25000 });
     await page.evaluate(() => { hideLogin(); LOJA = 'Campo Grande'; state.data = '2026-11-11';
       usuarioLogado = { id: 1, nome: 'Thalyta', cargo: 'sub_gerente', loja: 'CAMPO GRANDE' };
@@ -91,7 +93,9 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
   // ══ 4. Lembra aberto/fechado ═══════════════════════════════════════════════════════
   await page.evaluate(() => { const l = document.getElementById('dados-grupo-loja'); l.open = true; });
   await page.waitForTimeout(100);
-  await abrir();
+  const gravado = await page.evaluate(() => { try { return JSON.parse(localStorage.getItem('gn_chk_dados_grupos') || '{}'); } catch (e) { return {}; } });
+  check('abrir/fechar um grupo grava a escolha no aparelho', gravado.loja === true && gravado.equipe === true && !gravado.dia, JSON.stringify(gravado));
+  await abrir(true);
   const lembra = await page.evaluate(() => ({ equipe: document.getElementById('dados-grupo-equipe').open, loja: document.getElementById('dados-grupo-loja').open, dia: document.getElementById('dados-grupo-dia').open }));
   check('aberto/fechado volta igual depois de recarregar', lembra.equipe && lembra.loja && !lembra.dia, JSON.stringify(lembra));
 
