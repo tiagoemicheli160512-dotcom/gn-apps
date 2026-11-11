@@ -35,7 +35,7 @@ const semente = () => ({
 
 (async () => {
   const browser = await chromium.launch({ executablePath: CAMINHOS.CHROMIUM });
-  let srv = semente(), patches = 0;
+  let srv = semente(), patches = 0, segurarPatch = null, patchSegurado = false;
   const novoAparelho = async (localAllData) => {
     const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 900 } });
     // Quarta 11/11/2026 15:00 — semana de índice 44.
@@ -44,7 +44,13 @@ const semente = () => ({
     await ctx.route('**/rest/v1/**', r => {
       const u = r.request().url(), m = r.request().method();
       if (/gn_comissoes\?/.test(u) && m === 'GET') return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{ all_data: srv }]) });
-      if (/gn_comissoes\?/.test(u) && m === 'PATCH') { srv = JSON.parse(JSON.stringify(r.request().postDataJSON().all_data)); patches++; return r.fulfill({ status: 204, body: '' }); }
+      if (/gn_comissoes\?/.test(u) && m === 'PATCH') {
+        const corpo = JSON.parse(JSON.stringify(r.request().postDataJSON().all_data));
+        const responder = () => { srv = corpo; patches++; return r.fulfill({ status: 204, body: '' }); };
+        // Seção 8: segura o PATCH "na rede" pra a loja editar enquanto ele está a caminho.
+        if (segurarPatch) { patchSegurado = true; return segurarPatch.then(responder); }
+        return responder();
+      }
       return r.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
     });
     const page = await ctx.newPage();
@@ -119,6 +125,27 @@ const semente = () => ({
   check('a assinatura é pequena (não é uma segunda cópia do all_data)', await l2.page.evaluate(() => JSON.stringify(ld('baseSync', {})).length < 400));
   check('sem erro de JavaScript', l2.erros.length === 0, l2.erros.join(' | '));
   await l2.ctx.close();
+
+  // ══ 8. Edição feita ENQUANTO um envio está a caminho (12/11/2026, achado no CI) ═════
+  // O envio automático roda a cada 5 s. Se a loja edita durante o PATCH, o app marcava a
+  // edição como já enviada (assinatura gravada com o estado de DEPOIS do PATCH e o
+  // "pendente" zerado) — no envio seguinte o servidor ganhava e a edição sumia.
+  srv = semente();
+  const l3 = await novoAparelho(null);
+  let soltar; segurarPatch = new Promise(r => { soltar = r; }); patchSegurado = false;
+  await l3.page.evaluate(() => { const wd = { ...getWD(44) }; wd.funcs = [...wd.funcs]; wd.funcs[0] = { ...wd.funcs[0], setor: 'Bar' }; setWD(44, wd);
+    clearTimeout(syncTimer); window.__envio = _syncNow(); });
+  for (let i = 0; i < 100 && !patchSegurado; i++) await new Promise(r => setTimeout(r, 20));
+  check('(controle) o primeiro envio está a caminho', patchSegurado);
+  await l3.page.evaluate(() => { const wd = { ...getWD(44) }; wd.funcs = [...wd.funcs]; wd.funcs[2] = { ...wd.funcs[2], horario: '11:00-19:00' }; setWD(44, wd); clearTimeout(syncTimer); });
+  soltar(); segurarPatch = null;
+  await l3.page.evaluate(async () => { await window.__envio; });
+  check('o primeiro envio levou só o que existia quando saiu (setor do 0)', f(0).setor === 'Bar' && f(2).horario === '16:00-00:00', JSON.stringify([f(0).setor, f(2).horario]));
+  check('a edição feita durante o envio continua pendente', await l3.page.evaluate(() => syncPendente === true));
+  await l3.page.evaluate(async () => { clearTimeout(syncTimer); await _syncNow(); });
+  check('…e sobe no envio seguinte, em vez de o servidor apagar ela', f(2).horario === '11:00-19:00' && f(0).setor === 'Bar', JSON.stringify([f(0).setor, f(2).horario]));
+  check('sem erro de JavaScript', l3.erros.length === 0, l3.erros.join(' | '));
+  await l3.ctx.close();
 
   await browser.close();
   console.log(`\n${ok} OK, ${falhou} falhou`);
