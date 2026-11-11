@@ -61,7 +61,8 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
 
   // ── Os botões ────────────────────────────────────────────────────────────────────────
   let r = await ir('sem');
-  check('o seletor tem Dia · Semana · Mês · Trimestre', r.botoes.join('|') === 'Dia|Semana*|Mês|Trimestre', r.botoes.join('|'));
+  // 12/11/2026: + Livre (de/até escolhidos à mão) — coberto em e2e_painel_livre.
+  check('o seletor tem Dia · Semana · Mês · Trimestre · Livre', r.botoes.join('|') === 'Dia|Semana*|Mês|Trimestre|Livre', r.botoes.join('|'));
   check('Semana: 02/11–08/11 e meta comparada (quadro de meta)', /02\/11–08\/11/.test(r.label) && r.meta, JSON.stringify(r));
 
   // ── Diário ───────────────────────────────────────────────────────────────────────────
@@ -99,7 +100,9 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
 
   // ── Relatório abre no mesmo período ─────────────────────────────────────────────────
   const rel = await page.evaluate(async () => {
-    _gerarRelatorio = _gerarRelatorio;   // o original
+    // A ‹ acima dispara uma carga nova; com _dashFat ainda vazio o 📄 só avisa "aguarde"
+    // (é o comportamento certo) — o teste precisa esperar a carga, senão falha por corrida.
+    for (let i = 0; i < 200 && (_dashLoading || !_dashFat); i++) await new Promise(r => setTimeout(r, 20));
     await _gerarRelatorio();
     const d = window._relData || {};
     const out = { tipo: d.perTipo, label: d.range && d.range.label, offs: JSON.stringify(window._relOffsets) };

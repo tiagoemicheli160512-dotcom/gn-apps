@@ -998,16 +998,30 @@ let _dashWoff = 0;      // week offset (0=current week)
 let _dashMoff = 0;      // month offset (0=current month)
 let _dashDoff = 0;      // day offset (0=hoje)
 let _dashToff = 0;      // trimestre offset (0=trimestre atual, regra de _trimestreRange)
+// Período LIVRE (12/11/2026, pedido do dono): de/até escolhidos à mão. As setas andam uma
+// janela do MESMO tamanho pra trás (ou pra frente, até a escolhida) — então o "anterior"
+// da comparação são os N dias logo antes. Fica só na memória da tela.
+let _dashLivreDe = null, _dashLivreAte = null; // 'YYYY-MM-DD'
+let _dashLoff = 0;      // livre offset, em janelas do tamanho escolhido
+const DASH_LIVRE_MAX_DIAS = 366;
 // O período navegado do Painel, seja qual for o tipo — mesmas funções de período do
 // relatório (_relRange), então Painel, relatório e raio-x falam do mesmo intervalo.
-function _dashOff() { return _dashPer === 'dia' ? _dashDoff : _dashPer === 'sem' ? _dashWoff : _dashPer === 'tri3' ? _dashToff : _dashMoff; }
-function _dashSetOff(v) { if (_dashPer === 'dia') _dashDoff = v; else if (_dashPer === 'sem') _dashWoff = v; else if (_dashPer === 'tri3') _dashToff = v; else _dashMoff = v; }
+function _dashOff() { return _dashPer === 'dia' ? _dashDoff : _dashPer === 'sem' ? _dashWoff : _dashPer === 'tri3' ? _dashToff : _dashPer === 'livre' ? _dashLoff : _dashMoff; }
+function _dashSetOff(v) { if (_dashPer === 'dia') _dashDoff = v; else if (_dashPer === 'sem') _dashWoff = v; else if (_dashPer === 'tri3') _dashToff = v; else if (_dashPer === 'livre') _dashLoff = v; else _dashMoff = v; }
 function _dashRangeOf(off) { return _relRange(_dashPer, off); }
 // A grade "Dia a dia" e a mini-tendência dos cards são sempre de UMA semana: a navegada no
 // Semanal, a que contém o dia no Diário, e a atual no Mensal e no Trimestre (como antes).
 function _dashSemanaOff() {
   if (_dashPer === 'sem') return _dashWoff;
   if (_dashPer === 'dia') { const dow = (new Date().getDay() + 6) % 7; return Math.floor((dow + _dashDoff) / 7); }
+  // No livre, a semana do ÚLTIMO dia escolhido (a mais recente do período).
+  if (_dashPer === 'livre') {
+    const fim = _livreRange(_dashLoff).to.split('-').map(Number);
+    const alvo = new Date(fim[0], fim[1] - 1, fim[2], 12), hoje = new Date();
+    const base = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate(), 12);
+    const dowHoje = (hoje.getDay() + 6) % 7;
+    return Math.min(0, Math.floor((Math.round((alvo - base) / 864e5) + dowHoje) / 7));
+  }
   return 0;
 }
 // A meta cadastrada é UM número por loja, comparado com a semana e com o mês. Contra um
@@ -10264,18 +10278,36 @@ function _trimestreRange(off) {
   return { dates, from:dates[0], to:dates[dates.length-1], label, isCurrent:off===0, meses };
 }
 
+// Período livre: de _dashLivreDe a _dashLivreAte, deslocado `off` janelas do mesmo
+// tamanho (off -1 = os N dias logo antes). Datas em horário local, nunca UTC.
+function _livreRange(off) {
+  const hoje = new Date();
+  const iso = d => `${d.getFullYear()}-${_p2(d.getMonth()+1)}-${_p2(d.getDate())}`;
+  const hojeIso = iso(hoje);
+  const de = _dashLivreDe || hojeIso, ate = _dashLivreAte || de;
+  const [y1, m1, d1] = de.split('-').map(Number), [y2, m2, d2] = ate.split('-').map(Number);
+  const n = Math.max(1, Math.round((new Date(y2, m2-1, d2, 12) - new Date(y1, m1-1, d1, 12)) / 864e5) + 1);
+  const dates = [];
+  for (let i = 0; i < n; i++) dates.push(iso(new Date(y1, m1-1, d1 + (off||0)*n + i, 12)));
+  const from = dates[0], to = dates[dates.length-1];
+  const fd = s => s.slice(8)+'/'+s.slice(5,7) + (s.slice(0,4) !== String(hoje.getFullYear()) ? '/'+s.slice(2,4) : '');
+  const label = n === 1 ? fd(from) : fd(from)+'–'+fd(to);
+  return { dates, from, to, label, isCurrent: to >= hojeIso, livre: true, dias: n };
+}
 function _relRange(per, off) {
   return per==='dia'  ? _dayRange(off)
        : per==='sem'  ? _weekRange(off)
        : per==='mes'  ? _monthRange(off)
+       : per==='livre'? _livreRange(off)
        :                _trimestreRange(off);
 }
-const _REL_PER_TIPO = { dia:'Diário', sem:'Semanal', mes:'Mensal', tri3:'Trimestral' };
+const _REL_PER_TIPO = { dia:'Diário', sem:'Semanal', mes:'Mensal', tri3:'Trimestral', livre:'Personalizado' };
 
 // Meta de venda por funcionário (R$ 18k/mês/funcionário, padrão já usado no dashboard
 // "Gestão" do Check-list) escalada pro período — semana ≈ 18k×7/30, 3 meses = 18k×3.
 // Compartilhada entre o card de loja do Painel e o Relatório, pra nunca desalinhar.
 function _metaFuncPeriodo(per) {
+  if (per === 'livre') return 18000 * _livreRange(0).dias / 30;
   return per==='mes' ? 18000 : per==='tri3' ? 18000*3 : per==='dia' ? 18000/30 : 18000*7/30;
 }
 
@@ -10695,7 +10727,7 @@ function _raioxMapearDecl(rows, campoPor, campoEm) {
 // Equipe é a única exceção e aparece sempre: é o denominador de tudo o mais no card.
 const _raioxCache = {};
 function _raioxChaveCache() {
-  return _dashPer + ':' + _dashOff();
+  return _dashPer + ':' + _dashOff() + (_dashPer === 'livre' ? ':' + _dashLivreDe + ':' + _dashLivreAte : '');
 }
 function _raioxPeriodoAtual() {
   return _dashRangeOf(_dashOff());
@@ -10852,7 +10884,7 @@ function _raioxHtml() {
   const nome = LOJA_DISPLAY[_raioxLoja] || _raioxLoja;
   const dm = iso => iso.slice(8, 10) + '/' + iso.slice(5, 7);
 
-  const pills = [['dia', 'Dia'], ['sem', 'Semana'], ['mes', 'Mês'], ['tri3', 'Trimestre']].map(([p, lbl]) => {
+  const pills = [['dia', 'Dia'], ['sem', 'Semana'], ['mes', 'Mês'], ['tri3', 'Trimestre']].concat(_dashLivreDe ? [['livre', 'Livre']] : []).map(([p, lbl]) => {
     const on = p === _raioxPer;
     return `<button onclick="_raioxTrocarPer('${p}')" style="flex:1;padding:7px 4px;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;border:1px solid ${on ? '#CA8A04' : 'var(--b2)'};background:${on ? 'rgba(202,138,4,.18)' : 'transparent'};color:${on ? 'var(--t1)' : 'var(--t3)'}">${lbl}</button>`;
   }).join('');
@@ -11329,7 +11361,8 @@ function _buildTendenciaChart() {
   const ys=totals.map(v=>h-padY-((v-min)/range)*(h-padY*2));
   const pts=xs.map((x,i)=>`${x.toFixed(1)},${ys[i].toFixed(1)}`).join(' ');
   // No Diário o rótulo é a própria data: o Diário abre em ontem, então "hoje/ontem" fixos mentiriam.
-  const periodLbl=({ dia:[3,2,1,0].map(i => _dashRangeOf(_dashOff()-i).label), sem:['3 sem. atrás','2 sem. atrás','sem. passada','esta semana'],
+  const _rotulos4 = () => [3,2,1,0].map(i => _dashRangeOf(_dashOff()-i).label);
+  const periodLbl=({ dia:_dashPer==='dia'?_rotulos4():null, livre:_dashPer==='livre'?_rotulos4():null, sem:['3 sem. atrás','2 sem. atrás','sem. passada','esta semana'],
     tri3:['3 trim. atrás','2 trim. atrás','trim. passado','este trim.'] })[_dashPer] || ['3 meses atrás','2 meses atrás','mês passado','este mês'];
   const pontos=xs.map((x,i)=>`
     <circle cx="${x.toFixed(1)}" cy="${ys[i].toFixed(1)}" r="3" fill="#FACC15"/>
@@ -11434,7 +11467,8 @@ function _buildKPIRow() {
     ${sub?`<div class="kpi-tile-sub">${sub}</div>`:''}
   </div>`;
   const totalPStr=totalP>0?_fmtBRLs(totalP):null;
-  const anteriorLbl=_dashPer==='dia'?'mesmo dia da semana passada':_dashFatPrevParcial?'mesmos dias · anterior':'anterior';
+  const _nLivre=_dashPer==='livre'?_dashRangeOf(_dashOff()).dias:0;
+  const anteriorLbl=_dashPer==='dia'?'mesmo dia da semana passada':_dashPer==='livre'?(_nLivre===1?'dia anterior':`${_nLivre} dias anteriores`):_dashFatPrevParcial?'mesmos dias · anterior':'anterior';
   // Herdado do antigo card "Faturamento total": quem do consolidado está sem venda no
   // período (a Maglia não conta — não é do consolidado).
   const semDados=lojasConsolidado.filter(k=>!(fat[k]>0));
@@ -16004,6 +16038,67 @@ function _presencaMacroDados() {
   };
 }
 
+// ── OCORRÊNCIAS POR LOJA (12/11/2026) ─────────────────────────────────────────────────
+// "Um card controle de faltas, advertência e suspensão por loja, pra ter a visão." Mesma
+// conta do raio-x de cada loja (_raioxDaLoja), no período do Painel — então o número aqui,
+// o do raio-x e o do relatório são sempre o mesmo:
+//   falta e suspensão → DIAS marcados na escala (suspensão de 3 dias conta 3);
+//   advertência       → documento anexado na semana (uma por semana em que foi anexado).
+// Só as 11 lojas (sem a Maglia — regra do CLAUDE.md: Maglia só entra quando citada).
+// Loja com semana sem escala lançada é avisada: zero falta ali não é mérito, é escala vazia.
+const OCOR_TIPOS = [['FALTA', 'Faltas', 'var(--txt-red)'], ['ADVERTENCIA', 'Advertências', 'var(--txt-amber)'], ['SUSPENSÃO', 'Suspensões', '#A855F7']];
+let _ocorAbertas = new Set();
+function _ocorToggle(k) { if (_ocorAbertas.has(k)) _ocorAbertas.delete(k); else _ocorAbertas.add(k); renderDashboard(); }
+function _ocorDados() {
+  const range = _dashRangeOf(_dashOff());
+  const lojas = _lojasFatConsolidado().map(k => {
+    const x = _raioxDaLoja(k, range.dates, { cancel: {} });
+    const pessoas = x.ocor.pessoas
+      .map(p => ({ nome: p.nome, setor: p.setor, FALTA: p.FALTA || 0, ADVERTENCIA: p.ADVERTENCIA || 0, 'SUSPENSÃO': p['SUSPENSÃO'] || 0 }))
+      .filter(p => p.FALTA || p.ADVERTENCIA || p['SUSPENSÃO'])
+      .sort((a, b) => (b.FALTA + b.ADVERTENCIA + b['SUSPENSÃO']) - (a.FALTA + a.ADVERTENCIA + a['SUSPENSÃO']) || a.nome.localeCompare(b.nome, 'pt-BR'));
+    const n = { FALTA: x.ocor.FALTA, ADVERTENCIA: x.ocor.ADVERTENCIA, 'SUSPENSÃO': x.ocor['SUSPENSÃO'] };
+    return { k, nome: LOJA_DISPLAY[k] || k, n, total: n.FALTA + n.ADVERTENCIA + n['SUSPENSÃO'], pessoas, equipe: x.equipe.total, escala: x.escala };
+  }).sort((a, b) => b.total - a.total || a.nome.localeCompare(b.nome, 'pt-BR'));
+  const tot = { FALTA: 0, ADVERTENCIA: 0, 'SUSPENSÃO': 0 };
+  lojas.forEach(l => OCOR_TIPOS.forEach(([t]) => { tot[t] += l.n[t]; }));
+  return { range, lojas, tot };
+}
+function _buildOcorrenciasPanel() {
+  if (!_dashComissoesAll) return _skelPanel(4);
+  const esc = s2 => window.escapeHtml(String(s2 == null ? '' : s2));
+  const d = _ocorDados();
+  const num = (v, cor) => `<span style="font-variant-numeric:tabular-nums;font-weight:800;color:${v ? cor : 'var(--t4)'}">${v}</span>`;
+  const kpis = `<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:10px">${OCOR_TIPOS.map(([t, rot, cor]) => `
+    <div class="kpi-tile" style="border-left-color:${d.tot[t] ? cor : 'var(--t3)'};min-width:0">
+      <div class="kpi-tile-lbl" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${rot}</div>
+      <div class="kpi-tile-val" style="color:${d.tot[t] ? cor : 'var(--t1)'}">${d.tot[t]}</div>
+      <div class="kpi-tile-sub">${t === 'ADVERTENCIA' ? (d.tot[t] === 1 ? 'documento' : 'documentos') : (d.tot[t] === 1 ? 'dia' : 'dias')}</div>
+    </div>`).join('')}</div>
+    <div style="font-size:10px;color:var(--t3);margin:-2px 2px 10px;line-height:1.5">${esc(d.range.label)} · da escala de cada loja. Falta e suspensão contam <b>dias</b> (3 dias de suspensão = 3); advertência conta o documento anexado.</div>`;
+  const cab = `<div style="display:flex;gap:6px;padding:0 14px 4px;font-size:9px;font-weight:800;color:var(--t4);letter-spacing:.8px;text-transform:uppercase">
+    <span style="flex:1">Loja</span>${OCOR_TIPOS.map(([, rot]) => `<span style="width:44px;text-align:right">${rot.slice(0, 4)}.</span>`).join('')}<span style="width:12px"></span></div>`;
+  const linhas = d.lojas.map(l => {
+    const aberta = _ocorAbertas.has(l.k);
+    const aviso = l.escala.semRegistro ? `<div style="font-size:9.5px;color:var(--txt-amber);font-weight:700;margin-top:2px">${l.escala.semRegistro} de ${l.escala.semanas} semana${l.escala.semanas > 1 ? 's' : ''} sem escala lançada — pode faltar ocorrência</div>` : '';
+    const det = !aberta ? '' : (l.pessoas.length ? `<div style="margin-top:8px;border-top:1px solid var(--b1)">${l.pessoas.map(p => `
+        <div style="display:flex;gap:6px;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--b1)">
+          <div style="flex:1;min-width:0;font-size:11px;font-weight:700;color:var(--t1);overflow-wrap:anywhere">${esc(p.nome)}<span style="font-weight:500;color:var(--t3)"> · ${esc(p.setor)}</span></div>
+          ${OCOR_TIPOS.map(([t, , cor]) => `<span style="width:44px;text-align:right;font-size:11.5px">${num(p[t], cor)}</span>`).join('')}<span style="width:12px"></span>
+        </div>`).join('')}
+        <button type="button" onclick="event.stopPropagation();_raioxAbrir('${l.k}')" title="Os dias de cada ocorrência estão no raio-x" style="margin-top:8px;background:var(--fill-sutil);border:1px solid var(--b2);border-radius:8px;color:var(--t1);font-size:11px;font-weight:700;padding:6px 10px;cursor:pointer;font-family:inherit">🩻 Raio-x de ${esc(l.nome)}</button></div>`
+      : `<div style="font-size:10.5px;color:var(--t3);margin-top:6px">Ninguém com falta, advertência ou suspensão no período.</div>`);
+    return `<div onclick="_ocorToggle('${l.k}')" style="cursor:pointer;background:var(--s2);border:1px solid var(--b1);border-left:3px solid ${l.total ? (l.n.FALTA ? 'var(--txt-red)' : 'var(--txt-amber)') : 'var(--txt-green)'};border-radius:12px;padding:10px 14px;margin-bottom:6px">
+      <div style="display:flex;gap:6px;align-items:baseline">
+        <div style="flex:1;min-width:0"><div style="font-size:12.5px;font-weight:800;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(l.nome)}</div>
+          <div style="font-size:9.5px;color:var(--t3)">${l.equipe} na equipe${l.pessoas.length ? ` · ${l.pessoas.length} pessoa${l.pessoas.length > 1 ? 's' : ''} com ocorrência` : ''}</div></div>
+        ${OCOR_TIPOS.map(([t, , cor]) => `<span style="width:44px;text-align:right;font-size:15px">${num(l.n[t], cor)}</span>`).join('')}
+        <span style="width:12px;color:var(--t4);font-size:13px;text-align:right">${aberta ? '▾' : '›'}</span>
+      </div>${aviso}${det}</div>`;
+  }).join('');
+  return kpis + cab + linhas;
+}
+
 function _buildPresencaPanel() {
   if (!_dashPresencaHoje) return _skelPanel(3);
   const d = _presencaMacroDados();
@@ -16851,11 +16946,13 @@ function renderDashboard() {
         <button class="${_dashPer==='sem'?'on':''}" onclick="_setPer('sem')">Semana</button>
         <button class="${_dashPer==='mes'?'on':''}" onclick="_setPer('mes')">Mês</button>
         <button class="${_dashPer==='tri3'?'on':''}" onclick="_setPer('tri3')">Trimestre</button>
+        <button class="${_dashPer==='livre'?'on':''}" onclick="_setPer('livre')">Livre</button>
       </div>
       <button class="period-arrow" onclick="_dashNav(-1)">‹</button>
       ${_dashPeriodoLabelHtml(range)}
       <button class="period-arrow" onclick="_dashNav(1)"${range.isCurrent?' disabled':''}>›</button>
       <button onclick="_gerarRelatorio()" title="Gerar relatório" style="background:rgba(250,204,21,.12);border:1px solid rgba(250,204,21,.28);border-radius:7px;color:var(--t1);font-size:12px;cursor:pointer;padding:4px 9px;white-space:nowrap;flex-shrink:0;font-weight:700">📄${_dashRelSel.size>0?' '+_dashRelSel.size+' ✓':''}</button>
+      ${_dashPer==='livre' ? _dashLivreCamposHtml() : ''}
     </div>`;
 
   let content='';
@@ -17057,6 +17154,9 @@ function renderDashboard() {
   } else if (_dashTab==='presenca') {
     content = _buildPresencaPanel();
 
+  } else if (_dashTab==='ocorr') {
+    content = _buildOcorrenciasPanel();
+
   } else if (_dashTab==='ferias') {
     content = _buildFeriasPanel();
 
@@ -17252,7 +17352,7 @@ function _dashTabsDepoisDeDesenhar() {
 const DASH_GRUPOS = [
   { g: 'vendas',   rot: '📈 Vendas',   abas: [['fat', '↓ Faturamento'], ['att', '⚠ Atenção'], ['bi', '📊 BI'], ['metas', '⚙ Metas']] },
   { g: 'caixa',    rot: '🧾 Caixa',    abas: [['cancel', '🧾 Cancel. e transf.'], ['sem10', '💸 Sem 10%']] },
-  { g: 'equipe',   rot: '👥 Equipe',   abas: [['presenca', '👤 Presença'], ['ferias', '🏖 Férias'], ['xadrez', '🔀 Xadrez'], ['banco', '⏱ Banco'], ['extra', '👷 Extra']] },
+  { g: 'equipe',   rot: '👥 Equipe',   abas: [['presenca', '👤 Presença'], ['ocorr', '⚠ Ocorrências'], ['ferias', '🏖 Férias'], ['xadrez', '🔀 Xadrez'], ['banco', '⏱ Banco'], ['extra', '👷 Extra']] },
   { g: 'operacao', rot: '🛠 Operação', abas: [['barris', '🍺 Barris'], ['carnes', '🥩 Carnes'], ['trios', '🎵 Trios']] },
   { g: 'dre',      rot: '💰 DRE',      abas: [['dre', '💰 DRE']] },
 ];
@@ -17289,6 +17389,13 @@ function _setPer(p){
   // O Diário abre em ONTEM: a venda do dia só é lançada no Check-list à noite, e "hoje"
   // passaria o dia inteiro zerado (▼ 100%, todas as lojas "sem dados"). A › leva a hoje.
   if (p === 'dia' && _dashPer !== 'dia') _dashDoff = -1;
+  // Livre abre no mês corrente até hoje (o pedido mais comum); dali a pessoa ajusta o de/até.
+  if (p === 'livre' && !_dashLivreDe) {
+    const h = new Date();
+    _dashLivreAte = _dashIsoLocal(h);
+    _dashLivreDe = _dashIsoLocal(new Date(h.getFullYear(), h.getMonth(), 1));
+    _dashLoff = 0;
+  }
   _dashPer=p; _dashFat=null; _dashFatPrev=null; _dashFatDia=null; _dashComDia=null; _dashFatDiaLoja=null; _dashComDiaLoja=null; _dashRelSel.clear(); renderDashboard(); _loadDashAll(); }
 function _toggleDashSel(k){ if(_dashRelSel.has(k)) _dashRelSel.delete(k); else _dashRelSel.add(k); renderDashboard(); }
 /* Ir direto a um dia ou mês (07/11/2026 — "se quiser ver um dia de outubro tem que ir na
@@ -17308,6 +17415,36 @@ function _dashPeriodoLabelHtml(range) {
   return `<div class="period-label period-label-pick" style="position:relative;cursor:pointer" title="${dica}" onclick="_dashAbrirSeletor()">${txt} <span aria-hidden="true" style="font-size:11px">📅</span>
     <input type="${tipo}" id="dash-periodo-pick" aria-label="${dica}" value="${valor}" max="${max}" onchange="_dashIrPara(this.value)"
       style="position:absolute;inset:0;width:100%;height:100%;opacity:0;border:0;padding:0;margin:0;cursor:pointer;font-size:16px"></div>`;
+}
+// Os dois campos do período livre: linha inteira embaixo do ‹ período ›. Mostram a janela
+// escolhida (a de off 0); as setas só deslocam a consulta, não estes campos.
+function _dashLivreCamposHtml() {
+  const max = _dashIsoLocal(new Date());
+  const campo = (id, v, rot) => `<label style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;font-size:10px;font-weight:700;color:var(--t3);letter-spacing:.3px">${rot}
+    <input type="date" id="${id}" value="${v}" max="${max}" onchange="_dashLivreDefinir()"
+      style="width:100%;min-width:0;box-sizing:border-box;background:var(--s2);border:1px solid var(--b2);border-radius:8px;color:var(--t1);font-family:inherit;font-size:16px;padding:6px 8px"></label>`;
+  return `<div class="period-livre" style="flex:1 1 100%;display:flex;gap:8px;align-items:flex-end">
+    ${campo('dash-livre-de', _dashLivreDe || '', 'DE')}${campo('dash-livre-ate', _dashLivreAte || '', 'ATÉ')}</div>`;
+}
+function _dashLivreDefinir() {
+  const a = document.getElementById('dash-livre-de'), b = document.getElementById('dash-livre-ate');
+  let de = a && a.value, ate = b && b.value;
+  if (!de || !ate) return;
+  const hoje = _dashIsoLocal(new Date());
+  if (ate > hoje) ate = hoje;
+  if (de > hoje) de = hoje;
+  if (de > ate) { const t = de; de = ate; ate = t; }
+  const [y1, m1, d1] = de.split('-').map(Number), [y2, m2, d2] = ate.split('-').map(Number);
+  const dias = Math.round((new Date(y2, m2-1, d2, 12) - new Date(y1, m1-1, d1, 12)) / 864e5) + 1;
+  if (dias > DASH_LIVRE_MAX_DIAS) {
+    // Mais de um ano em cada consulta (o Painel ainda busca 3 janelas anteriores pra
+    // comparar) deixaria a tela pesada no celular. Corta no limite e avisa.
+    de = _dashIsoLocal(new Date(y2, m2-1, d2 - (DASH_LIVRE_MAX_DIAS - 1), 12));
+    alert(`O período livre vai até ${DASH_LIVRE_MAX_DIAS} dias. Ajustei o início pra ${de.slice(8)}/${de.slice(5,7)}/${de.slice(0,4)}.`);
+  }
+  _dashLivreDe = de; _dashLivreAte = ate; _dashLoff = 0;
+  _dashFat=null; _dashFatPrev=null; _dashFatDia=null; _dashComDia=null; _dashFatDiaLoja=null; _dashComDiaLoja=null;
+  renderDashboard(); _loadDashAll();
 }
 function _dashAbrirSeletor() {
   const i = document.getElementById('dash-periodo-pick');
@@ -17505,8 +17642,8 @@ function _relModalHtml() {
   // Folha do relatório é escura (background:#0f0f1a, ver _gerarRelatorio) — texto precisa
   // ser claro. Antes usava as mesmas cores escuras (#1A1D23 etc.) do resto do app, que é
   // claro, ficando ilegível (texto escuro em cima de fundo escuro).
-  const pills = ['dia','sem','mes','tri3'].map(p => {
-    const lbl = p==='dia'?'Dia':p==='sem'?'Semana':p==='mes'?'Mês':'Trimestre';
+  const pills = ['dia','sem','mes','tri3'].concat(_dashLivreDe ? ['livre'] : []).map(p => {
+    const lbl = p==='dia'?'Dia':p==='sem'?'Semana':p==='mes'?'Mês':p==='livre'?'Livre':'Trimestre';
     const on = p===per;
     return `<button onclick="_relTrocarPeriodo('${p}')" style="flex:1;padding:7px 4px;border-radius:8px;font-size:11px;font-weight:700;border:1px solid ${on?'#7C83FD':'rgba(255,255,255,.15)'};background:${on?'rgba(124,131,253,.2)':'transparent'};color:${on?'#fff':'rgba(255,255,255,.45)'};cursor:pointer">${lbl}</button>`;
   }).join('');
@@ -17596,7 +17733,7 @@ async function _gerarRelatorio() {
   // Sempre abre casando com o que está navegado no Painel agora (Diário e 3 Meses não têm
   // equivalente lá, então começam em hoje / nos 3 meses até o mês atual) — dali em diante
   // _relNav navega livre.
-  window._relOffsets = { dia: _dashDoff, sem: _dashWoff, mes: _dashMoff, tri3: _dashToff };
+  window._relOffsets = { dia: _dashDoff, sem: _dashWoff, mes: _dashMoff, tri3: _dashToff, livre: _dashLoff };
   await _relCarregarPeriodo(_dashPer);
 
   const ex = document.getElementById('_rel-modal');
