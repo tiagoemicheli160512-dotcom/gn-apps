@@ -100,6 +100,7 @@ const DIA = '2026-10-01';
     const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight; const x = c.getContext('2d'); x.drawImage(img, 0, 0);
     const px = (yy) => x.getImageData(5, yy, 1, 1).data[0]; return [px(10), px(c.height - 5)]; }, uploads[0].b64) : [0, 0];
   check('a marca d\'água está DESENHADA na imagem (faixa escura embaixo, topo intacto)', escura[0] > 240 && escura[1] < 140, JSON.stringify(escura));
+  check('a marca traz a identificação do app (GN Operações · Visita)', /GN Operações · Visita/.test(tx), tx);
   check('a marca traz loja e quem chegou', /Bangu · Carlos/i.test(tx), tx);
   check('…data e hora da chegada', /Chegada 01\/10\/2026 10:30/.test(tx), tx);
   check('…o endereço e o GPS com a precisão', /Rua de Teste, 10/.test(tx) && /GPS -22\.876123, -43\.465123 \(±12 m\)/.test(tx), tx);
