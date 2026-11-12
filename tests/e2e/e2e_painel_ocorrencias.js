@@ -59,16 +59,23 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
   const ordem = await page.evaluate(() => _ocorDados().lojas.map(l => l.k + ':' + l.total));
   check('uma linha por loja das 11, sem a Maglia', ordem.length === 11 && !ordem.some(o => /MAGLIA/.test(o)), ordem.join(','));
   check('ordenada por quem tem mais: Bangu (6) e depois Caxias (1)', ordem[0] === 'BANGU:6' && ordem[1] === 'CAXIAS:1', ordem.join(','));
-  check('atestado não conta como falta', await page.evaluate(() => _ocorDados().lojas[0].pessoas.every(p => p.nome !== 'Ana')));
+  // 12/11/2026: atestado virou a 4ª coluna, separado — não é falta e não pesa na ordem.
+  const ana = await page.evaluate(() => _ocorDados().lojas[0].pessoas.find(p => p.nome === 'Ana'));
+  check('atestado não conta como falta: Ana aparece com 1 atestado e 0 falta', ana && ana.ATESTADO === 1 && ana.FALTA === 0, JSON.stringify(ana));
+  check('…e não entra no total que ordena (Bangu continua 6)', await page.evaluate(() => _ocorDados().lojas[0].total === 6));
+  check('Atestados: total da rede = 1 dia', /Atestados 1 dia\b/i.test(t.txt), t.txt.slice(0, 400));
   check('semana sem escala lançada é avisada nas lojas sem registro', /sem escala lançada/.test(t.txt), '');
   check('fechada, a loja não lista as pessoas', !/Maria/.test(t.txt));
   await page.evaluate(() => _ocorToggle('BANGU')); t = await tela();
-  check('tocar em Bangu abre as pessoas, com setor', /Maria <b>X<\/b> · Cozinha/.test(t.txt) && /Rui · Salão/.test(t.txt), t.txt.slice(0, 600));
+  check('tocar em Bangu abre as pessoas, com setor', /Maria <b>X<\/b> · Cozinha/.test(t.txt) && /Rui · Salão/.test(t.txt) && /Ana · Cozinha/.test(t.txt), t.txt.slice(0, 600));
+  check('quem só tem atestado vem depois de quem tem falta/suspensão', await page.evaluate(() => { const p = _ocorDados().lojas[0].pessoas.map(x => x.nome); return p[p.length - 1] === 'Ana'; }));
   check('nome com HTML aparece escapado (não vira negrito)', /Maria &lt;b&gt;X&lt;\/b&gt;/.test(t.html));
   check('…com atalho pro raio-x da loja', /_raioxAbrir\('BANGU'\)/.test(t.html));
   check('o período do Painel aparece (é o mesmo do seletor)', await page.evaluate(() => document.getElementById('dash-section').innerText.includes(_dashRangeOf(_dashOff()).label)));
   await page.setViewportSize({ width: 320, height: 800 }); await page.evaluate(() => renderDashboard()); t = await tela();
   check('320 px: sem rolagem de lado', !t.larga);
+  const nomeLarg = await page.evaluate(() => { const el = [...document.querySelectorAll('#dash-section div')].find(d => d.textContent === 'Campo Grande'); return el ? Math.round(el.getBoundingClientRect().width) : -1; });
+  check('320 px: com 4 colunas, o nome da loja ainda tem espaço (≥ 60 px)', nomeLarg >= 60, nomeLarg);
   check('nenhum erro de JavaScript', erros.length === 0, erros.join(' | '));
   await browser.close();
   console.log(`\n${ok} OK, ${falhou} falhou`);
