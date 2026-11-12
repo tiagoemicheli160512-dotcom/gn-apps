@@ -9206,6 +9206,18 @@ function _buildTextoVisitasSup(paraWpp) {
 //
 // O "PDF no Whats" segue em texto (jsPDF), porque precisa de um arquivo pronto pra
 // anexar; o desenho em calendário depende da impressão do navegador.
+// Seção de fotos do PDF de imprimir: a foto (com a marca d'água gravada nela) e a legenda.
+// Duas por linha; o window.onload do PDF espera as imagens carregarem antes de imprimir.
+function _visFotosPdfHtml(lista) {
+  const fotos = _visFotosDoPeriodo(lista);
+  if (!fotos.length) return '';
+  const esc = window.gnPdfEsc;
+  return `<style>.fotos{display:grid;grid-template-columns:1fr 1fr;gap:10px}.foto{break-inside:avoid;page-break-inside:avoid;border:1px solid #e5e7eb;border-radius:6px;padding:6px}
+    .foto img{width:100%;max-height:330px;object-fit:contain;display:block;border-radius:4px;background:#f3f4f6}.foto .leg2{font-size:7.5pt;color:#444;white-space:pre-wrap;margin-top:4px;line-height:1.35}</style>
+    <h2 class="sec" style="margin-top:14px">📷 Fotos das visitas (${fotos.length})</h2>
+    <div class="fotos">${fotos.map(f => `<div class="foto"><img src="${esc(f.url)}" alt="Foto"><div class="leg2">${esc(f.legenda)}</div></div>`).join('')}</div>`;
+}
+
 function _visSupPdfHtml() {
   if (!_visSupSelecionado) return null;
   const esc = window.gnPdfEsc;
@@ -9375,7 +9387,7 @@ function _visSupPdfHtml() {
     tituloDoc: `Visitas ${_visSupSelecionado} — ${_visSupTitulo(deISO, ateISO, _visSupPeriodo)}`,
     subtitulo: `${_visSupTitulo(deISO, ateISO, _visSupPeriodo)} · ${fmtBR(deISO)} a ${fmtBR(ateISO)} · gerado em ${window.gnPdfAgora()}`,
     kpis,
-    html: css + calendario + legenda + tabela,
+    html: css + calendario + legenda + tabela + _visFotosPdfHtml(_visSupData),
     rodape: `GN Operações · Relatório de Visitas — ${_visSupSelecionado}`,
   };
 }
@@ -9401,7 +9413,7 @@ function gerarWppVisitasSup() {
 async function enviarPDFVisitasSupWpp() {
   const r = _buildTextoVisitasSup();
   if (!r) return;
-  await _compartilharPdfWpp(r.texto, r.titulo);
+  await _compartilharPdfWpp(r.texto, r.titulo, _visFotosDoPeriodo(_visSupData));
 }
 
 // ── Aba Calendário (dentro do modal Visitas) ───────────────────────────────
@@ -9922,16 +9934,82 @@ async function _visCarimbarFoto(file, info) {
   prontas.forEach((l, i) => { ctx.font = l.fonte; ctx.fillStyle = l.cor; ctx.fillText(l.t, pad, h - faixa + pad + i * lh); });
   return cv.toDataURL('image/jpeg', 0.82);
 }
+// Registro das visitas cujas fotos estão na tela, pro botão "📤 Enviar" achar os dados.
+const _visFotoReg = {};
 function _visFotoThumbHtml(v) {
   if (!v) return '';
-  const uma = (url, nome) => {
+  if (v.id != null) _visFotoReg[v.id] = v;
+  const uma = (url, nome, tipo) => {
     if (!url || !/^https:\/\//.test(url)) return '';
     const u = window.escapeHtml(url);
-    return `<a href="${u}" target="_blank" rel="noopener" title="Abrir a foto da ${nome}" style="display:inline-flex;align-items:center;gap:6px;text-decoration:none;color:var(--t3);font-size:10px;font-weight:700">
-    <img src="${u}" alt="Foto da ${nome}" loading="lazy" style="width:56px;height:56px;object-fit:cover;border-radius:6px;border:1px solid rgba(0,0,0,.15)">📷 ${nome}</a>`;
+    return `<div style="display:inline-flex;flex-direction:column;align-items:flex-start;gap:4px">
+    <a href="${u}" target="_blank" rel="noopener" title="Abrir a foto da ${nome}" style="display:inline-flex;align-items:center;gap:6px;text-decoration:none;color:var(--t3);font-size:10px;font-weight:700">
+    <img src="${u}" alt="Foto da ${nome}" loading="lazy" style="width:56px;height:56px;object-fit:cover;border-radius:6px;border:1px solid rgba(0,0,0,.15)">📷 ${nome}</a>
+    ${v.id != null ? `<button type="button" onclick="event.stopPropagation();_visFotoCompartilhar('${window.escapeHtml(String(v.id))}','${tipo}')" title="Enviar a foto com os dados da visita (WhatsApp)" style="background:rgba(37,211,102,.12);border:1px solid rgba(37,211,102,.35);border-radius:7px;padding:3px 8px;color:var(--txt-green);font-size:10px;font-weight:800;cursor:pointer;font-family:inherit">📤 Enviar</button>` : ''}</div>`;
   };
-  const partes = [uma(v.foto_chegada, 'chegada'), uma(v.foto_saida, 'saída')].filter(Boolean);
-  return partes.length ? `<div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:5px">${partes.join('')}</div>` : '';
+  const partes = [uma(v.foto_chegada, 'chegada', 'chegada'), uma(v.foto_saida, 'saída', 'saida')].filter(Boolean);
+  return partes.length ? `<div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:5px">${partes.join('')}</div>` : '';
+}
+// Texto que acompanha a foto (legenda no WhatsApp e no PDF).
+function _visFotoLegenda(v, tipo) {
+  const DS = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+  const d = v.data ? new Date(v.data + 'T12:00') : null;
+  const dataTxt = d ? `${DS[d.getDay()]} ${v.data.split('-').reverse().join('/')}` : '';
+  const loja = LOJA_DISPLAY[_normLoja(v.loja)] || v.loja || '';
+  const dur = _calcDuracaoMin(v.hora_chegada, v.hora_saida);
+  const end = tipo === 'saida' ? (v.endereco_saida || v.endereco) : v.endereco;
+  const linhas = [
+    `📍 Visita — ${loja}${tipo === 'saida' ? ' (saída)' : ' (chegada)'}`,
+    `📅 ${dataTxt}`,
+    `🕒 ${v.hora_chegada || '—'} → ${v.hora_saida || 'em andamento'}${dur ? ' (' + _fmtDuracao(dur) + ')' : ''}`,
+    v.visitante ? `👤 ${v.visitante}${v.cargo ? ' · ' + v.cargo : ''}` : '',
+    end ? `📌 ${end}` : '',
+    v.obs ? `💬 ${v.obs}` : '',
+  ];
+  return linhas.filter(Boolean).join('\n');
+}
+// Manda a FOTO anexada (não só o link) com os dados da visita. No celular abre o
+// compartilhamento do aparelho (WhatsApp entre as opções). Onde o navegador não anexa
+// arquivo (vários computadores), baixa a foto e abre o WhatsApp com o texto e o link.
+async function _visFotoCompartilhar(id, tipo) {
+  const v = _visFotoReg[id];
+  if (!v) return;
+  const url = tipo === 'saida' ? v.foto_saida : v.foto_chegada;
+  if (!url) return;
+  const texto = _visFotoLegenda(v, tipo);
+  const nome = `visita-${String(LOJA_DISPLAY[_normLoja(v.loja)] || v.loja || 'loja').replace(/[^\w-]+/g, '_')}-${v.data || ''}-${tipo}.jpg`;
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const blob = await r.blob();
+    const file = new File([blob], nome, { type: blob.type || 'image/jpeg' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], text: texto, title: 'Visita' });
+      return;
+    }
+    const obj = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = obj; a.download = nome; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(obj), 10000);
+    alert('📷 Foto baixada — anexe no WhatsApp. O texto da visita vai abrir junto.');
+    window.open('https://wa.me/?text=' + encodeURIComponent(texto + '\n📷 ' + url), '_blank');
+  } catch (e) {
+    if (e && e.name === 'AbortError') return;   // cancelou o compartilhamento
+    window.gnLogError && window.gnLogError('visitas:compartilhar', e);
+    // Sem a foto em mãos (rede), ainda dá pra mandar o texto com o link.
+    window.open('https://wa.me/?text=' + encodeURIComponent(texto + '\n📷 ' + url), '_blank');
+  }
+}
+// Fotos de um conjunto de visitas, em ordem: [{url, legenda, v, tipo}].
+function _visFotosDoPeriodo(lista) {
+  const out = [];
+  (lista || []).filter(v => v && v.hora_chegada !== 'PLAN' && !_ehAusenciaVisitaLoja(v.loja))
+    .slice().sort((x, y) => (x.data + String(x.hora_chegada || '')).localeCompare(y.data + String(y.hora_chegada || '')))
+    .forEach(v => {
+      [['foto_chegada', 'chegada'], ['foto_saida', 'saida']].forEach(([c, t]) => {
+        if (v[c] && /^https:\/\//.test(v[c])) out.push({ url: v[c], legenda: _visFotoLegenda(v, t), v, tipo: t });
+      });
+    });
+  return out;
 }
 
 function _horaAtualVP(){
@@ -17845,7 +17923,9 @@ async function _garantirJsPDF(){
   });
 }
 
-async function _textoParaPdfBlob(texto, titulo){
+// fotos (opcional): [{url, legenda}] — entram depois do texto, uma por bloco, com a legenda.
+// Foto que não baixar vira uma linha com o link, em vez de derrubar o PDF inteiro.
+async function _textoParaPdfBlob(texto, titulo, fotos){
   await _garantirJsPDF();
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ unit:'pt', format:'a4' });
@@ -17864,15 +17944,45 @@ async function _textoParaPdfBlob(texto, titulo){
       y+=lineHeight;
     });
   });
+  if(fotos && fotos.length){
+    const paraDataUrl = async (url) => {
+      const r = await fetch(url); if(!r.ok) throw new Error('HTTP '+r.status);
+      const b = await r.blob();
+      return await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(b); });
+    };
+    const medidas = (src) => new Promise(res => { const im = new Image(); im.onload = () => res([im.naturalWidth, im.naturalHeight]); im.onerror = () => res([4, 3]); im.src = src; });
+    doc.addPage(); y=40;
+    doc.setFont('helvetica','bold'); doc.setFontSize(12); doc.text('Fotos das visitas ('+fotos.length+')', marginX, y); y+=20;
+    for(const f of fotos){
+      try{
+        const du = await paraDataUrl(f.url);
+        const [w0, h0] = await medidas(du);
+        const maxH = 300; let w = maxWidth, h = w * h0 / w0;
+        if(h > maxH){ h = maxH; w = h * w0 / h0; }
+        // A fonte do jsPDF (helvetica) não tem emoji: sairia lixo no lugar de 📍📅🕒.
+        const legenda = String(f.legenda || '').split('\n').map(l => l.replace(/—/g, '-').replace(/→/g, '->').replace(/[^\u0000-\u00FF]/g, '').trim()).join('\n');
+        const legLinhas = doc.splitTextToSize(legenda, maxWidth);
+        if(y + h + legLinhas.length*11 + 16 > pageHeight-30){ doc.addPage(); y=40; }
+        doc.addImage(du, 'JPEG', marginX, y, w, h); y += h + 12;
+        doc.setFont('helvetica','normal'); doc.setFontSize(8.5);
+        legLinhas.forEach(l => { doc.text(l, marginX, y); y += 11; });
+        y += 14;
+      }catch(e){
+        if(y>pageHeight-50){ doc.addPage(); y=40; }
+        doc.setFont('courier','normal'); doc.setFontSize(8.5);
+        doc.text(doc.splitTextToSize('(foto indisponível) '+f.url, maxWidth), marginX, y); y+=24;
+      }
+    }
+  }
   return doc.output('blob');
 }
 
 // Gera o PDF (a partir de msg/titulo) e abre o compartilhamento nativo do dispositivo
 // pra enviar direto pelo WhatsApp. Sem suporte a compartilhar arquivo (ex.: desktop),
 // baixa o PDF e abre o WhatsApp com um texto pra anexar manualmente.
-async function _compartilharPdfWpp(msg, titulo){
+async function _compartilharPdfWpp(msg, titulo, fotos){
   try{
-    const blob=await _textoParaPdfBlob(msg, titulo);
+    const blob=await _textoParaPdfBlob(msg, titulo, fotos);
     const file=new File([blob], titulo.replace(/\s+/g,'_')+'.pdf', { type:'application/pdf' });
     if(navigator.canShare && navigator.canShare({ files:[file] })){
       await navigator.share({ files:[file], title:titulo, text:titulo });

@@ -195,6 +195,47 @@ const DIA = '2026-10-01';
   const ambas = await page.evaluate(() => _visFotoThumbHtml({ foto_chegada: 'https://x.supabase.co/a.jpg', foto_saida: 'https://x.supabase.co/b.jpg' }));
   check('a visita mostra as duas miniaturas (chegada e saída)', /📷 chegada/.test(ambas) && /📷 saída/.test(ambas));
 
+  // ── 9. Enviar a foto pelo WhatsApp e fotos nos PDFs (12/11/2026) ─────────────────
+  const URLF = 'https://ncxttwvpafajnilpjbol.supabase.co/storage/v1/object/public/gn-fotos/visitas/c.jpg';
+  const jpg = await page.evaluate(async () => { const cv = document.createElement('canvas'); cv.width = 40; cv.height = 30; cv.getContext('2d').fillRect(0, 0, 40, 30);
+    return (await new Promise(r => cv.toBlob(b => { const fr = new FileReader(); fr.onload = () => r(fr.result.split(',')[1]); fr.readAsDataURL(b); }, 'image/jpeg', .8))); });
+  await ctx.route('**/storage/v1/object/public/gn-fotos/visitas/**', r => r.fulfill({ status: 200, contentType: 'image/jpeg', body: Buffer.from(jpg, 'base64') }));
+  const VIS = { id: 777, loja: 'BANGU', data: '2026-10-01', visitante: 'Carlos', cargo: 'supervisor', hora_chegada: '09:00', hora_saida: '11:30',
+    endereco: 'Rua de Teste, 10 - Bangu', endereco_saida: 'Rua de Teste, 12 - Bangu', obs: 'Treinamento do salão', foto_chegada: URLF, foto_saida: URLF.replace('c.jpg', 's.jpg') };
+  const thumb2 = await page.evaluate(v => _visFotoThumbHtml(v), VIS);
+  check('cada foto da visita tem o botão "📤 Enviar"', (thumb2.match(/_visFotoCompartilhar\('777','(chegada|saida)'\)/g) || []).length === 2 && /📤 Enviar/.test(thumb2), thumb2.slice(0, 300));
+  const sh = await page.evaluate(async () => {
+    window.__share = null; navigator.canShare = () => true;
+    navigator.share = async (d) => { window.__share = { n: d.files.length, tipo: d.files[0].type, nome: d.files[0].name, tam: d.files[0].size, text: d.text }; };
+    await _visFotoCompartilhar('777', 'chegada'); return window.__share;
+  });
+  check('no celular: compartilha a FOTO anexada (jpg), não só o link', sh && sh.n === 1 && sh.tipo === 'image/jpeg' && sh.tam > 100 && /visita-Bangu-2026-10-01-chegada\.jpg/.test(sh.nome), JSON.stringify(sh));
+  check('…com o texto da visita: loja, data, horários, quem, endereço e observação', sh && /Visita — Bangu \(chegada\)/.test(sh.text) && /01\/10\/2026/.test(sh.text) && /09:00 → 11:30 \(2h 30min\)/.test(sh.text) && /Carlos · supervisor/.test(sh.text) && /Rua de Teste, 10 - Bangu/.test(sh.text) && /Treinamento do salão/.test(sh.text), sh && sh.text);
+  const sh2 = await page.evaluate(async () => { await _visFotoCompartilhar('777', 'saida'); return window.__share; });
+  check('na foto da saída, o endereço é o da SAÍDA', sh2 && /\(saída\)/.test(sh2.text) && /Rua de Teste, 12/.test(sh2.text), sh2 && sh2.text);
+  const fb = await page.evaluate(async () => {
+    navigator.canShare = undefined; window.__abriu = []; const oo = window.open; window.open = (u) => { window.__abriu.push(u); return null; };
+    window.__baixou = 0; const oc = HTMLAnchorElement.prototype.click; HTMLAnchorElement.prototype.click = function () { if (this.download) window.__baixou++; };
+    const oa = window.alert; window.alert = () => {};
+    await _visFotoCompartilhar('777', 'chegada');
+    window.open = oo; HTMLAnchorElement.prototype.click = oc; window.alert = oa;
+    return { abriu: window.__abriu, baixou: window.__baixou };
+  });
+  check('sem compartilhar arquivo (computador): baixa a foto e abre o WhatsApp com o texto e o link', fb.baixou === 1 && fb.abriu.length === 1 && /^https:\/\/wa\.me\/\?text=/.test(fb.abriu[0]) && decodeURIComponent(fb.abriu[0]).includes(URLF), JSON.stringify(fb));
+  const pdfHtml = await page.evaluate(v => _visFotosPdfHtml([v, { id: 1, loja: 'FOLGA', data: '2026-10-02', hora_chegada: '00:00' }, { id: 2, loja: 'BANGU', data: '2026-10-03', hora_chegada: 'PLAN' }]), VIS);
+  check('PDF de imprimir: seção "Fotos das visitas" com as 2 fotos e a legenda (sem ausência nem plano)', /Fotos das visitas \(2\)/.test(pdfHtml) && (pdfHtml.match(/<img src=/g) || []).length === 2 && /Treinamento do salão/.test(pdfHtml), pdfHtml.slice(0, 300));
+  const jp = await page.evaluate(async (v) => {
+    const chamadas = { addImage: 0, textos: [] };
+    window.jspdf = { jsPDF: class { constructor() { this.internal = { pageSize: { getHeight: () => 842, getWidth: () => 595 } }; }
+      setFont() {} setFontSize() {} addPage() {} splitTextToSize(t) { return String(t).split('\n'); }
+      text(t) { chamadas.textos.push(String(t)); } addImage(d, f) { chamadas.addImage++; chamadas.fmt = f; chamadas.du = String(d).slice(0, 23); }
+      output() { return new Blob(['%PDF']); } } };
+    await _textoParaPdfBlob('Relatório', 'Visitas', _visFotosDoPeriodo([v]).concat([{ url: 'https://x.invalid/nao.jpg', legenda: 'x' }]));
+    return chamadas;
+  }, VIS);
+  check('PDF no Whats: as fotos entram como imagem (2) e a que não baixa vira linha com o link', jp.addImage === 2 && jp.fmt === 'JPEG' && /^data:image\/jpeg;base64/.test(jp.du) && jp.textos.some(t => /foto indisponível/.test(t)), JSON.stringify({ a: jp.addImage, f: jp.fmt, du: jp.du }));
+  check('…e a legenda vai sem emoji (a fonte do PDF não tem)', jp.textos.some(t => /^Visita - Bangu \(chegada\)$/.test(t)) && jp.textos.some(t => /^09:00 -> 11:30/.test(t)) && !jp.textos.some(t => /📍|📅|🕒/.test(t)), jp.textos.filter(t => /Visita/.test(t)).join(' | '));
+
   check('nenhum erro de JavaScript', erros.length === 0, erros.join(' | '));
   await browser.close();
   console.log(`\n${ok} OK, ${falhou} falhou`);
