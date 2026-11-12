@@ -125,10 +125,42 @@ const prepara = (page, over) => page.evaluate(async ([s, comp]) => {
     await _cienteConfirmar('BOULEVARD', comp, 'setembro');
     return { erro: _cienteErro, registrou: !!_cienteDe(comp, 'BOULEVARD') };
   }, COMP);
-  check('senha de SUB-gerente não vale — a ciência é da gerência',
-    /ciência é da gerência/i.test(sub.erro) && sub.registrou === false);
-  check('e também não grava nada', comSub.gravacoes.length === 0);
+  // 12/11/2026: sub-gerência passou a poder confirmar (Felix/Norte e Daniela/Guarulhos
+  // tentavam e eram barrados). O cargo fica gravado e aparece no card.
+  check('senha de SUB-gerente agora registra a ciência', sub.erro === '' && sub.registrou === true, JSON.stringify(sub));
+  const subBloco = await comSub.page.evaluate((comp) => ({ j: _cienteDe(comp, 'BOULEVARD'), html: _cienteBlocoHtml('BOULEVARD', comp, 'setembro') }), COMP);
+  check('…gravando o cargo sub_gerente, e o card diz "(sub-gerente)"', subBloco.j && subBloco.j.cargo === 'sub_gerente' && /Bárbara \(sub-gerente\)/.test(subBloco.html), JSON.stringify(subBloco.j));
+  check('e foi pro banco', comSub.gravacoes.length === 1);
   await comSub.ctx.close();
+
+  // Quem não é da gerência continua barrado.
+  const comCaixa = await abrir(browser, { login: [{ id: 99, nome: 'Tatiana', cargo: 'caixa' }] });
+  await prepara(comCaixa.page, { nome: 'Tatiana', cargo: 'caixa' });
+  const cx = await comCaixa.page.evaluate(async (comp) => {
+    _cienteForm = 'BOULEVARD';
+    document.body.insertAdjacentHTML('beforeend', '<div id="t2c">' + _cienteBlocoHtml('BOULEVARD', comp, 'setembro') + '</div>');
+    document.getElementById('ciente-user').value = 'Tatiana';
+    document.getElementById('ciente-senha').value = 'x';
+    await _cienteConfirmar('BOULEVARD', comp, 'setembro');
+    return { erro: _cienteErro, registrou: !!_cienteDe(comp, 'BOULEVARD') };
+  }, COMP);
+  check('senha de CAIXA não vale — a ciência é da gerência e da sub-gerência',
+    /gerência e da sub-gerência/i.test(cx.erro) && cx.registrou === false, JSON.stringify(cx));
+  check('…e não grava nada', comCaixa.gravacoes.length === 0);
+
+  // Lembrete no card da SEMANA enquanto o mês não foi confirmado (caso Nova América 12/11).
+  const lemb = await comCaixa.page.evaluate(() => {
+    if (!document.getElementById('mes-anterior-home-card')) { const d = document.createElement('div'); d.id = 'mes-anterior-home-card'; document.body.appendChild(d); }
+    const h = new Date(); const comp = _dreCompetencia(new Date(h.getFullYear(), h.getMonth(), 0));
+    _cienteAllData = {}; const sem = _fechaLembreteMesHtml('NOVA AMERICA');
+    _cienteAllData = { [comp]: { 'NOVA AMERICA': { nome: 'Walter', cargo: 'gerente', em: new Date().toISOString() } } };
+    const com = _fechaLembreteMesHtml('NOVA AMERICA');
+    return { sem, com };
+  });
+  check('card da semana lembra que o resultado do MÊS é outra assinatura (enquanto não confirmado)',
+    /resultado do mês de .+ ainda não foi confirmado/.test(lemb.sem) && /_fechaIrProMes/.test(lemb.sem), lemb.sem.slice(0, 200));
+  check('…e o lembrete some depois que o mês é confirmado', lemb.com === '');
+  await comCaixa.ctx.close();
 
   // ── 4. Senha de gerente registra, com nome e hora ───────────────────────────────
   const g = await abrir(browser, { login: [GERENTE] });
@@ -148,7 +180,7 @@ const prepara = (page, over) => page.evaluate(async ([s, comp]) => {
   check('guardando quem foi, o cargo e a hora',
     feito.j.nome === 'Leandro' && feito.j.cargo === 'gerente' && !!feito.j.em);
   check('o formulário fecha e o card passa a mostrar quem viu',
-    feito.formFechou === true && /Resultado visto pela gerência/.test(feito.bloco) && /Leandro/.test(feito.bloco));
+    feito.formFechou === true && /Resultado do mês visto pela gerência/.test(feito.bloco) && /Leandro/.test(feito.bloco));
   const grav = g.gravacoes.pop();
   check('e foi pro banco na competência do mês fechado',
     !!grav && !!grav.all_data[COMP] && grav.all_data[COMP].BOULEVARD.nome === 'Leandro');
