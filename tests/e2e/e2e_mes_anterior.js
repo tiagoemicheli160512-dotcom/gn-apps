@@ -175,9 +175,9 @@ const dia = (v) => ({ venda_salao: v, venda_delivery: 0 });
   vendaAgo = [dia(300000)]; vendaSet = [dia(270000)]; comissoes = {}; caixa = [];
   const noDia20 = await abrir('2026-10-20T12:00:00');
   check('o card continua aparecendo no dia 20 do mês, não só nos 3 primeiros',
-    /desempenho de setembro/i.test(noDia20.html) && /Abaixo/.test(noDia20.html));
+    /Resultado do mês de setembro/i.test(noDia20.html) && /Abaixo/.test(noDia20.html));
   const noDia31 = await abrir('2026-10-31T12:00:00');
-  check('e no último dia do mês também', /desempenho de setembro/i.test(noDia31.html));
+  check('e no último dia do mês também', /Resultado do mês de setembro/i.test(noDia31.html));
 
   await browser.close();
   console.log(`\n${ok} OK, ${falhou} falhou`);
