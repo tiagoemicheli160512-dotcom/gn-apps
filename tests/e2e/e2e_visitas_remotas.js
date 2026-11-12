@@ -174,6 +174,11 @@ const FEITO = 'Contagem de barris travando a segunda\nValor do estoque separado 
   // ── 7. Presencial não mudou de comportamento ────────────────────────────────────────
   await page.evaluate((dia) => { _visCalData = []; }, DIA);
   await montar();
+  // 12/11/2026: supervisor passou a precisar de foto na chegada presencial (coberto em
+  // e2e_visita_foto). Aqui o que se cobra é o resto do presencial, então o registro é de
+  // um cargo sem essa obrigação.
+  await page.evaluate((dia) => { _visSupList = [{ id: 7, nome: 'Carlos', cargo: 'administrador' }];
+    document.getElementById('_teste-dia').innerHTML = _visCalDetalheHtml(dia); }, DIA);
   escritas.length = 0;
   await page.evaluate((dia) => {
     document.getElementById('visreg-destino-' + dia).value = 'Caxias';
