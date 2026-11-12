@@ -9065,6 +9065,7 @@ function _buildTextoVisitasSup(paraWpp) {
         const dur = _calcDuracaoMin(v.hora_chegada, v.hora_saida);
         txt += `  📍 ${LOJA_DISPLAY[_normLoja(v.loja)]||v.loja} — ${v.hora_chegada} → ${v.hora_saida||'em andamento'}${dur?' ('+_fmtDuracao(dur)+')':''}\n`;
         if (v.endereco) txt += `     📌 ${v.endereco}\n`;
+        if (v.foto_chegada) txt += `     📷 ${v.foto_chegada}\n`;
         if (v.obs) txt += `     💬 ${v.obs}\n`;
       }
     });
@@ -9536,6 +9537,7 @@ function _visCalDetalheHtml(dataStr) {
       </div>
       <div style="font-size:11px;color:var(--t3);margin-top:2px">${_visEhRemoto(v)?'💻':'📍'} ${v.hora_chegada} → ${v.hora_saida||'em andamento'}${dur?' · '+_fmtDuracao(dur):''}</div>
       ${v.endereco ? `<div style="font-size:9px;color:var(--t4);margin-top:2px">📌 ${esc(v.endereco)}</div>` : ''}
+      ${_visFotoThumbHtml(v)}
       ${v.obs ? `<div style="font-size:10px;color:var(--t3);margin-top:4px;white-space:pre-wrap">${esc(v.obs)}</div>` : ''}
       ${emAndamento ? `<button id="visreg-said-btn-${v.id}" onclick="_visRegistrarSaida('${v.id}','${dataStr}')" style="margin-top:6px;width:100%;background:#ef4444;color:#fff;border:none;border-radius:8px;padding:7px;font-size:11px;font-weight:800;cursor:pointer">🚪 ${_visEhRemoto(v)?'Encerrar acompanhamento':'Registrar Saída (GPS)'}</button>
       <div id="visreg-said-status-${v.id}" style="font-size:10px;color:var(--t3);margin-top:4px;min-height:14px"></div>` : ''}
@@ -9624,6 +9626,20 @@ function _visCalDetalheHtml(dataStr) {
 
       <input type="text" id="visreg-obs-${dataStr}" placeholder="Observação (opcional)" style="width:100%;box-sizing:border-box;background:var(--s1);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:var(--t1);font-family:inherit;margin-bottom:8px">
 
+      <!-- Foto da chegada (opcional, só presencial). Na hora de confirmar, a imagem ganha a
+           marca d'água com data, hora, loja, quem chegou e a localização do GPS. -->
+      <div id="visreg-foto-wrap-${dataStr}" style="margin-bottom:8px">
+        <label style="display:flex;align-items:center;justify-content:center;gap:6px;width:100%;box-sizing:border-box;background:var(--s1);border:1px dashed rgba(0,0,0,.25);border-radius:8px;padding:7px 8px;font-size:11px;font-weight:700;color:var(--t2);cursor:pointer">
+          📷 <span id="visreg-foto-rot-${dataStr}">Foto da chegada (opcional)</span>
+          <input type="file" id="visreg-foto-${dataStr}" accept="image/*" capture="environment" onchange="_visFotoEscolhida('${dataStr}')" style="display:none">
+        </label>
+        <div id="visreg-foto-prev-${dataStr}" style="display:none;align-items:center;gap:8px;margin-top:6px">
+          <img id="visreg-foto-img-${dataStr}" alt="Foto escolhida" style="width:52px;height:52px;object-fit:cover;border-radius:6px;border:1px solid rgba(0,0,0,.15)">
+          <div style="flex:1;min-width:0;font-size:10px;color:var(--t3);line-height:1.4">A marca d'água (data, hora e GPS) entra quando você confirmar a chegada.</div>
+          <button type="button" onclick="_visFotoLimpar('${dataStr}')" style="background:none;border:none;color:var(--t4);font-size:13px;cursor:pointer;padding:2px 4px" title="Tirar a foto">✕</button>
+        </div>
+      </div>
+
       <!-- Registro do que foi entregue no acompanhamento remoto. Vai pro mesmo campo obs, que
            é o que o histórico da visita já mostra — sem isso o acompanhamento ficava gravado
            como "aconteceu", sem dizer o que saiu dele. -->
@@ -9659,6 +9675,8 @@ function _visRemotoToggle(dataStr) {
   mostrar('visreg-destino-wrap', !remoto);
   mostrar('visreg-multi-wrap', remoto);
   mostrar('visreg-feito-wrap', remoto);
+  // Remoto não tem "onde": foto com GPS de quem está no computador não prova nada da loja.
+  mostrar('visreg-foto-wrap', !remoto);
   const btn = document.getElementById('visreg-btn-' + dataStr);
   if (btn) btn.textContent = remoto ? '💻 Registrar acompanhamento' : '📍 Confirmar chegada agora';
 }
@@ -9673,6 +9691,84 @@ function _visMultiMarcar(dataStr, marcar) {
 
 function _visMultiSelecionadas(dataStr) {
   return [...document.querySelectorAll('._visreg-multi-' + dataStr)].filter(c => c.checked).map(c => c.value);
+}
+
+// ── FOTO DA CHEGADA COM MARCA D'ÁGUA (12/11/2026) ─────────────────────────────────────
+// A marca é DESENHADA na imagem (não é legenda ao lado): quem recebe a foto por WhatsApp,
+// impressa ou baixada continua vendo data, hora, loja, quem chegou e onde o GPS estava.
+// Ela registra o momento e o local da CONFIRMAÇÃO. Se a foto escolhida for antiga (galeria),
+// a marca diz isso com todas as letras — sem esse aviso, foto de ontem passaria por de hoje.
+const VIS_FOTO_MAX_LADO = 1600;
+const VIS_FOTO_ANTIGA_MIN = 15;
+function _visFotoArquivo(dataStr) {
+  const i = document.getElementById('visreg-foto-' + dataStr);
+  return (i && i.files && i.files[0]) || null;
+}
+function _visFotoEscolhida(dataStr) {
+  const f = _visFotoArquivo(dataStr);
+  const prev = document.getElementById('visreg-foto-prev-' + dataStr), img = document.getElementById('visreg-foto-img-' + dataStr);
+  const rot = document.getElementById('visreg-foto-rot-' + dataStr);
+  if (!f) { _visFotoLimpar(dataStr); return; }
+  if (img) { try { if (img.dataset.url) URL.revokeObjectURL(img.dataset.url); } catch (e) {} img.dataset.url = URL.createObjectURL(f); img.src = img.dataset.url; }
+  if (prev) prev.style.display = 'flex';
+  if (rot) rot.textContent = 'Trocar a foto';
+}
+function _visFotoLimpar(dataStr) {
+  const i = document.getElementById('visreg-foto-' + dataStr); if (i) i.value = '';
+  const prev = document.getElementById('visreg-foto-prev-' + dataStr); if (prev) prev.style.display = 'none';
+  const img = document.getElementById('visreg-foto-img-' + dataStr);
+  if (img) { try { if (img.dataset.url) URL.revokeObjectURL(img.dataset.url); } catch (e) {} img.removeAttribute('src'); delete img.dataset.url; }
+  const rot = document.getElementById('visreg-foto-rot-' + dataStr); if (rot) rot.textContent = 'Foto da chegada (opcional)';
+}
+function _visFotoCarregar(file) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); res(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('Não deu pra abrir a foto')); };
+    img.src = url;
+  });
+}
+// info: { loja, visitante, quando: Date, lat, lon, precisao, endereco, fotoDe: Date|null }
+async function _visCarimbarFoto(file, info) {
+  const img = await _visFotoCarregar(file);
+  const esc = Math.min(1, VIS_FOTO_MAX_LADO / Math.max(img.naturalWidth || img.width, img.naturalHeight || img.height));
+  const w = Math.max(1, Math.round((img.naturalWidth || img.width) * esc)), h = Math.max(1, Math.round((img.naturalHeight || img.height) * esc));
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d');
+  ctx.drawImage(img, 0, 0, w, h);
+  const p2 = n => String(n).padStart(2, '0');
+  const dh = d => `${p2(d.getDate())}/${p2(d.getMonth() + 1)}/${d.getFullYear()} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
+  const linhas = [
+    { t: `${info.loja || ''} · ${info.visitante || ''}`, forte: true },
+    { t: `Chegada ${dh(info.quando)}` },
+  ];
+  if (info.lat != null && info.lon != null) {
+    if (info.endereco) linhas.push({ t: info.endereco });
+    linhas.push({ t: `GPS ${Number(info.lat).toFixed(6)}, ${Number(info.lon).toFixed(6)}${info.precisao ? ` (±${Math.round(info.precisao)} m)` : ''}` });
+  } else {
+    linhas.push({ t: 'Localização não obtida (GPS negado ou indisponível)', aviso: true });
+  }
+  if (info.fotoDe) linhas.push({ t: `Atenção: foto de ${dh(info.fotoDe)}, não tirada na chegada`, aviso: true });
+  const fs = Math.max(14, Math.round(w / 38)), lh = Math.round(fs * 1.32), pad = Math.round(fs * 0.7), maxW = w - pad * 2;
+  const quebrar = (txt, fonte) => {
+    ctx.font = fonte; const out = []; let cur = '';
+    String(txt).split(/\s+/).forEach(pal => { const t = cur ? cur + ' ' + pal : pal; if (ctx.measureText(t).width > maxW && cur) { out.push(cur); cur = pal; } else cur = t; });
+    if (cur) out.push(cur); return out;
+  };
+  const prontas = [];
+  linhas.forEach(l => { const fonte = `${l.forte ? '700' : '500'} ${fs}px system-ui, -apple-system, Segoe UI, Roboto, sans-serif`;
+    quebrar(l.t, fonte).forEach(t => prontas.push({ t, fonte, cor: l.aviso ? '#FCD34D' : '#FFFFFF' })); });
+  const faixa = prontas.length * lh + pad * 2;
+  ctx.fillStyle = 'rgba(0,0,0,0.58)'; ctx.fillRect(0, h - faixa, w, faixa);
+  ctx.textBaseline = 'top';
+  prontas.forEach((l, i) => { ctx.font = l.fonte; ctx.fillStyle = l.cor; ctx.fillText(l.t, pad, h - faixa + pad + i * lh); });
+  return cv.toDataURL('image/jpeg', 0.82);
+}
+function _visFotoThumbHtml(v) {
+  if (!v || !v.foto_chegada || !/^https:\/\//.test(v.foto_chegada)) return '';
+  const u = window.escapeHtml(v.foto_chegada);
+  return `<a href="${u}" target="_blank" rel="noopener" title="Abrir a foto da chegada" style="display:inline-flex;align-items:center;gap:6px;margin-top:5px;text-decoration:none;color:var(--t3);font-size:10px;font-weight:700">
+    <img src="${u}" alt="Foto da chegada" loading="lazy" style="width:56px;height:56px;object-fit:cover;border-radius:6px;border:1px solid rgba(0,0,0,.15)">📷 foto da chegada</a>`;
 }
 
 function _horaAtualVP(){
@@ -9703,7 +9799,20 @@ async function _visRegistrarChegada(dataStr) {
   const horaChegada = _horaAtualVP();
   if (btnEl) btnEl.disabled = true;
   if (statusEl) statusEl.textContent = remoto ? '💻 Registrando acompanhamento remoto...' : '📡 Obtendo localização...';
-  let lat = null, lon = null, endereco = null;
+  let lat = null, lon = null, endereco = null, precisao = null;
+  const fotoArq = remoto ? null : _visFotoArquivo(dataStr);
+  const agoraChegada = new Date();
+  // Foto antiga (da galeria): avisa ANTES de pedir GPS, e se seguir a marca d'água diz.
+  let fotoDe = null;
+  if (fotoArq && fotoArq.lastModified && (agoraChegada - fotoArq.lastModified) > VIS_FOTO_ANTIGA_MIN * 60000) {
+    fotoDe = new Date(fotoArq.lastModified);
+    const p2 = n => String(n).padStart(2, '0');
+    if (!confirm(`Essa foto é de ${p2(fotoDe.getDate())}/${p2(fotoDe.getMonth()+1)} às ${p2(fotoDe.getHours())}:${p2(fotoDe.getMinutes())}, não de agora.\n\nUsar mesmo assim? A marca d'água vai avisar que a foto não foi tirada na chegada.`)) {
+      if (btnEl) btnEl.disabled = false;
+      if (statusEl) statusEl.textContent = '';
+      return;
+    }
+  }
   try {
     // Remoto não tem "onde" — pedir GPS aqui só gravaria a localização de quem estava na
     // frente do computador, que não diz nada sobre a loja acompanhada.
@@ -9715,6 +9824,7 @@ async function _visRegistrarChegada(dataStr) {
       );
       lat = parseFloat(pos.coords.latitude.toFixed(6));
       lon = parseFloat(pos.coords.longitude.toFixed(6));
+      precisao = pos.coords.accuracy || null;
       if (statusEl) statusEl.textContent = '🔍 Identificando endereço...';
       endereco = await _reverseGeocodeVP(lat, lon);
     } else if (statusEl) {
@@ -9722,6 +9832,27 @@ async function _visRegistrarChegada(dataStr) {
     }
   } catch(e) {
     if (statusEl) statusEl.textContent = '⚠️ Localização não obtida — verifique a permissão no navegador';
+  }
+  // Foto: marca d'água com o que acabou de ser medido e sobe pro Storage. Se não subir, a
+  // pessoa decide: a chegada (hora e GPS) é o registro principal e não pode se perder por
+  // causa da foto.
+  let fotoChegada = null;
+  if (fotoArq) {
+    try {
+      if (statusEl) statusEl.textContent = '📷 Preparando a foto...';
+      const dataUri = await _visCarimbarFoto(fotoArq, {
+        loja: LOJA_DISPLAY[_normLoja(destinos[0])] || destinos[0], visitante: _visSupNomeAlvo(),
+        quando: agoraChegada, lat, lon, precisao, endereco, fotoDe });
+      if (statusEl) statusEl.textContent = '☁️ Enviando a foto...';
+      fotoChegada = await window.gnUploadFotoStorage(SB_URL, SB_KEY, 'visitas', dataUri);
+    } catch (e) {
+      window.gnLogError && window.gnLogError('visitas:foto', e);
+      if (!confirm('A foto não conseguiu subir agora.\n\nRegistrar a chegada mesmo assim, sem a foto?')) {
+        if (btnEl) btnEl.disabled = false;
+        if (statusEl) statusEl.textContent = '';
+        return;
+      }
+    }
   }
   const obs = 'Registrado por ' + ((session && session.nome) || 'Painel de Gestão')
     + (remoto ? ' — acompanhamento remoto (online)' : '') + (obsInput ? ' — ' + obsInput : '')
@@ -9731,7 +9862,8 @@ async function _visRegistrarChegada(dataStr) {
   const bodies = destinos.map(destino => ({
     loja: destino, data: dataStr, visitante: _visSupNomeAlvo(), cargo: _visSupCargoAlvo(),
     hora_chegada: horaChegada, hora_saida: null, lat, lon, endereco, obs,
-    tipo_visita: remoto ? TIPO_VISITA_REMOTO : null
+    tipo_visita: remoto ? TIPO_VISITA_REMOTO : null,
+    ...(fotoChegada ? { foto_chegada: fotoChegada } : {})
   }));
   if (statusEl) statusEl.textContent = bodies.length > 1 ? `💾 Registrando ${bodies.length} lojas...` : '💾 Registrando...';
   try {
