@@ -52,9 +52,10 @@ const DIA = '2026-10-01';
     window.__textos = []; const orig = CanvasRenderingContext2D.prototype.fillText;
     CanvasRenderingContext2D.prototype.fillText = function (t, x, y) { window.__textos.push(String(t)); return orig.apply(this, arguments); };
   });
-  const montar = (gps) => page.evaluate(([dia, gps]) => {
+  // cargo de quem está sendo registrado: 'administrador' (foto opcional) ou 'supervisor' (obrigatória).
+  const montar = (gps, cargo) => page.evaluate(([dia, gps, cargo]) => {
     session = { id: 1, nome: 'Tiago', loja: 'GERAL', cargo: 'mestre', permissoes: { master: true } };
-    _visSupList = [{ id: 7, nome: 'Carlos', cargo: 'supervisor' }]; _visSupSelecionado = 'Carlos';
+    _visSupList = [{ id: 7, nome: 'Carlos', cargo: cargo || 'administrador' }]; _visSupSelecionado = 'Carlos';
     window._reverseGeocodeVP = async () => 'Rua de Teste, 10 - Bangu';
     navigator.geolocation.getCurrentPosition = gps
       ? (res) => res({ coords: { latitude: -22.8761234, longitude: -43.4651234, accuracy: 12 } })
@@ -65,7 +66,7 @@ const DIA = '2026-10-01';
     if (!document.getElementById('visitas-sup-content')) { const a = document.createElement('div'); a.id = 'visitas-sup-content'; document.body.appendChild(a); }
     const sel = document.getElementById('visreg-destino-' + dia); if (sel) { const o = [...sel.options].find(x => /BANGU|Bangu/.test(x.value)); if (o) sel.value = o.value; }
     window.__textos = [];
-  }, [DIA, gps]);
+  }, [DIA, gps, cargo]);
   // Foto "tirada agora": 4000x3000 branca, com lastModified opcional.
   const escolherFoto = (minutosAtras) => page.evaluate(async ([dia, min]) => {
     const cv = document.createElement('canvas'); cv.width = 4000; cv.height = 3000;
@@ -139,6 +140,60 @@ const DIA = '2026-10-01';
   await montar(true); uploads = []; posts = []; dialogos.length = 0;
   await registrar();
   check('sem foto: nenhum upload, chegada gravada como antes', uploads.length === 0 && posts.length === 1 && !('foto_chegada' in posts[0][0]), JSON.stringify(posts));
+
+  // ── 7. Supervisor: foto obrigatória ────────────────────────────────────────────────
+  await montar(true, 'supervisor'); uploads = []; posts = []; dialogos.length = 0;
+  check('supervisor: o campo diz "(obrigatória)"', await page.evaluate(d => /obrigatória/.test(document.getElementById('visreg-foto-rot-' + d).textContent), DIA));
+  let geoPedido = 0; await page.exposeFunction('__geoConta', () => { geoPedido++; });
+  await page.evaluate(() => { const g = navigator.geolocation.getCurrentPosition; navigator.geolocation.getCurrentPosition = (a, b, c) => { window.__geoConta(); g(a, b, c); }; });
+  await registrar();
+  check('supervisor sem foto: avisa e NÃO registra (nem pede GPS)', dialogos.some(d => /obrigatória/.test(d)) && posts.length === 0 && geoPedido === 0, JSON.stringify({ dialogos, posts: posts.length, geoPedido }));
+  await escolherFoto(0); dialogos.length = 0; falharUpload = true;
+  await registrar(); falharUpload = false;
+  check('supervisor com foto que não subiu: avisa e NÃO registra sem foto', dialogos.some(d => /obrigatória/.test(d)) && posts.length === 0, JSON.stringify({ dialogos, posts }));
+  dialogos.length = 0;
+  await registrar();
+  check('supervisor com foto: registra com foto_chegada', posts.length === 1 && /gn-fotos\/visitas\//.test(posts[0][0].foto_chegada || '') && dialogos.length === 0, JSON.stringify(posts));
+  await page.evaluate(d => { document.getElementById('visreg-remoto-' + d).checked = true; _visRemotoToggle(d); }, DIA);
+  check('supervisor no remoto: sem campo de foto (remoto não tem foto)', !(await visivel('visreg-foto-wrap-' + DIA)));
+
+  // ── 8. Foto na saída ────────────────────────────────────────────────────────────────
+  // Visita em andamento (chegada já registrada) com o painel do dia na tela.
+  const abrirSaida = (cargo) => page.evaluate(([dia, cargo]) => {
+    _visSupList = [{ id: 7, nome: 'Carlos', cargo }]; _visSupSelecionado = 'Carlos';
+    _visCalData = [{ id: 501, loja: 'BANGU', data: dia, visitante: 'Carlos', cargo, hora_chegada: '09:00', hora_saida: null, lat: -22.876123, lon: -43.465123, endereco: 'Rua de Teste, 10 - Bangu', foto_chegada: 'https://ncxttwvpafajnilpjbol.supabase.co/storage/v1/object/public/gn-fotos/visitas/c.jpg' }];
+    document.getElementById('_teste-dia').innerHTML = _visCalDetalheHtml(dia);
+    window.__textos = [];
+    return !!document.getElementById('visreg-foto-s501');
+  }, [DIA, cargo]);
+  let patches = [];
+  await ctx.route('**/rest/v1/gn_chk_visitas?id=eq.*', async route => {
+    if (route.request().method() !== 'PATCH') return route.fallback();
+    const b = JSON.parse(route.request().postData() || '{}'); patches.push(b);
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{ id: 501, loja: 'BANGU', data: DIA, visitante: 'Carlos', hora_chegada: '09:00', ...b }]) });
+  });
+  check('visita em andamento mostra "📷 Foto da saída" e a miniatura da chegada', await abrirSaida('administrador')
+    && await page.evaluate(() => /📷 chegada/.test(document.getElementById('_teste-dia').innerText)));
+  const escolherSaida = () => page.evaluate(async () => {
+    const cv = document.createElement('canvas'); cv.width = 800; cv.height = 600; const c = cv.getContext('2d'); c.fillStyle = '#fff'; c.fillRect(0, 0, 800, 600);
+    const blob = await new Promise(r => cv.toBlob(r, 'image/jpeg', 0.9));
+    const dt = new DataTransfer(); dt.items.add(new File([blob], 's.jpg', { type: 'image/jpeg', lastModified: Date.now() }));
+    document.getElementById('visreg-foto-s501').files = dt.files; _visFotoEscolhida('s501');
+  });
+  uploads = []; patches = []; dialogos.length = 0;
+  await escolherSaida();
+  await page.evaluate(async d => { await _visRegistrarSaida('501', d); }, DIA);
+  const txs = await page.evaluate(() => window.__textos.join(' | '));
+  check('saída com foto: sobe a foto e grava foto_saida junto da hora', uploads.length === 1 && patches.length === 1 && /gn-fotos\/visitas\//.test(patches[0].foto_saida || '') && patches[0].hora_saida === '10:30', JSON.stringify(patches));
+  check('…a marca diz "Saída" com data/hora e o GPS da saída', /Saída 12\/10|Saída 01\/10\/2026 10:30/.test(txs) && /GPS -22\.876123/.test(txs), txs);
+  await abrirSaida('administrador'); uploads = []; patches = [];
+  await page.evaluate(async d => { await _visRegistrarSaida('501', d); }, DIA);
+  check('saída sem foto (não supervisor): registra como antes, sem foto_saida', patches.length === 1 && !('foto_saida' in patches[0]) && uploads.length === 0, JSON.stringify(patches));
+  await abrirSaida('supervisor'); uploads = []; patches = []; dialogos.length = 0;
+  await page.evaluate(async d => { await _visRegistrarSaida('501', d); }, DIA);
+  check('supervisor: saída sem foto avisa e NÃO registra', dialogos.some(d => /obrigatória/.test(d)) && patches.length === 0, JSON.stringify({ dialogos, patches }));
+  const ambas = await page.evaluate(() => _visFotoThumbHtml({ foto_chegada: 'https://x.supabase.co/a.jpg', foto_saida: 'https://x.supabase.co/b.jpg' }));
+  check('a visita mostra as duas miniaturas (chegada e saída)', /📷 chegada/.test(ambas) && /📷 saída/.test(ambas));
 
   check('nenhum erro de JavaScript', erros.length === 0, erros.join(' | '));
   await browser.close();
