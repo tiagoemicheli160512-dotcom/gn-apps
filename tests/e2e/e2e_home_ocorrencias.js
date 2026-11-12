@@ -63,7 +63,9 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
   check('…e as pessoas com o que teve (Ana: 1 falta e 1 advertência; Bia: atestado)', /Ana · Salão/.test(r.txt) && /Bia · Cozinha/.test(r.txt), r.txt);
   check('a loja não vê o nome das outras lojas', !/Caxias|Nova América/.test(r.txt));
   r = await render('CAXIAS', 'gerente');
-  check('loja sem ocorrência: 0 em verde e "1º de 3"', r.tile && r.tile.valor === '0' && r.tile.cor === 'green' && r.tile.pos === '1º de 3', JSON.stringify(r.tile));
+  // 12/11/2026: zero não é mérito automático — pode ser escala que não é marcada.
+  check('loja zerada: "1º de 3", em âmbar, com "confira a escala" (não verde)', r.tile && r.tile.valor === '0' && r.tile.cor === 'amber' && r.tile.pos === '1º de 3' && /confira a escala/.test(r.tile.detalhe), JSON.stringify(r.tile));
+  check('…e o cartão pede pra conferir se a escala está sendo marcada', /confira se a escala está sendo marcada/.test(r.txt), r.txt.slice(0, 300));
   r = await render('BANGU', 'garcom');
   check('garçom não vê o quadradinho (mesma plateia do cancelamento)', !(r.tile && r.tile.k) && r.html === '', JSON.stringify(r.tile));
   r = await render('MAGLIA', 'gerente');
@@ -82,6 +84,7 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
   });
   check('Painel: a lista começa por quem precisa de atenção (maior índice) e mostra a posição', painel.ordem.join(',') === 'BANGU:2,CAXIAS:1', painel.ordem.join(','));
   check('…com "2º de 2 · 1,00 por pessoa" na linha da loja e a explicação do índice', /2º de 2<\/b> · 1,00 por pessoa/.test(painel.html) && /1º = menos ocorrências/.test(painel.html), '');
+  check('Painel: a loja zerada (Caxias) leva o aviso de conferir a escala, e o resumo conta as zeradas', /1 loja com zero<\/b> \(Caxias\)/.test(painel.html) && (painel.html.match(/confira se a escala está sendo marcada/g) || []).length >= 2, '');
   check('nenhum erro de JavaScript', erros.length === 0, erros.join(' | '));
   await browser.close();
   console.log(`\n${ok} OK, ${falhou} falhou`);
