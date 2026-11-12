@@ -68,7 +68,12 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
           const erro = { data: null, error: { code: '42703', message: 'column checklist_diario.' + ruins[0] + ' does not exist' } };
           return { eq() { return this; }, single: async () => erro, maybeSingle: async () => erro };
         },
-        upsert: async p => { window.__gravacoes++; window.__srv = Object.assign({}, window.__srv || {}, JSON.parse(JSON.stringify(p))); return { error: null }; },
+        upsert: async p => {
+          const corpo = JSON.parse(JSON.stringify(p));   // o corpo sai na hora da chamada, como no fetch
+          // Seção 10: segura a gravação "na rede" pra a loja mexer enquanto ela está a caminho.
+          if (window.__segurar) { window.__segurado = true; await window.__segurar; }
+          window.__gravacoes++; window.__srv = Object.assign({}, window.__srv || {}, corpo); return { error: null };
+        },
         update: p => ({ eq() { return this; }, then(res) { window.__srv = Object.assign({}, window.__srv || {}, p); res({ error: null }); } }),
       };
     };
@@ -220,6 +225,25 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
   check('item marcado no servidor e em branco no aparelho continua marcado', b.abertura[S0][2].checked === true, JSON.stringify(b.abertura[S0][2]));
   // Navegar de dia (não é abertura do app) não usa a preservação.
   check('a preservação é só da abertura do app (consumida na primeira carga)', await page.evaluate(() => _chkPendentesAntes === null));
+
+  // ══ 10. Mexer ENQUANTO um salvamento está a caminho (12/11/2026) ════════════════════
+  // A mesma janela achada no Gorjetas: depois de gravar, o retrato do "igual ao servidor"
+  // era tirado do state de DEPOIS da resposta. A marcação feita no meio entrava no retrato
+  // sem ter subido — e o salvamento seguinte trocava ela pelo valor do servidor.
+  await semear();
+  await lojaAbre();
+  await page.evaluate(() => { window.__segurado = false; window.__segurar = new Promise(r => { window.__soltar = r; });
+    state.banda = { ...state.banda, nome: 'TRIO DA LOJA' };
+    window.__s1 = saveAll({ silencioso: true }); });
+  await page.waitForFunction(() => window.__segurado === true, null, { timeout: 5000 });
+  await page.evaluate(() => { state.despesas = state.despesas.map(d => d.id === 'd2' ? { ...d, valor: 75 } : d); autoSave(); });
+  await page.evaluate(async () => { window.__segurar = null; window.__soltar(); await window.__s1; });
+  b = await banco();
+  check('(controle) o salvamento que estava a caminho levou o que saiu com ele', b.banda.nome === 'TRIO DA LOJA' && b.despesas.find(d => d.id === 'd2').valor === 50, JSON.stringify([b.banda.nome, b.despesas]));
+  await lojaSalva();
+  b = await banco();
+  check('a despesa corrigida DURANTE o salvamento sobe no seguinte (não volta a 50)', b.despesas.find(d => d.id === 'd2').valor === 75, JSON.stringify(b.despesas));
+  check('…e a tela continua com 75', await page.evaluate(() => state.despesas.find(d => d.id === 'd2').valor === 75));
 
   const errosReais = erros.filter(e => !/Failed to fetch|NetworkError|ERR_/i.test(e));
   check('sem erro de JavaScript', errosReais.length === 0, errosReais.join(' | '));
