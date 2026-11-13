@@ -455,6 +455,7 @@
 <script src="gn-comissoes-calendario.js"></script>
 <script src="gn-presenca.js"></script>
 <script src="gn-avisos.js"></script>
+<script src="gn-visita-checklist.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 </head>
 <body>
@@ -627,6 +628,10 @@
   <div id="pendencias-loja-home-card"></div>
 
   <div id="visita-supervisao-home-card"></div>
+
+  <div id="visita-resultado-home-card"></div>
+
+  <div id="visita-critico-home-card"></div>
 
   <div id="docs-rh-home-card"></div>
 
@@ -1471,6 +1476,214 @@ async function _renderVisitaSupervisaoHome(mostrar, sess, isMasterAtivo) {
     <div style="font-size:10.5px;color:var(--t3);margin-top:4px">${tituloLinha}</div>
     ${itens}
   </div>`;
+}
+
+// ── RESULTADO DA VISITA (Home da loja, 7 dias a partir da data da visita) ─────────────
+// O check-list finalizado no Painel › Visitas aparece aqui pra gerência da loja: nota,
+// nota por setor, críticos, plano de ação, fotos — e o histórico do que foi feito nos
+// últimos 7 dias. Tocar abre o check-list inteiro, só leitura (mesma tela do Painel).
+// Quem vê: gerente / sub-gerente da loja e o mestre olhando a loja. O resto da equipe não.
+const VCK_HOME_DIAS = 7;
+let _vckHomeLinhas = [];
+function _vckResumoLinha(l) {
+  const G = window.GNVck, d = l.dados || {};
+  const r = { tipo: l.tipo, nota: null, notaTxt: '—', classe: { label: '', cor: 'var(--t3)' }, setores: [], criticos: [], plano: 0, fotos: 0 };
+  // Fotos: qualquer campo de foto preenchido no registro.
+  (function contar(o) { if (!o || typeof o !== 'object') return; Object.entries(o).forEach(([k, v]) => {
+    if (typeof v === 'string' && /^https:\/\//.test(v) && /foto/i.test(k)) r.fotos++; else if (v && typeof v === 'object') contar(v); }); })(d);
+  if (l.tipo === 'salao') {
+    const c = G.calcSalao(d); r.nota = c.nota; r.notaTxt = c.nota == null ? '—' : c.nota + '/100'; r.classe = G.classSalao(c.nota);
+    r.criticos = c.criticos.map(x => x.label);
+    r.plano = Object.values(d.acoes && !Array.isArray(d.acoes) ? d.acoes : {}).filter(x => String(x || '').trim()).length || (Array.isArray(d.acoes) ? d.acoes.filter(x => String(x || '').trim()).length : 0);
+    G.SUP_SETORES.forEach(st => {
+      const it = (d.itens || {})[st.key] || {};
+      const vs = st.itens.map(i => it[i.key]).filter(v => v !== undefined && v !== null && v !== '').map(Number);
+      if (vs.length) r.setores.push({ label: st.label, icon: st.icon, txt: (vs.reduce((a, b) => a + b, 0) / vs.length).toFixed(1).replace('.', ','), ruim: vs.reduce((a, b) => a + b, 0) / vs.length < 7 });
+    });
+  } else if (l.tipo === 'cozinha') {
+    const c = G.calcCozinha(d); r.nota = c.nota; r.notaTxt = c.nota == null ? '—' : c.nota + '%'; r.classe = G.classCozinha(c.nota, c.criticos.length > 0);
+    r.criticos = c.criticos.map(x => x.label);
+    r.plano = Object.values(d.acoes && !Array.isArray(d.acoes) ? d.acoes : {}).filter(x => String(x || '').trim()).length;
+    G.COZ_SETORES.forEach(st => {
+      const it = (d.itens || {})[st.key] || {};
+      const cc = st.itens.filter(i => it[i.key] === 'C').length, nc = st.itens.filter(i => it[i.key] === 'NC').length;
+      if (cc + nc) r.setores.push({ label: st.label.replace(/^\d+\.\s*/, ''), icon: st.icon, txt: Math.round(cc / (cc + nc) * 100) + '%', ruim: nc > 0 });
+    });
+  } else {
+    let pior = null;
+    G.AUDP_TIPOS.forEach(t => {
+      const c = G.calcPadrao(d, t.key), a = d[t.key] || {};
+      if (!c.avaliados) return;
+      const inf = G.infoPadrao(c.status);
+      r.setores.push({ label: t.label, icon: t.icon, txt: (c.nota == null ? '—' : String(c.nota).replace('.', ',') + '%') + (a.finalizada ? '' : ' (aberta)'), ruim: c.status !== 'excelente' });
+      t.itens.forEach((it, i) => { if (((a.itens || {})[i] || {}).resp === 'NAO' && it.crit === 'CRITICO') r.criticos.push(it.label); });
+      const pa = a.planoAcao ? Object.values(a.planoAcao) : []; r.plano += pa.length;
+      if (c.nota != null && (pior === null || c.nota < pior.nota)) pior = { nota: c.nota, inf };
+    });
+    if (pior) { r.nota = pior.nota; r.notaTxt = String(pior.nota).replace('.', ',') + '%'; r.classe = { label: pior.inf.emoji + ' ' + pior.inf.label, cor: pior.inf.cor }; }
+    if (l.nota != null && r.setores.length <= 1) r.notaTxt = String(l.nota).replace('.', ',') + '%';
+  }
+  return r;
+}
+async function _renderVisitaResultadoHome(mostrar, sess, isMasterAtivo) {
+  const el = document.getElementById('visita-resultado-home-card');
+  if (!el) return;
+  const cargo = String((sess && sess.cargo) || '').toLowerCase();
+  const pode = isMasterAtivo ? !!masterLoja : CIENTE_CARGOS.includes(cargo);
+  const limpar = () => { el.innerHTML = ''; _vckAlertaLinhas = []; _vckRenderAlerta(); };
+  if (!mostrar || !sess || !pode || !window.GNVck) { limpar(); return; }
+  const loja = (isMasterAtivo && masterLoja) ? masterLoja : sess.loja;
+  if (!LOJAS_LISTA.includes(loja)) { limpar(); return; }
+  // Maglia: card e alerta são novos e o pedido não citou a Maglia (regra do projeto).
+  if (loja === LOJA_FORA_CONSOLIDADO) { limpar(); return; }
+  const chkKey = LOJA_DB_KEY[loja] || loja;
+  const iso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const desde = new Date(); desde.setDate(desde.getDate() - (VCK_HOME_DIAS - 1));
+  // O alerta de crítico olha mais pra trás: se a gerência não confirmou em 7 dias, o aviso
+  // não pode sumir junto com o card — some quando alguém dá ciência.
+  const desdeAlerta = new Date(); desdeAlerta.setDate(desdeAlerta.getDate() - (VCK_ALERTA_DIAS - 1));
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_visita_checklist?loja=eq.${encodeURIComponent(chkKey)}&finalizada=eq.true&visita_id=not.is.null&data=gte.${iso(desdeAlerta)}&order=data.desc,finalizada_em.desc&select=*`, H, 'vckHome:rows', []);
+  const todas = rows || [];
+  _vckHomeLinhas = todas.filter(l => l.data >= iso(desde));
+  _vckAlertaLinhas = todas.filter(l => !l.ciente_em && _vckResumoLinha(l).criticos.length);
+  _vckAlertaLoja = chkKey;
+  _vckRenderAlerta();
+  el.innerHTML = _vckHomeLinhas.length ? _vckHomeCardHtml(_vckHomeLinhas, new Date()) : '';
+}
+
+// ── Alerta de crítico (13/11/2026) ──
+// Visita finalizada com item crítico vira linha urgente em "⚡ Precisa de você hoje" até a
+// gerência confirmar que viu — com SENHA, mesmo padrão da ciência do resultado do mês: sem
+// senha, qualquer um com o celular daria a ciência e o aviso perderia o sentido.
+const VCK_ALERTA_DIAS = 30;
+let _vckAlertaLinhas = [], _vckAlertaLoja = null, _vckAlertaForm = false, _vckAlertaErro = '', _vckAlertaSalvando = false;
+function _vckPrazoLinha(l) {
+  // Salão e cozinha: crítico é corrigido em até 24h. Auditoria: o prazo mais curto do plano.
+  const d = new Date(l.data + 'T12:00:00');
+  if (l.tipo === 'padrao') {
+    const prazos = [];
+    window.GNVck.AUDP_TIPOS.forEach(t => Object.values(((l.dados || {})[t.key] || {}).planoAcao || {}).forEach(p => { if (p && (p.prazo || p.prazoMax)) prazos.push(p.prazo || p.prazoMax); }));
+    if (prazos.length) return prazos.sort()[0];
+  }
+  d.setDate(d.getDate() + 1);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function _vckRenderAlerta() {
+  const el = document.getElementById('visita-critico-home-card');
+  if (!el) return;
+  const esc = s => window.escapeHtml ? window.escapeHtml(String(s == null ? '' : s)) : String(s == null ? '' : s);
+  const L = _vckAlertaLinhas || [];
+  if (!L.length) { el.innerHTML = ''; _homeMarcar(el, '', {}); return; }
+  const dm = s => String(s || '').split('-').reverse().slice(0, 2).join('/');
+  const prazo = L.map(_vckPrazoLinha).sort()[0];
+  const hj = new Date(); const hojeIso = hj.getFullYear() + '-' + String(hj.getMonth() + 1).padStart(2, '0') + '-' + String(hj.getDate()).padStart(2, '0');
+  const atrasado = prazo < hojeIso;
+  const prazoTxt = atrasado ? 'atrasado desde ' + dm(prazo) : 'até ' + dm(prazo);
+  const nCrit = L.reduce((a, l) => a + _vckResumoLinha(l).criticos.length, 0);
+  const linhas = L.map((l, i) => {
+    const r = _vckResumoLinha(l), t = window.GNVck.TIPOS[l.tipo] || { icon: '📋', label: l.tipo };
+    return `<div style="border-top:1px solid rgba(220,38,38,.15);padding:8px 0">
+      <div style="display:flex;justify-content:space-between;gap:8px;font-size:11.5px;font-weight:800;color:var(--t1)"><span>${t.icon} ${esc(t.label)} · ${dm(l.data)}</span><span style="color:#dc2626;white-space:nowrap">${_vckPrazoLinha(l) < hojeIso ? '⏰ atrasado · ' : ''}prazo ${dm(_vckPrazoLinha(l))}</span></div>
+      <div style="font-size:10.5px;color:#b91c1c;margin-top:2px;line-height:1.4">${r.criticos.map(esc).join(' · ')}</div>
+      <button type="button" onclick="_vckAlertaAbrir(${i})" style="background:none;border:none;padding:4px 0 0;color:#4f46e5;font-size:10.5px;font-weight:800;cursor:pointer;font-family:inherit">Ver check-list e plano de ação ›</button>
+    </div>`;
+  }).join('');
+  const form = _vckAlertaForm ? `<div style="margin-top:8px;background:var(--fill-sutil);border:1px solid rgba(0,0,0,.1);border-radius:10px;padding:11px">
+      <div style="font-size:10.5px;font-weight:800;color:var(--t2);margin-bottom:7px">SENHA DA GERÊNCIA OU SUB-GERÊNCIA</div>
+      <input id="vck-ciente-user" type="text" placeholder="Usuário" autocomplete="off" style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.14);border-radius:8px;padding:9px;font-size:16px;margin-bottom:6px;font-family:inherit">
+      <input id="vck-ciente-senha" type="password" placeholder="Senha" autocomplete="off" onkeydown="if(event.key==='Enter')_vckCienteConfirmar()" style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.14);border-radius:8px;padding:9px;font-size:16px;font-family:inherit">
+      ${_vckAlertaErro ? `<div style="font-size:11px;color:var(--txt-red,#dc2626);margin-top:7px;line-height:1.4">${esc(_vckAlertaErro)}</div>` : ''}
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button type="button" onclick="_vckCienteConfirmar()" ${_vckAlertaSalvando ? 'disabled' : ''} style="flex:1;background:#dc2626;color:#fff;border:none;border-radius:8px;padding:9px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">${_vckAlertaSalvando ? 'Registrando…' : 'Confirmar ciência'}</button>
+        <button type="button" onclick="_vckAlertaForm=false;_vckAlertaErro='';_vckRenderAlerta()" style="flex:1;background:var(--fill-sutil2);border:1px solid rgba(0,0,0,.1);color:var(--t1);border-radius:8px;padding:9px;font-size:12px;cursor:pointer;font-family:inherit">Cancelar</button>
+      </div></div>`
+    : `<button type="button" onclick="_vckAlertaForm=true;_vckRenderAlerta();setTimeout(()=>{const u=document.getElementById('vck-ciente-user');if(u)u.focus();},50)" style="width:100%;margin-top:8px;background:#dc2626;color:#fff;border:none;border-radius:10px;padding:10px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">✓ Estou ciente — vou cumprir o plano</button>`;
+  el.innerHTML = `<div style="background:rgba(220,38,38,.06);border:1px solid rgba(220,38,38,.3);border-left:3px solid #dc2626;border-radius:18px;padding:14px 16px;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05)">
+    <div style="font-size:12.5px;font-weight:900;color:#b91c1c">🚨 Visita com ${nCrit === 1 ? 'item crítico' : nCrit + ' itens críticos'}</div>
+    <div style="font-size:10.5px;color:var(--t2);margin:2px 0 4px">A supervisão marcou crítico. Plano de ação <b>${prazoTxt}</b> — a gerência confirma que viu.</div>
+    ${linhas}${form}
+  </div>`;
+  _homeMarcar(el, 'acao', { icone: '🚨', titulo: 'Visita com crítico', urgente: true, resumo: 'plano de ação ' + prazoTxt + ' · confirmar ciência' });
+}
+function _vckAlertaAbrir(i) {
+  const l = _vckAlertaLinhas[i];
+  if (!l || !window.GNVck) return;
+  _vckConfig();
+  window.GNVck.abrirLeitura(l);
+}
+async function _vckCienteConfirmar() {
+  if (_vckAlertaSalvando) return;
+  const user = ((document.getElementById('vck-ciente-user') || {}).value || '').trim();
+  const pass = (document.getElementById('vck-ciente-senha') || {}).value || '';
+  if (!user || !pass) { _vckAlertaErro = 'Preencha usuário e senha.'; _vckRenderAlerta(); return; }
+  _vckAlertaSalvando = true; _vckAlertaErro = ''; _vckRenderAlerta();
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+  try {
+    const auth = await window.gnFetchJson(`${SB_URL}/rest/v1/rpc/verificar_login`, H, 'vckCiente:auth', null,
+      { method: 'POST', body: JSON.stringify({ p_nome: user, p_senha: pass, p_app: 'gn-home:ciente-visita' }) });
+    if (auth === null) { _vckAlertaErro = 'Sem conexão. Confere a internet e tenta de novo.'; return; }
+    if (!auth.length) { _vckAlertaErro = 'Usuário ou senha incorretos.'; return; }
+    const cargo = String(auth[0].cargo || '').toLowerCase();
+    if (!CIENTE_CARGOS.includes(cargo)) { _vckAlertaErro = `A ciência é da gerência e da sub-gerência. ${auth[0].nome} está como ${auth[0].cargo || 'sem cargo'}.`; return; }
+    const ids = _vckAlertaLinhas.map(l => l.id);
+    const corpo = { ciente_nome: auth[0].nome, ciente_cargo: cargo, ciente_em: new Date().toISOString() };
+    const r = await fetch(`${SB_URL}/rest/v1/gn_visita_checklist?id=in.(${ids.join(',')})`, { method: 'PATCH', headers: { ...H, Prefer: 'return=representation' }, body: JSON.stringify(corpo) });
+    const gravou = r.ok ? await r.json() : [];
+    // PATCH sem linha casada devolve 200 vazio — confere que gravou de verdade.
+    if (!Array.isArray(gravou) || gravou.length !== ids.length) throw new Error('ciência não gravou (' + r.status + ')');
+    _vckAlertaLinhas = [];
+    _vckHomeLinhas.forEach(l => { if (ids.includes(l.id)) Object.assign(l, corpo); });
+    _vckAlertaForm = false;
+    const card = document.getElementById('visita-resultado-home-card');
+    if (card && _vckHomeLinhas.length) card.innerHTML = _vckHomeCardHtml(_vckHomeLinhas, new Date());
+  } catch (e) {
+    window.gnLogError && window.gnLogError('vckCiente:confirmar', e);
+    _vckAlertaErro = 'Não consegui registrar agora. Confere a internet e tenta de novo.';
+  } finally {
+    _vckAlertaSalvando = false;
+    _vckRenderAlerta();
+  }
+}
+function _vckHomeCardHtml(linhas, hoje) {
+  const esc = s => window.escapeHtml ? window.escapeHtml(String(s == null ? '' : s)) : String(s == null ? '' : s);
+  const G = window.GNVck;
+  const dm = s => String(s || '').split('-').reverse().slice(0, 2).join('/');
+  const ate = s => { const d = new Date(s + 'T12:00:00'); d.setDate(d.getDate() + VCK_HOME_DIAS - 1); return String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0'); };
+  const itens = linhas.map((l, i) => {
+    const r = _vckResumoLinha(l), t = G.TIPOS[l.tipo] || { icon: '📋', label: l.tipo };
+    const setores = r.setores.map(s => `<span style="display:inline-flex;gap:3px;align-items:center;background:${s.ruim ? 'rgba(220,38,38,.08)' : 'var(--fill-sutil)'};border-radius:999px;padding:2px 8px;font-size:10px;color:${s.ruim ? '#dc2626' : 'var(--t2)'};font-weight:700;white-space:nowrap">${s.icon} ${esc(s.label)} ${esc(s.txt)}</span>`).join('');
+    const crit = r.criticos.length ? `<div style="margin-top:6px;font-size:10.5px;color:#dc2626;font-weight:700;line-height:1.4">🚨 ${r.criticos.length} crítico${r.criticos.length > 1 ? 's' : ''}: ${esc(r.criticos.slice(0, 2).join(' · '))}${r.criticos.length > 2 ? ' · +' + (r.criticos.length - 2) : ''}</div>` : '';
+    const obs = String((l.dados || {}).obs || '').trim();
+    const extra = [r.plano ? `⚡ plano de ação: ${r.plano} ite${r.plano > 1 ? 'ns' : 'm'}` : '', r.fotos ? `📷 ${r.fotos} foto${r.fotos > 1 ? 's' : ''}` : ''].filter(Boolean).join(' · ');
+    return `<button type="button" onclick="_vckHomeAbrir(${i})" style="display:block;width:100%;text-align:left;background:none;border:none;border-top:1px solid rgba(0,0,0,.06);padding:9px 0;cursor:pointer;font-family:inherit;color:var(--t1)">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
+        <span style="font-size:12px;font-weight:800;min-width:0">${t.icon} ${esc(t.label)}</span>
+        <span style="font-size:16px;font-weight:900;color:${r.classe.cor};white-space:nowrap;font-variant-numeric:tabular-nums">${esc(r.notaTxt)}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;gap:8px;font-size:10.5px;color:var(--t3);margin-top:1px">
+        <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.visitante || l.finalizada_por || '—')} · ${dm(l.data)}</span>
+        <span style="font-weight:800;color:${r.classe.cor};white-space:nowrap">${esc(r.classe.label)}</span>
+      </div>
+      ${setores ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px">${setores}</div>` : ''}
+      ${crit}
+      ${extra ? `<div style="margin-top:5px;font-size:10.5px;color:var(--t2);font-weight:700">${extra}</div>` : ''}
+      ${r.criticos.length ? (l.ciente_em ? `<div style="margin-top:5px;font-size:10.5px;color:#047857;font-weight:700">✓ Gerência ciente: ${esc(l.ciente_nome || '')} · ${dm(String(l.ciente_em).slice(0, 10))}</div>` : `<div style="margin-top:5px;font-size:10.5px;color:#b91c1c;font-weight:800">⏳ Aguardando ciência da gerência</div>`) : ''}
+      ${obs ? `<div style="margin-top:5px;font-size:10.5px;color:var(--t3);line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">📝 ${esc(obs)}</div>` : ''}
+      <div style="margin-top:5px;font-size:10px;color:#4f46e5;font-weight:800">Ver tudo › <span style="color:var(--t4);font-weight:600">(aparece aqui até ${ate(l.data)})</span></div>
+    </button>`;
+  }).join('');
+  return `<div style="background:rgba(99,102,241,.05);border:1px solid rgba(99,102,241,.2);border-left:3px solid #6366f1;border-radius:18px;padding:14px 16px;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05)">
+    <div style="font-size:12px;font-weight:800;color:var(--t1)">📋 Resultado das visitas</div>
+    <div style="font-size:10.5px;color:var(--t3);margin:2px 0 4px">Check-lists finalizados pela supervisão nos últimos ${VCK_HOME_DIAS} dias.</div>
+    ${itens}
+  </div>`;
+}
+function _vckHomeAbrir(i) {
+  const l = _vckHomeLinhas[i];
+  if (!l || !window.GNVck) return;
+  _vckConfig();
+  window.GNVck.abrirLeitura(l);
 }
 
 // ── VENDA DO MÊS vs MÊS ANTERIOR (card fixo, logo abaixo do nome da loja) ────────────
@@ -3248,7 +3461,7 @@ const PRA_HOJE_CARGOS = ['gerente', 'sub_gerente'];
    e redesenhando no lugar. Um marcador invisível guarda a posição original pra quando o card
    deixar de pedir ação e precisar voltar. */
 const HOME_ORG_IDS = [   // ordem das linhas em "Precisa de você hoje"
-  'pra-hoje-card', 'validades-home-card', 'cancel-ontem-home-card', 'pendencias-loja-home-card',
+  'pra-hoje-card', 'visita-critico-home-card', 'validades-home-card', 'cancel-ontem-home-card', 'pendencias-loja-home-card',
   'xml-mes-home-card', 'carnes-docs-home-card', 'avaliacoes-aviso-home-card',
   'contagem-segunda-home-card', 'barris-semanal-home-card', 'banco-horas-fecha-home-card',
 ];
@@ -3350,7 +3563,7 @@ function _homeOrganizarResultado(esc) {
    grupo tem conteúdo — card vazio (a senha não pode ver) continua sem aparecer. */
 const HOME_GRUPOS = [
   { sec: 'home-sec-fech', titulo: '🗂 Fechamentos', ids: ['mes-anterior-home-card', 'fechamento-semana-home-card'] },
-  { sec: 'home-sec-equipe', titulo: '👥 Equipe e agenda', ids: ['escala-dia-home-card', 'visita-supervisao-home-card', 'ocorrencias-semana-home-card', 'docs-rh-home-card', 'datas-especiais-home-card'] },
+  { sec: 'home-sec-equipe', titulo: '👥 Equipe e agenda', ids: ['escala-dia-home-card', 'visita-supervisao-home-card', 'visita-resultado-home-card', 'ocorrencias-semana-home-card', 'docs-rh-home-card', 'datas-especiais-home-card'] },
 ];
 function _homeOrganizarGrupos() {
   HOME_GRUPOS.forEach(g => {
@@ -7650,6 +7863,7 @@ function _refreshPermUI(sess) {
   _renderVendaMesHome(_mostrarCards, sess, isMaster);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
   _renderVisitaSupervisaoHome(_mostrarCards, sess, isMaster);
+  _renderVisitaResultadoHome(_mostrarCards, sess, isMaster);
   _renderFechamentoSemanaHome(_mostrarCards, sess, isMaster);
   _renderMesAnteriorHome(_mostrarCards, sess, isMaster);
   _renderDocsRHHome(_mostrarCards, sess, isMaster);
@@ -7914,6 +8128,7 @@ function showHome(sess) {
   _renderVendaMesHome(_mostrarCards, sess, isMaster);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
   _renderVisitaSupervisaoHome(_mostrarCards, sess, isMaster);
+  _renderVisitaResultadoHome(_mostrarCards, sess, isMaster);
   _renderFechamentoSemanaHome(_mostrarCards, sess, isMaster);
   _renderMesAnteriorHome(_mostrarCards, sess, isMaster);
   _renderDocsRHHome(_mostrarCards, sess, isMaster);
@@ -8773,6 +8988,7 @@ function _setVisSupView(view) {
   _renderVisitasSupContent();
   if (view === 'cobertura') { if (!_coberturaVisData) _carregarCoberturaVisitas(); }
   else if (view === 'provisao') { if (!_visProvData.length) _carregarVisProvisao(); }
+  else if (view === 'reincidencia') { if (!_visReincData) _carregarVisReincidencia(); }
   else if (_visSupSelecionado) {
     if (view === 'calendario') _carregarVisCalendario();
     else _carregarVisitasSupData();
@@ -8928,7 +9144,7 @@ function _renderVisitasSupContent() {
   const el = document.getElementById('visitas-sup-content');
   if (!el) return;
 
-  const tabs = [['calendario','📅 Calendário'],['relatorio','📊 Relatório'],['cobertura','🗺️ Cobertura'],['provisao','🗓 Provisão']];
+  const tabs = [['calendario','📅 Calendário'],['relatorio','📊 Relatório'],['cobertura','🗺️ Cobertura'],['provisao','🗓 Provisão'],['reincidencia','🔁 Reincidência']];
   const switcherHtml = `<div style="display:flex;gap:6px;margin-bottom:14px;overflow-x:auto;-webkit-overflow-scrolling:touch">${tabs.map(([v,lbl]) => {
     const ativo = _visSupView === v;
     return `<button onclick="_setVisSupView('${v}')" style="flex:1;padding:7px 0;border-radius:8px;border:1px solid ${ativo?'#6366f1':'var(--t4)'};background:${ativo?'rgba(99,102,241,.25)':'var(--t4)'};color:var(--t1);font-size:11px;font-weight:700;font-family:inherit;cursor:pointer;white-space:nowrap">${lbl}</button>`;
@@ -8937,6 +9153,7 @@ function _renderVisitasSupContent() {
   const body = _visSupView === 'calendario' ? _renderVisCalendarioTab()
     : _visSupView === 'cobertura' ? _renderVisCoberturaTab()
     : _visSupView === 'provisao' ? _renderVisProvisaoTab()
+    : _visSupView === 'reincidencia' ? _renderVisReincidenciaTab()
     : _renderVisRelatorioTab();
 
   el.innerHTML = switcherHtml + body;
@@ -8955,6 +9172,129 @@ function _visEhRemoto(v) { return !!v && v.tipo_visita === TIPO_VISITA_REMOTO; }
 function _visSeloHtml(v) {
   if (!_visEhRemoto(v)) return '';
   return ` <span style="font-size:9px;font-weight:800;color:#4f46e5;background:rgba(99,102,241,.14);border-radius:6px;padding:2px 6px;margin-left:4px;white-space:nowrap">💻 Remoto</span>`;
+}
+
+// ── Reincidência (13/11/2026) ───────────────────────────────────────────────────────
+// Item que falha de novo na visita seguinte é plano de ação que não foi cumprido. Aqui
+// fica, loja por loja, o que reprovou em mais de uma visita e quantas vezes SEGUIDAS
+// (contando da visita mais recente pra trás) — a sequência é o sinal; o total dá o contexto.
+// Reprovou = nota abaixo de 7 no salão, "Não conforme" na cozinha, "NÃO" na auditoria.
+// Fonte: check-lists finalizados do Painel (gn_visita_checklist) + os do app Check-list de
+// antes da mudança (checklist_diario), pra não começar do zero. Maglia fica fora (regra do
+// projeto: só entra quando é citada).
+const VIS_REINC_DIAS = 90;
+let _visReincData = null, _visReincCarregando = false, _visReincLoja = '';
+function _vckReincidencia(registros) {
+  const G = window.GNVck;
+  const porItem = {};   // loja|chave → { loja, chave, label, origem, critico, avals:[{data, falhou}] }
+  const add = (loja, data, chave, label, critico, tipoLabel, falhou) => {
+    const k = loja + '|' + chave;
+    (porItem[k] = porItem[k] || { loja, chave, label, critico, tipoLabel, avals: [] }).avals.push({ data, falhou });
+  };
+  (registros || []).forEach(r => {
+    const d = r.dados || {}, it = d.itens || {};
+    if (r.tipo === 'salao') G.SUP_SETORES.forEach(st => st.itens.forEach(i => {
+      const v = (it[st.key] || {})[i.key];
+      if (v === undefined || v === null || v === '') return;
+      add(r.loja, r.data, 'salao|' + st.key + '|' + i.key, i.label, !!i.critico, '🎯 Salão', Number(v) < 7);
+    }));
+    else if (r.tipo === 'cozinha') G.COZ_SETORES.forEach(st => st.itens.forEach(i => {
+      const v = (it[st.key] || {})[i.key];
+      if (!v || v === 'NA') return;
+      add(r.loja, r.data, 'cozinha|' + st.key + '|' + i.key, i.label, !!i.critico, '🧼 Cozinha', v === 'NC');
+    }));
+    else if (r.tipo === 'padrao') G.AUDP_TIPOS.forEach(t => {
+      const a = d[t.key];
+      if (!a || !a.finalizada) return;
+      t.itens.forEach((i, idx) => {
+        const v = ((a.itens || {})[idx] || {}).resp;
+        if (!v || v === 'NA') return;
+        add(r.loja, r.data, 'padrao|' + t.key + '#' + idx, i.label, i.crit === 'CRITICO', '🔍 ' + t.label, v === 'NAO');
+      });
+    });
+  });
+  const lista = Object.values(porItem).map(x => {
+    x.avals.sort((a, b) => b.data.localeCompare(a.data));
+    let seguidas = 0; for (const a of x.avals) { if (a.falhou) seguidas++; else break; }
+    x.seguidas = seguidas;
+    x.falhas = x.avals.filter(a => a.falhou).length;
+    x.ultima = x.avals[0].data;
+    return x;
+  }).filter(x => x.falhas >= 2);
+  lista.sort((a, b) => b.seguidas - a.seguidas || b.falhas - a.falhas || (b.critico - a.critico) || a.label.localeCompare(b.label));
+  return lista;
+}
+async function _carregarVisReincidencia() {
+  if (_visReincCarregando || !window.GNVck) return;
+  _visReincCarregando = true;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const d0 = new Date(); d0.setDate(d0.getDate() - VIS_REINC_DIAS);
+  const desde = d0.getFullYear() + '-' + String(d0.getMonth() + 1).padStart(2, '0') + '-' + String(d0.getDate()).padStart(2, '0');
+  try {
+    const [novos, antigos] = await Promise.all([
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_visita_checklist?finalizada=eq.true&visita_id=not.is.null&data=gte.${desde}&select=loja,data,tipo,dados`, H, 'reinc:novos', null),
+      window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${desde}&data_operacao=lt.${VCK_INICIO}&or=(supervisao->>fechada.eq.true,supervisao_cozinha->>fechada.eq.true,auditorias_padrao.neq.%7B%7D)&select=loja,data_operacao,supervisao,supervisao_cozinha,auditorias_padrao`, H, 'reinc:antigos', null),
+    ]);
+    if (novos === null || antigos === null) { _visReincData = { erro: true }; return; }
+    const regs = novos.map(r => ({ loja: r.loja, data: r.data, tipo: r.tipo, dados: r.dados }));
+    // Do app Check-list só entra o que foi FECHADO — avaliação largada no meio (com os itens
+    // que sumiam: em 13/11 a Boulevard tinha 1 item de 30) contaria como visita e distorceria
+    // a sequência. O filtro já vem do servidor: dos ~1.000 dias de 90 dias, só uns 4 servem.
+    const fechado = o => o && o.itens && Object.keys(o.itens).length && o.fechada === true;
+    antigos.forEach(r => {
+      if (fechado(r.supervisao)) regs.push({ loja: r.loja, data: r.data_operacao, tipo: 'salao', dados: r.supervisao });
+      if (fechado(r.supervisao_cozinha)) regs.push({ loja: r.loja, data: r.data_operacao, tipo: 'cozinha', dados: r.supervisao_cozinha });
+      if (r.auditorias_padrao && Object.values(r.auditorias_padrao).some(a => a && a.finalizada)) regs.push({ loja: r.loja, data: r.data_operacao, tipo: 'padrao', dados: r.auditorias_padrao });
+    });
+    // Lojas que esta sessão enxerga (supervisor com rota só vê a rota), sem a Maglia.
+    const permitidas = new Set(LOJAS_LISTA.filter(k => k !== LOJA_FORA_CONSOLIDADO).map(k => LOJA_DB_KEY[k] || k));
+    const filtrados = regs.filter(r => permitidas.has(r.loja));
+    _visReincData = { itens: _vckReincidencia(filtrados), avaliacoes: filtrados.length, lojas: [...new Set(filtrados.map(r => r.loja))] };
+  } catch (e) {
+    window.gnLogError && window.gnLogError('reinc:carregar', e);
+    _visReincData = { erro: true };
+  } finally {
+    _visReincCarregando = false;
+    if (_visSupView === 'reincidencia') _renderVisitasSupContent();
+  }
+}
+function _renderVisReincidenciaTab() {
+  const esc = s => window.escapeHtml ? window.escapeHtml(String(s == null ? '' : s)) : String(s == null ? '' : s);
+  const D = _visReincData;
+  if (!D) return `<div style="text-align:center;padding:24px;color:var(--t3);font-size:12px">Carregando reincidências…</div>`;
+  if (D.erro) return `<div style="text-align:center;padding:24px;color:var(--t2);font-size:12px">Não deu pra carregar agora.<br><button onclick="_visReincData=null;_carregarVisReincidencia();_renderVisitasSupContent()" style="margin-top:10px;padding:8px 14px;border-radius:9px;border:1px solid rgba(0,0,0,.15);background:var(--s2);color:var(--t1);font-weight:700;cursor:pointer;font-family:inherit">Tentar de novo</button></div>`;
+  const dm = s => String(s || '').split('-').reverse().slice(0, 2).join('/');
+  const nome = l => LOJA_DISPLAY[_normLoja(l)] || l;
+  const lojasCom = [...new Set(D.itens.map(x => x.loja))];
+  const filtro = _visReincLoja && lojasCom.includes(_visReincLoja) ? _visReincLoja : '';
+  const itens = filtro ? D.itens.filter(x => x.loja === filtro) : D.itens;
+  const chips = lojasCom.length > 1 ? `<div style="display:flex;gap:5px;overflow-x:auto;margin-bottom:10px;padding-bottom:2px">${[''].concat(lojasCom).map(l => {
+    const on = l === filtro, n = l ? D.itens.filter(x => x.loja === l).length : D.itens.length;
+    return `<button onclick="_visReincLoja='${esc(l)}';_renderVisitasSupContent()" style="flex-shrink:0;padding:5px 10px;border-radius:999px;font-size:10.5px;font-weight:800;font-family:inherit;cursor:pointer;border:1px solid ${on ? '#6366f1' : 'rgba(0,0,0,.12)'};background:${on ? 'rgba(99,102,241,.16)' : 'var(--s2)'};color:var(--t1);white-space:nowrap">${l ? esc(nome(l)) : 'Todas'} · ${n}</button>`;
+  }).join('')}</div>` : '';
+  const porLoja = {};
+  itens.forEach(x => { (porLoja[x.loja] = porLoja[x.loja] || []).push(x); });
+  const cards = Object.entries(porLoja).sort((a, b) => Math.max(...b[1].map(x => x.seguidas)) - Math.max(...a[1].map(x => x.seguidas)) || b[1].length - a[1].length).map(([loja, xs]) => `
+    <div style="background:var(--fill-sutil);border-left:3px solid ${COR_LOJA[_normLoja(loja)] || '#888'};border-radius:0 12px 12px 0;padding:10px 12px;margin-bottom:10px">
+      <div style="font-size:12.5px;font-weight:800;color:var(--t1);margin-bottom:4px">${esc(nome(loja))} <span style="font-weight:600;color:var(--t3);font-size:10.5px">· ${xs.length} ite${xs.length > 1 ? 'ns' : 'm'} reincidente${xs.length > 1 ? 's' : ''}</span></div>
+      ${xs.map(x => {
+        const cor = x.seguidas >= 3 ? '#dc2626' : x.seguidas === 2 ? '#d97706' : 'var(--t3)';
+        const bolinhas = x.avals.slice(0, 6).reverse().map(a => `<span title="${dm(a.data)}" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${a.falhou ? '#dc2626' : '#16a34a'};margin-right:3px"></span>`).join('');
+        return `<div style="border-top:1px solid rgba(0,0,0,.06);padding:7px 0">
+          <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
+            <span style="font-size:11.5px;font-weight:700;color:var(--t1);line-height:1.35;min-width:0">${x.critico ? '<span style="color:#dc2626">⚡</span> ' : ''}${esc(x.label)}</span>
+            <span style="font-size:11px;font-weight:900;color:${cor};white-space:nowrap">${x.seguidas >= 2 ? x.seguidas + 'x seguidas' : x.falhas + ' de ' + x.avals.length}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-top:3px">
+            <span style="font-size:10px;color:var(--t3)">${esc(x.tipoLabel)} · reprovou ${x.falhas} de ${x.avals.length} · última ${dm(x.ultima)}</span>
+            <span style="white-space:nowrap">${bolinhas}</span>
+          </div></div>`;
+      }).join('')}
+    </div>`).join('');
+  const semReinc = D.lojas.filter(l => !lojasCom.includes(l));
+  const topo = `<div style="font-size:11px;color:var(--t3);margin-bottom:10px;line-height:1.45">Itens que reprovaram em mais de uma visita nos últimos ${VIS_REINC_DIAS} dias (nota abaixo de 7, não conforme ou NÃO). <b>Seguidas</b> conta da visita mais recente pra trás. Bolinhas: as últimas avaliações do item, da mais antiga à mais recente.</div>`;
+  if (!D.itens.length) return topo + `<div style="text-align:center;padding:20px;color:var(--t2);font-size:12px">✅ Nenhum item reprovou em mais de uma visita${D.avaliacoes ? '' : ' — ainda não há check-list finalizado no período'}.</div>`;
+  return topo + chips + cards + (semReinc.length && !filtro ? `<div style="font-size:10.5px;color:var(--t3);margin-top:4px">✅ Sem reincidência: ${semReinc.map(l => esc(nome(l))).join(', ')}</div>` : '');
 }
 
 function _renderVisRelatorioTab() {
@@ -9619,7 +9959,64 @@ function _renderVisCalendarioTab() {
   return html;
 }
 
+// ── Check-list da visita (Supervisão salão / cozinha / Auditoria de padrão) ──────────
+// Mora em gn-visita-checklist.js, com registro próprio por visita (gn_visita_checklist).
+// Aqui só ficam os botões na visita e o resumo de quanto já foi feito em cada um.
+let _vckResumoCache = {};
+const VCK_LEGADO_TIPO = { checklist: 'salao', cozinha: 'cozinha', auditoria_padrao: 'padrao' };
+function _vckVisitaElegivel(v) {
+  return !!(v && v.id && window.GNVck && !_visEhRemoto(v) && v.hora_chegada !== 'PLAN' && !_ehAusenciaVisitaLoja(v.loja));
+}
+function _vckBotoesHtml(v) {
+  const r = _vckResumoCache[v.id] || {};
+  const legado = VCK_LEGADO_TIPO[v.tipo_visita];
+  const btn = (tipo) => {
+    const t = window.GNVck.TIPOS[tipo], st = r[tipo];
+    const sub = !st ? 'Abrir' : st.finalizada ? `✓ ${st.nota != null ? (tipo === 'salao' ? st.nota + '/100' : st.nota + '%') : 'feito'}` : 'Em andamento';
+    const cor = !st ? 'var(--t3)' : st.finalizada ? '#16a34a' : '#d97706';
+    return `<button type="button" onclick="_vckAbrir('${v.id}','${tipo}')" style="flex:1;min-width:0;background:var(--s2);border:1px solid ${st ? cor + '66' : 'rgba(0,0,0,.12)'};border-radius:9px;padding:6px 4px;cursor:pointer;font-family:inherit;color:var(--t1)">
+      <div style="font-size:14px;line-height:1">${t.icon}</div>
+      <div style="font-size:9.5px;font-weight:800;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${t.curto}</div>
+      <div style="font-size:9px;font-weight:700;color:${cor};margin-top:1px">${sub}</div></button>`;
+  };
+  // Visita antiga feita pelo app Check-list: o registro dela continua lá, só pra leitura.
+  const antigo = legado && !r[legado] && v.data < VCK_INICIO
+    ? `<button type="button" onclick="_vckAbrirLegado('${v.id}','${legado}')" style="width:100%;margin-top:5px;background:none;border:1px dashed rgba(0,0,0,.18);border-radius:8px;padding:5px;font-size:10px;font-weight:700;color:var(--t2);cursor:pointer;font-family:inherit">📜 Ver o check-list feito no app Check-list</button>` : '';
+  return `<div style="font-size:9px;font-weight:800;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Check-list da visita</div>
+    <div style="display:flex;gap:5px">${btn('salao')}${btn('cozinha')}${btn('padrao')}</div>${antigo}`;
+}
+// Dia em que o check-list passou a morar no Painel; antes disso o registro está no app Check-list.
+const VCK_INICIO = '2026-11-14';
+async function _vckAtualizarBotoes() {
+  if (!window.GNVck) return;
+  const els = [...document.querySelectorAll('._vck-btns[data-vck-visita]')];
+  if (!els.length) return;
+  const ids = [...new Set(els.map(e => e.dataset.vckVisita))];
+  const res = await window.GNVck.resumo(ids);
+  ids.forEach(id => { _vckResumoCache[id] = res[id] || {}; });
+  els.forEach(el => {
+    const v = (_visCalData || []).find(x => x.id === el.dataset.vckVisita);
+    if (v && el.isConnected) el.innerHTML = _vckBotoesHtml(v);
+  });
+}
+function _vckConfig() {
+  window.GNVck.config({ url: SB_URL, key: SB_KEY, registrar: _registrarTelaSobreposta, fecharSobreposta: fecharTelaSobreposta, quem: () => session && session.nome });
+}
+function _vckAbrir(id, tipo) {
+  const v = (_visCalData || []).find(x => x.id === id);
+  if (!v || !window.GNVck) return;
+  _vckConfig();
+  window.GNVck.abrir(v, tipo, { aoFechar: _vckAtualizarBotoes });
+}
+function _vckAbrirLegado(id, tipo) {
+  const v = (_visCalData || []).find(x => x.id === id);
+  if (!v || !window.GNVck) return;
+  _vckConfig();
+  window.GNVck.abrirLegado(v, tipo);
+}
+
 function _visCalDetalheHtml(dataStr) {
+  setTimeout(_vckAtualizarBotoes, 0);
   const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
   const [a,m,d] = dataStr.split('-');
   const dsem = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'][new Date(dataStr+'T12:00').getDay()];
@@ -9666,6 +10063,7 @@ function _visCalDetalheHtml(dataStr) {
       ${v.endereco ? `<div style="font-size:9px;color:var(--t4);margin-top:2px">📌 ${esc(v.endereco)}</div>` : ''}
       ${_visFotoThumbHtml(v)}
       ${v.obs ? `<div style="font-size:10px;color:var(--t3);margin-top:4px;white-space:pre-wrap">${esc(v.obs)}</div>` : ''}
+      ${_vckVisitaElegivel(v) ? `<div class="_vck-btns" data-vck-visita="${v.id}" style="margin-top:7px">${_vckBotoesHtml(v)}</div>` : ''}
       ${emAndamento && !_visEhRemoto(v) ? `<div style="margin-top:6px">${_visFotoCampoHtml('s' + v.id, 'Foto da saída')}</div>` : ''}
       ${emAndamento ? `<button id="visreg-said-btn-${v.id}" onclick="_visRegistrarSaida('${v.id}','${dataStr}')" style="margin-top:6px;width:100%;background:#ef4444;color:#fff;border:none;border-radius:8px;padding:7px;font-size:11px;font-weight:800;cursor:pointer">🚪 ${_visEhRemoto(v)?'Encerrar acompanhamento':'Registrar Saída (GPS)'}</button>
       <div id="visreg-said-status-${v.id}" style="font-size:10px;color:var(--t3);margin-top:4px;min-height:14px"></div>` : ''}
