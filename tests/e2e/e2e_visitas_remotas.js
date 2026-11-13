@@ -180,12 +180,17 @@ const FEITO = 'Contagem de barris travando a segunda\nValor do estoque separado 
   await page.evaluate((dia) => { _visSupList = [{ id: 7, nome: 'Carlos', cargo: 'administrador' }];
     document.getElementById('_teste-dia').innerHTML = _visCalDetalheHtml(dia); }, DIA);
   escritas.length = 0;
+  // 13/11/2026: sem foto, o app pergunta antes de registrar (aqui a resposta é "sim").
+  const perguntas = []; const aoDialogo = d => { perguntas.push(d.message()); d.accept(); };
+  page.on('dialog', aoDialogo);
   await page.evaluate((dia) => {
     document.getElementById('visreg-destino-' + dia).value = 'Caxias';
     document.getElementById('visreg-obs-' + dia).value = 'Visita de rotina';
     return _visRegistrarChegada(dia);
   }, DIA);
   await page.waitForTimeout(600);
+  page.off('dialog', aoDialogo);
+  check('presencial sem foto pergunta antes de registrar', perguntas.some(m => /SEM foto/.test(m)), perguntas);
   const postPres = escritas.find(e => e.m === 'POST' && /gn_chk_visitas/.test(e.url));
   const pres = postPres ? JSON.parse(postPres.body) : [];
   check('presencial grava uma linha só, com o destino do seletor',
