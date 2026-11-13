@@ -153,6 +153,9 @@ const LINHAS = [
   }));
   check('abre o check-list inteiro do salão', /Validades em dia na cozinha/.test(tela.t) && /Descartar e treinar/.test(tela.t.replace(/\s+/g, ' ')) || /Plano de ação/.test(tela.t), tela.t.slice(0, 150));
   check('mostra que é só leitura', /Resultado da visita/.test(tela.t) && tela.travado && tela.campos && tela.semFoto, tela);
+  const relLeitura = await page.evaluate(() => ({ botoes: [...document.querySelectorAll('#_vck-modal button')].map(b => b.textContent.trim()), r: GNVck.relatorio() }));
+  check('o resultado aberto pela Home também gera o relatório', relLeitura.botoes.includes('📄📲 PDF no Whats') && /SUPERVISÃO SALÃO — Bangu/.test(relLeitura.r.texto), relLeitura.botoes);
+  check('as fotos dos itens vão pro PDF, com legenda do item', relLeitura.r.fotos.length === 1 && /Limpeza geral do salão/.test(relLeitura.r.fotos[0].legenda), relLeitura.r.fotos);
   check('média do setor na tela igual à do card (só itens avaliados)', tela.mediaSetor);
   check('sem abas pra trocar de check-list (é o resultado daquela linha)', !tela.abas);
   await page.evaluate(() => { GNVck._nota('visual', 'limpeza_geral', 2); });
