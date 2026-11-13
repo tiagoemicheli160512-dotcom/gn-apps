@@ -74,6 +74,7 @@ async function rota(route) {
       return route.fulfill({ status: 204, body: '' });
     }
   }
+  if (/gn_chk_visitas/.test(url) && m !== 'GET') { chamadas.push({ visita: url }); return json([]); }
   if (/checklist_diario/.test(url) && /Boulevard/.test(url)) {
     return json([{ supervisao: { itens: { visual: { limpeza_geral: 1 } }, supervisor: 'Tiago' }, supervisao_cozinha: {}, auditorias_padrao: {} }]);
   }
@@ -279,6 +280,9 @@ async function rota(route) {
   await D.evaluate(() => GNVck._nota('visual', 'uniformes', 2));
   await D.waitForTimeout(200);
   check('finalizada trava os itens', srv1.dados.itens.visual.uniformes === undefined);
+  const fimTela = await D.evaluate(() => document.getElementById('_vck-modal').textContent.replace(/\s+/g, ' '));
+  check('o texto diz que fechou o check-list, não a visita', /Check-list do Salão finalizado/.test(fimTela) && /encerra só pela saída/.test(fimTela) && !/Visita finalizada/.test(fimTela), fimTela.slice(-200));
+  check('finalizar o check-list não mexe na visita (chegada/saída)', !chamadas.some(c => c.visita), chamadas.filter(c => c.visita));
 
   // ── 6b. Cozinha ─────────────────────────────────────────────────────────────────────
   await D.evaluate(() => GNVck._trocarTipo('cozinha'));

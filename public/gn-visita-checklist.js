@@ -593,11 +593,14 @@
     if (d.fechada) {
       const quando = d.fechada_em ? new Date(d.fechada_em) : null;
       const hm = quando ? String(quando.getHours()).padStart(2, '0') + ':' + String(quando.getMinutes()).padStart(2, '0') : '';
-      return card(`<div style="text-align:center"><div style="font-size:20px">🔒</div><div style="font-size:14px;font-weight:800;color:var(--t1)">Visita finalizada</div>
+      return card(`<div style="text-align:center"><div style="font-size:20px">🔒</div><div style="font-size:14px;font-weight:800;color:var(--t1)">Check-list ${_ctx.tipo === 'cozinha' ? 'da Cozinha' : 'do Salão'} finalizado</div>
+        <div style="font-size:11px;color:var(--t3);margin-top:2px">A visita continua em andamento — encerra só pela saída.</div>
         <div style="font-size:11.5px;color:var(--t3);margin:3px 0 10px">${esc(['Por ' + (d.fechada_por || '—'), hm ? 'às ' + hm : ''].filter(Boolean).join(' '))}</div>
         <button type="button" onclick="GNVck._reabrir()" style="padding:9px 16px;border-radius:10px;border:1px solid var(--b2,rgba(0,0,0,.15));background:var(--s1,#fff);color:var(--t2);font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">🔓 Reabrir pra editar</button></div>`);
     }
-    return `<button type="button" onclick="GNVck._finalizar()" style="width:100%;margin:4px 0 24px;padding:13px;border-radius:12px;border:none;background:#16a34a;color:#fff;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">✅ Finalizar visita${nota !== null ? ' — ' + (_ctx.tipo === 'cozinha' ? nota + '%' : nota + '/100') : ''}</button>`;
+    // "Finalizar" fecha só ESTE check-list — a visita (chegada/saída/GPS) segue aberta e só
+    // encerra pelo "Registrar Saída" do Painel. Com o rótulo "Finalizar visita" isso confundia.
+    return `<button type="button" onclick="GNVck._finalizar()" style="width:100%;margin:4px 0 24px;padding:13px;border-radius:12px;border:none;background:#16a34a;color:#fff;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">✅ Finalizar check-list ${_ctx.tipo === 'cozinha' ? 'da Cozinha' : 'do Salão'}${nota !== null ? ' — ' + (_ctx.tipo === 'cozinha' ? nota + '%' : nota + '/100') : ''}</button>`;
   }
 
   // ── Auditoria de padrão ──
@@ -703,14 +706,15 @@
   function _finalizar() {
     const nota = (_ctx.tipo === 'salao' ? calcSalao(R.dados) : calcCozinha(R.dados)).nota;
     if (nota === null) { alert('Avalie pelo menos um item antes de finalizar.'); return; }
-    if (!confirm('Finalizar a visita? Os itens ficam travados (dá pra reabrir se precisar).')) return;
+    const qual = _ctx.tipo === 'cozinha' ? 'da Cozinha' : 'do Salão';
+    if (!confirm(`Finalizar o check-list ${qual}? Os itens ficam travados (dá pra reabrir se precisar).\n\nA visita NÃO é encerrada — ela continua em andamento até você registrar a saída.`)) return;
     const agora = new Date().toISOString(), por = _quem();
     set(['notaFinal'], nota); set(['fechada'], true); set(['fechada_em'], agora); set(['fechada_por'], por);
     patchLinha({ finalizada: true, nota, finalizada_em: agora, finalizada_por: por });
     pintar();
   }
   function _reabrir() {
-    if (!confirm('Reabrir a visita pra editar?')) return;
+    if (!confirm('Reabrir este check-list pra editar?')) return;
     set(['fechada'], false); patchLinha({ finalizada: false });
     pintar();
   }
