@@ -25,6 +25,13 @@ const LINHAS = [
   { id: 'r3', visita_id: 'v2', loja: 'Bangu', data: dias(6), tipo: 'padrao', visitante: 'Edna', finalizada: true, nota: 57.1,
     dados: { calibracao_equipamentos: { itens: { 0: { resp: 'SIM' }, 1: { resp: 'NAO', foto: FOTO }, 2: { resp: 'SIM' }, 3: { resp: 'NA' } }, finalizada: true,
       planoAcao: { 0: { itemIdx: 1, itemLabel: 'Filtros das coifas', crit: 'MAIOR', acaoCorretiva: 'Trocar filtro', prazoMax: dias(-1), prazo: dias(-1) } } } } },
+  // 20 dias atrás, com crítico e SEM ciência: fora do card (7 dias), mas o alerta não pode sumir.
+  { id: 'r4', visita_id: 'v3', loja: 'Bangu', data: dias(20), tipo: 'salao', visitante: 'Aryano', finalizada: true, nota: 40,
+    dados: { itens: { documentacao: { licenca: 2 } }, fechada: true } },
+  // 3 dias atrás, com crítico e JÁ com ciência: não entra no alerta.
+  { id: 'r5', visita_id: 'v4', loja: 'Bangu', data: dias(3), tipo: 'cozinha', visitante: 'Edna', finalizada: true, nota: 0,
+    ciente_nome: 'Ana', ciente_cargo: 'gerente', ciente_em: new Date().toISOString(),
+    dados: { itens: { ambientes: { pias: 'NC' } }, fechada: true } },
 ];
 
 (async () => {
@@ -33,7 +40,19 @@ const LINHAS = [
   const pedidos = [], escritas = [];
   await ctx.route('**/rest/v1/**', (route) => {
     const req = route.request(), url = decodeURIComponent(req.url());
-    if (req.method() !== 'GET') escritas.push(url);
+    if (req.method() !== 'GET' && !/verificar_login/.test(url)) escritas.push({ url, body: req.postData() });
+    if (/rpc\/verificar_login/.test(url)) {
+      const b = JSON.parse(req.postData());
+      const u = { 'ana': [{ nome: 'Ana', cargo: 'gerente' }], 'ze': [{ nome: 'Zé', cargo: 'garcom' }] }[b.p_nome] || [];
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b.p_senha === '123' ? u : []) });
+    }
+    if (/gn_visita_checklist/.test(url) && req.method() === 'PATCH') {
+      const ids = (url.match(/id=in\.\(([^)]+)\)/) || [])[1].split(',');
+      const b = JSON.parse(req.postData());
+      const alvo = LINHAS.filter(l => ids.includes(l.id));
+      alvo.forEach(l => Object.assign(l, b));
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(alvo) });
+    }
     if (/gn_visita_checklist/.test(url) && req.method() === 'GET') {
       pedidos.push(url);
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(LINHAS) });
@@ -76,7 +95,8 @@ const LINHAS = [
   check('pede só a loja da sessão', /loja=eq\.Bangu&/.test(q), q);
   check('só o que foi finalizado', /finalizada=eq\.true/.test(q));
   check('só de visita que ainda existe (excluída some da Home)', /visita_id=not\.is\.null/.test(q));
-  check('só dos últimos 7 dias, contando o dia da visita', q.includes('data=gte.' + dias(6)), q);
+  check('busca 30 dias (o alerta de crítico olha mais pra trás que o card)', q.includes('data=gte.' + dias(29)), q);
+  check('o card mostra só os últimos 7 dias, contando o dia da visita', !/Aryano/.test(ger) && /Edna · /.test(ger));
 
   // ── O que mostra ──
   check('nota do salão com classificação', /Supervisão salão 74\/100/.test(ger) && /Atenção/.test(ger), ger);
@@ -88,6 +108,34 @@ const LINHAS = [
   check('auditoria com nota do tipo avaliado', /Auditoria de padrão 57,1%/.test(ger) && /Calibração de Equipamentos e Manutenção Preventiva 57,1%/.test(ger), ger);
   check('quem fez e quando', /Carlos · /.test(ger) && /Edna · /.test(ger));
   check('diz até quando fica na Home', /aparece aqui até/.test(ger));
+
+  // ── Alerta de crítico ──
+  await render('gerente', false);
+  await page.waitForTimeout(100);
+  const al = await page.evaluate(() => { const el = document.getElementById('visita-critico-home-card'); return { t: el.textContent.replace(/\s+/g, ' '), estado: el.dataset.homeEstado, info: el.dataset.homeInfo }; });
+  check('visita com crítico vira linha urgente em "Precisa de você hoje"', al.estado === 'acao' && /Visita com crítico/.test(al.info), al);
+  check('alerta lista os críticos sem ciência, inclusive os de 20 dias atrás', /Validades em dia na cozinha/.test(al.t) && /Licença de funcionamento/.test(al.t) && /Aryano|Supervisão salão/.test(al.t), al.t);
+  check('crítico que a gerência já viu não volta pro alerta', !/Pias exclusivas/.test(al.t));
+  check('alerta diz o prazo do plano (24h depois da visita)', al.t.includes('prazo ' + dias(0).split('-').reverse().slice(0, 2).join('/')), al.t);
+  check('prazo que já passou aparece como atrasado', /Plano de ação atrasado desde/.test(al.t) && /atrasado/.test(al.info), al.info);
+  check('card de resultado mostra quem já deu ciência', /Gerência ciente: Ana/.test(ger) && /Aguardando ciência da gerência/.test(ger));
+  const confirmar = (u, p) => page.evaluate(async ({ u, p }) => {
+    _vckAlertaForm = true; _vckRenderAlerta();
+    document.getElementById('vck-ciente-user').value = u; document.getElementById('vck-ciente-senha').value = p;
+    await _vckCienteConfirmar();
+    return document.getElementById('visita-critico-home-card').textContent.replace(/\s+/g, ' ');
+  }, { u, p });
+  escritas.length = 0;
+  const errSenha = await confirmar('ana', 'errada');
+  check('senha errada não dá ciência', /Usuário ou senha incorretos/.test(errSenha) && escritas.length === 0);
+  const errCargo = await confirmar('ze', '123');
+  check('garçom não dá ciência pela gerência', /A ciência é da gerência/.test(errCargo) && escritas.length === 0, errCargo);
+  const ok1 = await confirmar('ana', '123');
+  const patch = escritas.find(e => /gn_visita_checklist/.test(e.url));
+  check('gerente com senha grava a ciência nas visitas pendentes', patch && /r1/.test(patch.url) && /r4/.test(patch.url) && !/r5/.test(patch.url) && /"ciente_nome":"Ana"/.test(patch.body), patch);
+  const depois = await page.evaluate(() => ({ estado: document.getElementById('visita-critico-home-card').dataset.homeEstado, card: document.getElementById('visita-resultado-home-card').textContent }));
+  check('o alerta sai de "Precisa de você hoje"', ok1.trim() === '' && depois.estado === '', { ok1, depois: depois.estado });
+  check('e o card passa a mostrar a ciência', !/Aguardando ciência/.test(depois.card) && /Gerência ciente: Ana/.test(depois.card));
 
   // ── Tocar abre tudo, só leitura ──
   escritas.length = 0;

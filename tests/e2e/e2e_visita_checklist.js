@@ -129,6 +129,25 @@ async function rota(route) {
     check('nota e críticos do salão batem em 300 avaliações sorteadas', par.difS === 0, par.difS);
     check('nota e críticos da cozinha batem em 300 avaliações sorteadas', par.difC === 0, par.difC);
     check('nota e status da auditoria batem em 300×5 avaliações sorteadas', par.difA === 0, par.difA);
+
+    // ── Etapa 3: a aba Visitas saiu do Check-list ──
+    const e3 = await pg.evaluate(() => {
+      const entradas = [...document.querySelectorAll('.tab-btn, .sidebar-link')].filter(b => /switchTab\('(visitas|supervisao|supervisao-cozinha|auditoria-padrao)'/.test(b.getAttribute('onclick') || ''));
+      const antes = (document.querySelector('.tab-content.active') || {}).id;
+      let toast = '';
+      const orig = window.showToast; window.showToast = (m) => { toast = m; };
+      ['visitas', 'supervisao', 'supervisao-cozinha', 'auditoria-padrao'].forEach(t => switchTab(t, null));
+      window.showToast = orig;
+      try { localStorage.setItem(_tabsRecentesChave(), JSON.stringify(['visitas', 'dados'])); } catch (e) {}
+      _renderTabsRecentes();
+      const rec = (document.getElementById('tabs-recentes') || {}).innerHTML || '';
+      return { n: entradas.length, antes, depois: (document.querySelector('.tab-content.active') || {}).id, toast, recVisitas: /visitas/.test(rec),
+        guia: (GUIA_SECOES || []).find ? ((GUIA_SECOES.find(g => g.id === 'visitas') || {}).resumo || '') : '' };
+    }).catch(e => ({ erro: String(e) }));
+    check('Check-list não tem mais botão nem menu de Visitas/Supervisão/Auditoria', e3.n === 0, e3);
+    check('tentar abrir uma dessas telas avisa onde ficou e não troca de aba', e3.antes === e3.depois && /Painel de Gestão › Visitas/.test(e3.toast), e3);
+    check('atalho antigo de "Visitas" nas abas recentes some', !e3.recVisitas, e3);
+    check('guia do Check-list aponta pro Painel', /Painel de Gestão › Visitas/.test(e3.guia), e3.guia);
     await ctx.close();
   }
 
@@ -185,6 +204,14 @@ async function rota(route) {
     chamadas.filter(c => c.rpc).every(c => Array.isArray(c.rpc.p_path) && c.rpc.p_path.length <= 3));
   const tela = await A.evaluate(() => document.getElementById('_vck-modal').textContent);
   check('crítico com nota baixa vira plano de ação', /Plano de ação/.test(tela) && /Validades em dia na cozinha/.test(tela));
+  const chipsSalao = await A.evaluate(() => [...document.querySelectorAll('#_vck-modal button')].map(b => b.textContent.trim()).filter(t => /^\+ /.test(t)));
+  check('plano de ação do crítico traz opções prontas daquela questão', chipsSalao.includes('+ Descartar na hora os vencidos e registrar a perda') && chipsSalao.includes('+ Treinar a equipe no padrão'), chipsSalao);
+  await A.evaluate(() => { GNVck._chip(['acoes', 'validade|val_cozinha'], 'Descartar na hora os vencidos e registrar a perda'); GNVck._chip(['acoes', 'validade|val_cozinha'], 'Treinar a equipe no padrão'); });
+  await esperarFilaVazia(A);
+  check('tocar em duas opções junta as duas no plano', srv1.dados.acoes['validade|val_cozinha'] === 'Descartar na hora os vencidos e registrar a perda; Treinar a equipe no padrão', srv1.dados.acoes);
+  await A.evaluate(() => { const el = document.createElement('textarea'); el.value = GNVck._estado().dados.acoes['validade|val_cozinha'] + '; até sexta, com o Marcos'; GNVck._texto(el, ['acoes', 'validade|val_cozinha']); GNVck._chip(['acoes', 'validade|val_cozinha'], 'Treinar a equipe no padrão'); });
+  await esperarFilaVazia(A);
+  check('texto livre continua junto, e tocar de novo tira só aquela opção', srv1.dados.acoes['validade|val_cozinha'] === 'Descartar na hora os vencidos e registrar a perda; até sexta, com o Marcos', srv1.dados.acoes);
   await A.evaluate(() => GNVck._nota('visual', 'limpeza_geral', 9));
   await esperarFilaVazia(A);
   check('tocar de novo na mesma nota desmarca', srv1.dados.itens.visual.limpeza_geral === undefined);
@@ -266,6 +293,12 @@ async function rota(route) {
     cal && cal.finalizada === true && cal.planoAcao && cal.planoAcao['0'] && cal.planoAcao['0'].crit === 'MAIOR' && cal.notaFinal === 57.1, cal);
   await D.evaluate(() => { const el = document.createElement('input'); el.value = 'Trocar o filtro da coifa'; GNVck._texto(el, ['calibracao_equipamentos', 'planoAcao', '0', 'acaoCorretiva']); });
   await esperarFilaVazia(D);
+  const chipsAud = await D.evaluate(() => [...document.querySelectorAll('#_vck-modal button')].map(b => b.textContent.trim()).filter(t => /^[+✓] /.test(t)));
+  check('plano da auditoria: opções de ação corretiva, responsável e preventiva daquela questão',
+    chipsAud.includes('+ Limpar os filtros da coifa hoje') && chipsAud.includes('+ Gerente') && chipsAud.includes('+ Limpeza de filtros na escala semanal'), chipsAud);
+  await D.evaluate(() => GNVck._chip(['calibracao_equipamentos', 'planoAcao', '0', 'responsavel'], 'Gerente'));
+  await esperarFilaVazia(D);
+  check('opção de responsável grava no plano', cal.planoAcao['0'].responsavel === 'Gerente');
   check('campo do plano de ação grava sozinho, sem apagar o resto do plano',
     cal.planoAcao['0'].acaoCorretiva === 'Trocar o filtro da coifa' && cal.planoAcao['0'].crit === 'MAIOR');
   await D.evaluate(() => GNVck.fechar());

@@ -143,6 +143,65 @@
     ] },
   ];
 
+  // ── Opções prontas dos planos de ação (13/11/2026, pedido do dono: "agiliza") ──────
+  // Por questão. Tocar numa opção escreve no campo; tocar de novo tira; o texto continua
+  // livre pra completar ou escrever outra coisa. Chave: 'setor|item' (salão e cozinha) e
+  // 'tipo#índice' (auditoria). As preventivas gerais valem pra qualquer questão.
+  const SUG_SALAO = {
+    'validade|val_cozinha': ['Descartar na hora os vencidos e registrar a perda', 'Conferir a validade de toda a cozinha com o líder do turno', 'Etiquetar todo produto aberto com a validade secundária', 'Conferência de validade na abertura, todo dia'],
+    'validade|val_estoque': ['Descartar na hora os vencidos e registrar a perda', 'Reorganizar o estoque no PVPS (vence primeiro na frente)', 'Conferir a validade de todo o estoque hoje', 'Conferência semanal de validade no estoque'],
+    'validade|val_copa': ['Descartar bebidas e frutas vencidas e registrar a perda', 'Conferir a validade da copa/bar com o barman', 'Etiquetar frutas cortadas e xaropes abertos', 'Conferência de validade da copa na abertura'],
+    'validade|val_salao': ['Recolher do salão os produtos vencidos', 'Conferir validade de sachês, molhos e expositores', 'Repor só com produto conferido', 'Incluir validade do salão no check-list de abertura'],
+    'documentacao|licenca': ['Pedir a renovação da licença ao escritório hoje', 'Afixar a licença vigente em local visível', 'Mandar cópia digital pro escritório', 'Avisar o escritório 60 dias antes do vencimento'],
+    'documentacao|bombeiro': ['Abrir pedido de renovação do laudo dos Bombeiros', 'Resolver as pendências da última vistoria', 'Afixar o certificado vigente', 'Avisar o escritório 60 dias antes do vencimento'],
+    'documentacao|dedetizacao': ['Agendar a dedetização com a empresa contratada', 'Afixar o certificado vigente', 'Cobrar da empresa o certificado da última aplicação', 'Deixar a próxima data agendada no calendário da loja'],
+  };
+  const SUG_COZINHA = {
+    'documentacao|lsf': ['Pedir a renovação da LSF ao escritório hoje', 'Afixar a LSF vigente em local visível', 'Mandar cópia digital pro escritório'],
+    'documentacao|pops': ['Imprimir o Manual de Boas Práticas e os POPs', 'Colher a assinatura de toda a equipe', 'Deixar o manual em local fixo na cozinha', 'Revisar os POPs com a equipe na reunião do mês'],
+    'documentacao|pragas': ['Pedir o laudo vigente à empresa de controle de pragas', 'Agendar nova aplicação', 'Conferir o registro INEA-RJ da empresa'],
+    'documentacao|reservatorio': ['Agendar a limpeza do reservatório', 'Pedir o laudo de potabilidade da água', 'Arquivar o comprovante na pasta da loja', 'Deixar a próxima limpeza agendada (6 meses)'],
+    'higiene_pessoal|adornos': ['Retirar os adornos agora, antes de voltar à praça', 'Orientar a equipe sobre a regra de adornos', 'Conferir adornos na entrada do turno'],
+    'higiene_pessoal|celulares': ['Guardar os celulares fora da área de manipulação', 'Criar local fixo (armário/caixa) pros celulares', 'Conferir na entrada do turno'],
+    'ambientes|pias': ['Abastecer sabonete antisséptico e papel toalha agora', 'Deixar estoque de reposição perto da pia', 'Incluir a pia no check-list de abertura e de troca de turno'],
+    'ambientes|coifas': ['Limpar os filtros da coifa', 'Agendar a limpeza dos dutos com a empresa', 'Registrar a limpeza na planilha'],
+    'rastreabilidade|etiquetagem': ['Etiquetar agora tudo que está aberto', 'Repor o rolo da máquina de etiquetas', 'Treinar a equipe na etiqueta: nome, marca, abertura e validade'],
+    'rastreabilidade|separacao': ['Reorganizar a geladeira: pronto em cima, cru embaixo', 'Colar o mapa de prateleiras na porta', 'Conferir a organização na troca de turno'],
+    'rastreabilidade|quimicos': ['Tirar os químicos de perto dos alimentos agora', 'Trancar os químicos no armário próprio', 'Identificar o armário de químicos'],
+  };
+  const SUG_AUDP = {
+    'seguranca_alimentos#0': { c: ['Etiquetar agora todo produto aberto ou fracionado', 'Descartar o que estiver sem etiqueta ou vencido'], p: ['Conferência de etiquetas na abertura e na troca de turno'] },
+    'seguranca_alimentos#1': { c: ['Separar cru de pronto agora, com identificação', 'Reorganizar as geladeiras: pronto em cima, cru embaixo'], p: ['Colar o mapa de prateleiras na porta das geladeiras'] },
+    'seguranca_alimentos#2': { c: ['Retomar o registro de temperatura 3x ao dia', 'Imprimir planilha nova de temperatura'], p: ['Definir responsável por turno pela planilha'] },
+    'seguranca_alimentos#3': { c: ['Reorganizar o estoque no PVPS (vence primeiro na frente)'], p: ['Conferir o PVPS no recebimento de mercadoria'] },
+    'seguranca_alimentos#4': { c: ['Abastecer sabão, papel toalha e consertar a lixeira de pedal'], p: ['Incluir a pia no check-list de abertura'] },
+    'calibracao_equipamentos#0': { c: ['Abrir chamado de manutenção pra trocar a borracha', 'Pedir orçamento da gaxeta'], p: ['Conferir as borrachas na limpeza semanal'] },
+    'calibracao_equipamentos#1': { c: ['Limpar os filtros da coifa hoje', 'Agendar limpeza da exaustão com a empresa'], p: ['Limpeza de filtros na escala semanal'] },
+    'calibracao_equipamentos#2': { c: ['Limpar a poeira dos motores', 'Afastar os equipamentos da parede'], p: ['Limpeza de motores no cronograma mensal'] },
+    'calibracao_equipamentos#3': { c: ['Trocar as lâmpadas queimadas', 'Abrir chamado de manutenção elétrica'], p: ['Conferir iluminação na abertura'] },
+    'los_jornada_cliente#0': { c: ['Reforçar a equipe no horário de pico', 'Rever o posicionamento das praças no pico'], p: ['Acompanhar o tempo de atendimento no pico 1x por semana'] },
+    'los_jornada_cliente#1': { c: ['Limpar e abastecer o banheiro agora'], p: ['Ronda no banheiro a cada 1h com registro'] },
+    'los_jornada_cliente#2': { c: ['Ajustar a temperatura do passe/estufa', 'Entregar o prato logo após a montagem'], p: ['Conferir temperatura do passe a cada turno'] },
+    'los_jornada_cliente#3': { c: ['Refazer a montagem conforme a ficha técnica', 'Mostrar a foto oficial do prato pra equipe'], p: ['Deixar as fotos dos pratos expostas na praça'] },
+    'los_jornada_cliente#4': { c: ['Reforçar a saudação oficial com os atendentes'], p: ['Reforçar na reunião de início de turno'] },
+    'los_jornada_cliente#5': { c: ['Escalar responsável pela limpeza das mesas no turno'], p: ['Acompanhar o tempo de limpeza das mesas no pico'] },
+    'los_jornada_cliente#6': { c: ['Limpar a fachada e os letreiros', 'Abrir chamado pros letreiros apagados'], p: ['Conferir fachada e letreiros na abertura'] },
+    'prevencao_perdas#0': { c: ['Abrir chamado urgente do CFTV', 'Reposicionar as câmeras com ponto cego'], p: ['Conferir as gravações 1x por dia'] },
+    'prevencao_perdas#1': { c: ['Desobstruir a saída de emergência agora', 'Consertar a barra antipânico'], p: ['Conferir a saída de emergência na abertura'] },
+    'prevencao_perdas#2': { c: ['Apurar a diferença do caixa com o operador', 'Registrar a ocorrência'], p: ['Fazer inventário surpresa de gaveta 1x por turno'] },
+    'prevencao_perdas#3': { c: ['Assinar o relatório e anexar as justificativas'], p: ['Gerente assina os cancelamentos todo dia no fechamento'] },
+    'prevencao_perdas#4': { c: ['Fazer a sangria agora', 'Reforçar o limite de gaveta com os operadores'], p: ['Sangria em horários fixos'] },
+    'prevencao_perdas#5': { c: ['Trancar o cofre e trocar o segredo'], p: ['Lista de quem tem acesso ao cofre por turno'] },
+    'prevencao_perdas#6': { c: ['Inspecionar o lixo antes de descartar'], p: ['Supervisor do turno confere o lixo no fechamento'] },
+    'gestao_pessoas#0': { c: ['Providenciar os EPIs que faltam', 'Afastar da função quem está sem EPI'], p: ['Conferir EPIs na entrada do turno'] },
+    'gestao_pessoas#1': { c: ['Colher as assinaturas dos cartões de ponto', 'Corrigir as marcações pendentes com o RH'], p: ['Conferência semanal do ponto pelo gerente'] },
+    'gestao_pessoas#2': { c: ['Corrigir o uniforme e a touca agora'], p: ['Conferir uniforme na entrada do turno'] },
+    'gestao_pessoas#3': { c: ['Limpar e organizar o refeitório', 'Repor a água potável'], p: ['Incluir o refeitório na escala de limpeza'] },
+    'gestao_pessoas#4': { c: ['Atualizar o mural com metas, folgas e campanhas'], p: ['Atualizar o mural toda segunda'] },
+  };
+  const SUG_PREVENTIVAS_GERAIS = ['Treinar a equipe no padrão', 'Gerente confere no fechamento', 'Revisar na próxima visita'];
+  const SUG_RESPONSAVEIS = ['Gerente', 'Sub-gerente', 'Líder de cozinha', 'Líder de salão', 'Manutenção'];
+
   const TIPOS = {
     salao: { label: 'Supervisão salão', curto: 'Salão', icon: '🎯' },
     cozinha: { label: 'Supervisão cozinha', curto: 'Cozinha', icon: '🧼' },
@@ -407,6 +466,28 @@
         ${tem ? `<button type="button" onclick="GNVck._set(${p}, null)" style="background:none;border:none;color:var(--t4);font-size:11px;cursor:pointer;font-family:inherit">🗑 Remover</button>` : ''}`}
     </div>`;
   }
+  // Opções prontas embaixo do campo: tocar escreve, tocar de novo tira. Várias se somam com
+  // "; " — e o campo continua aberto pra completar à mão.
+  const SEP = '; ';
+  const getPath = (o, path) => path.reduce((a, k) => (a && typeof a === 'object') ? a[k] : undefined, o);
+  const _partes = v => String(v || '').split(SEP).map(x => x.trim()).filter(Boolean);
+  function _chipsHtml(path, opcoes) {
+    if (_ro() || !opcoes || !opcoes.length) return '';
+    const atuais = _partes(getPath(R.dados, path));
+    const p = attr(JSON.stringify(path));
+    return `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px">${[...new Set(opcoes)].map(o => {
+      const on = atuais.includes(o);
+      return `<button type="button" onclick="GNVck._chip(${p}, ${attr(JSON.stringify(o))})" style="text-align:left;padding:5px 9px;border-radius:999px;font-size:11px;font-weight:700;font-family:inherit;cursor:pointer;line-height:1.3;border:1px solid ${on ? '#6366f1' : 'var(--b2,rgba(0,0,0,.14))'};background:${on ? 'rgba(99,102,241,.14)' : 'var(--s2,#fff)'};color:${on ? '#4338ca' : 'var(--t2)'}">${on ? '✓ ' : '+ '}${esc(o)}</button>`;
+    }).join('')}</div>`;
+  }
+  function _chip(path, opcao) {
+    if (_ro()) return;
+    const atuais = _partes(getPath(R.dados, path));
+    const i = atuais.indexOf(opcao);
+    if (i >= 0) atuais.splice(i, 1); else atuais.push(opcao);
+    set(path, atuais.join(SEP));
+    pintar();
+  }
   const corNota = n => n >= 9 ? '#16a34a' : n >= 7 ? '#2563eb' : n >= 5 ? '#d97706' : '#dc2626';
 
   // ── Supervisão salão ──
@@ -448,7 +529,9 @@
       ${criticos.map(c => `<div style="background:rgba(220,38,38,.06);border:1px solid rgba(220,38,38,.2);border-radius:10px;padding:9px 11px;margin-bottom:6px">
         <div style="font-size:10.5px;font-weight:800;color:var(--t2)">${esc(c.setor)} · nota ${c.nota}/10 · peso ${c.peso}×</div>
         <div style="font-size:12px;color:var(--t1);margin:2px 0 6px">${esc(c.label)}</div>
-        ${_campoTexto(['acoes', c.chave], acoes[c.chave] || _acaoLegada(d, c), 'Ação corretiva e prazo…')}</div>`).join('')}`) : '';
+        ${_campoTexto(['acoes', c.chave], acoes[c.chave] || _acaoLegada(d, c), 'Ação corretiva (escolha abaixo ou escreva)…', 2)}
+        ${_chipsHtml(['acoes', c.chave], (SUG_SALAO[c.chave] || []).concat(SUG_PREVENTIVAS_GERAIS))}</div>`).join('')}
+      <div style="font-size:10.5px;color:var(--t3);margin-top:4px">⏱ Item crítico: corrigir em até 24h.</div>`) : '';
     const obs = card(`<div style="font-size:10px;font-weight:800;color:var(--t3);letter-spacing:.6px;text-transform:uppercase;margin-bottom:8px">📝 Observações gerais</div>${_campoTexto(['obs'], d.obs, 'Pontos positivos, destaques, contexto…', 3)}`);
     return topo + dadosV + _filtroHtml() + setores + plano + obs + _fechamentoHtml(nota);
   }
@@ -494,7 +577,9 @@
       ${criticos.map(c => `<div style="background:rgba(220,38,38,.06);border:1px solid rgba(220,38,38,.2);border-radius:10px;padding:9px 11px;margin-bottom:6px">
         <div style="font-size:10.5px;font-weight:800;color:var(--t2)">${esc(c.setor)} · 🚨 não conforme</div>
         <div style="font-size:12px;color:var(--t1);margin:2px 0 6px">${esc(c.label)}</div>
-        ${_campoTexto(['acoes', c.chave], acoes[c.chave] || _acaoLegada(Object.assign({ __tipo: 'cozinha' }, d), c), 'Ação corretiva e prazo…')}</div>`).join('')}`) : '';
+        ${_campoTexto(['acoes', c.chave], acoes[c.chave] || _acaoLegada(Object.assign({ __tipo: 'cozinha' }, d), c), 'Ação corretiva (escolha abaixo ou escreva)…', 2)}
+        ${_chipsHtml(['acoes', c.chave], (SUG_COZINHA[c.chave] || []).concat(SUG_PREVENTIVAS_GERAIS))}</div>`).join('')}
+      <div style="font-size:10.5px;color:var(--t3);margin-top:4px">⏱ Item crítico: corrigir em até 24h.</div>`) : '';
     const obs = card(`<div style="font-size:10px;font-weight:800;color:var(--t3);letter-spacing:.6px;text-transform:uppercase;margin-bottom:8px">📝 Observações gerais</div>${_campoTexto(['obs'], d.obs, 'Pontos positivos, destaques, contexto…', 3)}`);
     return topo + dadosV + _filtroHtml() + setores + plano + obs + _fechamentoHtml(nota);
   }
@@ -545,7 +630,10 @@
     const plano = (aud.planoAcao || []).length ? card(`<div style="font-size:10.5px;font-weight:800;color:#dc2626;letter-spacing:.6px;text-transform:uppercase;margin-bottom:8px">⚡ Plano de ação (5W2H)</div>
       ${aud.planoAcao.map((p, i) => {
         const cl = p.crit === 'CRITICO' ? '🔴 Crítico · prazo máx. 24h' : p.crit === 'MAIOR' ? '🟠 Maior · prazo máx. 48h' : '🟡 Menor · prazo máx. 5 dias';
-        const campo = (k, ph) => _campoTexto([_padraoTipo, 'planoAcao', String(i), k], p[k], ph);
+        const caminho = k => [_padraoTipo, 'planoAcao', String(i), k];
+        const sug = SUG_AUDP[_padraoTipo + '#' + p.itemIdx] || { c: [], p: [] };
+        const campo = (k, ph) => _campoTexto(caminho(k), p[k], ph, k === 'responsavel' ? 0 : 2) + _chipsHtml(caminho(k),
+          k === 'acaoCorretiva' ? sug.c : k === 'responsavel' ? SUG_RESPONSAVEIS : k === 'acaoPreventiva' ? sug.p.concat(SUG_PREVENTIVAS_GERAIS) : []);
         return `<div style="background:var(--s1,#fafafa);border:1px solid var(--b1,rgba(0,0,0,.08));border-radius:10px;padding:10px 12px;margin-bottom:7px">
           <div style="font-size:10.5px;font-weight:800;color:var(--t2)">${cl}</div><div style="font-size:12px;font-weight:700;color:var(--t1);margin:3px 0 7px">${esc(p.itemLabel)}</div>
           <div style="font-size:10.5px;color:var(--t3)">Ação corretiva</div>${campo('acaoCorretiva', 'O que será feito?')}
@@ -756,6 +844,7 @@
     config, abrir, abrirLegado, abrirLeitura, fechar, resumo, set, setPath,
     _estado: () => R, _ctx: () => _ctx, _enviar,
     _trocarTipo, _filtrar, _nota, _coz, _texto, _set, _foto, _finalizar, _reabrir,
+    _chip, SUG_SALAO, SUG_COZINHA, SUG_AUDP,
     _padraoTipo: _padraoTipoSel, _resp, _padraoFinalizar, _padraoReabrir,
   };
 })();
