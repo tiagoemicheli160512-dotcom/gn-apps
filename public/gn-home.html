@@ -455,6 +455,7 @@
 <script src="gn-comissoes-calendario.js"></script>
 <script src="gn-presenca.js"></script>
 <script src="gn-avisos.js"></script>
+<script src="gn-visita-checklist.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 </head>
 <body>
@@ -9619,7 +9620,64 @@ function _renderVisCalendarioTab() {
   return html;
 }
 
+// ── Check-list da visita (Supervisão salão / cozinha / Auditoria de padrão) ──────────
+// Mora em gn-visita-checklist.js, com registro próprio por visita (gn_visita_checklist).
+// Aqui só ficam os botões na visita e o resumo de quanto já foi feito em cada um.
+let _vckResumoCache = {};
+const VCK_LEGADO_TIPO = { checklist: 'salao', cozinha: 'cozinha', auditoria_padrao: 'padrao' };
+function _vckVisitaElegivel(v) {
+  return !!(v && v.id && window.GNVck && !_visEhRemoto(v) && v.hora_chegada !== 'PLAN' && !_ehAusenciaVisitaLoja(v.loja));
+}
+function _vckBotoesHtml(v) {
+  const r = _vckResumoCache[v.id] || {};
+  const legado = VCK_LEGADO_TIPO[v.tipo_visita];
+  const btn = (tipo) => {
+    const t = window.GNVck.TIPOS[tipo], st = r[tipo];
+    const sub = !st ? 'Abrir' : st.finalizada ? `✓ ${st.nota != null ? (tipo === 'salao' ? st.nota + '/100' : st.nota + '%') : 'feito'}` : 'Em andamento';
+    const cor = !st ? 'var(--t3)' : st.finalizada ? '#16a34a' : '#d97706';
+    return `<button type="button" onclick="_vckAbrir('${v.id}','${tipo}')" style="flex:1;min-width:0;background:var(--s2);border:1px solid ${st ? cor + '66' : 'rgba(0,0,0,.12)'};border-radius:9px;padding:6px 4px;cursor:pointer;font-family:inherit;color:var(--t1)">
+      <div style="font-size:14px;line-height:1">${t.icon}</div>
+      <div style="font-size:9.5px;font-weight:800;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${t.curto}</div>
+      <div style="font-size:9px;font-weight:700;color:${cor};margin-top:1px">${sub}</div></button>`;
+  };
+  // Visita antiga feita pelo app Check-list: o registro dela continua lá, só pra leitura.
+  const antigo = legado && !r[legado] && v.data < VCK_INICIO
+    ? `<button type="button" onclick="_vckAbrirLegado('${v.id}','${legado}')" style="width:100%;margin-top:5px;background:none;border:1px dashed rgba(0,0,0,.18);border-radius:8px;padding:5px;font-size:10px;font-weight:700;color:var(--t2);cursor:pointer;font-family:inherit">📜 Ver o check-list feito no app Check-list</button>` : '';
+  return `<div style="font-size:9px;font-weight:800;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Check-list da visita</div>
+    <div style="display:flex;gap:5px">${btn('salao')}${btn('cozinha')}${btn('padrao')}</div>${antigo}`;
+}
+// Dia em que o check-list passou a morar no Painel; antes disso o registro está no app Check-list.
+const VCK_INICIO = '2026-11-14';
+async function _vckAtualizarBotoes() {
+  if (!window.GNVck) return;
+  const els = [...document.querySelectorAll('._vck-btns[data-vck-visita]')];
+  if (!els.length) return;
+  const ids = [...new Set(els.map(e => e.dataset.vckVisita))];
+  const res = await window.GNVck.resumo(ids);
+  ids.forEach(id => { _vckResumoCache[id] = res[id] || {}; });
+  els.forEach(el => {
+    const v = (_visCalData || []).find(x => x.id === el.dataset.vckVisita);
+    if (v && el.isConnected) el.innerHTML = _vckBotoesHtml(v);
+  });
+}
+function _vckConfig() {
+  window.GNVck.config({ url: SB_URL, key: SB_KEY, registrar: _registrarTelaSobreposta, fecharSobreposta: fecharTelaSobreposta, quem: () => session && session.nome });
+}
+function _vckAbrir(id, tipo) {
+  const v = (_visCalData || []).find(x => x.id === id);
+  if (!v || !window.GNVck) return;
+  _vckConfig();
+  window.GNVck.abrir(v, tipo, { aoFechar: _vckAtualizarBotoes });
+}
+function _vckAbrirLegado(id, tipo) {
+  const v = (_visCalData || []).find(x => x.id === id);
+  if (!v || !window.GNVck) return;
+  _vckConfig();
+  window.GNVck.abrirLegado(v, tipo);
+}
+
 function _visCalDetalheHtml(dataStr) {
+  setTimeout(_vckAtualizarBotoes, 0);
   const esc = s => window.escapeHtml ? window.escapeHtml(s) : s;
   const [a,m,d] = dataStr.split('-');
   const dsem = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'][new Date(dataStr+'T12:00').getDay()];
@@ -9666,6 +9724,7 @@ function _visCalDetalheHtml(dataStr) {
       ${v.endereco ? `<div style="font-size:9px;color:var(--t4);margin-top:2px">📌 ${esc(v.endereco)}</div>` : ''}
       ${_visFotoThumbHtml(v)}
       ${v.obs ? `<div style="font-size:10px;color:var(--t3);margin-top:4px;white-space:pre-wrap">${esc(v.obs)}</div>` : ''}
+      ${_vckVisitaElegivel(v) ? `<div class="_vck-btns" data-vck-visita="${v.id}" style="margin-top:7px">${_vckBotoesHtml(v)}</div>` : ''}
       ${emAndamento && !_visEhRemoto(v) ? `<div style="margin-top:6px">${_visFotoCampoHtml('s' + v.id, 'Foto da saída')}</div>` : ''}
       ${emAndamento ? `<button id="visreg-said-btn-${v.id}" onclick="_visRegistrarSaida('${v.id}','${dataStr}')" style="margin-top:6px;width:100%;background:#ef4444;color:#fff;border:none;border-radius:8px;padding:7px;font-size:11px;font-weight:800;cursor:pointer">🚪 ${_visEhRemoto(v)?'Encerrar acompanhamento':'Registrar Saída (GPS)'}</button>
       <div id="visreg-said-status-${v.id}" style="font-size:10px;color:var(--t3);margin-top:4px;min-height:14px"></div>` : ''}
