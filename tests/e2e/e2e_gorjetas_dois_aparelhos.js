@@ -35,7 +35,7 @@ const semente = () => ({
 
 (async () => {
   const browser = await chromium.launch({ executablePath: CAMINHOS.CHROMIUM });
-  let srv = semente(), patches = 0, segurarPatch = null, patchSegurado = false;
+  let srv = semente(), patches = 0, segurarPatch = null, patchSegurado = false, segurarGet = null, getsSegurados = 0;
   const novoAparelho = async (localAllData) => {
     const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 900 } });
     // Quarta 11/11/2026 15:00 — semana de índice 44.
@@ -43,7 +43,12 @@ const semente = () => ({
     await ctx.route('**/cdn.jsdelivr.net/**', r => r.fulfill({ status: 200, contentType: 'application/javascript', body: SB_LIB }));
     await ctx.route('**/rest/v1/**', r => {
       const u = r.request().url(), m = r.request().method();
-      if (/gn_comissoes\?/.test(u) && m === 'GET') return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{ all_data: srv }]) });
+      if (/gn_comissoes\?/.test(u) && m === 'GET') {
+        // A resposta é o servidor NA HORA do pedido — o que volta atrasado é essa foto.
+        const foto = JSON.stringify([{ all_data: srv }]);
+        if (segurarGet) { getsSegurados++; return segurarGet.then(() => r.fulfill({ status: 200, contentType: 'application/json', body: foto })); }
+        return r.fulfill({ status: 200, contentType: 'application/json', body: foto });
+      }
       if (/gn_comissoes\?/.test(u) && m === 'PATCH') {
         const corpo = JSON.parse(JSON.stringify(r.request().postDataJSON().all_data));
         const responder = () => { srv = corpo; patches++; return r.fulfill({ status: 204, body: '' }); };
@@ -146,6 +151,24 @@ const semente = () => ({
   check('…e sobe no envio seguinte, em vez de o servidor apagar ela', f(2).horario === '11:00-19:00' && f(0).setor === 'Bar', JSON.stringify([f(0).setor, f(2).horario]));
   check('sem erro de JavaScript', l3.erros.length === 0, l3.erros.join(' | '));
   await l3.ctx.close();
+
+  // ══ 9. Dois envios ao mesmo tempo (13/11/2026, achado no CI) ═════════════════════════
+  // Excluir dispara um envio na hora; o automático (ou outro toque) disparava OUTRO no meio.
+  // O segundo lia o servidor de ANTES do primeiro gravar e a pessoa excluída voltava. Aqui as
+  // leituras ficam presas na rede até os dois envios terem sido pedidos — sem a fila, os dois
+  // leem a foto velha; com ela, o segundo só lê depois que o primeiro gravou.
+  srv = semente();
+  const l4 = await novoAparelho(null);
+  let soltarGet; segurarGet = new Promise(r => { soltarGet = r; }); getsSegurados = 0;
+  await l4.page.evaluate(() => { clearTimeout(syncTimer); window.__a = _removerFuncionarioConfirmado(2, 'BRUNO', 'ERRO_CADASTRO'); window.__b = _syncNow(); });
+  for (let i = 0; i < 50 && getsSegurados < 1; i++) await new Promise(r => setTimeout(r, 20));
+  await new Promise(r => setTimeout(r, 300));
+  check('com um envio a caminho, o segundo espera (só uma leitura na rede)', getsSegurados === 1, 'leituras ao mesmo tempo: ' + getsSegurados);
+  soltarGet(); segurarGet = null;
+  await l4.page.evaluate(async () => { await window.__a; await window.__b; await _syncNow(); });
+  check('a exclusão não é desfeita pelo envio que veio junto', f(2).nome === '' && f(2)._removidoNome === 'BRUNO', JSON.stringify(f(2)));
+  check('sem erro de JavaScript', l4.erros.length === 0, l4.erros.join(' | '));
+  await l4.ctx.close();
 
   await browser.close();
   console.log(`\n${ok} OK, ${falhou} falhou`);
