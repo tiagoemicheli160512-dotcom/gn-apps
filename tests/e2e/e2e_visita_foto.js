@@ -186,9 +186,28 @@ const DIA = '2026-10-01';
   const txs = await page.evaluate(() => window.__textos.join(' | '));
   check('saída com foto: sobe a foto e grava foto_saida junto da hora', uploads.length === 1 && patches.length === 1 && /gn-fotos\/visitas\//.test(patches[0].foto_saida || '') && patches[0].hora_saida === '10:30', JSON.stringify(patches));
   check('…a marca diz "Saída" com data/hora e o GPS da saída', /Saída 12\/10|Saída 01\/10\/2026 10:30/.test(txs) && /GPS -22\.876123/.test(txs), txs);
-  await abrirSaida('administrador'); uploads = []; patches = [];
+  // ── 8b. Caso real (13/11, Boulevard): foto da saída escolhida e o dia redesenhado antes
+  // de confirmar (abrir/fechar check-list, a câmera recarregando a tela). O campo da tela
+  // perdia o arquivo e a saída ia sem foto, sem aviso.
+  await abrirSaida('administrador'); uploads = []; patches = []; dialogos.length = 0;
+  await escolherSaida();
+  const redesenho = await page.evaluate(d => { document.getElementById('_teste-dia').innerHTML = _visCalDetalheHtml(d);
+    const prev = document.getElementById('visreg-foto-prev-s501'), inp = document.getElementById('visreg-foto-s501');
+    return { prev: prev && getComputedStyle(prev).display, arquivosNoCampo: inp.files.length, rot: document.getElementById('visreg-foto-rot-s501').textContent }; }, DIA);
+  check('(controle) o redesenho zera o campo de arquivo da tela', redesenho.arquivosNoCampo === 0);
+  check('a foto escolhida continua lá depois do redesenho (miniatura e "Trocar a foto")', redesenho.prev === 'flex' && /Trocar a foto/.test(redesenho.rot), redesenho);
   await page.evaluate(async d => { await _visRegistrarSaida('501', d); }, DIA);
-  check('saída sem foto (não supervisor): registra como antes, sem foto_saida', patches.length === 1 && !('foto_saida' in patches[0]) && uploads.length === 0, JSON.stringify(patches));
+  check('…e sobe junto da saída', uploads.length === 1 && patches.length === 1 && /gn-fotos\/visitas\//.test(patches[0].foto_saida || ''), JSON.stringify(patches));
+  check('depois de registrada, a foto não fica presa pra próxima', await page.evaluate(() => !_visFotoArquivo('s501')));
+
+  // ── 8c. Sem foto: pergunta antes (opcional, mas nunca sem saber) ──
+  await abrirSaida('administrador'); uploads = []; patches = []; dialogos.length = 0; responder = false;
+  await page.evaluate(async d => { await _visRegistrarSaida('501', d); }, DIA);
+  check('saída sem foto pergunta antes; "Cancelar" não registra nada', dialogos.some(d => /saída SEM foto/.test(d)) && patches.length === 0, JSON.stringify({ dialogos, patches }));
+  responder = true;
+  await abrirSaida('administrador'); uploads = []; patches = []; dialogos.length = 0;
+  await page.evaluate(async d => { await _visRegistrarSaida('501', d); }, DIA);
+  check('saída sem foto (não supervisor), confirmando: registra como antes, sem foto_saida', patches.length === 1 && !('foto_saida' in patches[0]) && uploads.length === 0 && dialogos.some(d => /SEM foto/.test(d)), JSON.stringify(patches));
   await abrirSaida('supervisor'); uploads = []; patches = []; dialogos.length = 0;
   await page.evaluate(async d => { await _visRegistrarSaida('501', d); }, DIA);
   check('supervisor: saída sem foto avisa e NÃO registra', dialogos.some(d => /obrigatória/.test(d)) && patches.length === 0, JSON.stringify({ dialogos, patches }));
