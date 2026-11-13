@@ -104,9 +104,46 @@ const ANTIGOS = [
   const filtro = await page.evaluate(() => { _visReincLoja = 'Caxias'; _renderVisitasSupContent(); return document.getElementById('visitas-sup-content').textContent.replace(/\s+/g, ' '); });
   check('filtrar por loja mostra só ela', /Pias exclusivas/.test(filtro) && !/Validades em dia na cozinha/.test(filtro));
 
+  // ── Ranking (só ganha posição com 3 visitas avaliadas) ──
+  const rk = R.d.ranking || [];
+  const pos = l => (rk.find(x => x.loja === l) || {});
+  check('ranking: Bangu (3 visitas, 58,7) 1º e Caxias (6 visitas, 0) 2º',
+    pos('Bangu').pos === 1 && pos('Bangu').media === 58.7 && pos('Caxias').pos === 2 && pos('Bangu').total === 2, rk.slice(0, 3));
+  check('mínimo de visitas: Itaquera com 2 visitas (média 95) fica "em formação", sem posição — não passa na frente por sorte',
+    pos('Itaquera').pos === null && pos('Itaquera').emFormacao && pos('Itaquera').media === 95 && pos('Itaquera').visitas === 2, pos('Itaquera'));
+  check('ordem: com posição, depois em formação, depois sem visita',
+    rk.length === 11 && rk[2].loja === 'Itaquera' && rk.slice(3).every(x => x.pos === null && x.media === null), rk.map(x => x.loja + ':' + x.pos));
+  check('Maglia fora do ranking', !rk.some(x => x.loja === 'Maglia'));
+  check('reincidentes contados por loja (2x seguidas ou mais)', pos('Caxias').reincidentes === 2 && pos('Bangu').reincidentes === 1, { c: pos('Caxias').reincidentes, b: pos('Bangu').reincidentes });
+  const emp = await page.evaluate(() => {
+    const s = (loja, n, d) => ({ loja, data: d, tipo: 'salao', dados: { itens: { visual: { limpeza_geral: n } } } });
+    const tres = (loja, n) => ['2026-11-01', '2026-11-05', '2026-11-09'].map(d => s(loja, n, d));
+    const r = _vckRanking([...tres('Bangu', 8), ...tres('Caxias', 8), ...tres('Itaquera', 9)]);
+    return r.slice(0, 3).map(x => x.loja + ':' + x.pos).sort();
+  });
+  check('empate de verdade divide a posição (1º, 2º, 2º)', JSON.stringify(emp) === JSON.stringify(['Bangu:2', 'Caxias:2', 'Itaquera:1']), emp);
+  check('tela do Painel mostra ranking, em formação e a regra do mínimo', /Ranking das lojas nas visitas/.test(R.t) && /🥇 Bangu/.test(R.t) && /em formação · 2 de 3 visitas/.test(R.t) && /3 visitas avaliadas ou mais/.test(R.t), R.t.slice(0, 500));
+
   // ── Supervisor com rota ──
   const S = await carregar(['BANGU']);
   check('supervisor só vê a reincidência das lojas da rota dele', S.d.itens.length > 0 && S.d.itens.every(x => x.loja === 'Bangu'), S.d.itens.map(x => x.loja));
+  check('e no ranking só a loja dele, mas com a posição na rede', S.d.ranking.length === 1 && S.d.ranking[0].loja === 'Bangu' && S.d.ranking[0].pos === 1 && S.d.ranking[0].total === 2, S.d.ranking);
+
+  // ── Na Home da loja ──
+  const home = async (loja) => page.evaluate(async (loja) => {
+    LOJAS_LISTA = [loja]; masterLoja = null; _vckHomeRankAberto = false;
+    await _renderVisitaResultadoHome(true, { id: 1, nome: 'G', loja, cargo: 'gerente', permissoes: {} }, false);
+    const fechado = document.getElementById('visita-resultado-home-card').textContent.replace(/\s+/g, ' ');
+    _vckHomeRankAberto = true; document.getElementById('visita-resultado-home-card').innerHTML = _vckHomeCardHtml(_vckHomeLinhas, new Date());
+    return { fechado, aberto: document.getElementById('visita-resultado-home-card').textContent.replace(/\s+/g, ' ') };
+  }, loja);
+  const hb = await home('BANGU');
+  check('Home da Bangu mostra a posição dela', /1º de 2 no ranking das visitas/.test(hb.fechado) && /média 58,7/.test(hb.fechado) && /🔁 1 reincidente/.test(hb.fechado), hb.fechado);
+  check('e abre o ranking completo', /🥇 Bangu/.test(hb.aberto) && /Itaquera/.test(hb.aberto) && /Caxias/.test(hb.aberto), hb.aberto.slice(0, 300));
+  const hi = await home('ITAQUERA');
+  check('loja com menos de 3 visitas vê "em formação" e quantas faltam', /Ranking em formação/.test(hi.fechado) && /2 de 3 visitas avaliadas/.test(hi.fechado) && /média até agora 95/.test(hi.fechado), hi.fechado);
+  const hn = await home('NORTE SHOPPING');
+  check('loja sem visita avaliada: diz que ainda não entra no ranking', /ainda não entra no ranking/.test(hn.fechado), hn.fechado);
 
   console.log(`\n${ok} OK, ${falhou} falhou`);
   await browser.close();

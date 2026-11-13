@@ -93,7 +93,7 @@ const LINHAS = [
   check('mestre na visão geral (sem loja) não vê', (await render('mestre', true, null)) === '');
 
   // ── O que é pedido ──
-  const q = pedidos[pedidos.length - 1] || '';
+  const q = pedidos.filter(u => /loja=eq\./.test(u)).pop() || '';
   check('pede só a loja da sessão', /loja=eq\.Bangu&/.test(q), q);
   check('só o que foi finalizado', /finalizada=eq\.true/.test(q));
   check('só de visita que ainda existe (excluída some da Home)', /visita_id=not\.is\.null/.test(q));
