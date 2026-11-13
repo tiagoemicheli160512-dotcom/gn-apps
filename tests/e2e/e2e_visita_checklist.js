@@ -282,6 +282,27 @@ async function rota(route) {
   check('finalizada trava os itens', srv1.dados.itens.visual.uniformes === undefined);
   const fimTela = await D.evaluate(() => document.getElementById('_vck-modal').textContent.replace(/\s+/g, ' '));
   check('o texto diz que fechou o check-list, não a visita', /Check-list do Salão finalizado/.test(fimTela) && /encerra só pela saída/.test(fimTela) && !/Visita finalizada/.test(fimTela), fimTela.slice(-200));
+
+  // ── Relatório pra diretoria (WhatsApp / PDF / PDF no Whats) ──
+  const rel = await D.evaluate(async () => {
+    const botoes = [...document.querySelectorAll('#_vck-modal button')].map(b => b.textContent.trim());
+    const r = GNVck.relatorio();
+    const pdf = GNVck._paraPdf(r.texto);
+    const cap = {};
+    window.open = (u) => { cap.wpp = u; return null; };
+    GNVck.config({ textoParaPdfBlob: async (t, ti, f) => { cap.pdf = { t, ti, f }; return new Blob(['%PDF']); },
+      compartilharPdfWpp: (t, ti, f) => { cap.pdfWpp = { t, ti, f }; } });
+    GNVck._relWpp(); await GNVck._relPdf(); GNVck._relPdfWpp();
+    return { botoes, r, pdf, cap };
+  });
+  check('check-list finalizado mostra 📲 WhatsApp, 📄 PDF e 📄📲 PDF no Whats', ['📲 WhatsApp', '📄 PDF', '📄📲 PDF no Whats'].every(b => rel.botoes.includes(b)), rel.botoes.filter(b => /📲|📄/.test(b)));
+  check('relatório traz loja, data, supervisão, nota e classificação', /SUPERVISÃO SALÃO — Bangu/.test(rel.r.texto) && /20\/11\/2026/.test(rel.r.texto) && /Supervisão: Carlos/.test(rel.r.texto) && new RegExp('NOTA: ' + notaEsperada + '/100').test(rel.r.texto), rel.r.texto.slice(0, 300));
+  check('…a nota de cada setor e item avaliado', /Segurança Alimentar e Validades/.test(rel.r.texto) && /Validades em dia na cozinha — nenhum produto vencido: \*4\*/.test(rel.r.texto), rel.r.texto);
+  check('…os críticos com o plano de ação escolhido', /CRÍTICOS \(1\)/.test(rel.r.texto) && /Ação: Descartar na hora os vencidos e registrar a perda; até sexta, com o Marcos/.test(rel.r.texto));
+  check('…e quem finalizou', /Finalizado por Carlos/.test(rel.r.texto));
+  check('WhatsApp abre com o texto do relatório', /^https:\/\/wa\.me\/\?text=/.test(rel.cap.wpp || '') && decodeURIComponent(rel.cap.wpp).includes('NOTA: ' + notaEsperada));
+  check('PDF sai sem emoji e sem os * do WhatsApp (a fonte do PDF não tem)', rel.cap.pdf && !/[^\u0000-\u00FF]/.test(rel.cap.pdf.t) && !/\*/.test(rel.cap.pdf.t) && /\[RUIM\]/.test(rel.cap.pdf.t) && /Supervis.o sal.o - Bangu - 20\/11\/2026/i.test(rel.cap.pdf.ti), rel.cap.pdf && rel.cap.pdf.t.slice(0, 200));
+  check('PDF no Whats usa o mesmo relatório', rel.cap.pdfWpp && rel.cap.pdfWpp.t === rel.cap.pdf.t);
   check('finalizar o check-list não mexe na visita (chegada/saída)', !chamadas.some(c => c.visita), chamadas.filter(c => c.visita));
 
   // ── 6b. Cozinha ─────────────────────────────────────────────────────────────────────
