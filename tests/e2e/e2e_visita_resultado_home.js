@@ -88,6 +88,8 @@ const LINHAS = [
   check('gerente vê o card', /Resultado das visitas/.test(ger), ger.slice(0, 80));
   check('sub-gerente vê o card', /Resultado das visitas/.test(await render('sub_gerente', false)));
   check('mestre olhando a loja vê o card', /Resultado das visitas/.test(await render('mestre', true, 'BANGU')));
+  const mag = await page.evaluate(async () => { LOJAS_LISTA = GN_LOJAS.map(l => l.userKey); masterLoja = null; await _renderVisitaResultadoHome(true, { id: 2, nome: 'X', loja: 'MAGLIA', cargo: 'gerente', permissoes: {} }, false); return document.getElementById('visita-resultado-home-card').textContent.trim() + document.getElementById('visita-critico-home-card').textContent.trim(); });
+  check('Maglia não recebe o card nem o alerta (regra: só quando é citada)', mag === '', mag);
   check('mestre na visão geral (sem loja) não vê', (await render('mestre', true, null)) === '');
 
   // ── O que é pedido ──

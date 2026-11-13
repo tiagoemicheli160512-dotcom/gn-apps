@@ -1534,6 +1534,8 @@ async function _renderVisitaResultadoHome(mostrar, sess, isMasterAtivo) {
   if (!mostrar || !sess || !pode || !window.GNVck) { limpar(); return; }
   const loja = (isMasterAtivo && masterLoja) ? masterLoja : sess.loja;
   if (!LOJAS_LISTA.includes(loja)) { limpar(); return; }
+  // Maglia: card e alerta são novos e o pedido não citou a Maglia (regra do projeto).
+  if (loja === LOJA_FORA_CONSOLIDADO) { limpar(); return; }
   const chkKey = LOJA_DB_KEY[loja] || loja;
   const iso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
   const desde = new Date(); desde.setDate(desde.getDate() - (VCK_HOME_DIAS - 1));
@@ -8986,6 +8988,7 @@ function _setVisSupView(view) {
   _renderVisitasSupContent();
   if (view === 'cobertura') { if (!_coberturaVisData) _carregarCoberturaVisitas(); }
   else if (view === 'provisao') { if (!_visProvData.length) _carregarVisProvisao(); }
+  else if (view === 'reincidencia') { if (!_visReincData) _carregarVisReincidencia(); }
   else if (_visSupSelecionado) {
     if (view === 'calendario') _carregarVisCalendario();
     else _carregarVisitasSupData();
@@ -9141,7 +9144,7 @@ function _renderVisitasSupContent() {
   const el = document.getElementById('visitas-sup-content');
   if (!el) return;
 
-  const tabs = [['calendario','📅 Calendário'],['relatorio','📊 Relatório'],['cobertura','🗺️ Cobertura'],['provisao','🗓 Provisão']];
+  const tabs = [['calendario','📅 Calendário'],['relatorio','📊 Relatório'],['cobertura','🗺️ Cobertura'],['provisao','🗓 Provisão'],['reincidencia','🔁 Reincidência']];
   const switcherHtml = `<div style="display:flex;gap:6px;margin-bottom:14px;overflow-x:auto;-webkit-overflow-scrolling:touch">${tabs.map(([v,lbl]) => {
     const ativo = _visSupView === v;
     return `<button onclick="_setVisSupView('${v}')" style="flex:1;padding:7px 0;border-radius:8px;border:1px solid ${ativo?'#6366f1':'var(--t4)'};background:${ativo?'rgba(99,102,241,.25)':'var(--t4)'};color:var(--t1);font-size:11px;font-weight:700;font-family:inherit;cursor:pointer;white-space:nowrap">${lbl}</button>`;
@@ -9150,6 +9153,7 @@ function _renderVisitasSupContent() {
   const body = _visSupView === 'calendario' ? _renderVisCalendarioTab()
     : _visSupView === 'cobertura' ? _renderVisCoberturaTab()
     : _visSupView === 'provisao' ? _renderVisProvisaoTab()
+    : _visSupView === 'reincidencia' ? _renderVisReincidenciaTab()
     : _renderVisRelatorioTab();
 
   el.innerHTML = switcherHtml + body;
@@ -9168,6 +9172,129 @@ function _visEhRemoto(v) { return !!v && v.tipo_visita === TIPO_VISITA_REMOTO; }
 function _visSeloHtml(v) {
   if (!_visEhRemoto(v)) return '';
   return ` <span style="font-size:9px;font-weight:800;color:#4f46e5;background:rgba(99,102,241,.14);border-radius:6px;padding:2px 6px;margin-left:4px;white-space:nowrap">💻 Remoto</span>`;
+}
+
+// ── Reincidência (13/11/2026) ───────────────────────────────────────────────────────
+// Item que falha de novo na visita seguinte é plano de ação que não foi cumprido. Aqui
+// fica, loja por loja, o que reprovou em mais de uma visita e quantas vezes SEGUIDAS
+// (contando da visita mais recente pra trás) — a sequência é o sinal; o total dá o contexto.
+// Reprovou = nota abaixo de 7 no salão, "Não conforme" na cozinha, "NÃO" na auditoria.
+// Fonte: check-lists finalizados do Painel (gn_visita_checklist) + os do app Check-list de
+// antes da mudança (checklist_diario), pra não começar do zero. Maglia fica fora (regra do
+// projeto: só entra quando é citada).
+const VIS_REINC_DIAS = 90;
+let _visReincData = null, _visReincCarregando = false, _visReincLoja = '';
+function _vckReincidencia(registros) {
+  const G = window.GNVck;
+  const porItem = {};   // loja|chave → { loja, chave, label, origem, critico, avals:[{data, falhou}] }
+  const add = (loja, data, chave, label, critico, tipoLabel, falhou) => {
+    const k = loja + '|' + chave;
+    (porItem[k] = porItem[k] || { loja, chave, label, critico, tipoLabel, avals: [] }).avals.push({ data, falhou });
+  };
+  (registros || []).forEach(r => {
+    const d = r.dados || {}, it = d.itens || {};
+    if (r.tipo === 'salao') G.SUP_SETORES.forEach(st => st.itens.forEach(i => {
+      const v = (it[st.key] || {})[i.key];
+      if (v === undefined || v === null || v === '') return;
+      add(r.loja, r.data, 'salao|' + st.key + '|' + i.key, i.label, !!i.critico, '🎯 Salão', Number(v) < 7);
+    }));
+    else if (r.tipo === 'cozinha') G.COZ_SETORES.forEach(st => st.itens.forEach(i => {
+      const v = (it[st.key] || {})[i.key];
+      if (!v || v === 'NA') return;
+      add(r.loja, r.data, 'cozinha|' + st.key + '|' + i.key, i.label, !!i.critico, '🧼 Cozinha', v === 'NC');
+    }));
+    else if (r.tipo === 'padrao') G.AUDP_TIPOS.forEach(t => {
+      const a = d[t.key];
+      if (!a || !a.finalizada) return;
+      t.itens.forEach((i, idx) => {
+        const v = ((a.itens || {})[idx] || {}).resp;
+        if (!v || v === 'NA') return;
+        add(r.loja, r.data, 'padrao|' + t.key + '#' + idx, i.label, i.crit === 'CRITICO', '🔍 ' + t.label, v === 'NAO');
+      });
+    });
+  });
+  const lista = Object.values(porItem).map(x => {
+    x.avals.sort((a, b) => b.data.localeCompare(a.data));
+    let seguidas = 0; for (const a of x.avals) { if (a.falhou) seguidas++; else break; }
+    x.seguidas = seguidas;
+    x.falhas = x.avals.filter(a => a.falhou).length;
+    x.ultima = x.avals[0].data;
+    return x;
+  }).filter(x => x.falhas >= 2);
+  lista.sort((a, b) => b.seguidas - a.seguidas || b.falhas - a.falhas || (b.critico - a.critico) || a.label.localeCompare(b.label));
+  return lista;
+}
+async function _carregarVisReincidencia() {
+  if (_visReincCarregando || !window.GNVck) return;
+  _visReincCarregando = true;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const d0 = new Date(); d0.setDate(d0.getDate() - VIS_REINC_DIAS);
+  const desde = d0.getFullYear() + '-' + String(d0.getMonth() + 1).padStart(2, '0') + '-' + String(d0.getDate()).padStart(2, '0');
+  try {
+    const [novos, antigos] = await Promise.all([
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_visita_checklist?finalizada=eq.true&visita_id=not.is.null&data=gte.${desde}&select=loja,data,tipo,dados`, H, 'reinc:novos', null),
+      window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${desde}&data_operacao=lt.${VCK_INICIO}&or=(supervisao->>fechada.eq.true,supervisao_cozinha->>fechada.eq.true,auditorias_padrao.neq.%7B%7D)&select=loja,data_operacao,supervisao,supervisao_cozinha,auditorias_padrao`, H, 'reinc:antigos', null),
+    ]);
+    if (novos === null || antigos === null) { _visReincData = { erro: true }; return; }
+    const regs = novos.map(r => ({ loja: r.loja, data: r.data, tipo: r.tipo, dados: r.dados }));
+    // Do app Check-list só entra o que foi FECHADO — avaliação largada no meio (com os itens
+    // que sumiam: em 13/11 a Boulevard tinha 1 item de 30) contaria como visita e distorceria
+    // a sequência. O filtro já vem do servidor: dos ~1.000 dias de 90 dias, só uns 4 servem.
+    const fechado = o => o && o.itens && Object.keys(o.itens).length && o.fechada === true;
+    antigos.forEach(r => {
+      if (fechado(r.supervisao)) regs.push({ loja: r.loja, data: r.data_operacao, tipo: 'salao', dados: r.supervisao });
+      if (fechado(r.supervisao_cozinha)) regs.push({ loja: r.loja, data: r.data_operacao, tipo: 'cozinha', dados: r.supervisao_cozinha });
+      if (r.auditorias_padrao && Object.values(r.auditorias_padrao).some(a => a && a.finalizada)) regs.push({ loja: r.loja, data: r.data_operacao, tipo: 'padrao', dados: r.auditorias_padrao });
+    });
+    // Lojas que esta sessão enxerga (supervisor com rota só vê a rota), sem a Maglia.
+    const permitidas = new Set(LOJAS_LISTA.filter(k => k !== LOJA_FORA_CONSOLIDADO).map(k => LOJA_DB_KEY[k] || k));
+    const filtrados = regs.filter(r => permitidas.has(r.loja));
+    _visReincData = { itens: _vckReincidencia(filtrados), avaliacoes: filtrados.length, lojas: [...new Set(filtrados.map(r => r.loja))] };
+  } catch (e) {
+    window.gnLogError && window.gnLogError('reinc:carregar', e);
+    _visReincData = { erro: true };
+  } finally {
+    _visReincCarregando = false;
+    if (_visSupView === 'reincidencia') _renderVisitasSupContent();
+  }
+}
+function _renderVisReincidenciaTab() {
+  const esc = s => window.escapeHtml ? window.escapeHtml(String(s == null ? '' : s)) : String(s == null ? '' : s);
+  const D = _visReincData;
+  if (!D) return `<div style="text-align:center;padding:24px;color:var(--t3);font-size:12px">Carregando reincidências…</div>`;
+  if (D.erro) return `<div style="text-align:center;padding:24px;color:var(--t2);font-size:12px">Não deu pra carregar agora.<br><button onclick="_visReincData=null;_carregarVisReincidencia();_renderVisitasSupContent()" style="margin-top:10px;padding:8px 14px;border-radius:9px;border:1px solid rgba(0,0,0,.15);background:var(--s2);color:var(--t1);font-weight:700;cursor:pointer;font-family:inherit">Tentar de novo</button></div>`;
+  const dm = s => String(s || '').split('-').reverse().slice(0, 2).join('/');
+  const nome = l => LOJA_DISPLAY[_normLoja(l)] || l;
+  const lojasCom = [...new Set(D.itens.map(x => x.loja))];
+  const filtro = _visReincLoja && lojasCom.includes(_visReincLoja) ? _visReincLoja : '';
+  const itens = filtro ? D.itens.filter(x => x.loja === filtro) : D.itens;
+  const chips = lojasCom.length > 1 ? `<div style="display:flex;gap:5px;overflow-x:auto;margin-bottom:10px;padding-bottom:2px">${[''].concat(lojasCom).map(l => {
+    const on = l === filtro, n = l ? D.itens.filter(x => x.loja === l).length : D.itens.length;
+    return `<button onclick="_visReincLoja='${esc(l)}';_renderVisitasSupContent()" style="flex-shrink:0;padding:5px 10px;border-radius:999px;font-size:10.5px;font-weight:800;font-family:inherit;cursor:pointer;border:1px solid ${on ? '#6366f1' : 'rgba(0,0,0,.12)'};background:${on ? 'rgba(99,102,241,.16)' : 'var(--s2)'};color:var(--t1);white-space:nowrap">${l ? esc(nome(l)) : 'Todas'} · ${n}</button>`;
+  }).join('')}</div>` : '';
+  const porLoja = {};
+  itens.forEach(x => { (porLoja[x.loja] = porLoja[x.loja] || []).push(x); });
+  const cards = Object.entries(porLoja).sort((a, b) => Math.max(...b[1].map(x => x.seguidas)) - Math.max(...a[1].map(x => x.seguidas)) || b[1].length - a[1].length).map(([loja, xs]) => `
+    <div style="background:var(--fill-sutil);border-left:3px solid ${COR_LOJA[_normLoja(loja)] || '#888'};border-radius:0 12px 12px 0;padding:10px 12px;margin-bottom:10px">
+      <div style="font-size:12.5px;font-weight:800;color:var(--t1);margin-bottom:4px">${esc(nome(loja))} <span style="font-weight:600;color:var(--t3);font-size:10.5px">· ${xs.length} ite${xs.length > 1 ? 'ns' : 'm'} reincidente${xs.length > 1 ? 's' : ''}</span></div>
+      ${xs.map(x => {
+        const cor = x.seguidas >= 3 ? '#dc2626' : x.seguidas === 2 ? '#d97706' : 'var(--t3)';
+        const bolinhas = x.avals.slice(0, 6).reverse().map(a => `<span title="${dm(a.data)}" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${a.falhou ? '#dc2626' : '#16a34a'};margin-right:3px"></span>`).join('');
+        return `<div style="border-top:1px solid rgba(0,0,0,.06);padding:7px 0">
+          <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
+            <span style="font-size:11.5px;font-weight:700;color:var(--t1);line-height:1.35;min-width:0">${x.critico ? '<span style="color:#dc2626">⚡</span> ' : ''}${esc(x.label)}</span>
+            <span style="font-size:11px;font-weight:900;color:${cor};white-space:nowrap">${x.seguidas >= 2 ? x.seguidas + 'x seguidas' : x.falhas + ' de ' + x.avals.length}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-top:3px">
+            <span style="font-size:10px;color:var(--t3)">${esc(x.tipoLabel)} · reprovou ${x.falhas} de ${x.avals.length} · última ${dm(x.ultima)}</span>
+            <span style="white-space:nowrap">${bolinhas}</span>
+          </div></div>`;
+      }).join('')}
+    </div>`).join('');
+  const semReinc = D.lojas.filter(l => !lojasCom.includes(l));
+  const topo = `<div style="font-size:11px;color:var(--t3);margin-bottom:10px;line-height:1.45">Itens que reprovaram em mais de uma visita nos últimos ${VIS_REINC_DIAS} dias (nota abaixo de 7, não conforme ou NÃO). <b>Seguidas</b> conta da visita mais recente pra trás. Bolinhas: as últimas avaliações do item, da mais antiga à mais recente.</div>`;
+  if (!D.itens.length) return topo + `<div style="text-align:center;padding:20px;color:var(--t2);font-size:12px">✅ Nenhum item reprovou em mais de uma visita${D.avaliacoes ? '' : ' — ainda não há check-list finalizado no período'}.</div>`;
+  return topo + chips + cards + (semReinc.length && !filtro ? `<div style="font-size:10.5px;color:var(--t3);margin-top:4px">✅ Sem reincidência: ${semReinc.map(l => esc(nome(l))).join(', ')}</div>` : '');
 }
 
 function _renderVisRelatorioTab() {
