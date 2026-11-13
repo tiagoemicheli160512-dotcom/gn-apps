@@ -195,6 +195,17 @@ async function rota(route) {
   // ── 3. Marcar e reabrir ─────────────────────────────────────────────────────────────
   await abrirCk(A, 'salao');
   check('abre em tela cheia', await A.evaluate(() => { const m = document.getElementById('_vck-modal'); return !!m && getComputedStyle(m).position === 'fixed'; }));
+  // Caso real (print 13/11): a visita é aberta de DENTRO da janela "Visitas por Supervisor".
+  // O check-list tem que ficar POR CIMA dela — antes abria por baixo e o toque "não fazia nada".
+  const porCima = await A.evaluate(() => {
+    const ov = document.getElementById('visitas-sup-overlay');
+    if (ov) ov.style.display = 'flex';
+    const el = document.elementFromPoint(window.innerWidth / 2, window.innerHeight / 2);
+    const r = !!el && !!el.closest('#_vck-modal');
+    if (ov) ov.style.display = '';
+    return { r, temOverlay: !!ov, z: getComputedStyle(document.getElementById('_vck-modal')).zIndex };
+  });
+  check('abre por cima da janela "Visitas por Supervisor"', porCima.r && porCima.temOverlay, porCima);
   await A.evaluate(() => { GNVck._nota('visual', 'limpeza_geral', 9); GNVck._nota('validade', 'val_cozinha', 4); GNVck._nota('operacao', 'camaras', 8); });
   check('as marcações sobem pro servidor', await esperarFilaVazia(A));
   const srv1 = linhas.find(l => l.visita_id === VISITA.id && l.tipo === 'salao');

@@ -388,7 +388,10 @@
     if (m) return m;
     m = document.createElement('div');
     m.id = '_vck-modal';
-    m.style.cssText = 'position:fixed;inset:0;background:var(--s1,#fff);z-index:10000;overflow-y:auto;-webkit-overflow-scrolling:touch';
+    // Acima de tudo do Painel: a janela "Visitas por Supervisor" (picker-overlay) fica em
+    // 100000 e a tela do Equipe em 100001 — com 10000 o check-list abria POR BAIXO e o toque
+    // parecia não fazer nada (13/11/2026, print do dono).
+    m.style.cssText = 'position:fixed;inset:0;background:var(--s1,#fff);z-index:100050;overflow-y:auto;-webkit-overflow-scrolling:touch';
     document.body.appendChild(m);
     m._vckRegistrado = typeof CFG.registrar === 'function';
     if (m._vckRegistrado) CFG.registrar(m);
