@@ -291,6 +291,19 @@ const HOJE = '2026-11-05';
   check('açúcar e feijão da Nutrimax NÃO ganham a troca pela Top Alto',
     await page.evaluate(() => !_epGrupoSubst('NUTRIMAX', { gn_catalogo: { item_id: 164 } }) && !_epGrupoSubst('NUTRIMAX', { gn_catalogo: { item_id: 121 } })));
   check('sem saber o item, grupo restrito não casa', await page.evaluate(() => _epGrupoSubst('TOP ALTO') === null));
+  // Rio Quality/Arcofood (13/11/2026): SÓ o açúcar sachê (item 165).
+  const opAcuc = await page.evaluate(() => { provisoesEntrega = [Object.assign({}, provisoesEntrega[0], { id: 'a', fornecedor: 'RIO', fornecedor_entregue: null, gn_catalogo: { produto: 'açucar  sache', und: 'CX', item_id: 165, origem_item_id: null } })]; abrirTrocaFornecedorEntrega('a'); const m = document.getElementById('modalTrocaForn'); const o = Array.from(m.querySelectorAll('button[data-forn]')).map(b => b.dataset.forn); m.remove(); return o; });
+  check('açúcar sachê da RIO (Rio Quality) pode virar ARCO (Arcofood)', JSON.stringify(opAcuc) === JSON.stringify(['ARCO']), JSON.stringify(opAcuc));
+  await page.evaluate(async () => { window.__gravado = []; await _epAplicarTrocaForn('a', 'ARCO'); });
+  const gA = await gravado();
+  check('…grava "entregue por ARCO" mantendo o pedido na RIO', gA.length && gA[gA.length - 1].corpo.fornecedor_entregue === 'ARCO' &&
+    await page.evaluate(() => /Pedido em RIO · entregue por ARCO/.test(_epRessalvaForn(provisoesEntrega[0]))), JSON.stringify(gA[gA.length - 1]));
+  check('…e a volta (pedido na ARCO, entregue pela RIO) também vale', await page.evaluate(() => !!_epGrupoSubst('ARCO', { gn_catalogo: { item_id: 165 } })));
+  check('outros itens da ARCO (ketchup, knorr, sal) NÃO ganham a troca pela RIO',
+    await page.evaluate(() => [170, 150, 163].every(i => !_epGrupoSubst('ARCO', { gn_catalogo: { item_id: i } }))));
+  check('em SP (açúcar sachê da PMG, item 1165) nada muda', await page.evaluate(() => !_epGrupoSubst('PMG', { gn_catalogo: { item_id: 1165, origem_item_id: 165 } })));
+  // volta o item da margarina pro teste da batata logo abaixo
+  await page.evaluate(() => { provisoesEntrega = [Object.assign({}, provisoesEntrega[0], { id: 'm', fornecedor: 'TOP ALTO', fornecedor_entregue: 'NUTRIMAX', gn_catalogo: { produto: 'Margarina Balde 15 L', und: 'BB', item_id: 187, origem_item_id: null } })]; });
   await page.evaluate(async () => { window.__gravado = []; await _epAplicarTrocaForn('m', 'TOP ALTO'); provisoesEntrega[0].gn_catalogo = { produto: 'Batata', item_id: 199 }; window.__gravado = []; await _epAplicarTrocaForn('m', 'NUTRIMAX'); });
   check('trocar a batata pela Nutrimax é barrado mesmo chamando direto', (await gravado()).length === 0);
 
