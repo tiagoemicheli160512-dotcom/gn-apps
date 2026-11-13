@@ -629,6 +629,8 @@
 
   <div id="visita-supervisao-home-card"></div>
 
+  <div id="visita-resultado-home-card"></div>
+
   <div id="docs-rh-home-card"></div>
 
   <!-- Banner de permissão de notificações — aparece só se não concedida -->
@@ -1472,6 +1474,110 @@ async function _renderVisitaSupervisaoHome(mostrar, sess, isMasterAtivo) {
     <div style="font-size:10.5px;color:var(--t3);margin-top:4px">${tituloLinha}</div>
     ${itens}
   </div>`;
+}
+
+// ── RESULTADO DA VISITA (Home da loja, 7 dias a partir da data da visita) ─────────────
+// O check-list finalizado no Painel › Visitas aparece aqui pra gerência da loja: nota,
+// nota por setor, críticos, plano de ação, fotos — e o histórico do que foi feito nos
+// últimos 7 dias. Tocar abre o check-list inteiro, só leitura (mesma tela do Painel).
+// Quem vê: gerente / sub-gerente da loja e o mestre olhando a loja. O resto da equipe não.
+const VCK_HOME_DIAS = 7;
+let _vckHomeLinhas = [];
+function _vckResumoLinha(l) {
+  const G = window.GNVck, d = l.dados || {};
+  const r = { tipo: l.tipo, nota: null, notaTxt: '—', classe: { label: '', cor: 'var(--t3)' }, setores: [], criticos: [], plano: 0, fotos: 0 };
+  // Fotos: qualquer campo de foto preenchido no registro.
+  (function contar(o) { if (!o || typeof o !== 'object') return; Object.entries(o).forEach(([k, v]) => {
+    if (typeof v === 'string' && /^https:\/\//.test(v) && /foto/i.test(k)) r.fotos++; else if (v && typeof v === 'object') contar(v); }); })(d);
+  if (l.tipo === 'salao') {
+    const c = G.calcSalao(d); r.nota = c.nota; r.notaTxt = c.nota == null ? '—' : c.nota + '/100'; r.classe = G.classSalao(c.nota);
+    r.criticos = c.criticos.map(x => x.label);
+    r.plano = Object.values(d.acoes && !Array.isArray(d.acoes) ? d.acoes : {}).filter(x => String(x || '').trim()).length || (Array.isArray(d.acoes) ? d.acoes.filter(x => String(x || '').trim()).length : 0);
+    G.SUP_SETORES.forEach(st => {
+      const it = (d.itens || {})[st.key] || {};
+      const vs = st.itens.map(i => it[i.key]).filter(v => v !== undefined && v !== null && v !== '').map(Number);
+      if (vs.length) r.setores.push({ label: st.label, icon: st.icon, txt: (vs.reduce((a, b) => a + b, 0) / vs.length).toFixed(1).replace('.', ','), ruim: vs.reduce((a, b) => a + b, 0) / vs.length < 7 });
+    });
+  } else if (l.tipo === 'cozinha') {
+    const c = G.calcCozinha(d); r.nota = c.nota; r.notaTxt = c.nota == null ? '—' : c.nota + '%'; r.classe = G.classCozinha(c.nota, c.criticos.length > 0);
+    r.criticos = c.criticos.map(x => x.label);
+    r.plano = Object.values(d.acoes && !Array.isArray(d.acoes) ? d.acoes : {}).filter(x => String(x || '').trim()).length;
+    G.COZ_SETORES.forEach(st => {
+      const it = (d.itens || {})[st.key] || {};
+      const cc = st.itens.filter(i => it[i.key] === 'C').length, nc = st.itens.filter(i => it[i.key] === 'NC').length;
+      if (cc + nc) r.setores.push({ label: st.label.replace(/^\d+\.\s*/, ''), icon: st.icon, txt: Math.round(cc / (cc + nc) * 100) + '%', ruim: nc > 0 });
+    });
+  } else {
+    let pior = null;
+    G.AUDP_TIPOS.forEach(t => {
+      const c = G.calcPadrao(d, t.key), a = d[t.key] || {};
+      if (!c.avaliados) return;
+      const inf = G.infoPadrao(c.status);
+      r.setores.push({ label: t.label, icon: t.icon, txt: (c.nota == null ? '—' : String(c.nota).replace('.', ',') + '%') + (a.finalizada ? '' : ' (aberta)'), ruim: c.status !== 'excelente' });
+      t.itens.forEach((it, i) => { if (((a.itens || {})[i] || {}).resp === 'NAO' && it.crit === 'CRITICO') r.criticos.push(it.label); });
+      const pa = a.planoAcao ? Object.values(a.planoAcao) : []; r.plano += pa.length;
+      if (c.nota != null && (pior === null || c.nota < pior.nota)) pior = { nota: c.nota, inf };
+    });
+    if (pior) { r.nota = pior.nota; r.notaTxt = String(pior.nota).replace('.', ',') + '%'; r.classe = { label: pior.inf.emoji + ' ' + pior.inf.label, cor: pior.inf.cor }; }
+    if (l.nota != null && r.setores.length <= 1) r.notaTxt = String(l.nota).replace('.', ',') + '%';
+  }
+  return r;
+}
+async function _renderVisitaResultadoHome(mostrar, sess, isMasterAtivo) {
+  const el = document.getElementById('visita-resultado-home-card');
+  if (!el) return;
+  const cargo = String((sess && sess.cargo) || '').toLowerCase();
+  const pode = isMasterAtivo ? !!masterLoja : CIENTE_CARGOS.includes(cargo);
+  if (!mostrar || !sess || !pode || !window.GNVck) { el.innerHTML = ''; return; }
+  const loja = (isMasterAtivo && masterLoja) ? masterLoja : sess.loja;
+  if (!LOJAS_LISTA.includes(loja)) { el.innerHTML = ''; return; }
+  const chkKey = LOJA_DB_KEY[loja] || loja;
+  const iso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const desde = new Date(); desde.setDate(desde.getDate() - (VCK_HOME_DIAS - 1));
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_visita_checklist?loja=eq.${encodeURIComponent(chkKey)}&finalizada=eq.true&visita_id=not.is.null&data=gte.${iso(desde)}&order=data.desc,finalizada_em.desc&select=*`, H, 'vckHome:rows', []);
+  _vckHomeLinhas = rows || [];
+  if (!_vckHomeLinhas.length) { el.innerHTML = ''; return; }
+  el.innerHTML = _vckHomeCardHtml(_vckHomeLinhas, new Date());
+}
+function _vckHomeCardHtml(linhas, hoje) {
+  const esc = s => window.escapeHtml ? window.escapeHtml(String(s == null ? '' : s)) : String(s == null ? '' : s);
+  const G = window.GNVck;
+  const dm = s => String(s || '').split('-').reverse().slice(0, 2).join('/');
+  const ate = s => { const d = new Date(s + 'T12:00:00'); d.setDate(d.getDate() + VCK_HOME_DIAS - 1); return String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0'); };
+  const itens = linhas.map((l, i) => {
+    const r = _vckResumoLinha(l), t = G.TIPOS[l.tipo] || { icon: '📋', label: l.tipo };
+    const setores = r.setores.map(s => `<span style="display:inline-flex;gap:3px;align-items:center;background:${s.ruim ? 'rgba(220,38,38,.08)' : 'var(--fill-sutil)'};border-radius:999px;padding:2px 8px;font-size:10px;color:${s.ruim ? '#dc2626' : 'var(--t2)'};font-weight:700;white-space:nowrap">${s.icon} ${esc(s.label)} ${esc(s.txt)}</span>`).join('');
+    const crit = r.criticos.length ? `<div style="margin-top:6px;font-size:10.5px;color:#dc2626;font-weight:700;line-height:1.4">🚨 ${r.criticos.length} crítico${r.criticos.length > 1 ? 's' : ''}: ${esc(r.criticos.slice(0, 2).join(' · '))}${r.criticos.length > 2 ? ' · +' + (r.criticos.length - 2) : ''}</div>` : '';
+    const obs = String((l.dados || {}).obs || '').trim();
+    const extra = [r.plano ? `⚡ plano de ação: ${r.plano} ite${r.plano > 1 ? 'ns' : 'm'}` : '', r.fotos ? `📷 ${r.fotos} foto${r.fotos > 1 ? 's' : ''}` : ''].filter(Boolean).join(' · ');
+    return `<button type="button" onclick="_vckHomeAbrir(${i})" style="display:block;width:100%;text-align:left;background:none;border:none;border-top:1px solid rgba(0,0,0,.06);padding:9px 0;cursor:pointer;font-family:inherit;color:var(--t1)">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
+        <span style="font-size:12px;font-weight:800;min-width:0">${t.icon} ${esc(t.label)}</span>
+        <span style="font-size:16px;font-weight:900;color:${r.classe.cor};white-space:nowrap;font-variant-numeric:tabular-nums">${esc(r.notaTxt)}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;gap:8px;font-size:10.5px;color:var(--t3);margin-top:1px">
+        <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.visitante || l.finalizada_por || '—')} · ${dm(l.data)}</span>
+        <span style="font-weight:800;color:${r.classe.cor};white-space:nowrap">${esc(r.classe.label)}</span>
+      </div>
+      ${setores ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px">${setores}</div>` : ''}
+      ${crit}
+      ${extra ? `<div style="margin-top:5px;font-size:10.5px;color:var(--t2);font-weight:700">${extra}</div>` : ''}
+      ${obs ? `<div style="margin-top:5px;font-size:10.5px;color:var(--t3);line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">📝 ${esc(obs)}</div>` : ''}
+      <div style="margin-top:5px;font-size:10px;color:#4f46e5;font-weight:800">Ver tudo › <span style="color:var(--t4);font-weight:600">(aparece aqui até ${ate(l.data)})</span></div>
+    </button>`;
+  }).join('');
+  return `<div style="background:rgba(99,102,241,.05);border:1px solid rgba(99,102,241,.2);border-left:3px solid #6366f1;border-radius:18px;padding:14px 16px;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05)">
+    <div style="font-size:12px;font-weight:800;color:var(--t1)">📋 Resultado das visitas</div>
+    <div style="font-size:10.5px;color:var(--t3);margin:2px 0 4px">Check-lists finalizados pela supervisão nos últimos ${VCK_HOME_DIAS} dias.</div>
+    ${itens}
+  </div>`;
+}
+function _vckHomeAbrir(i) {
+  const l = _vckHomeLinhas[i];
+  if (!l || !window.GNVck) return;
+  _vckConfig();
+  window.GNVck.abrirLeitura(l);
 }
 
 // ── VENDA DO MÊS vs MÊS ANTERIOR (card fixo, logo abaixo do nome da loja) ────────────
@@ -3351,7 +3457,7 @@ function _homeOrganizarResultado(esc) {
    grupo tem conteúdo — card vazio (a senha não pode ver) continua sem aparecer. */
 const HOME_GRUPOS = [
   { sec: 'home-sec-fech', titulo: '🗂 Fechamentos', ids: ['mes-anterior-home-card', 'fechamento-semana-home-card'] },
-  { sec: 'home-sec-equipe', titulo: '👥 Equipe e agenda', ids: ['escala-dia-home-card', 'visita-supervisao-home-card', 'ocorrencias-semana-home-card', 'docs-rh-home-card', 'datas-especiais-home-card'] },
+  { sec: 'home-sec-equipe', titulo: '👥 Equipe e agenda', ids: ['escala-dia-home-card', 'visita-supervisao-home-card', 'visita-resultado-home-card', 'ocorrencias-semana-home-card', 'docs-rh-home-card', 'datas-especiais-home-card'] },
 ];
 function _homeOrganizarGrupos() {
   HOME_GRUPOS.forEach(g => {
@@ -7651,6 +7757,7 @@ function _refreshPermUI(sess) {
   _renderVendaMesHome(_mostrarCards, sess, isMaster);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
   _renderVisitaSupervisaoHome(_mostrarCards, sess, isMaster);
+  _renderVisitaResultadoHome(_mostrarCards, sess, isMaster);
   _renderFechamentoSemanaHome(_mostrarCards, sess, isMaster);
   _renderMesAnteriorHome(_mostrarCards, sess, isMaster);
   _renderDocsRHHome(_mostrarCards, sess, isMaster);
@@ -7915,6 +8022,7 @@ function showHome(sess) {
   _renderVendaMesHome(_mostrarCards, sess, isMaster);
   _renderPendenciasLojaHome(_mostrarCards, sess, isMaster);
   _renderVisitaSupervisaoHome(_mostrarCards, sess, isMaster);
+  _renderVisitaResultadoHome(_mostrarCards, sess, isMaster);
   _renderFechamentoSemanaHome(_mostrarCards, sess, isMaster);
   _renderMesAnteriorHome(_mostrarCards, sess, isMaster);
   _renderDocsRHHome(_mostrarCards, sess, isMaster);

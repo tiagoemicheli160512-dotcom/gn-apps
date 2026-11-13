@@ -352,7 +352,7 @@
 
   function _syncTexto() {
     if (!R) return '';
-    if (R.somenteLeitura) return '<span style="color:var(--t3)">🔒 Registro antigo · só leitura</span>';
+    if (R.somenteLeitura) return `<span style="color:var(--t3)">🔒 ${R.rotulo || 'Registro antigo · só leitura'}</span>`;
     if (R.fila.length && R.erro) return `<span style="color:#d97706">⏳ ${R.fila.length} sem enviar — guardado neste aparelho, tentando de novo</span>`;
     if (R.fila.length) return `<span style="color:var(--t3)">⏳ Salvando…</span>`;
     return '<span style="color:#16a34a">✓ Tudo salvo</span>';
@@ -422,7 +422,8 @@
     const setores = SUP_SETORES.map(s => {
       const sd = it[s.key] || {};
       const feitos = s.itens.filter(i => !vazio(sd[i.key])).length;
-      const media = feitos ? s.itens.reduce((a, i) => a + (parseFloat(sd[i.key]) || 0), 0) / s.itens.length : null;
+      // Média só dos itens avaliados — item sem nota não é zero.
+      const media = feitos ? s.itens.filter(i => !vazio(sd[i.key])).reduce((a, i) => a + (parseFloat(sd[i.key]) || 0), 0) / feitos : null;
       const itensHtml = s.itens.map(i => {
         const val = sd[i.key], tem = !vazio(val), n = parseFloat(val) || 0;
         const crit = i.critico && tem && n < 7;
@@ -439,7 +440,7 @@
         </div>`;
       }).join('');
       return `<details open style="background:var(--s2,#fff);border:1px solid var(--b1,rgba(0,0,0,.08));border-radius:14px;padding:10px 12px;margin-bottom:10px">
-        <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px"><span style="font-size:16px">${s.icon}</span><span style="flex:1;min-width:0"><b style="font-size:13px;color:var(--t1)">${esc(s.label)}</b><br><span style="font-size:10.5px;color:var(--t3)">${feitos}/${s.itens.length} avaliados</span></span>${media !== null ? `<b style="font-size:15px;color:${corNota(media)}">${media.toFixed(1)}</b>` : ''}</summary>
+        <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px"><span style="font-size:16px">${s.icon}</span><span style="flex:1;min-width:0"><b style="font-size:13px;color:var(--t1)">${esc(s.label)}</b><br><span style="font-size:10.5px;color:var(--t3)">${feitos}/${s.itens.length} avaliados</span></span>${media !== null ? `<b style="font-size:15px;color:${corNota(media)}">${media.toFixed(1).replace('.', ',')}</b>` : ''}</summary>
         ${itensHtml}</details>`;
     }).join('');
     const acoes = d.acoes && !Array.isArray(d.acoes) ? d.acoes : {};
@@ -654,7 +655,12 @@
     patchLinha({ finalizada: true, finalizada_em: agora, finalizada_por: por, nota: calc.nota });
     pintar();
   }
-  function _padraoReabrir() { set([_padraoTipo, 'finalizada'], false); pintar(); }
+  function _padraoReabrir() {
+    set([_padraoTipo, 'finalizada'], false);
+    // Sem nenhuma auditoria finalizada, o registro sai da Home da loja até finalizar de novo.
+    if (!AUDP_TIPOS.some(t => (R.dados[t.key] || {}).finalizada)) patchLinha({ finalizada: false });
+    pintar();
+  }
 
   // planoAcao chega como objeto {0:…,1:…} (novo) ou array (registro antigo): a tela usa array.
   function _normalizarPadrao(d) {
@@ -717,6 +723,21 @@
     }
   }
 
+  // Resultado já finalizado, aberto da Home da loja: mesma tela, só leitura, sem abas.
+  function abrirLeitura(linha) {
+    if (!linha) return;
+    _opts = {};
+    _ctx = { visita: { loja: linha.loja, data: linha.data, visitante: linha.visitante }, tipo: linha.tipo, legado: true };
+    const dados = clone(linha.dados || {});
+    R = { linha, dados: linha.tipo === 'padrao' ? _normalizarPadrao(dados) : dados, fila: [], somenteLeitura: true,
+      rotulo: 'Resultado da visita · ' + (TIPOS[linha.tipo] || {}).label };
+    if (linha.tipo === 'padrao') {
+      const fin = AUDP_TIPOS.find(t => (R.dados[t.key] || {}).finalizada) || AUDP_TIPOS.find(t => calcPadrao(R.dados, t.key).avaliados);
+      _padraoTipo = (fin || AUDP_TIPOS[0]).key;
+    }
+    pintar();
+  }
+
   // Resumo pros botões da visita no Painel: {visita_id: {salao:{nota,finalizada}, …}}.
   async function resumo(ids) {
     const lista = (ids || []).filter(Boolean);
@@ -732,7 +753,7 @@
   window.GNVck = {
     SUP_SETORES, COZ_SETORES, AUDP_TIPOS, TIPOS,
     calcSalao, calcCozinha, calcPadrao, classSalao, classCozinha, infoPadrao,
-    config, abrir, abrirLegado, fechar, resumo, set, setPath,
+    config, abrir, abrirLegado, abrirLeitura, fechar, resumo, set, setPath,
     _estado: () => R, _ctx: () => _ctx, _enviar,
     _trocarTipo, _filtrar, _nota, _coz, _texto, _set, _foto, _finalizar, _reabrir,
     _padraoTipo: _padraoTipoSel, _resp, _padraoFinalizar, _padraoReabrir,
