@@ -2764,6 +2764,52 @@ function _confirmarRepique(rq) {
   return true;
 }
 
+// ── Total do sistema fora do normal (14/11/2026) ─────────────────────────────────────
+// Bangu 10/11 noite fechou com R$ 78.522,16 — a foto do sistema dizia R$ 7.852,16: um "2" a
+// mais. Fechado, o valor foi pro Painel e virou "venda faltando no Check-list" de R$ 71 mil.
+// Antes de fechar, compara com o normal do mesmo turno no mesmo dia da semana (mediana das
+// últimas 9 semanas); 3× acima ou abaixo pede confirmação. Não trava: dia de evento existe.
+const TOTAL_FORA_FATOR = 3;
+let _totalConfirmado = null;
+function _totalForaDoNormal(valor, historico) {
+  const v = (historico || []).filter(x => x > 0).sort((a, b) => a - b);
+  if (v.length < 3 || !(valor > 0)) return null;
+  const m = Math.floor(v.length / 2);
+  const med = v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+  if (valor > med * TOTAL_FORA_FATOR) return { med, vezes: valor / med, tipo: 'alto' };
+  if (valor < med / TOTAL_FORA_FATOR) return { med, vezes: med / valor, tipo: 'baixo' };
+  return null;
+}
+async function _confirmarTotalSistema(valor) {
+  if (_totalConfirmado === valor) return true;
+  const f = S.fech || {};
+  if (!f.data || !(valor > 0)) return true;
+  let linhas = [];
+  try {
+    const d0 = new Date(f.data + 'T12:00:00'); d0.setDate(d0.getDate() - 63);
+    const desde = d0.getFullYear() + '-' + String(d0.getMonth() + 1).padStart(2, '0') + '-' + String(d0.getDate()).padStart(2, '0');
+    linhas = await sb(`gn_caixa_fechamento?loja=eq.${encodeURIComponent(S.loja)}&turno=eq.${encodeURIComponent(f.turno || '')}&status=eq.FECHADO&data=gte.${desde}&data=lt.${f.data}&select=data,total_sistema`) || [];
+  } catch (e) { return true; }      // sem histórico agora: não segura o fechamento por isso
+  const dow = new Date(f.data + 'T12:00:00').getDay();
+  const doDia = linhas.filter(l => new Date(l.data + 'T12:00:00').getDay() === dow).map(l => parseFloat(l.total_sistema) || 0);
+  const base = doDia.filter(x => x > 0).length >= 3 ? doDia : linhas.map(l => parseFloat(l.total_sistema) || 0);
+  const r = _totalForaDoNormal(valor, base);
+  if (!r) return true;
+  const DIAS = ['domingo', 'segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado'];
+  const quando = base === doDia ? `de ${DIAS[dow]} (${(f.turno || '').toLowerCase()})` : `do turno da ${(f.turno || '').toLowerCase()}`;
+  const msg = `⚠️ Confere o Total do Sistema?
+
+${money(valor)} é ${Math.round(r.vezes)}× ${r.tipo === 'alto' ? 'MAIOR' : 'MENOR'} que o normal ${quando} nesta loja — costuma ficar perto de ${money(r.med)}.
+
+Um dígito a mais ou a menos é o erro mais comum. Confira com a foto do sistema.
+
+OK = o valor está certo, fechar assim
+Cancelar = voltar e corrigir`;
+  if (!confirm(msg)) return false;
+  _totalConfirmado = valor;
+  return true;
+}
+
 async function fecharCaixa() {
   // Reabertura exige autorização de cargo superior
   if (S.fech.status === 'FECHADO') { abrirModalReabrir(); return; }
@@ -2841,6 +2887,7 @@ async function fecharCaixa() {
   // Última barreira antes de fechar: fechado, o valor já foi pro Check-list, pro Painel
   // e pro rateio da semana, e desfazer depois é conserto em três lugares.
   if (!_confirmarRepique(rq)) { $('repiqueInput').focus(); return; }
+  if (!(await _confirmarTotalSistema(sistema))) { $('totalSistema').focus(); return; }
   try {
     const u = await sb(`gn_caixa_fechamento?id=eq.${S.fech.id}`, {
       method: 'PATCH', prefer: 'return=representation',
