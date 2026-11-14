@@ -63,6 +63,7 @@ const COMPS = [{ bandeira: 'Crédito', valor: 20000 }, { bandeira: 'Pix', valor:
   check('escolhendo 10/10, aparece o caixa daquele dia', /10\/10\/2026/.test(res.txt) && /FECHADO/.test(res.txt), res.txt);
   check('com os mesmos botões: Relançar, Reimprimir e Reabrir', ['↑ Relançar', '🖨️ Reimprimir', '↩ Reabrir'].every(b => res.botoes.includes(b)), JSON.stringify(res.botoes));
   check('e avisa que a venda do Check-list está faltando (R$ 0,00 contra caixa de R$ 27.128,91)', /R\$ 0,00/.test(res.txt) && /está faltando/.test(res.txt), res.txt);
+  check('o caixa da data escolhida mostra o selo "○ Check-list" (ainda sem venda lançada)', /○ Check-list/.test(res.txt) && !/✓ Check-list/.test(res.txt), res.txt);
 
   // Relançar a partir da data escolhida.
   await page.click('#homeOutraDataRes button:has-text("Relançar")');
@@ -75,6 +76,8 @@ const COMPS = [{ bandeira: 'Crédito', valor: 20000 }, { bandeira: 'Pix', valor:
     txt: (document.getElementById('homeOutraDataRes') || {}).textContent.replace(/\s+/g, ' ') }));
   check('depois de relançar a data continua escolhida e a venda aparece certa (R$ 24.911,86)',
     depois.data === '2026-10-10' && /24\.911,86/.test(depois.txt) && !/está faltando/.test(depois.txt), JSON.stringify(depois));
+  // 14/11/2026 (print do dono): depois de Relançar, o verde de "lançado" não aparecia na Outra data.
+  check('depois de relançar aparece o verde "✓ Check-list" no caixa da data escolhida', /✓ Check-list/.test(depois.txt) && !/○ Check-list/.test(depois.txt), depois.txt);
 
   // Data sem caixa.
   await page.fill('#homeOutraDataInput', '2026-10-05');
