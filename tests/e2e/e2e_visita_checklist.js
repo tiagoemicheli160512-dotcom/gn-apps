@@ -216,6 +216,17 @@ async function rota(route) {
     chamadas.filter(c => c.rpc).every(c => Array.isArray(c.rpc.p_path) && c.rpc.p_path.length <= 3));
   const tela = await A.evaluate(() => document.getElementById('_vck-modal').textContent);
   check('crítico com nota baixa vira plano de ação', /Plano de ação/.test(tela) && /Validades em dia na cozinha/.test(tela));
+  // ── Frases prontas na observação de cada pergunta (só quando o item não está 100%) ──
+  const obsChips = await A.evaluate(() => {
+    const blocos = [...document.querySelectorAll('#_vck-modal [data-vck-item]')];
+    const chipsDe = (txt) => { const b = blocos.find(x => x.textContent.includes(txt)); return b ? [...b.querySelectorAll('button')].map(x => x.textContent.trim()).filter(t => /^[+✓] /.test(t)) : null; };
+    return { val4: chipsDe('Validades em dia na cozinha'), cam8: chipsDe('Câmaras frias limpas'), limp9: chipsDe('Limpeza geral do salão') };
+  });
+  check('nota baixa: a observação da pergunta traz frases prontas daquele item', (obsChips.val4 || []).includes('+ Produto vencido encontrado') && (obsChips.cam8 || []).includes('+ Temperatura sem registro'), obsChips);
+  check('nota 9 ou 10: sem frases (item ok fica limpo)', Array.isArray(obsChips.limp9) && obsChips.limp9.length === 0, obsChips.limp9);
+  await A.evaluate(() => GNVck._chip(['itens', 'operacao', 'camaras_obs'], 'Temperatura sem registro'));
+  await esperarFilaVazia(A);
+  check('tocar na frase grava na observação do item', srv1.dados.itens.operacao.camaras_obs === 'Temperatura sem registro', srv1.dados.itens.operacao);
   const chipsSalao = await A.evaluate(() => [...document.querySelectorAll('#_vck-modal button')].map(b => b.textContent.trim()).filter(t => /^\+ /.test(t)));
   check('plano de ação do crítico traz opções prontas daquela questão', chipsSalao.includes('+ Descartar na hora os vencidos e registrar a perda') && chipsSalao.includes('+ Treinar a equipe no padrão'), chipsSalao);
   await A.evaluate(() => { GNVck._chip(['acoes', 'validade|val_cozinha'], 'Descartar na hora os vencidos e registrar a perda'); GNVck._chip(['acoes', 'validade|val_cozinha'], 'Treinar a equipe no padrão'); });
@@ -325,6 +336,12 @@ async function rota(route) {
   check('cozinha grava C / NC e tocar de novo limpa', coz.dados.itens.documentacao.lsf === 'C' && coz.dados.itens.documentacao.pops === 'NC' && coz.dados.itens.ambientes.janelas === undefined, coz.dados);
   const cozTela = await D.evaluate(() => document.getElementById('_vck-modal').textContent);
   check('crítico não conforme da cozinha aparece como risco de interdição', /risco de interdição/.test(cozTela) && /50%/.test(cozTela));
+  const cozObs = await D.evaluate(() => {
+    const blocos = [...document.querySelectorAll('#_vck-modal [data-vck-item]')];
+    const chipsDe = (txt) => { const b = blocos.find(x => x.textContent.includes(txt)); return b ? [...b.querySelectorAll('button')].map(x => x.textContent.trim()).filter(t => /^[+✓] /.test(t)) : null; };
+    return { pops: chipsDe('Manual de Boas Práticas'), lsf: chipsDe('Licença Sanitária') };
+  });
+  check('cozinha: "Não conforme" traz frases prontas na observação; "Conforme" não', (cozObs.pops || []).includes('+ Faltam assinaturas da equipe') && Array.isArray(cozObs.lsf) && cozObs.lsf.length === 0, cozObs);
 
   // ── 6c. Auditoria de padrão ─────────────────────────────────────────────────────────
   await D.evaluate(() => GNVck._trocarTipo('padrao'));
