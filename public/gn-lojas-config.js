@@ -825,7 +825,7 @@ window.gnPdfAgora = function () {
 // opts: { titulo, subtitulo, kpis:[{label,valor,sub}], texto | html, rodape }
 // `html` é pra quem já monta tabela própria (o relatório do Painel); `texto` é o caminho
 // dos outros, que mandam texto corrido.
-window.gnRelatorioPDF = function (opts) {
+window.gnRelatorioHtml = function (opts, imprimir) {
   const o = opts || {};
   const esc = window.gnPdfEsc;
   const titulo = esc(o.titulo || 'Relatório GN');
@@ -880,10 +880,104 @@ window.gnRelatorioPDF = function (opts) {
   ${kpiHtml}
   ${corpo}
   <div class="footer">${rodape}</div>
-  <script>window.onload=function(){window.print()}<\/script>
+  ${imprimir ? '<script>window.onload=function(){window.print()}<\/script>' : ''}
 </body></html>`;
+  return html;
+};
+window.gnRelatorioPDF = function (opts) {
   const w = window.open('', '_blank');
-  if (w) { w.document.write(html); w.document.close(); }
+  if (w) { w.document.write(window.gnRelatorioHtml(opts, true)); w.document.close(); }
+};
+
+// ── O MESMO relatório, como ARQUIVO PDF (13/11/2026) ─────────────────────────────────────
+// O gnRelatorioPDF abre a página e quem vira PDF é a impressão do celular — não sai um
+// arquivo, então não dá pra anexar no WhatsApp. Aqui a mesma página (mesmo HTML, mesmo
+// CSS) é montada num iframe escondido do tamanho de uma A4, fotografada (html2canvas) e
+// fatiada em páginas. O corte cai ENTRE blocos (linha de tabela, foto, título), nunca no
+// meio de uma linha. Sai idêntico ao que a impressão mostra.
+const _GN_PDF_LIBS = {
+  jspdf: ['https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js', () => window.jspdf],
+  html2canvas: ['https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js', () => window.html2canvas],
+};
+function _gnPdfLib(nome) {
+  const [src, pronta] = _GN_PDF_LIBS[nome];
+  if (pronta()) return Promise.resolve();
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = () => res(); s.onerror = () => rej(new Error('não deu pra carregar ' + nome));
+    document.head.appendChild(s);
+  });
+}
+window.gnRelatorioPDFArquivo = async function (opts) {
+  await Promise.all([_gnPdfLib('jspdf'), _gnPdfLib('html2canvas')]);
+  const LARG = 794;                                  // A4 a 96 dpi
+  const ifr = document.createElement('iframe');
+  ifr.setAttribute('aria-hidden', 'true');
+  ifr.style.cssText = `position:fixed;left:-10000px;top:0;width:${LARG}px;height:1123px;border:0;opacity:0;pointer-events:none`;
+  document.body.appendChild(ifr);
+  try {
+    const d = ifr.contentDocument;
+    d.open(); d.write(window.gnRelatorioHtml(opts, false)); d.close();
+    // Fotos: espera carregar (com teto, pra uma foto quebrada não travar o PDF).
+    await Promise.all([...d.images].map(im => im.complete ? 0 : new Promise(r => { im.onload = im.onerror = r; setTimeout(r, 8000); })));
+    await new Promise(r => setTimeout(r, 60));
+    const corpo = d.body;
+    const alturaTotal = Math.ceil(corpo.scrollHeight);
+    ifr.style.height = alturaTotal + 'px';
+    // Onde dá pra cortar: o fim de cada bloco "inteiro".
+    const cortes = [...d.querySelectorAll('tr, .foto, h1, h2, .sec, .lin, .det, .gap, .kpi-row, .marca, .sub, .footer, table, .vb, p, li')]
+      .map(el => Math.round(el.getBoundingClientRect().bottom + (d.defaultView.scrollY || 0)))
+      .filter(y => y > 0).sort((a, b) => a - b);
+    const escala = 1.6;          // nítido no celular sem passar de uns poucos MB num mês inteiro
+    const canvas = await window.html2canvas(corpo, { scale: escala, useCORS: true, backgroundColor: '#FFFFFF', width: LARG, windowWidth: LARG, height: alturaTotal, windowHeight: alturaTotal, logging: false });
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({ unit: 'pt', format: 'a4' });
+    const Wpt = pdf.internal.pageSize.getWidth(), Hpt = pdf.internal.pageSize.getHeight();
+    const margem = 22;                               // pt, em cima e embaixo de cada página
+    const pxPorPt = LARG / Wpt;
+    const pagPx = Math.floor((Hpt - margem * 2) * pxPorPt);
+    let ini = 0, primeira = true;
+    while (ini < alturaTotal - 2) {
+      let fim = Math.min(ini + pagPx, alturaTotal);
+      if (fim < alturaTotal) {
+        const bom = cortes.filter(c => c > ini + pagPx * 0.35 && c <= fim).pop();
+        if (bom) fim = bom;
+      }
+      const alt = fim - ini;
+      const fatia = document.createElement('canvas');
+      fatia.width = canvas.width; fatia.height = Math.ceil(alt * escala);
+      const ctx = fatia.getContext('2d');
+      ctx.fillStyle = '#FFFFFF'; ctx.fillRect(0, 0, fatia.width, fatia.height);
+      ctx.drawImage(canvas, 0, Math.floor(ini * escala), canvas.width, fatia.height, 0, 0, canvas.width, fatia.height);
+      if (!primeira) pdf.addPage();
+      pdf.addImage(fatia.toDataURL('image/jpeg', 0.8), 'JPEG', 0, margem, Wpt, alt / pxPorPt);
+      primeira = false; ini = fim;
+    }
+    const nome = String((opts && (opts.tituloDoc || opts.titulo)) || 'Relatorio GN')
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\w-]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+    return new File([pdf.output('blob')], nome + '.pdf', { type: 'application/pdf' });
+  } finally {
+    ifr.remove();
+  }
+};
+// Gera o arquivo e abre o compartilhamento (WhatsApp). Sem suporte a compartilhar arquivo
+// (computador), baixa o PDF e abre o WhatsApp pra anexar.
+window.gnRelatorioPDFCompartilhar = async function (opts) {
+  try {
+    const f = await window.gnRelatorioPDFArquivo(opts);
+    const titulo = (opts && opts.titulo) || 'Relatório GN';
+    if (navigator.canShare && navigator.canShare({ files: [f] })) { await navigator.share({ files: [f], title: titulo, text: titulo }); return f; }
+    const url = URL.createObjectURL(f), a = document.createElement('a');
+    a.href = url; a.download = f.name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    alert('📄 PDF baixado — anexe no WhatsApp.');
+    window.open('https://wa.me/?text=' + encodeURIComponent(titulo), '_blank');
+    return f;
+  } catch (e) {
+    if (e && e.name === 'AbortError') return null;
+    alert('⚠️ Não deu pra gerar o PDF agora: ' + (e.message || e));
+    return null;
+  }
 };
 
 // O que os nove apps chamam. Mantém a assinatura antiga (texto, titulo) pros 25 pontos
