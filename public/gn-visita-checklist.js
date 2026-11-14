@@ -199,6 +199,62 @@
     'gestao_pessoas#3': { c: ['Limpar e organizar o refeitório', 'Repor a água potável'], p: ['Incluir o refeitório na escala de limpeza'] },
     'gestao_pessoas#4': { c: ['Atualizar o mural com metas, folgas e campanhas'], p: ['Atualizar o mural toda segunda'] },
   };
+  // ── Frases prontas na OBSERVAÇÃO de cada pergunta (13/11/2026, pedido do dono) ──
+  // O que mais se encontra quando o item não está 100%. Aparecem só quando o item precisa:
+  // salão com nota abaixo de 9, cozinha "Não conforme". Item ok continua sem nada embaixo.
+  const OBS_SALAO = {
+    'visual|limpeza_geral': ['Piso sujo', 'Mesas e cadeiras sujas', 'Vidros e portas sujos', 'Varanda/área externa suja', 'Cantos e rodapés com acúmulo'],
+    'visual|uniformes': ['Funcionário sem uniforme completo', 'Sem crachá', 'Cabelo solto', 'Uniforme sujo ou amassado'],
+    'visual|iluminacao': ['Lâmpadas queimadas no salão', 'Fachada/letreiro apagado ou piscando', 'LEDs com defeito', 'Iluminação externa falhando'],
+    'visual|organizacao': ['Falta display de mesa', 'Faltam porta-guardanapos/triedros', 'Mesas fora do layout', 'Cadeiras quebradas ou bambas'],
+    'visual|banheiros': ['Sem papel higiênico/toalha', 'Sem sabonete', 'Odor forte', 'Lixeira cheia', 'Vaso/pia sujos'],
+    'operacao|mise_en_place': ['Praça incompleta na abertura', 'Insumo faltando na praça', 'Praça desorganizada'],
+    'operacao|equipamentos': ['Equipamento com defeito', 'Geladeira/freezer fora da temperatura', 'Fritadeira com problema', 'Chamado de manutenção em aberto'],
+    'operacao|estoque_org': ['PVPS não aplicado', 'Estoque desorganizado', 'Produto no chão', 'Paletes sujos', 'Sinal de praga (baratas)'],
+    'operacao|camaras': ['Câmara suja', 'Câmara desorganizada', 'Temperatura sem registro', 'Porta/borracha com defeito'],
+    'operacao|etiquetas': ['Máquina de etiqueta parada', 'Faltando rolo de etiqueta', 'Equipe sem usar a etiqueta'],
+    'validade|val_cozinha': ['Produto vencido encontrado', 'Produto sem etiqueta', 'Troca feita no ato', 'Gerência alertada'],
+    'validade|val_estoque': ['Produto vencido no estoque', 'Produto próximo do vencimento sem destaque', 'Troca feita no ato'],
+    'validade|val_copa': ['Bebida vencida', 'Fruta estragada', 'Xarope/polpa aberto sem etiqueta'],
+    'validade|val_salao': ['Sachê/molho vencido no salão', 'Produto exposto sem validade'],
+    'validade|higiene_pessoal': ['Funcionário de adorno (brinco/anel/relógio)', 'Unha grande ou com esmalte', 'Sem touca/rede', 'Sem lavar as mãos'],
+    'validade|temp_registradas': ['Nenhum controle de temperatura feito', 'Planilha incompleta', 'Planilha não encontrada'],
+    'atendimento|postura': ['Equipe desatenta com cliente', 'Demora pra receber o cliente', 'Uso de celular no salão'],
+    'atendimento|tempo_resposta': ['Pedido atrasado', 'Demora pra servir as bebidas', 'Cozinha lenta no pico'],
+    'atendimento|conhecimento': ['Equipe não sabe as promoções', 'Equipe não conhece o cardápio', 'Precisa de treinamento'],
+    'atendimento|reservas': ['Reserva sem mesa montada', 'Reserva não confirmada', 'Lista de reservas desatualizada'],
+    'documentacao|licenca': ['Licença vencida', 'Licença não afixada', 'Licença não encontrada'],
+    'documentacao|bombeiro': ['Laudo vencido', 'Laudo não encontrado', 'Pendência da vistoria'],
+    'documentacao|dedetizacao': ['Certificado vencido', 'Certificado não afixado', 'Sem data da próxima aplicação'],
+    'documentacao|coifa': ['Não tem registro', 'Limpeza atrasada', 'Coifa com acúmulo de gordura'],
+    'documentacao|extintores': ['Extintor vencido', 'Extintor faltando', 'Extintor obstruído', 'Sem sinalização'],
+    'documentacao|relatorios': ['Controles não preenchidos', 'Relatórios incompletos', 'Assinatura do gerente faltando'],
+    'delivery_financeiro|plataformas': ['iFood fora do ar', '99Food fora do ar', 'Cardápio desatualizado na plataforma', 'Loja pausada'],
+    'delivery_financeiro|embalagens': ['Embalagem acabando', 'Faltando tamanho de embalagem', 'Estoque de embalagem desorganizado'],
+    'delivery_financeiro|maquinetas': ['Maquineta com defeito', 'Maquineta sem bateria', 'Faltando bobina'],
+    'delivery_financeiro|boletos': ['Boleto atrasado', 'Boleto não lançado', 'Comprovante não encontrado'],
+  };
+  const OBS_COZINHA = {
+    'documentacao|lsf': ['LSF vencida', 'LSF não afixada', 'LSF não encontrada'],
+    'documentacao|pops': ['Manual/POPs não impressos', 'Faltam assinaturas da equipe', 'Manual fora do alcance da equipe'],
+    'documentacao|pragas': ['Laudo vencido', 'Laudo não encontrado', 'Sinal de praga na cozinha'],
+    'documentacao|reservatorio': ['Limpeza vencida (mais de 6 meses)', 'Sem laudo de potabilidade', 'Comprovante não encontrado'],
+    'documentacao|planilhas': ['Planilha não preenchida', 'Planilha com rasura', 'Planilha não encontrada'],
+    'higiene_pessoal|adornos': ['Funcionário de brinco', 'Funcionário de anel/aliança', 'Funcionário de relógio/pulseira'],
+    'higiene_pessoal|unhas': ['Unha grande', 'Unha com esmalte'],
+    'higiene_pessoal|uniformes': ['Sem touca/rede', 'Uniforme sujo', 'Sapato inadequado', 'Cabelo exposto'],
+    'higiene_pessoal|celulares': ['Celular na bancada', 'Funcionário usando celular na manipulação'],
+    'ambientes|pias': ['Sem sabonete antisséptico', 'Sem papel toalha', 'Pia usada pra outra coisa'],
+    'ambientes|lixeiras': ['Lixeira sem tampa', 'Pedal quebrado', 'Lixeira cheia'],
+    'ambientes|janelas': ['Tela rasgada', 'Tela suja', 'Janela sem tela'],
+    'ambientes|borrachas': ['Borracha com mofo', 'Borracha rasgada', 'Porta não veda'],
+    'ambientes|coifas': ['Gordura acumulada', 'Gotejamento sobre a bancada', 'Filtro saturado'],
+    'rastreabilidade|papelao': ['Caixa de papelão na câmara/geladeira', 'Papelão no pré-preparo'],
+    'rastreabilidade|etiquetagem': ['Produto aberto sem etiqueta', 'Etiqueta sem validade', 'Etiqueta vencida'],
+    'rastreabilidade|separacao': ['Cru em cima de pronto', 'Geladeira desorganizada', 'Sem separação por tipo'],
+    'rastreabilidade|afastamento': ['Produto no chão', 'Produto encostado na parede'],
+    'rastreabilidade|quimicos': ['Químico perto de alimento', 'Armário de químicos aberto', 'Químico sem identificação'],
+  };
   const SUG_PREVENTIVAS_GERAIS = ['Treinar a equipe no padrão', 'Gerente confere no fechamento', 'Revisar na próxima visita'];
   const SUG_RESPONSAVEIS = ['Gerente', 'Sub-gerente', 'Líder de cozinha', 'Líder de salão', 'Manutenção'];
 
@@ -520,6 +576,7 @@
           }).join('')}</div>
           ${crit ? '<div style="margin-top:7px;font-size:11px;font-weight:800;color:#dc2626">🚨 Item crítico — requer ação imediata</div>' : ''}
           <div style="margin-top:8px">${_campoTexto(['itens', s.key, i.key + '_obs'], sd[i.key + '_obs'], 'Observação (opcional)…')}</div>
+          ${tem && n < 9 ? _chipsHtml(['itens', s.key, i.key + '_obs'], OBS_SALAO[s.key + '|' + i.key]) : ''}
           ${_fotoHtml(['itens', s.key, i.key + '_foto'], sd[i.key + '_foto'])}
         </div>`;
       }).join('');
@@ -568,6 +625,7 @@
           <div style="display:flex;gap:5px">${opt.map(([v, lbl, cor]) => `<button type="button" ${ro ? 'disabled' : ''} onclick="GNVck._coz('${s.key}','${i.key}','${v}')" style="flex:1;padding:8px 3px;border-radius:9px;font-size:11px;font-weight:800;font-family:inherit;cursor:${ro ? 'default' : 'pointer'};border:1px solid ${val === v ? cor : 'var(--b1,rgba(0,0,0,.1))'};background:${val === v ? cor + '22' : 'var(--s2,#fff)'};color:${val === v ? cor : 'var(--t3)'}">${lbl}</button>`).join('')}</div>
           ${crit ? '<div style="margin-top:7px;font-size:11px;font-weight:800;color:#dc2626">🚨 Item crítico — requer ação imediata</div>' : ''}
           <div style="margin-top:8px">${_campoTexto(['itens', s.key, i.key + '_obs'], sd[i.key + '_obs'], 'Ações corretivas / observações (opcional)…')}</div>
+          ${val === 'NC' ? _chipsHtml(['itens', s.key, i.key + '_obs'], OBS_COZINHA[s.key + '|' + i.key]) : ''}
           ${_fotoHtml(['itens', s.key, i.key + '_foto'], sd[i.key + '_foto'])}
         </div>`;
       }).join('');
@@ -1137,7 +1195,7 @@
     config, abrir, abrirLegado, abrirLeitura, fechar, resumo, set, setPath,
     _estado: () => R, _ctx: () => _ctx, _enviar,
     _trocarTipo, _filtrar, _nota, _coz, _texto, _set, _foto, _finalizar, _reabrir,
-    _chip, relatorio, _relModelo, _pdfBlob, _paraPdf, _relWpp, _relPdf, _relPdfWpp, SUG_SALAO, SUG_COZINHA, SUG_AUDP,
+    _chip, OBS_SALAO, OBS_COZINHA, relatorio, _relModelo, _pdfBlob, _paraPdf, _relWpp, _relPdf, _relPdfWpp, SUG_SALAO, SUG_COZINHA, SUG_AUDP,
     _padraoTipo: _padraoTipoSel, _resp, _padraoFinalizar, _padraoReabrir,
   };
 })();
