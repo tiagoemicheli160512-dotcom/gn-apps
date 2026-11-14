@@ -616,93 +616,110 @@
     if (_ctx.tipo === 'padrao') return AUDP_TIPOS.some(t => (R.dados[t.key] || {}).finalizada);
     return !!R.dados.fechada || (R.somenteLeitura && (_ctx.tipo === 'salao' ? calcSalao(R.dados) : calcCozinha(R.dados)).nota !== null);
   }
-  function relatorio() {
+  // Modelo único do relatório: o texto do WhatsApp e o PDF saem DELE, então os dois dizem
+  // sempre a mesma coisa. cor: 'ok' | 'aten' | 'ruim' | 'na'.
+  function _relModelo() {
     const d = R.dados, v = _ctx.visita || {}, t = TIPOS[_ctx.tipo];
     const lojaNome = (CFG.nomeLoja && CFG.nomeLoja(v.loja)) || v.loja || '';
-    const L = [];
-    const fotos = [];
-    const foto = (url, legenda) => { if (url && /^https:\/\//.test(url)) fotos.push({ url, legenda: `${lojaNome} · ${_dmY(v.data)}\n${legenda}` }); };
-    L.push(`${t.icon} *${t.label.toUpperCase()} — ${lojaNome}*`);
-    L.push(`📅 ${_dmY(v.data)}${v.visitante ? ' · Supervisão: ' + v.visitante : ''}${v.hora_chegada && v.hora_chegada !== 'PLAN' ? ' · chegada ' + v.hora_chegada : ''}${v.hora_saida ? ' → saída ' + v.hora_saida : ''}`);
+    const M = { tipo: _ctx.tipo, icone: t.icon, tipoLabel: t.label, loja: lojaNome, data: v.data, info: [], kpis: [], secoes: [], fotos: [], obs: d.obs || '', fim: '' };
+    const foto = (url, legenda) => { if (url && /^https:\/\//.test(url)) M.fotos.push({ url, legenda: `${lojaNome} · ${_dmY(v.data)}\n${legenda}` }); };
+    if (v.visitante) M.info.push('Supervisão: ' + v.visitante);
+    if (v.hora_chegada && v.hora_chegada !== 'PLAN') M.info.push('Chegada ' + v.hora_chegada + (v.hora_saida ? ' → saída ' + v.hora_saida : ''));
+    const corN = n => n < 7 ? 'ruim' : n < 9 ? 'aten' : 'ok';
+    const corPct = (p, crit) => p === null ? 'na' : crit ? 'ruim' : p >= 80 ? 'ok' : p >= 60 ? 'aten' : 'ruim';
     if (_ctx.tipo === 'salao') {
       const { nota, criticos } = calcSalao(d), cl = classSalao(nota);
-      if (d.responsavel) L.push(`👤 Responsável na loja: ${d.responsavel}`);
-      L.push('', `*NOTA: ${nota === null ? '—' : nota + '/100'}* — ${cl.label}`);
+      if (d.responsavel) M.info.push('Responsável na loja: ' + d.responsavel);
+      M.kpis = [
+        { label: 'Nota', valor: nota === null ? '—' : nota + '/100', cor: nota === null ? 'na' : nota >= 75 ? 'ok' : nota >= 60 ? 'aten' : 'ruim' },
+        { label: 'Classificação', valor: cl.label.replace(/^\S+\s/, ''), cor: nota === null ? 'na' : nota >= 75 ? 'ok' : nota >= 60 ? 'aten' : 'ruim' },
+        { label: 'Itens críticos', valor: String(criticos.length), sub: criticos.length ? 'corrigir em até 24h' : 'nenhum', cor: criticos.length ? 'ruim' : 'ok' },
+      ];
+      M.notaTxt = `*NOTA: ${nota === null ? '—' : nota + '/100'}* — ${cl.label}`;
       SUP_SETORES.forEach(st => {
         const it = (d.itens || {})[st.key] || {};
         const av = st.itens.filter(i => !vazio(it[i.key]));
         if (!av.length) return;
         const media = av.reduce((a, i) => a + Number(it[i.key]), 0) / av.length;
-        L.push('', `${st.icon} *${st.label}* — ${media.toFixed(1).replace('.', ',')} (${av.length}/${st.itens.length} avaliados)`);
-        av.forEach(i => {
-          const n = Number(it[i.key]);
-          // ⚡ só no crítico que REPROVOU — "(crítico)" do lado de um 10 lia como problema.
-          L.push(`${n < 7 ? '🔴' : n < 9 ? '🟡' : '🟢'} ${i.label}: *${n}*${i.critico && n < 7 ? ' ⚡' : ''}`);
-          if (it[i.key + '_obs']) L.push(`   ↳ ${it[i.key + '_obs']}`);
-          foto(it[i.key + '_foto'], `${st.label} — ${i.label}: ${n}/10`);
-        });
+        M.secoes.push({ icone: st.icon, titulo: st.label, resumo: `média ${media.toFixed(1).replace('.', ',')} · ${av.length}/${st.itens.length} avaliados`, cor: corN(media),
+          linhas: av.map(i => { const n = Number(it[i.key]); foto(it[i.key + '_foto'], `${st.label} — ${i.label}: ${n}/10`);
+            return { txt: i.label, valor: String(n), cor: corN(n), critico: i.critico && n < 7, obs: it[i.key + '_obs'] || '' }; }) });
       });
       const acoes = d.acoes && !Array.isArray(d.acoes) ? d.acoes : {};
-      if (criticos.length) {
-        L.push('', `🚨 *CRÍTICOS (${criticos.length}) — corrigir em até 24h*`);
-        criticos.forEach(c => { L.push(`• ${c.label} — nota ${c.nota}/10`); const a = acoes[c.chave] || _acaoLegada(d, c); if (a) L.push(`   Ação: ${a}`); });
-      }
+      if (criticos.length) M.secoes.push({ icone: '🚨', titulo: `Críticos (${criticos.length}) — corrigir em até 24h`, destaque: true,
+        linhas: criticos.map(c => ({ txt: c.label, valor: `${c.nota}/10`, cor: 'ruim', obs: (acoes[c.chave] || _acaoLegada(d, c)) ? 'Ação: ' + (acoes[c.chave] || _acaoLegada(d, c)) : '' })) });
     } else if (_ctx.tipo === 'cozinha') {
       const { nota, criticos } = calcCozinha(d), cl = classCozinha(nota, criticos.length > 0);
-      if (d.gerente) L.push(`👤 Gerente / responsável: ${d.gerente}`);
-      L.push('', `*CONFORMIDADE: ${nota === null ? '—' : nota + '%'}* — ${cl.label}`);
+      if (d.gerente) M.info.push('Gerente / responsável: ' + d.gerente);
+      M.kpis = [
+        { label: 'Conformidade', valor: nota === null ? '—' : nota + '%', cor: corPct(nota, criticos.length > 0) },
+        { label: 'Classificação', valor: cl.label.replace(/^\S+\s/, ''), cor: corPct(nota, criticos.length > 0) },
+        { label: 'Críticos não conformes', valor: String(criticos.length), sub: criticos.length ? 'risco de interdição' : 'nenhum', cor: criticos.length ? 'ruim' : 'ok' },
+      ];
+      M.notaTxt = `*CONFORMIDADE: ${nota === null ? '—' : nota + '%'}* — ${cl.label}`;
       COZ_SETORES.forEach(st => {
         const it = (d.itens || {})[st.key] || {};
         const av = st.itens.filter(i => it[i.key]);
         if (!av.length) return;
-        L.push('', `${st.icon} *${st.label}*`);
-        av.forEach(i => {
-          const r = it[i.key];
-          L.push(`${r === 'C' ? '✅' : r === 'NC' ? '❌' : '➖'} ${i.label}${r === 'NA' ? ' (N/A)' : ''}${i.critico && r === 'NC' ? ' ⚡' : ''}`);
-          if (it[i.key + '_obs']) L.push(`   ↳ ${it[i.key + '_obs']}`);
-          foto(it[i.key + '_foto'], `${st.label} — ${i.label}: ${r === 'C' ? 'Conforme' : r === 'NC' ? 'Não conforme' : 'N/A'}`);
-        });
+        const c = av.filter(i => it[i.key] === 'C').length, nc = av.filter(i => it[i.key] === 'NC').length;
+        M.secoes.push({ icone: st.icon, titulo: st.label.replace(/^\d+\.\s*/, ''), resumo: c + nc ? `${Math.round(c / (c + nc) * 100)}% conforme · ${av.length}/${st.itens.length} avaliados` : `${av.length}/${st.itens.length} avaliados`, cor: nc ? 'ruim' : 'ok',
+          linhas: av.map(i => { const r = it[i.key]; foto(it[i.key + '_foto'], `${st.label} — ${i.label}: ${r === 'C' ? 'Conforme' : r === 'NC' ? 'Não conforme' : 'N/A'}`);
+            return { txt: i.label, valor: r === 'C' ? 'Conforme' : r === 'NC' ? 'Não conforme' : 'N/A', cor: r === 'C' ? 'ok' : r === 'NC' ? 'ruim' : 'na', critico: i.critico && r === 'NC', obs: it[i.key + '_obs'] || '' }; }) });
       });
       const acoes = d.acoes && !Array.isArray(d.acoes) ? d.acoes : {};
-      if (criticos.length) {
-        L.push('', `🚨 *CRÍTICOS NÃO CONFORMES (${criticos.length}) — risco de interdição*`);
-        criticos.forEach(c => { L.push(`• ${c.label}`); const a = acoes[c.chave] || _acaoLegada(Object.assign({ __tipo: 'cozinha' }, d), c); if (a) L.push(`   Ação: ${a}`); });
-      }
+      if (criticos.length) M.secoes.push({ icone: '🚨', titulo: `Críticos não conformes (${criticos.length}) — risco de interdição`, destaque: true,
+        linhas: criticos.map(c => { const a = acoes[c.chave] || _acaoLegada(Object.assign({ __tipo: 'cozinha' }, d), c); return { txt: c.label, valor: 'Não conforme', cor: 'ruim', obs: a ? 'Ação: ' + a : '' }; }) });
     } else {
-      AUDP_TIPOS.forEach(tp => {
-        const a = d[tp.key];
-        if (!a || !a.finalizada) return;
-        const c = calcPadrao(d, tp.key), inf = infoPadrao(c.status);
-        L.push('', `${tp.icon} *${tp.label}* — ${c.nota === null ? '—' : _n1(c.nota) + '%'}`, `${inf.emoji} ${inf.label}`);
-        tp.itens.forEach((it, idx) => {
-          const r = ((a.itens || {})[idx] || {});
-          if (!r.resp) return;
-          L.push(`${r.resp === 'SIM' ? '✅' : r.resp === 'NAO' ? '❌' : '➖'} [${it.crit}] ${it.label}${r.resp === 'NA' ? ' (N/A)' : ''}`);
-          if (r.resp === 'NAO') foto(r.foto, `${tp.label} — NÃO: ${it.label}`);
-        });
-        const plano = Array.isArray(a.planoAcao) ? a.planoAcao : Object.keys(a.planoAcao || {}).sort((x, y) => x - y).map(k => a.planoAcao[k]);
-        if (plano.length) {
-          L.push('', `⚡ *Plano de ação (5W2H)*`);
-          plano.forEach(p => {
-            L.push(`• [${p.crit}] ${p.itemLabel}`);
-            if (p.acaoCorretiva) L.push(`   O quê: ${p.acaoCorretiva}`);
-            if (p.responsavel) L.push(`   Quem: ${p.responsavel}`);
-            if (p.prazo || p.prazoMax) L.push(`   Até: ${_dmY(p.prazo || p.prazoMax)}`);
-            if (p.acaoPreventiva) L.push(`   Prevenção: ${p.acaoPreventiva}`);
-          });
-        }
+      const fins = AUDP_TIPOS.filter(tp => (d[tp.key] || {}).finalizada);
+      const calcs = fins.map(tp => calcPadrao(d, tp.key));
+      const notas = calcs.map(c => c.nota).filter(n => n !== null);
+      const media = notas.length ? notas.reduce((a, b) => a + b, 0) / notas.length : null;
+      const nReprov = calcs.filter(c => c.status && c.status !== 'excelente').length;
+      M.kpis = [
+        { label: 'Auditorias finalizadas', valor: String(fins.length), sub: `de ${AUDP_TIPOS.length} tipos`, cor: 'na' },
+        { label: 'Nota média', valor: media === null ? '—' : _n1(media) + '%', cor: media === null ? 'na' : media >= 95 ? 'ok' : media >= 85 ? 'aten' : 'ruim' },
+        { label: 'Fora do padrão', valor: String(nReprov), sub: nReprov ? 'plano de ação obrigatório' : 'todas excelentes', cor: nReprov ? 'ruim' : 'ok' },
+      ];
+      M.notaTxt = `*AUDITORIAS FINALIZADAS: ${fins.length}*${media === null ? '' : ' — média ' + _n1(media) + '%'}`;
+      fins.forEach((tp, k) => {
+        const a = d[tp.key], c = calcs[k], inf = infoPadrao(c.status);
+        M.secoes.push({ icone: tp.icon, titulo: tp.label, resumo: `${c.nota === null ? '—' : _n1(c.nota) + '%'} · ${inf.label}`, cor: c.status === 'excelente' ? 'ok' : c.status === 'atencao' ? 'aten' : 'ruim',
+          linhas: tp.itens.map((it, idx) => { const r = ((a.itens || {})[idx] || {}); if (!r.resp) return null;
+            if (r.resp === 'NAO') foto(r.foto, `${tp.label} — NÃO: ${it.label}`);
+            return { txt: `[${it.crit}] ${it.label}`, valor: r.resp === 'SIM' ? 'Sim' : r.resp === 'NAO' ? 'Não' : 'N/A', cor: r.resp === 'SIM' ? 'ok' : r.resp === 'NAO' ? 'ruim' : 'na', critico: r.resp === 'NAO' && it.crit === 'CRITICO', obs: '' }; }).filter(Boolean) });
+        const plano = Array.isArray(a.planoAcao) ? a.planoAcao : Object.keys(a.planoAcao || {}).sort((x, y) => x - y).map(kk => a.planoAcao[kk]);
+        if (plano.length) M.secoes.push({ icone: '⚡', titulo: `Plano de ação (5W2H) — ${tp.label}`, destaque: true,
+          linhas: plano.map(p => ({ txt: `[${p.crit}] ${p.itemLabel}`, valor: (p.prazo || p.prazoMax) ? 'até ' + _dmY(p.prazo || p.prazoMax).slice(0, 5) : '', cor: 'ruim',
+            obs: [p.acaoCorretiva && 'O quê: ' + p.acaoCorretiva, p.responsavel && 'Quem: ' + p.responsavel, p.acaoPreventiva && 'Prevenção: ' + p.acaoPreventiva].filter(Boolean).join('\n') })) });
       });
     }
-    if (d.obs) L.push('', `📝 *Observações*`, d.obs);
     const fin = _ctx.tipo === 'padrao'
       ? AUDP_TIPOS.map(tp => d[tp.key]).filter(a => a && a.finalizada).map(a => [a.finalizadaPor, a.finalizadaEm])[0] || []
       : [d.fechada_por, d.fechada_em];
-    if (fin[0] || fin[1]) L.push('', `✅ Finalizado${fin[0] ? ' por ' + fin[0] : ''}${_hm(fin[1]) ? ' às ' + _hm(fin[1]) : ''}`);
-    if (R.linha && R.linha.ciente_nome) L.push(`👁 Gerência ciente: ${R.linha.ciente_nome}${R.linha.ciente_em ? ' · ' + _dmY(String(R.linha.ciente_em).slice(0, 10)) : ''}`);
-    const titulo = `${t.label} - ${lojaNome} - ${_dmY(v.data)}`;
-    return { titulo, texto: L.join('\n'), fotos };
+    if (fin[0] || fin[1]) M.fim = `Finalizado${fin[0] ? ' por ' + fin[0] : ''}${_hm(fin[1]) ? ' às ' + _hm(fin[1]) : ''}`;
+    if (R.linha && R.linha.ciente_nome) M.ciente = `Gerência ciente: ${R.linha.ciente_nome}${R.linha.ciente_em ? ' · ' + _dmY(String(R.linha.ciente_em).slice(0, 10)) : ''}`;
+    M.titulo = `${t.label} — ${lojaNome}`;
+    M.arquivo = `${t.label} - ${lojaNome} - ${_dmY(v.data)}`;
+    return M;
   }
-  // PDF: a fonte não tem emoji nem "*" de negrito do WhatsApp — troca pelos equivalentes em texto.
+  // Texto do WhatsApp, a partir do modelo.
+  function relatorio() {
+    const M = _relModelo();
+    const bola = { ok: '🟢', aten: '🟡', ruim: '🔴', na: '➖' };
+    const L = [`${M.icone} *${M.tipoLabel.toUpperCase()} — ${M.loja}*`, `📅 ${_dmY(M.data)}${M.info.length ? ' · ' + M.info.join(' · ') : ''}`, '', M.notaTxt];
+    M.secoes.forEach(s => {
+      L.push('', `${s.icone} *${s.titulo}*${s.resumo ? ' — ' + s.resumo : ''}`);
+      s.linhas.forEach(l => {
+        L.push(s.destaque ? `• ${l.txt} — ${l.valor}` : `${bola[l.cor]} ${l.txt}: *${l.valor}*${l.critico ? ' ⚡' : ''}`);
+        if (l.obs) l.obs.split('\n').forEach(o => L.push(`   ${s.destaque ? '' : '↳ '}${o}`));
+      });
+    });
+    if (M.obs) L.push('', '📝 *Observações*', M.obs);
+    if (M.fim) L.push('', '✅ ' + M.fim);
+    if (M.ciente) L.push('👁 ' + M.ciente);
+    return { titulo: M.arquivo, texto: L.join('\n'), fotos: M.fotos, modelo: M };
+  }
+  // Só pros testes / quem ainda quiser o texto sem emoji.
   function _paraPdf(txt) {
     const troca = { '🔴': '[RUIM]', '🟡': '[ATENÇÃO]', '🟢': '[OK]', '✅': '[OK]', '❌': '[X]', '➖': '[N/A]', '⚡': '(crítico)', '🚨': '!!', '↳': '>' };
     return txt.split('\n').map(l => {
@@ -712,28 +729,162 @@
         .replace(/[^\u0000-ÿ]/g, '').replace(/\s{2,}/g, ' ').replace(/^ (?=\S)/, '');
     }).join('\n');
   }
+
+  // ── PDF no padrão GN (o mesmo dos relatórios do Painel): marca, título dourado, linha de
+  // contexto, cartões de resumo, seções com cada item e a nota alinhada à direita, fotos em
+  // cartão. Desenhado direto no jsPDF pra sair um ARQUIVO — que dá pra anexar no WhatsApp.
+  const PDF_COR = { ouro: [202, 138, 4], tinta: [26, 29, 35], cinza: [136, 136, 136], linha: [229, 231, 235],
+    ok: [22, 163, 74], aten: [217, 119, 6], ruim: [220, 38, 38], na: [100, 116, 139] };
+  const _pt = s => String(s == null ? '' : s).replace(/—/g, '-').replace(/→/g, '->').replace(/[‘’]/g, "'").replace(/[“”]/g, '"')
+    .replace(/[^\u0000-ÿ]/g, '').replace(/[ \t]{2,}/g, ' ').trim();
+  async function _pdfBlob(M) {
+    if (typeof CFG.garantirJsPDF === 'function') await CFG.garantirJsPDF();
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+    const W = doc.internal.pageSize.getWidth(), Hp = doc.internal.pageSize.getHeight();
+    const mx = 40, larg = W - mx * 2, base = Hp - 46;
+    let y = 0;
+    const cor = c => doc.setTextColor.apply(doc, PDF_COR[c] || c);
+    const fill = c => doc.setFillColor.apply(doc, PDF_COR[c] || c);
+    const draw = c => doc.setDrawColor.apply(doc, PDF_COR[c] || c);
+    const novaPag = () => { doc.addPage(); y = 44; };
+    const cabe = (h) => { if (y + h > base) novaPag(); };
+    // Cabeçalho
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(16); cor('ouro'); doc.text('GN', mx, 44); const gnW = doc.getTextWidth('GN');
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(6.5); cor('cinza'); doc.setCharSpace(2.2); doc.text('SISTEMA DE GESTÃO', mx + gnW + 7, 44); doc.setCharSpace(0);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(17); cor('ouro');
+    const tl = doc.splitTextToSize(_pt(M.titulo), larg); doc.text(tl, mx, 72); y = 72 + (tl.length - 1) * 19;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9); cor('cinza');
+    const DS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+    const dd = M.data ? new Date(M.data + 'T12:00') : null;
+    const g = new Date(), p2 = n => String(n).padStart(2, '0');
+    const sub = doc.splitTextToSize(_pt([(dd ? DS[dd.getDay()] + ', ' : '') + _dmY(M.data)].concat(M.info).join(' · ') + ` · gerado em ${p2(g.getDate())}/${p2(g.getMonth() + 1)} ${p2(g.getHours())}:${p2(g.getMinutes())}`), larg);
+    doc.text(sub, mx, y + 15); y += 15 + sub.length * 11 + 10;
+    // Cartões de resumo
+    if (M.kpis.length) {
+      const gap = 10, kw = (larg - gap * (M.kpis.length - 1)) / M.kpis.length, kh = 58;
+      M.kpis.forEach((k, i) => {
+        const x = mx + i * (kw + gap);
+        draw('linha'); doc.setLineWidth(0.8); doc.roundedRect(x, y, kw, kh, 6, 6, 'S');
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(7); cor('cinza'); doc.setCharSpace(0.6);
+        doc.text(_pt(k.label).toUpperCase(), x + kw / 2, y + 15, { align: 'center' }); doc.setCharSpace(0);
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(15); cor(k.cor === 'na' ? 'ouro' : k.cor);
+        const vv = doc.splitTextToSize(_pt(k.valor), kw - 10);
+        doc.setFontSize(vv.length > 1 || _pt(k.valor).length > 14 ? 11 : 15);
+        doc.text(_pt(k.valor), x + kw / 2, y + 36, { align: 'center', maxWidth: kw - 10 });
+        if (k.sub) { doc.setFont('helvetica', 'normal'); doc.setFontSize(7); cor('cinza'); doc.text(_pt(k.sub), x + kw / 2, y + 50, { align: 'center' }); }
+      });
+      y += kh + 18;
+    }
+    // Seções
+    const colV = 78;   // coluna do valor, à direita
+    M.secoes.forEach(s => {
+      cabe(48);
+      if (s.destaque) { fill([254, 242, 242]); doc.rect(mx - 6, y - 12, larg + 12, 20, 'F'); }
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(11); cor(s.destaque ? 'ruim' : 'tinta');
+      doc.text(_pt(s.titulo), mx, y + 2, { maxWidth: larg - 150 });
+      if (s.resumo) { doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); cor(s.cor || 'cinza'); doc.text(_pt(s.resumo), mx + larg, y + 2, { align: 'right' }); }
+      y += 9; draw('ouro'); doc.setLineWidth(1.4); doc.line(mx, y, mx + larg, y); y += 13;
+      s.linhas.forEach(l => {
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5);
+        const tx = doc.splitTextToSize(_pt(l.txt) + (l.critico ? '  (crítico)' : ''), larg - colV - 16);
+        doc.setFontSize(8.5);
+        const ob = l.obs ? doc.splitTextToSize(_pt(l.obs).replace(/ ?\n ?/g, '\n'), larg - colV - 16) : [];
+        const h = tx.length * 12 + (ob.length ? ob.length * 10.5 + 3 : 0) + 7;
+        cabe(h);
+        fill(l.cor); doc.circle(mx + 3.5, y - 3.2, 3.2, 'F');
+        doc.setFont('helvetica', l.critico ? 'bold' : 'normal'); doc.setFontSize(9.5); cor('tinta'); doc.text(tx, mx + 14, y);
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(10); cor(l.cor); doc.text(_pt(l.valor), mx + larg, y, { align: 'right' });
+        let yy = y + tx.length * 12;
+        if (ob.length) { doc.setFont('helvetica', 'italic'); doc.setFontSize(8.5); cor([85, 85, 85]); doc.text(ob, mx + 14, yy + 1); yy += ob.length * 10.5 + 3; }
+        y = yy + 1; draw('linha'); doc.setLineWidth(0.5); doc.line(mx + 14, y - 5, mx + larg, y - 5); y += 6;
+      });
+      y += 10;
+    });
+    // Observações e fechamento
+    if (M.obs) {
+      cabe(50);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(11); cor('tinta'); doc.text('Observações gerais', mx, y + 2);
+      y += 9; draw('ouro'); doc.setLineWidth(1.4); doc.line(mx, y, mx + larg, y); y += 14;
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); cor('tinta');
+      doc.splitTextToSize(_pt(M.obs), larg).forEach(ln => { cabe(13); doc.text(ln, mx, y); y += 12.5; });
+      y += 8;
+    }
+    if (M.fim || M.ciente) {
+      cabe(30); doc.setFont('helvetica', 'normal'); doc.setFontSize(9); cor('cinza');
+      [M.fim, M.ciente].filter(Boolean).forEach(t => { doc.text(_pt(t), mx, y); y += 12; });
+      y += 6;
+    }
+    // Fotos em cartão, 2 por linha
+    if (M.fotos.length) {
+      const paraDataUrl = async (url) => { const r = await fetch(url); if (!r.ok) throw new Error('HTTP ' + r.status);
+        const b = await r.blob(); return await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(b); }); };
+      const medidas = (src) => new Promise(res => { const im = new Image(); im.onload = () => res([im.naturalWidth, im.naturalHeight]); im.onerror = () => res([4, 3]); im.src = src; });
+      cabe(240);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(11); cor('tinta'); doc.text(`Fotos (${M.fotos.length})`, mx, y + 2);
+      y += 9; draw('ouro'); doc.setLineWidth(1.4); doc.line(mx, y, mx + larg, y); y += 12;
+      const cw = (larg - 10) / 2, ih = 190, ch = ih + 44;
+      for (let i = 0; i < M.fotos.length; i++) {
+        const col = i % 2;
+        if (col === 0) cabe(ch + 8);
+        const x = mx + col * (cw + 10), f = M.fotos[i];
+        draw('linha'); doc.setLineWidth(0.8); doc.roundedRect(x, y, cw, ch, 5, 5, 'S');
+        fill([243, 244, 246]); doc.rect(x + 6, y + 6, cw - 12, ih, 'F');
+        try {
+          const du = await paraDataUrl(f.url); const [w0, h0] = await medidas(du);
+          let w = cw - 12, h = w * h0 / w0; if (h > ih) { h = ih; w = h * w0 / h0; }
+          doc.addImage(du, 'JPEG', x + 6 + (cw - 12 - w) / 2, y + 6 + (ih - h) / 2, w, h);
+        } catch (e) { doc.setFontSize(8); cor('cinza'); doc.text('(foto indisponível)', x + cw / 2, y + ih / 2, { align: 'center' }); }
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); cor([68, 68, 68]);
+        doc.text(doc.splitTextToSize(_pt(f.legenda), cw - 12).slice(0, 3), x + 6, y + ih + 17);
+        if (col === 1 || i === M.fotos.length - 1) y += ch + 10;
+      }
+    }
+    // Rodapé em todas as páginas
+    const n = doc.internal.getNumberOfPages();
+    for (let i = 1; i <= n; i++) {
+      doc.setPage(i); draw([238, 238, 238]); doc.setLineWidth(0.6); doc.line(mx, Hp - 34, mx + larg, Hp - 34);
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); cor([170, 170, 170]);
+      doc.text(_pt('GN Operações · ' + M.titulo + ' · ' + _dmY(M.data)), mx, Hp - 22);
+      doc.text(`${i}/${n}`, mx + larg, Hp - 22, { align: 'right' });
+    }
+    return doc.output('blob');
+  }
   function _relWpp() {
     const r = relatorio();
     window.open('https://wa.me/?text=' + encodeURIComponent(r.texto), '_blank');
   }
+  async function _relArquivo() {
+    const M = _relModelo();
+    const blob = await _pdfBlob(M);
+    return new File([blob], _pt(M.arquivo).replace(/[^\w-]+/g, '_') + '.pdf', { type: 'application/pdf' });
+  }
   async function _relPdf() {
-    const r = relatorio();
-    if (typeof CFG.textoParaPdfBlob !== 'function') return;
     try {
-      const blob = await CFG.textoParaPdfBlob(_paraPdf(r.texto), _paraPdf(r.titulo), r.fotos);
-      const url = URL.createObjectURL(blob), a = document.createElement('a');
-      a.href = url; a.download = _paraPdf(r.titulo).replace(/[^\w-]+/g, '_') + '.pdf';
-      document.body.appendChild(a); a.click(); a.remove();
+      const f = await _relArquivo();
+      const url = URL.createObjectURL(f), a = document.createElement('a');
+      a.href = url; a.download = f.name; document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
+      return f;
     } catch (e) { alert('⚠️ Não deu pra gerar o PDF agora: ' + (e.message || e)); }
   }
-  function _relPdfWpp() {
-    const r = relatorio();
-    if (typeof CFG.compartilharPdfWpp === 'function') CFG.compartilharPdfWpp(_paraPdf(r.texto), _paraPdf(r.titulo), r.fotos);
+  async function _relPdfWpp() {
+    try {
+      const f = await _relArquivo();
+      const titulo = f.name.replace(/\.pdf$/, '').replace(/_/g, ' ');
+      if (navigator.canShare && navigator.canShare({ files: [f] })) { await navigator.share({ files: [f], title: titulo, text: titulo }); return f; }
+      const url = URL.createObjectURL(f), a = document.createElement('a');
+      a.href = url; a.download = f.name; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      alert('📄 PDF baixado — anexe no WhatsApp.');
+      window.open('https://wa.me/?text=' + encodeURIComponent(titulo), '_blank');
+      return f;
+    } catch (e) { if (e && e.name === 'AbortError') return; alert('⚠️ Não deu pra gerar o PDF agora: ' + (e.message || e)); }
   }
   function _relBotoesHtml() {
     if (!_relFinalizado()) return '';
-    const b = (fn, rot, cor) => `<button type="button" onclick="GNVck.${fn}()" style="flex:1;min-width:0;padding:10px 4px;border-radius:10px;border:1px solid ${cor}55;background:${cor}18;color:var(--t1);font-size:11.5px;font-weight:800;cursor:pointer;font-family:inherit;white-space:nowrap">${rot}</button>`;
+    const b = (fn, rot, cor) => `<button type="button" onclick="GNVck.${fn}()" style="flex:1;min-width:0;padding:9px 4px;border-radius:10px;border:1px solid ${cor}55;background:${cor}18;color:var(--t1);font-size:11px;line-height:1.25;font-weight:800;cursor:pointer;font-family:inherit;white-space:normal;overflow-wrap:anywhere;text-align:center">${rot}</button>`;
+    // Quebra em duas linhas quando falta espaço: em 360px "PDF no Whats" passava da borda (print do dono).
     return card(`<div style="font-size:10px;font-weight:800;color:var(--t3);letter-spacing:.6px;text-transform:uppercase;margin-bottom:8px">📤 Relatório pra diretoria</div>
       <div style="display:flex;gap:6px">${b('_relWpp', '📲 WhatsApp', '#25d366')}${b('_relPdf', '📄 PDF', '#c0392b')}${b('_relPdfWpp', '📄📲 PDF no Whats', '#25d366')}</div>`);
   }
@@ -986,7 +1137,7 @@
     config, abrir, abrirLegado, abrirLeitura, fechar, resumo, set, setPath,
     _estado: () => R, _ctx: () => _ctx, _enviar,
     _trocarTipo, _filtrar, _nota, _coz, _texto, _set, _foto, _finalizar, _reabrir,
-    _chip, relatorio, _paraPdf, _relWpp, _relPdf, _relPdfWpp, SUG_SALAO, SUG_COZINHA, SUG_AUDP,
+    _chip, relatorio, _relModelo, _pdfBlob, _paraPdf, _relWpp, _relPdf, _relPdfWpp, SUG_SALAO, SUG_COZINHA, SUG_AUDP,
     _padraoTipo: _padraoTipoSel, _resp, _padraoFinalizar, _padraoReabrir,
   };
 })();
