@@ -2026,6 +2026,103 @@ function _cienteBlocoHtml(loja, comp, mesNome) {
     Com a senha da gerência ou da sub-gerência. É diferente do fechamento da semana: este é o do mês.</div>`;
 }
 
+/* ── Trava obrigatória da ciência do mês ─────────────────────────────────────────────
+   14/11/2026, 22h: "Vamos precisar colocar a obrigatoriedade de o gerente validar a verificação
+   da mini DRE no app Home Lojas, o resultado continua com pouca adesão. Pode bloquear a
+   partir de amanhã, só após validação com a senha que liberar o app." Substitui a decisão
+   anterior (card normal, sem travar): em 15/11 só 3 de 11 lojas tinham visto outubro.
+
+   Mesmo desenho da trava do fechamento da semana (_gateTravar), que já funciona:
+   - o PRÓPRIO card do mês vai pra dentro de uma tela cheia, aberto — a pessoa lê o resumo,
+     a Mini DRE, e confirma com a senha no fim dele. Sem tela paralela pra manter em dia;
+   - trava SÓ quem deve a ciência pelo cargo da sessão (gerente e sub). Caixa, estoquista
+     etc. seguem trabalhando — não podem resolver isso, e parar a loja não ajuda;
+   - FALHA ABERTO: sem a ciência carregada do banco (rede), sem card, erro — não trava;
+   - "Não sou eu — sair" desloga, pro aparelho não ficar preso até o gerente chegar;
+   - Maglia fica fora (o pedido não a citou — CLAUDE.md);
+   - a semana tem a vez: com as duas pendentes, aparece a da semana e, quando ela solta,
+     esta.
+   Começa em 15/11/2026 (o pedido veio às 22h do dia 14). Nos meses seguintes trava a partir do dia CIENTE_TRAVA_DIA: nos
+   primeiros dias o mês ainda está fechando (caixas, Mini DRE, relatório da empresa) e a
+   gerência confirmaria um número que ainda vai mudar. */
+const CIENTE_TRAVA_ID    = 'gate-ciente-mes';
+const CIENTE_TRAVA_DESDE = '2026-11-15';
+const CIENTE_TRAVA_DIA   = 5;
+const CIENTE_TRAVA_FORA  = ['MAGLIA'];
+let _cienteTravaAtiva  = false;
+let _cienteTravaOrigem = null;
+
+function _cienteTravaDeve(loja, comp, sess, hoje) {
+  hoje = hoje || new Date();
+  const iso = hoje.getFullYear() + '-' + String(hoje.getMonth() + 1).padStart(2, '0') + '-' + String(hoje.getDate()).padStart(2, '0');
+  if (iso < CIENTE_TRAVA_DESDE) return false;
+  // Novembro/2026 começa no dia 15 (pedido); dali em diante, a partir do dia 5.
+  if (iso.slice(0, 7) !== CIENTE_TRAVA_DESDE.slice(0, 7) && hoje.getDate() < CIENTE_TRAVA_DIA) return false;
+  if (!sess || !loja || loja === 'GERAL' || CIENTE_TRAVA_FORA.includes(loja)) return false;
+  if (sess.loja === 'GERAL' || (sess.permissoes || {}).master) return false;
+  if (!CIENTE_CARGOS.includes((sess.cargo || '').toLowerCase())) return false;
+  if (!_cienteAllData) return false;               // não carregou: falha aberto
+  return !_cienteDe(comp, loja);
+}
+
+function _cienteTravaReavaliar(loja, comp, sess) {
+  try {
+    if (!_cienteTravaDeve(loja, comp, sess)) { _cienteTravaLiberar(); return; }
+    // A da semana tem a vez — duas telas cheias uma sobre a outra confundem.
+    if (typeof _gateAtivo !== 'undefined' && _gateAtivo) return;
+    _cienteTravar(comp);
+  } catch (e) {
+    window.gnLogError && window.gnLogError('cienteTrava', e);
+    _cienteTravaLiberar();
+  }
+}
+
+function _cienteTravar(comp) {
+  const card = document.getElementById('mes-anterior-home-card');
+  if (!card || !card.querySelector('details')) return;  // sem card não há o que confirmar
+  let ov = document.getElementById(CIENTE_TRAVA_ID);
+  if (!ov) {
+    const MESES = ['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+    const mes = MESES[parseInt(comp.slice(5, 7), 10) - 1] || '';
+    ov = document.createElement('div');
+    ov.id = CIENTE_TRAVA_ID;
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9999;background:var(--s1);overflow-y:auto;-webkit-overflow-scrolling:touch';
+    ov.innerHTML = `
+      <div style="max-width:560px;margin:0 auto;padding:14px 0 26px">
+        <div style="padding:4px 16px 12px">
+          <div style="font-size:9px;font-weight:800;letter-spacing:1.6px;text-transform:uppercase;color:var(--t4)">Gigante Nordestino</div>
+          <div style="font-size:16px;font-weight:900;color:var(--t1);margin-top:3px;line-height:1.25">Antes de seguir: resultado do mês de ${mes}</div>
+          <div style="font-size:11.5px;color:var(--t3);margin-top:4px;line-height:1.45">Leia o resumo e a Mini DRE da loja. No fim, a gerência ou a sub-gerência confirma com a senha — o app libera na hora.</div>
+        </div>
+        <div id="${CIENTE_TRAVA_ID}-conteudo"></div>
+        <div style="padding:12px 16px 0">
+          <button onclick="doLogout()"
+            style="width:100%;padding:10px;border-radius:12px;border:1px solid rgba(0,0,0,.15);cursor:pointer;font-family:inherit;font-size:12px;font-weight:700;background:transparent;color:var(--t3)">Não sou eu — sair</button>
+        </div>
+      </div>`;
+    document.body.appendChild(ov);
+  }
+  const holder = document.getElementById(CIENTE_TRAVA_ID + '-conteudo');
+  if (!_cienteTravaAtiva) {
+    _cienteTravaOrigem = { pai: card.parentNode, proximo: card.nextSibling };
+    _cienteTravaAtiva = true;
+    document.body.style.overflow = 'hidden';
+    ov.scrollTop = 0;
+  }
+  if (card.parentNode !== holder) holder.appendChild(card);
+  const d = card.querySelector('details'); if (d) d.open = true;
+}
+
+function _cienteTravaLiberar() {
+  const card = document.getElementById('mes-anterior-home-card');
+  if (card && _cienteTravaOrigem && _cienteTravaOrigem.pai) _cienteTravaOrigem.pai.insertBefore(card, _cienteTravaOrigem.proximo || null);
+  _cienteTravaOrigem = null;
+  const ov = document.getElementById(CIENTE_TRAVA_ID);
+  if (ov) ov.remove();
+  if (_cienteTravaAtiva) document.body.style.overflow = '';
+  _cienteTravaAtiva = false;
+}
+
 async function _dreCarregar(force) {
   if (_dreAllData && !force) return _dreAllData;
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
@@ -3365,8 +3462,11 @@ async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
     const podeEnviarRel = sess.loja === 'GERAL' || !!(sess.permissoes || {}).master;
     _dreCtx = { loja, comp: dreComp, faturamento, mesNome };
     _dreEditando = false;
+    // Redesenhar (abrir o formulário da senha, errar a senha) não pode recolher o card: a
+    // ciência fica no FIM dele, e recolhido o formulário some junto.
+    const _estavaAberto = !!(el.querySelector('details') || {}).open || _cienteTravaAtiva;
 
-    el.innerHTML = `<details style="background:rgba(79,70,229,.06);border:1px solid rgba(79,70,229,.2);border-left:3px solid #4F46E5;border-radius:18px;padding:0;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05);overflow:hidden">
+    el.innerHTML = `<details${_estavaAberto ? ' open' : ''} style="background:rgba(79,70,229,.06);border:1px solid rgba(79,70,229,.2);border-left:3px solid #4F46E5;border-radius:18px;padding:0;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05);overflow:hidden">
       <summary style="list-style:none;cursor:pointer;padding:14px 16px;display:flex;align-items:center;gap:10px">
         <span style="font-size:18px;flex-shrink:0">📊</span>
         <div style="flex:1;min-width:0">
@@ -3415,9 +3515,11 @@ async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
         <div onclick="event.stopPropagation()">${_cienteBlocoHtml(loja, dreComp, mesNome)}</div>
       </div>
     </details>`;
+    _cienteTravaReavaliar(loja, dreComp, sess);
   } catch (e) {
     window.gnLogError && window.gnLogError('mesAnteriorHome', e);
     el.innerHTML = '';
+    _cienteTravaLiberar();
   }
 }
 
@@ -4973,8 +5075,8 @@ async function _renderFechamentoSemanaCard(mostrar, sess, isMasterAtivo) {
    qualquer coisa e só liberar após ser feito." — decisão do dono, que substitui a anterior
    ("insiste, não trava"): o card ficou semanas na tela com "não respondeu" nos dois chips.
 
-   É SÓ DO FECHAMENTO DA SEMANA. A ciência do mês segue como card normal, sem travar nada —
-   perguntado e confirmado com o dono.
+   A ciência do MÊS ganhou a trava dela em 15/11/2026 (ver _cienteTravaReavaliar) — é
+   outra tela, que espera esta soltar quando as duas estão pendentes.
 
    TRAVA SÓ QUEM DEVE A RESPOSTA, pelo cargo da sessão aberta: gerente e sub. Caixa,
    estoquista, supervisor e mestre seguem usando a Home — travar a loja inteira pararia a
@@ -5053,6 +5155,8 @@ function _gateOverlay() {
 }
 
 function _gateTravar(loja, chave) {
+  // A da semana tem a vez sobre a do mês (que volta quando esta soltar).
+  if (_cienteTravaAtiva) _cienteTravaLiberar();
   const ov = _gateOverlay();
   const holder = document.getElementById(GATE_ID + '-conteudo');
   const card = document.getElementById(GATE_CARD);
@@ -5097,9 +5201,15 @@ function _gateLiberar() {
   if (card && _gateOrigem && _gateOrigem.pai) _gateOrigem.pai.insertBefore(card, _gateOrigem.proximo || null);
   _gateOrigem = null;
   const ov = document.getElementById(GATE_ID);
+  const estava = _gateAtivo;
   if (ov) ov.remove();
   _gateAtivo = false;
   document.body.style.overflow = '';
+  // Com as duas pendentes, a do mês esperou a da semana — agora é a vez dela.
+  if (estava && _cienteDtCtxAtual()) { const c = _cienteDtCtxAtual(); _cienteTravaReavaliar(c.loja, c.comp, session); }
+}
+function _cienteDtCtxAtual() {
+  try { return (_dreCtx && _dreCtx.loja && _dreCtx.comp) ? _dreCtx : null; } catch (e) { return null; }
 }
 
 /* O que a pessoa marcou, pergunta por pergunta, com o certo ao lado. Serve a duas telas: o
@@ -8024,6 +8134,7 @@ function doLogout() {
   session = null; masterLoja = null;
   // Sem isto, o "já respondeu" de quem saiu valeria pro próximo que entrasse no aparelho.
   _gateReset();
+  _cienteTravaLiberar();
   // A trava de presença é overlay fixo: sem tirar ela aqui, "Não sou eu — sair" deslogava
   // por baixo e deixava a própria trava cobrindo a tela de login — a porta de saída não
   // levava a lugar nenhum.
