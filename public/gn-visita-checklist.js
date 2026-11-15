@@ -44,6 +44,10 @@
     { key: 'validade', label: 'Segurança Alimentar e Validades', icon: '🔬', itens: [
       { key: 'val_cozinha', label: 'Validades em dia na cozinha — nenhum produto vencido', peso: 3, critico: true, peso_label: '⚡ Peso 3×' },
       { key: 'val_estoque', label: 'Validades em dia no estoque — nenhum produto vencido', peso: 3, critico: true, peso_label: '⚡ Peso 3×' },
+      // 15/11/2026: "incluir etiquetas vencidas nas câmaras frigoríficas. Não tem. Tive que
+      // colocar em outro setor." Item novo, com chave própria: visita antiga sem ele não perde
+      // nota (calcSalao pula item sem resposta) e a reincidência começa a contar daqui.
+      { key: 'val_camaras', label: 'Etiquetas em dia nas câmaras frigoríficas — nenhuma etiqueta vencida', peso: 3, critico: true, peso_label: '⚡ Peso 3×' },
       { key: 'val_copa', label: 'Validades em dia na copa/bar — bebidas e frutas', peso: 3, critico: true, peso_label: '⚡ Peso 3×' },
       { key: 'val_salao', label: 'Validades em dia nos produtos expostos no salão', peso: 2, critico: true, peso_label: '⚡ Peso 2×' },
       { key: 'higiene_pessoal', label: 'Higiene pessoal dos manipuladores de alimentos', peso: 1 },
@@ -150,6 +154,7 @@
   const SUG_SALAO = {
     'validade|val_cozinha': ['Descartar na hora os vencidos e registrar a perda', 'Conferir a validade de toda a cozinha com o líder do turno', 'Etiquetar todo produto aberto com a validade secundária', 'Conferência de validade na abertura, todo dia'],
     'validade|val_estoque': ['Descartar na hora os vencidos e registrar a perda', 'Reorganizar o estoque no PVPS (vence primeiro na frente)', 'Conferir a validade de todo o estoque hoje', 'Conferência semanal de validade no estoque'],
+    'validade|val_camaras': ['Descartar na hora os produtos com etiqueta vencida e registrar a perda', 'Conferir as etiquetas de todas as câmaras com o líder do turno', 'Reetiquetar o que estiver sem etiqueta ou ilegível', 'Conferência das etiquetas das câmaras na abertura, todo dia'],
     'validade|val_copa': ['Descartar bebidas e frutas vencidas e registrar a perda', 'Conferir a validade da copa/bar com o barman', 'Etiquetar frutas cortadas e xaropes abertos', 'Conferência de validade da copa na abertura'],
     'validade|val_salao': ['Recolher do salão os produtos vencidos', 'Conferir validade de sachês, molhos e expositores', 'Repor só com produto conferido', 'Incluir validade do salão no check-list de abertura'],
     'documentacao|licenca': ['Pedir a renovação da licença ao escritório hoje', 'Afixar a licença vigente em local visível', 'Mandar cópia digital pro escritório', 'Avisar o escritório 60 dias antes do vencimento'],
@@ -215,6 +220,7 @@
     'operacao|etiquetas': ['Máquina de etiqueta parada', 'Faltando rolo de etiqueta', 'Equipe sem usar a etiqueta'],
     'validade|val_cozinha': ['Produto vencido encontrado', 'Produto sem etiqueta', 'Troca feita no ato', 'Gerência alertada'],
     'validade|val_estoque': ['Produto vencido no estoque', 'Produto próximo do vencimento sem destaque', 'Troca feita no ato'],
+    'validade|val_camaras': ['Etiqueta vencida na câmara', 'Produto sem etiqueta na câmara', 'Etiqueta ilegível/apagada', 'Troca feita no ato'],
     'validade|val_copa': ['Bebida vencida', 'Fruta estragada', 'Xarope/polpa aberto sem etiqueta'],
     'validade|val_salao': ['Sachê/molho vencido no salão', 'Produto exposto sem validade'],
     'validade|higiene_pessoal': ['Funcionário de adorno (brinco/anel/relógio)', 'Unha grande ou com esmalte', 'Sem touca/rede', 'Sem lavar as mãos'],
