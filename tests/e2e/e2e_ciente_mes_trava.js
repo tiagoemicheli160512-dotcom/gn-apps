@@ -88,6 +88,18 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   check('…com o próprio card do mês dentro, já aberto, e o botão de confirmar no fim', e.cardDentro && e.aberto && e.botao, e);
   check('…o título diz que é o resultado do mês de outubro', /resultado do mês de outubro/.test(e.titulo), e.titulo);
 
+  // 15/11, Bangu: a trava subiu VAZIA — o arranjo da Home ("🗂 Fechamentos") puxou o card de
+  // volta pro grupo depois que ele foi pra trava. O que a pessoa via: título e "Não sou eu".
+  const arr = await page.evaluate(async () => {
+    _homeOrganizarGrupos();
+    await new Promise(r => setTimeout(r, 400));          // o observador do card reorganiza "logo"
+    _homeOrganizarGrupos();
+    const ov = document.getElementById('gate-ciente-mes');
+    const card = document.getElementById('mes-anterior-home-card');
+    return { trava: !!ov, cardDentro: !!(ov && ov.contains(card)), botao: !!(ov && /Confirmar que vi o resultado do MÊS/.test(ov.innerText)) };
+  });
+  check('a organização da Home em grupos não tira o card de dentro da trava (não fica tela vazia)', arr.trava && arr.cardDentro && arr.botao, arr);
+
   e = await montar({ hoje: '2026-11-14' });
   check('14/11 (o dia do pedido) ainda não trava — começa no dia seguinte', !e.trava, e);
 
