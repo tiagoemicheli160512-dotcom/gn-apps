@@ -21,6 +21,15 @@ const FECH = LOJAS.map((l, i) => ({
   // Bangu: "Júlio" digitado de 3 jeitos (15 + 4 + 2 = 21) — tem que contar como uma pessoa.
   gn_caixa_gorjeta: l === 'BANGU' ? Array.from({ length: 37 }, (_, j) => ({ valor: 180, garcom: j < 15 ? 'Júlio' : j < 19 ? 'julio' : j < 21 ? ' JÚLIO ' : 'Ana' })) : [{ valor: 100 + i * 50, garcom: 'Y' }],
   gn_caixa_transferencia: l === 'BANGU' ? [] : Array.from({ length: i }, () => ({ id: 't', autorizado_por: 'Z' })),
+  // Extra (pedido de 15/11: "também o valor de extras pago"). Bangu R$ 2.500 (2,5% da venda):
+  // Talita 4x, 1 sem nome, e 1 lançado em "Outros" como "dobra Talita" (conta, como na aba
+  // Extra); "mercado" em Outros não conta. As outras lojas, R$ 100 a R$ 1.100.
+  gn_caixa_despesa: l === 'BANGU'
+    ? [1, 2, 3].map(() => ({ categoria: 'funcionario_extra', valor: 400, nome: 'Talita', justificativa: 'cobriu falta no salão' }))
+        .concat([{ categoria: 'funcionario_extra', valor: 500, nome: '', justificativa: 'reforço sábado' },
+                 { categoria: 'outros', valor: 800, nome: 'dobra Talita', justificativa: 'dobra no domingo' },
+                 { categoria: 'outros', valor: 300, nome: 'mercado', justificativa: 'compra de gelo' }])
+    : [{ categoria: 'funcionario_extra', valor: 100 + i * 100, nome: 'W', justificativa: 'reforço do turno' }],
 }));
 // MAGLIA também tem caixa — não pode entrar na rede.
 FECH.push({ loja: 'MAGLIA', data: '2026-11-10', status: 'FECHADO', gn_caixa_cancelamento: canc(50, 1000, 'M'), gn_caixa_gorjeta: [], gn_caixa_transferencia: [] });
@@ -91,6 +100,13 @@ const TRIOS = [
   check('couvert do fim de semana fechado (+R$ 600, 1º de 2)', r.linhas.some(l => l.id === 'couver' && /\+R\$\s?600,00/.test(l.txt) && /1º de 2/.test(l.txt)), r.linhas.find(l => l.id === 'couver'));
   check('o que não carregou (escala, visitas) é dito, não fingido', /Não carregou agora: escala, visitas/.test(r.txt), r.txt.slice(-300));
   check('uma leitura da rede só (a única por loja é a escala do banco da loja aberta)', r.urls.filter(u => /gn_caixa_fechamento/.test(u)).length === 1 && !r.urls.some(u => /loja=eq/.test(u) && !/gn_comissoes/.test(u)), r.urls);
+
+  // ── Funcionário extra pago ──
+  const ex = r.linhas.find(l => l.id === 'extra');
+  check('extra pago: Bangu R$ 2.500,00 em 5 lançamentos (o "mercado" em Outros não entra; a "dobra" entra)', ex && /R\$\s?2\.500,00/.test(ex.txt) && /5 lançamentos/.test(ex.txt), ex && ex.txt);
+  check('…em % da venda (2,50%), com a média da rede, e 11º de 11 em vermelho', ex && /2,50% da venda/.test(ex.txt) && /rede \d/.test(ex.txt) && /11º de 11/.test(ex.txt) && ex.sem === 'vermelho', ex);
+  check('…e quem mais recebeu (Talita 3x, dobra Talita 1x) e quantos sem nome', ex && /quem mais recebeu: Talita 3x/.test(ex.txt) && /1 sem nome/.test(ex.txt), ex && ex.txt);
+  check('a consulta traz só as despesas de extra e "outros" (não o caixa inteiro)', r.urls.some(u => /gn_caixa_despesa\.categoria=in\.\(funcionario_extra,outros\)/.test(decodeURIComponent(u))), r.urls.filter(u => /fechamento/.test(u)));
 
   // ── Banco de horas ──
   const bh = r.linhas.find(l => l.id === 'banco');
