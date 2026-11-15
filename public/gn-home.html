@@ -7590,7 +7590,14 @@ async function _renderCouverHome(mostrar, sess, isMasterAtivo) {
     const semFim = _carnesISO(_triosPeriodoFim('sem', _triosPeriodoIni('sem', 0)));
     const mesIniD = _triosPeriodoIni('mes', 0);
     const mesIni = _carnesISO(mesIniD), mesFim = _carnesISO(_triosPeriodoFim('mes', mesIniD));
-    const de = semIni < mesIni ? semIni : mesIni, ate = semFim > mesFim ? semFim : mesFim;
+    // O fim de semana EM ANDAMENTO (sáb/dom de hoje): a semana desta segunda. Entra na
+    // consulta pra linha "Este fim de semana" — na virada do mês ele pode cair fora do mês.
+    const estaSegD = _triosPeriodoIni('sem', 1);
+    const estaSab = _carnesISO(new Date(estaSegD.getTime() + 5 * 864e5)), estaDom = _carnesISO(new Date(estaSegD.getTime() + 6 * 864e5));
+    const emFds = [0, 6].includes(new Date().getDay());
+    let de = semIni < mesIni ? semIni : mesIni, ate = semFim > mesFim ? semFim : mesFim;
+    if (emFds && estaDom > ate) ate = estaDom;
+    if (emFds && estaSab < de) de = estaSab;
     const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
     // A rede inteira, não só a loja: a POSIÇÃO precisa das outras (a tabela é pequena —
     // ~10 linhas por loja num mês). Nenhum nome de outra loja chega ao HTML do card.
@@ -7618,19 +7625,67 @@ async function _renderCouverHome(mostrar, sess, isMasterAtivo) {
       const pm = posDe(aggMes, mesIni);
       if (sM || sF) _homeTile(el, { k: 'couvert', rotulo: 'Couvert × cachê', valor: fecha(sM) ? (sM.saldo < 0 ? '−' : '+') + _homeMil(Math.abs(sM.saldo)) : '—',
         cor: fecha(sM) ? (sM.saldo < 0 ? 'red' : 'green') : '',
-        detalhe: fecha(sF) ? 'fim de semana ' + (sF.saldo < 0 ? '−' : '+') + _homeMil(Math.abs(sF.saldo)) : (sM && !fecha(sM) ? 'falta lançar couvert' : ''),
+        detalhe: fecha(sF) ? (emFds ? 'fds passado ' : 'último fds ') + (sF.saldo < 0 ? '−' : '+') + _homeMil(Math.abs(sF.saldo)) : (sM && !fecha(sM) ? 'falta lançar couvert' : ''),
         pos: pm && pm.pos ? `${pm.pos}º de ${pm.n}` : '' });
       else _homeTile(el, null);
     }
     el.innerHTML = _couverHomeHtml({ titulo, semIni, semFim, mesIni,
       fds: aggSem[loja + '|' + semIni] || null, posFds: posDe(aggSem, semIni),
       mes: aggMes[loja + '|' + mesIni] || null, posMes: posDe(aggMes, mesIni),
-      cacheFuturo: fut.cache, fdsFuturos: fut.nFds });
+      cacheFuturo: fut.cache, fdsFuturos: fut.nFds,
+      emFds, estaFds: emFds ? _couverEstaFds(rows, loja, estaSab, estaDom, hoje) : null });
   } catch (e) {
     window.gnLogError && window.gnLogError('couverHome', e);
     _homeTile(el, null);
     el.innerHTML = _redeCaixa(titulo, 'Não deu pra carregar agora. Abra de novo daqui a pouco.');
   }
+}
+
+/* ── "Este fim de semana" (15/11/2026) ────────────────────────────────────────────────
+   "Estamos no fim de semana 14 e 15/11. Essa informação aqui mostra do último fim de
+   semana, acho que ficou confuso." O bloco principal fica no fim de semana JÁ FECHADO (o
+   saldo só fecha com o couvert de domingo, à noite — mostrar o atual deixaria "—" o fim de
+   semana inteiro), mas no sábado e no domingo o rótulo diz "passado" e uma linha mostra o
+   que já aconteceu no atual, dia a dia. A conta de cada dia é a do Painel (_triosAgregar). */
+function _couverEstaFds(rows, loja, sab, dom, hoje) {
+  const amanha = d => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + 1); return _carnesISO(x); };
+  const dentro = { [loja]: true };
+  const dias = [sab, dom].map(dia => {
+    const doDia = rows.filter(r => String(r.data).slice(0, 10) === dia && _triosChaveDaLinha(r) === loja);
+    if (!doDia.length) return { dia, estado: 'sem' };
+    if (dia > hoje) return { dia, estado: 'vem', hora: String(doDia[0].horario_inicio || '').slice(0, 5) };
+    // O dia entra como "já aconteceu" pra conta (hoje fica de fora em _triosAgregar).
+    const agg = _triosAgregar(doDia, 'sem', dentro, amanha(dia));
+    const s2 = Object.values(agg)[0];
+    if (!s2) return { dia, estado: 'sem' };
+    if (s2.diasSemShow.length && !s2.diasValidos.length) return { dia, estado: 'naoVeio' };
+    if (s2.diasSemCouver.length) return { dia, estado: dia === hoje ? 'hoje' : 'falta', hora: String(doDia[0].horario_inicio || '').slice(0, 5) };
+    return { dia, estado: 'ok', saldo: s2.saldo, couver: s2.couver, cache: s2.cacheDevido };
+  });
+  const fechado = dias.every(x => x.estado === 'ok' || x.estado === 'sem' || x.estado === 'naoVeio') && dias.some(x => x.estado === 'ok');
+  return { sab, dom, dias, fechado, total: dias.reduce((t, x) => t + (x.estado === 'ok' ? x.saldo : 0), 0) };
+}
+
+function _couverEstaFdsHtml(f) {
+  if (!f || f.dias.every(x => x.estado === 'sem')) return '';
+  const dm = iso => String(iso).slice(8, 10) + '/' + String(iso).slice(5, 7);
+  const sinal = v => (v < 0 ? '−' : '+') + _fmtBRL(Math.abs(v));
+  const cor = v => v < 0 ? 'var(--txt-red)' : 'var(--txt-green)';
+  const nome = ['domingo', '', '', '', '', '', 'sábado'];
+  const parte = x => {
+    const n = nome[new Date(x.dia + 'T12:00:00').getDay()];
+    if (x.estado === 'ok') return `${n} <b style="color:${cor(x.saldo)}">${sinal(x.saldo)}</b>`;
+    if (x.estado === 'vem') return `${n} ainda vem${x.hora ? ` (show às ${x.hora})` : ''}`;
+    if (x.estado === 'hoje') return `${n} é hoje — o couvert entra depois do show${x.hora ? ` das ${x.hora}` : ''}`;
+    if (x.estado === 'falta') return `${n} <b style="color:var(--txt-amber)">falta lançar o couvert</b>`;
+    if (x.estado === 'naoVeio') return `${n}: a banda não veio`;
+    return `${n} sem trio`;
+  };
+  const corpo = f.fechado
+    ? `fechou em <b style="color:${cor(f.total)}">${sinal(f.total)}</b> <span style="color:var(--t4)">(${f.dias.map(parte).join(' · ')})</span>`
+    : f.dias.map(parte).join(' · ');
+  return `<div class="couver-esta-fds" style="margin-top:9px;background:var(--s1);border:1px dashed var(--b2);border-radius:12px;padding:9px 11px;font-size:11px;color:var(--t2);line-height:1.45">
+    🎵 <b style="color:var(--t1)">Este fim de semana (${dm(f.sab)}–${dm(f.dom)}):</b> ${corpo}</div>`;
 }
 
 function _couverHomeHtml(d) {
@@ -7668,9 +7723,10 @@ function _couverHomeHtml(d) {
   return `<div class="rede-card" data-rede="couver" style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid #8b5cf6;border-radius:18px;padding:14px 16px;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05)">
     <div style="font-size:12px;font-weight:800;color:var(--t1);margin-bottom:8px">${d.titulo}</div>
     <div style="display:flex;gap:9px">
-      ${bloco(`Fim de semana ${dm(sab(d.semIni))}–${dm(d.semFim)}`, d.fds, '', d.posFds)}
+      ${bloco(`${d.emFds ? 'Fim de semana passado' : 'Último fim de semana'} ${dm(sab(d.semIni))}–${dm(d.semFim)}`, d.fds, '', d.posFds)}
       ${bloco(`${mesNome} até ontem`, d.mes, d.cacheFuturo > 0 ? 'Nenhum show do mês aconteceu ainda' : '', d.posMes)}
     </div>
+    ${_couverEstaFdsHtml(d.estaFds)}
     ${futuro}
     <div style="font-size:9px;color:var(--t4);margin-top:6px;line-height:1.4">Mesma conta e mesma posição do Painel de Gestão (aba Trios): do maior pro menor saldo, só entre quem lançou o couvert. No mês entra só o que já aconteceu.</div>
   </div>`;
