@@ -139,7 +139,9 @@ const ANTIGOS = [
   }, loja);
   const hb = await home('BANGU');
   check('Home da Bangu mostra a posição dela', /1º de 2 no ranking das visitas/.test(hb.fechado) && /média 58,7/.test(hb.fechado) && /🔁 1 reincidente/.test(hb.fechado), hb.fechado);
-  check('e abre o ranking completo', /🥇 Bangu/.test(hb.aberto) && /Itaquera/.test(hb.aberto) && /Caxias/.test(hb.aberto), hb.aberto.slice(0, 300));
+  // 15/11/2026: na Home da loja o ranking mostra só o pódio e a própria loja (ver
+  // _vckRankingVisivelLoja) — Itaquera, sem posição, não aparece pra Bangu.
+  check('e abre o ranking (pódio + a própria loja)', /🥇 Bangu/.test(hb.aberto) && /Caxias/.test(hb.aberto) && !/Itaquera/.test(hb.aberto) && /fora do pódio cada loja vê só a própria posição/.test(hb.aberto), hb.aberto.slice(0, 300));
   const hi = await home('ITAQUERA');
   check('loja com menos de 3 visitas vê "em formação" e quantas faltam', /Ranking em formação/.test(hi.fechado) && /2 de 3 visitas avaliadas/.test(hi.fechado) && /média até agora 95/.test(hi.fechado), hi.fechado);
   const hn = await home('NORTE SHOPPING');
