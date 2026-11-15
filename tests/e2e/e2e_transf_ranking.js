@@ -38,7 +38,7 @@ const decl = (caixas, declarados, quem) => ({ caixas, declarados, abertos: 0, re
     const html = _buildCancelPanel();
     const host = document.createElement('div'); host.innerHTML = html; document.body.appendChild(host);
     const rk = host.querySelector('.transf-ranking');
-    const linhas = rk ? [...rk.querySelectorAll(':scope > div[style*="margin-bottom:7px"]')].map(d => d.innerText.replace(/\s+/g, ' ').trim()) : [];
+    const linhas = rk ? [...rk.querySelectorAll(':scope > div[style*="margin-bottom:7px"]')].map(d => d.innerText.replace(/\s+/g, ' ').trim()).filter(t => /^\d+º/.test(t)) : [];
     const posRanking = html.indexOf('transf-ranking'), posPrimeiraLoja = html.indexOf('border-left:3px solid #4F46E5');
     host.remove();
     return { linhas, temRanking: !!rk, rodape: rk ? rk.innerText : '', antesDosDetalhes: posRanking > 0 && posRanking < posPrimeiraLoja,
@@ -65,6 +65,37 @@ const decl = (caixas, declarados, quem) => ({ caixas, declarados, abertos: 0, re
 
   check('o WhatsApp leva o ranking', /Ranking — de quem menos transfere pra quem mais\*\n\s+1º Guarulhos — 0\n\s+2º Nova América — 1\n\s+3º Caxias — 3\n\s+3º Pedreira — 3\n\s+5º Boulevard — 7\n\s+6º Bangu — 12/.test(r.wpp), r.wpp.slice(r.wpp.indexOf('TRANSF'), r.wpp.indexOf('TRANSF') + 400));
   check('o PDF também', /Ranking — de quem menos transfere pra quem mais\n\s+1º Guarulhos — 0/.test(r.pdf));
+
+  // ── "Pode fazer o ranking por faturamento também" ──
+  // Transferências a cada R$ 100 mil faturados. Bangu 12 em 600 mil = 2,00; Boulevard 7 em
+  // 350 mil = 2,00 (empate); Caxias 3 em 100 mil = 3,00; Nova América 1 em 200 mil = 0,50;
+  // Guarulhos 0 (assinado); Pedreira sem faturamento no período → fim, não 1º.
+  const f = await page.evaluate(() => {
+    _dashFat = { BANGU: 600000, BOULEVARD: 350000, CAXIAS: 100000, 'NOVA AMERICA': 200000, GUARULHOS: 300000 };
+    _transfRankModo = 'qtd';
+    const host = document.createElement('div'); host.innerHTML = _buildCancelPanel(); document.body.appendChild(host);
+    const linhas = () => [...host.querySelectorAll('.transf-ranking > div[style*="margin-bottom:7px"]')].map(d => d.innerText.replace(/\s+/g, ' ').trim()).filter(t => /^\d+º/.test(t));
+    const antes = linhas();
+    [...host.querySelectorAll('.transf-ranking button')].find(b => /Por faturamento/.test(b.textContent)).click();
+    const depois = linhas();
+    const modo = host.querySelector('.transf-ranking').dataset.modo;
+    const sub = host.querySelector('.transf-ranking').innerText;
+    [...host.querySelectorAll('.transf-ranking button')].find(b => /Quantidade/.test(b.textContent)).click();
+    const voltou = linhas();
+    host.remove();
+    _transfRankModo = 'qtd';
+    return { antes, depois, modo, sub, voltou, wpp: _cancelRelatorioTexto(true).msg };
+  });
+  check('o ranking abre por quantidade (o pedido anterior continua igual)', /^1º Guarulhos/.test(f.antes[0] || '') && /^6º Bangu/.test(f.antes[5] || ''), f.antes);
+  check('tocar em "Por faturamento" reordena pelo número a cada R$ 100 mil', f.modo === 'fat' && /a cada R\$ 100 mil faturados/.test(f.sub), f.modo);
+  const nf = f.depois.map(l => (l.match(/^\d+º (.+?) ·/) || [])[1]);
+  check('ordem por faturamento: Guarulhos 0, Nova América 0,50, Bangu e Boulevard 2,00, Caxias 3,00, Pedreira (sem faturamento) por último',
+    JSON.stringify(nf) === JSON.stringify(['Guarulhos', 'Nova América', 'Bangu', 'Boulevard', 'Caxias', 'Pedreira']), f.depois);
+  check('…Bangu, que é o último em quantidade, sobe pra 3º quando se divide pelo faturamento', /^3º Bangu · 12 transf\. 2,00 de R\$ 600,0k faturados/.test(f.depois[2] || ''), f.depois[2]);
+  check('…empate divide a posição (Bangu e Boulevard 3º; Caxias 5º)', /^3º Boulevard/.test(f.depois[3] || '') && /^5º Caxias · 3 transf\. 3,00/.test(f.depois[4] || ''), f.depois);
+  check('…loja sem faturamento vai pro fim com "—", sem fingir que é a melhor', /^6º Pedreira · 3 transf\. — sem faturamento no período/.test(f.depois[5] || ''), f.depois[5]);
+  check('volta pra quantidade', /^1º Guarulhos/.test(f.voltou[0] || '') && /^6º Bangu/.test(f.voltou[5] || ''), f.voltou);
+  check('o relatório leva os dois rankings', /Ranking por faturamento \(transf\. a cada R\$ 100 mil\)\*\n\s+1º Guarulhos — 0,00 \(0 em R\$ 300,0k\)\n\s+2º Nova América — 0,50 \(1 em R\$ 200,0k\)/.test(f.wpp), f.wpp.slice(f.wpp.indexOf('Ranking por'), f.wpp.indexOf('Ranking por') + 300));
 
   // Uma loja só não é ranking.
   const um = await page.evaluate(() => { _dashTransfPer = { BANGU: [{ data: '2026-11-10', origem: '1', destino: '2', motivo: 'x', autor: 'y', foto: null }] }; _dashDeclTransfPer = {}; return /transf-ranking/.test(_buildCancelPanel()); });

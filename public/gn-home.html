@@ -17573,38 +17573,78 @@ function _buildTransfPanelHtml() {
    transferiu, e loja que fechou o período com TODOS os caixas assinados dizendo que não
    houve — esse zero é de verdade e é o melhor lugar. Zero sem assinatura fica de fora: pôr
    no topo premiaria justamente quem não respondeu. */
-function _transfRankingLinhas(d) {
-  const linhas = d.lojas.map(l => ({ nome: l.nome, qtd: l.itens.length, zerada: false }))
-    .concat((d.semTransf || []).filter(l => l.estado === 'declarado').map(l => ({ nome: l.nome, qtd: 0, zerada: true })))
-    .sort((a, b) => a.qtd - b.qtd || a.nome.localeCompare(b.nome, 'pt-BR'));
-  linhas.forEach((l, i) => { l.pos = (i > 0 && linhas[i - 1].qtd === l.qtd) ? linhas[i - 1].pos : i + 1; });
+// 15/11/2026, segundo pedido: "Pode fazer o ranking por faturamento também." Quantidade
+// pura favorece a loja pequena (menos mesas, menos transferência). Por faturamento, a conta
+// é transferências a cada R$ 100 mil faturados, com o MESMO _dashFat do ranking do
+// cancelamento — o faturamento aparece na linha, então dá pra conferir. Loja sem
+// faturamento no período vai pro fim (chutar zero a poria em 1º).
+let _transfRankModo = 'qtd';   // 'qtd' | 'fat'
+const TRANSF_POR_FAT = 100000;
+
+function _transfRankingLinhas(d, modo) {
+  modo = modo || 'qtd';
+  const fat = _dashFat || {};
+  const linhas = d.lojas.map(l => ({ k: l.k, nome: l.nome, qtd: l.itens.length, zerada: false }))
+    .concat((d.semTransf || []).filter(l => l.estado === 'declarado').map(l => ({ k: l.k, nome: l.nome, qtd: 0, zerada: true })));
+  linhas.forEach(l => {
+    l.fat = fat[l.k] || 0;
+    l.taxa = l.fat > 0 ? l.qtd / l.fat * TRANSF_POR_FAT : (l.qtd === 0 ? 0 : null);
+  });
+  const chave = l => modo === 'fat' ? l.taxa : l.qtd;
+  linhas.sort((a, b) => {
+    const va = chave(a), vb = chave(b);
+    if (va === null && vb === null) return a.qtd - b.qtd || a.nome.localeCompare(b.nome, 'pt-BR');
+    if (va === null) return 1;
+    if (vb === null) return -1;
+    return va - vb || a.nome.localeCompare(b.nome, 'pt-BR');
+  });
+  // Empate divide a posição. No faturamento compara o número que aparece (2 casas).
+  const igual = (a, b) => modo === 'fat'
+    ? (a.taxa !== null && b.taxa !== null && a.taxa.toFixed(2) === b.taxa.toFixed(2))
+    : a.qtd === b.qtd;
+  linhas.forEach((l, i) => { l.pos = (i > 0 && igual(linhas[i - 1], l)) ? linhas[i - 1].pos : i + 1; });
   return linhas;
+}
+
+function _transfTaxaFmt(t) { return t === null ? '—' : t.toFixed(2).replace('.', ','); }
+
+function _transfRankModoTrocar(modo, el) {
+  _transfRankModo = modo;
+  const bloco = el && el.closest('.transf-ranking');
+  if (bloco) bloco.outerHTML = _transfRankingHtml(_transfMacroDados());
 }
 
 function _transfRankingHtml(d) {
   const esc = s => window.escapeHtml(String(s == null ? '' : s));
-  const linhas = _transfRankingLinhas(d);
+  const modo = _transfRankModo === 'fat' ? 'fat' : 'qtd';
+  const linhas = _transfRankingLinhas(d, modo);
   if (linhas.length < 2) return '';   // uma loja só não é ranking
-  const mais = Math.max(...linhas.map(l => l.qtd)) || 1;
+  const val = l => modo === 'fat' ? (l.taxa || 0) : l.qtd;
+  const mais = Math.max(...linhas.map(val)) || 1;
   const naoAssinou = (d.semTransf || []).filter(l => l.estado === 'sem_info' || l.estado === 'parcial').length;
   const semCaixa   = (d.semTransf || []).filter(l => l.estado === 'sem_caixa').length;
   const rodape = [
     naoAssinou ? `${naoAssinou} loja${naoAssinou === 1 ? '' : 's'} ${naoAssinou === 1 ? 'ficou' : 'ficaram'} de fora com zero NÃO conferido: fechou caixa sem ninguém assinar que não houve transferência` : '',
     semCaixa ? `${semCaixa} sem caixa fechado no período` : '',
   ].filter(Boolean).join('; ');
-  return `<div class="transf-ranking" style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:12px 14px;margin-bottom:10px">
+  const btn = (m, rot) => `<button onclick="_transfRankModoTrocar('${m}', this)" style="flex:1;border:none;border-radius:7px;padding:5px 6px;font-size:10px;font-weight:800;cursor:pointer;font-family:inherit;background:${modo === m ? '#4F46E5' : 'transparent'};color:${modo === m ? '#fff' : 'var(--t3)'}">${rot}</button>`;
+  return `<div class="transf-ranking" data-modo="${modo}" style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:12px 14px;margin-bottom:10px">
     <div style="font-size:10px;font-weight:800;color:var(--t3);letter-spacing:.5px;margin-bottom:2px">TRANSFERÊNCIAS — DE QUEM MENOS PRA QUEM MAIS</div>
-    <div style="font-size:9.5px;color:var(--t4);margin-bottom:9px">por quantidade no período</div>
+    <div style="font-size:9.5px;color:var(--t4);margin-bottom:7px">${modo === 'fat' ? 'transferências a cada R$ 100 mil faturados no período' : 'por quantidade no período'}</div>
+    <div style="display:flex;gap:4px;background:var(--fill-sutil);border-radius:9px;padding:3px;margin-bottom:9px">${btn('qtd', 'Quantidade')}${btn('fat', 'Por faturamento')}</div>
     ${linhas.map(l => `
       <div style="margin-bottom:7px">
         <div style="display:flex;justify-content:space-between;gap:10px;font-size:11.5px;align-items:baseline">
           <span style="color:var(--t1);font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
             <span style="color:var(--t4);font-weight:700;font-variant-numeric:tabular-nums">${l.pos}º</span>
-            ${esc(l.nome)}</span>
-          <span style="white-space:nowrap;font-variant-numeric:tabular-nums;font-weight:800;color:${l.zerada ? 'var(--txt-green)' : '#4F46E5'}">${l.qtd} transf.</span>
+            ${esc(l.nome)}${modo === 'fat' ? `<span style="color:var(--t3);font-weight:400"> · ${l.qtd} transf.</span>` : ''}</span>
+          <span style="white-space:nowrap;font-variant-numeric:tabular-nums;text-align:right">
+            <span style="font-weight:800;color:${l.zerada ? 'var(--txt-green)' : '#4F46E5'}">${modo === 'fat' ? _transfTaxaFmt(l.taxa) : l.qtd + ' transf.'}</span>
+            ${modo === 'fat' ? `<span style="display:block;color:var(--t4);font-weight:600;font-size:9.5px;margin-top:1px">${l.fat > 0 ? 'de ' + _fmtBRLs(l.fat) + ' faturados' : 'sem faturamento no período'}</span>` : ''}
+          </span>
         </div>
         <div style="height:4px;border-radius:3px;background:var(--fill-sutil);margin-top:3px;overflow:hidden">
-          <div style="height:100%;width:${l.qtd ? Math.max(2, Math.round(l.qtd / mais * 100)) : 0}%;background:#4F46E5;border-radius:3px"></div>
+          <div style="height:100%;width:${val(l) ? Math.max(2, Math.round(val(l) / mais * 100)) : 0}%;background:#4F46E5;border-radius:3px"></div>
         </div>
       </div>`).join('')}
     ${rodape ? `<div style="font-size:9.5px;color:var(--t4);margin-top:8px;line-height:1.4">${esc(rodape)}. Ver abaixo.</div>` : ''}
@@ -17828,10 +17868,14 @@ function _transfRelatorioTexto(wpp) {
   else {
     msg += `${d.qtd} transferência${d.qtd === 1 ? '' : 's'} em ${d.lojas.length} loja${d.lojas.length === 1 ? '' : 's'}`;
     msg += d.semFoto ? ` · ${d.semFoto} sem foto da comanda\n` : '\n';
-    const rk = _transfRankingLinhas(d);
+    const rk = _transfRankingLinhas(d, 'qtd');
     if (rk.length >= 2) {
       msg += `\n${b('Ranking — de quem menos transfere pra quem mais')}\n`;
       rk.forEach(l => { msg += `   ${l.pos}º ${l.nome} — ${l.qtd}\n`; });
+      msg += `\n${b('Ranking por faturamento (transf. a cada R$ 100 mil)')}\n`;
+      _transfRankingLinhas(d, 'fat').forEach(l => {
+        msg += `   ${l.pos}º ${l.nome} — ${_transfTaxaFmt(l.taxa)} (${l.qtd} em ${l.fat > 0 ? _fmtBRLs(l.fat) : 'sem faturamento'})\n`;
+      });
     }
     d.lojas.forEach(l => {
       msg += `\n${wpp ? '📍 ' : ''}${b(l.nome)} (${l.itens.length})\n`;
