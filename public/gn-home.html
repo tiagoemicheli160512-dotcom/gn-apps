@@ -17448,7 +17448,7 @@ function _cancelRankingHtml(d) {
   const naoAssinou = (d.semCancel || []).filter(l => l.estado === 'sem_info' || l.estado === 'parcial').length;
   const semCaixa   = (d.semCancel || []).filter(l => l.estado === 'sem_caixa').length;
   const rodape = [
-    naoAssinou ? `${naoAssinou} loja${naoAssinou === 1 ? '' : 's'} ficou de fora com zero NÃO conferido: fechou caixa sem ninguém assinar que não houve cancelamento` : '',
+    naoAssinou ? `${naoAssinou} loja${naoAssinou === 1 ? '' : 's'} ${naoAssinou === 1 ? 'ficou' : 'ficaram'} de fora com zero NÃO conferido: fechou caixa sem ninguém assinar que não houve cancelamento` : '',
     semCaixa ? `${semCaixa} sem caixa fechado no período` : '',
   ].filter(Boolean).join('; ');
 
@@ -17559,7 +17559,56 @@ function _buildTransfPanelHtml() {
       </div>`).join('')}
     </div>`).join('');
 
-  return titulo + blocos + _transfSemNadaHtml(d);
+  return titulo + _transfRankingHtml(d) + blocos + _transfSemNadaHtml(d);
+}
+
+/* ── RANKING DAS TRANSFERÊNCIAS, de quem menos transfere pra quem mais ─────────────────
+   "Gostaria de ter um ranking de transferências também, das lojas que mais transfere, com
+   quantidade, quem menos transfere fica em primeiro e assim por diante." (15/11/2026)
+
+   Por QUANTIDADE, como pedido — transferência não move dinheiro, então não há R$ nem % do
+   faturamento pra comparar. Empate divide a posição (duas lojas com 3 são as duas 2º).
+
+   Mesma regra de quem entra do ranking do cancelamento (_cancelRankingLinhas): loja que
+   transferiu, e loja que fechou o período com TODOS os caixas assinados dizendo que não
+   houve — esse zero é de verdade e é o melhor lugar. Zero sem assinatura fica de fora: pôr
+   no topo premiaria justamente quem não respondeu. */
+function _transfRankingLinhas(d) {
+  const linhas = d.lojas.map(l => ({ nome: l.nome, qtd: l.itens.length, zerada: false }))
+    .concat((d.semTransf || []).filter(l => l.estado === 'declarado').map(l => ({ nome: l.nome, qtd: 0, zerada: true })))
+    .sort((a, b) => a.qtd - b.qtd || a.nome.localeCompare(b.nome, 'pt-BR'));
+  linhas.forEach((l, i) => { l.pos = (i > 0 && linhas[i - 1].qtd === l.qtd) ? linhas[i - 1].pos : i + 1; });
+  return linhas;
+}
+
+function _transfRankingHtml(d) {
+  const esc = s => window.escapeHtml(String(s == null ? '' : s));
+  const linhas = _transfRankingLinhas(d);
+  if (linhas.length < 2) return '';   // uma loja só não é ranking
+  const mais = Math.max(...linhas.map(l => l.qtd)) || 1;
+  const naoAssinou = (d.semTransf || []).filter(l => l.estado === 'sem_info' || l.estado === 'parcial').length;
+  const semCaixa   = (d.semTransf || []).filter(l => l.estado === 'sem_caixa').length;
+  const rodape = [
+    naoAssinou ? `${naoAssinou} loja${naoAssinou === 1 ? '' : 's'} ${naoAssinou === 1 ? 'ficou' : 'ficaram'} de fora com zero NÃO conferido: fechou caixa sem ninguém assinar que não houve transferência` : '',
+    semCaixa ? `${semCaixa} sem caixa fechado no período` : '',
+  ].filter(Boolean).join('; ');
+  return `<div class="transf-ranking" style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:12px 14px;margin-bottom:10px">
+    <div style="font-size:10px;font-weight:800;color:var(--t3);letter-spacing:.5px;margin-bottom:2px">TRANSFERÊNCIAS — DE QUEM MENOS PRA QUEM MAIS</div>
+    <div style="font-size:9.5px;color:var(--t4);margin-bottom:9px">por quantidade no período</div>
+    ${linhas.map(l => `
+      <div style="margin-bottom:7px">
+        <div style="display:flex;justify-content:space-between;gap:10px;font-size:11.5px;align-items:baseline">
+          <span style="color:var(--t1);font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+            <span style="color:var(--t4);font-weight:700;font-variant-numeric:tabular-nums">${l.pos}º</span>
+            ${esc(l.nome)}</span>
+          <span style="white-space:nowrap;font-variant-numeric:tabular-nums;font-weight:800;color:${l.zerada ? 'var(--txt-green)' : '#4F46E5'}">${l.qtd} transf.</span>
+        </div>
+        <div style="height:4px;border-radius:3px;background:var(--fill-sutil);margin-top:3px;overflow:hidden">
+          <div style="height:100%;width:${l.qtd ? Math.max(2, Math.round(l.qtd / mais * 100)) : 0}%;background:#4F46E5;border-radius:3px"></div>
+        </div>
+      </div>`).join('')}
+    ${rodape ? `<div style="font-size:9.5px;color:var(--t4);margin-top:8px;line-height:1.4">${esc(rodape)}. Ver abaixo.</div>` : ''}
+  </div>`;
 }
 
 // Mesmo bloco do cancelamento e do sem 10% (_declSemNadaHtml): a terceira cópia era
@@ -17779,6 +17828,11 @@ function _transfRelatorioTexto(wpp) {
   else {
     msg += `${d.qtd} transferência${d.qtd === 1 ? '' : 's'} em ${d.lojas.length} loja${d.lojas.length === 1 ? '' : 's'}`;
     msg += d.semFoto ? ` · ${d.semFoto} sem foto da comanda\n` : '\n';
+    const rk = _transfRankingLinhas(d);
+    if (rk.length >= 2) {
+      msg += `\n${b('Ranking — de quem menos transfere pra quem mais')}\n`;
+      rk.forEach(l => { msg += `   ${l.pos}º ${l.nome} — ${l.qtd}\n`; });
+    }
     d.lojas.forEach(l => {
       msg += `\n${wpp ? '📍 ' : ''}${b(l.nome)} (${l.itens.length})\n`;
       l.itens.forEach(t => {
