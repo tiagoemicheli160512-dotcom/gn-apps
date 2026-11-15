@@ -10237,6 +10237,247 @@ function _renderVisCalendarioTab() {
 // ── Check-list da visita (Supervisão salão / cozinha / Auditoria de padrão) ──────────
 // Mora em gn-visita-checklist.js, com registro próprio por visita (gn_visita_checklist).
 // Aqui só ficam os botões na visita e o resumo de quanto já foi feito em cada um.
+/* ── ONDE AGIR (15/11/2026) ─────────────────────────────────────────────────────────────
+   "No painel de gestão, na aba visita, ao selecionar a loja da visita, ter um panorama da
+   loja [...] algo mais visual, as necessidades para atuar junto a gerência: muito
+   cancelamento, muitas notas sem 10%. Sem precisar entrar nela, ao selecionar a visita ter a
+   visão de onde agir lá já."
+
+   Um painel por loja com a POSIÇÃO DELA NA REDE em cada indicador, nos últimos 30 dias, com
+   semáforo pelo terço (verde em cima, vermelho embaixo). O pior vem primeiro; o que está bem
+   fica recolhido numa linha, pra não afogar o que pede ação. Embaixo, "leve pra conversa":
+   o detalhe que vira ação (quem mais autorizou, quem mais lançou nota sem 10%, o que reprovou
+   de novo nas visitas).
+
+   As contas são as mesmas da Home e do Painel (cancelamento por % do faturamento, nota sem
+   10% pelo 10% perdido, ocorrências por funcionário com _ocorDaLoja/_ocorIndexar, couvert
+   com _triosAgregar, visitas com _vckRanking/_vckReincidencia) — só o período é fixo em 30
+   dias. A rede é a das 11 lojas: a Maglia fica fora (CLAUDE.md), e uma visita nela não abre
+   o painel. Falha aberto por indicador: o que não carregou some, o resto aparece. */
+const ONDE_AGIR_DIAS = 30;
+let _ondeAgirCache = null;     // { em, chave, p }
+
+function _ondeAgirPeriodo() {
+  const iso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const hoje = new Date(); hoje.setHours(12, 0, 0, 0);
+  const ini = new Date(hoje); ini.setDate(ini.getDate() - (ONDE_AGIR_DIAS - 1));
+  const dates = []; for (const x = new Date(ini); x <= hoje; x.setDate(x.getDate() + 1)) dates.push(iso(x));
+  return { de: iso(ini), ate: iso(hoje), dates };
+}
+
+function _ondeAgirBuscar() {
+  const per = _ondeAgirPeriodo();
+  if (_ondeAgirCache && _ondeAgirCache.chave === per.de && Date.now() - _ondeAgirCache.em < 10 * 60 * 1000) return _ondeAgirCache.p;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const p = (async () => {
+    const lojas = _lojasFatConsolidado(LOJAS_TODAS);
+    const CAL = (typeof COMISSOES_CAL !== 'undefined') ? COMISSOES_CAL : [];
+    const dentro = new Set(per.dates);
+    const idxs = CAL.map((w, i) => (w.days || []).some(dd => dentro.has(_raioxIsoDoDia(dd))) ? i : -1).filter(i => i >= 0);
+    const sel = []; if (idxs.length) for (let i = Math.max(0, idxs[0] - 4); i <= idxs[idxs.length - 1]; i++) sel.push(`w${i}:all_data->"${i}"`);
+    const comKeys = lojas.map(k => LOJA_COM_KEY[k] || k);
+    const [fat, fech, trios, com, visitas] = await Promise.all([
+      window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${per.de}&data_operacao=lte.${per.ate}&select=loja,data_operacao,venda_salao,venda_delivery`, H, 'ondeAgir:fat', null),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${per.de}&data=lte.${per.ate}&select=loja,data,status,sem_cancelamento_por,sem_nota10_por,gn_caixa_cancelamento(valor,autorizado_por),gn_caixa_transferencia(id,autorizado_por),gn_caixa_gorjeta(valor,garcom)`, H, 'ondeAgir:fech', null),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_trios_agenda?data=gte.${per.de}&data=lte.${per.ate}&select=data,loja,artista,cache,couver_qtd,couver_valor,couver_lancado_em,presenca_confirmada,banda_nao_veio,banda_nao_veio_motivo,horario_inicio`, H, 'ondeAgir:trios', null),
+      sel.length ? window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=in.(${comKeys.map(c => encodeURIComponent('"' + c + '"')).join(',')})&select=loja,${sel.join(',')}`, H, 'ondeAgir:escala', null) : Promise.resolve(null),
+      (window.GNVck && typeof _vckRegistrosRede === 'function') ? _vckRegistrosRede().catch(() => null) : Promise.resolve(null),
+    ]);
+    return _ondeAgirCalcular({ per, lojas, fat, fech, trios, com, visitas });
+  })();
+  _ondeAgirCache = { em: Date.now(), chave: per.de, p };
+  p.catch(() => { _ondeAgirCache = null; });
+  return p;
+}
+
+// Ordena (1º = melhor) e dá posição + cor pelo terço. Empate divide a posição.
+function _ondeAgirRank(linhas, valor, menorMelhor) {
+  const ord = linhas.filter(l => valor(l) !== null).sort((a, b) => (menorMelhor ? valor(a) - valor(b) : valor(b) - valor(a)) || a.nome.localeCompare(b.nome, 'pt-BR'));
+  const n = ord.length, res = {};
+  ord.forEach((l, i) => {
+    const pos = (i > 0 && Math.abs(valor(ord[i - 1]) - valor(l)) < 1e-9) ? res[ord[i - 1].k].pos : i + 1;
+    res[l.k] = { pos, n, sem: pos <= n / 3 ? 'verde' : pos > n * 2 / 3 ? 'vermelho' : 'amarelo' };
+  });
+  return res;
+}
+function _ondeAgirTop(lista, campo) {
+  const c = {};
+  lista.forEach(x => { const nome = String((x && x[campo]) || '').trim(); if (nome) c[nome] = (c[nome] || 0) + 1; });
+  return Object.entries(c).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'pt-BR')).slice(0, 3);
+}
+
+function _ondeAgirCalcular({ per, lojas, fat, fech, trios, com, visitas }) {
+  const base = {}; lojas.forEach(k => { base[k] = { k, nome: LOJA_DISPLAY[k] || k, fat: 0, cancel: 0, cancelN: 0, cancelItens: [],
+    sem10: 0, sem10N: 0, sem10Itens: [], transf: 0, transfItens: [] }; });
+  const ok = { fat: !!fat, fech: !!fech, trios: !!trios, ocor: !!com, visitas: !!visitas };
+  (fat || []).forEach(r => { const l = base[_normLoja(r.loja)]; if (l) l.fat += _redeVendaDia(r); });
+  (fech || []).forEach(r => {
+    const l = base[_normLoja(r.loja)]; if (!l) return;
+    const arr = x => Array.isArray(x) ? x : (x ? [x] : []);
+    arr(r.gn_caixa_cancelamento).forEach(c => { l.cancel += parseFloat(c.valor) || 0; l.cancelN++; l.cancelItens.push(c); });
+    arr(r.gn_caixa_gorjeta).forEach(g => { l.sem10 += parseFloat(g.valor) || 0; l.sem10N++; l.sem10Itens.push(g); });
+    arr(r.gn_caixa_transferencia).forEach(t => { l.transf++; l.transfItens.push(t); });
+  });
+  const L = Object.values(base);
+  const libC = k => !(window.gnCancelamentoLiberado && !window.gnCancelamentoLiberado(k));
+  const libS = k => !(window.gnSem10Liberado && !window.gnSem10Liberado(k));
+  const libT = k => !(window.gnTransferenciaLiberada && !window.gnTransferenciaLiberada(k));
+  L.forEach(l => {
+    l.cancelPct = ok.fat && ok.fech && l.fat > 0 && libC(l.k) ? l.cancel / l.fat * 100 : null;
+    l.dez = ok.fech && libS(l.k) && l.sem10N > 0 ? l.sem10 * 0.10 : null;   // como a Home: só quem lançou nota
+    l.transfTaxa = ok.fat && ok.fech && l.fat > 0 && libT(l.k) ? l.transf / l.fat * 100000 : null;
+  });
+  const rk = {
+    cancel: _ondeAgirRank(L, l => l.cancelPct, true),
+    sem10:  _ondeAgirRank(L, l => l.dez, true),
+    transf: _ondeAgirRank(L, l => l.transfTaxa, true),
+  };
+  // Couvert: soma dos fins de semana que FECHARAM no período (o mesmo critério do card).
+  if (ok.trios) {
+    const dentro = {}; lojas.forEach(k => { dentro[k] = true; });
+    const agg = _triosAgregar(trios, 'sem', dentro, per.ate);
+    const fecha = s2 => s2 && !(s2.status === 'futuro' || s2.status === 'naoVeio' || (s2.diasSemCouver || []).length > 0);
+    L.forEach(l => {
+      const ws = Object.values(agg).filter(s2 => s2.k === l.k);
+      const fechados = ws.filter(fecha);
+      l.couver = fechados.length ? fechados.reduce((t, s2) => t + s2.saldo, 0) : null;
+      l.couverAbertos = ws.filter(s2 => !fecha(s2) && s2.status !== 'futuro').length;
+    });
+    rk.couver = _ondeAgirRank(L, l => l.couver, false);
+  }
+  // Ocorrências: por funcionário, a mesma conta do quadradinho da Home.
+  if (ok.ocor) {
+    try {
+      const comissoes = com.map(r => { const all = {}; Object.keys(r).forEach(c => { const m = /^w(\d+)$/.exec(c); if (m && r[c]) all[m[1]] = r[c]; }); return { loja: r.loja, all_data: all }; });
+      const datas = per.dates.filter(d => d < per.ate);   // hoje ainda está acontecendo
+      const oc = lojas.map(k => _ocorDaLoja(k, datas, comissoes));
+      const idx = _ocorIndexar(oc);
+      oc.forEach(o => { const l = base[o.k]; l.ocor = o; });
+      rk.ocor = {}; oc.forEach(o => { if (o.pos) rk.ocor[o.k] = { pos: o.pos, n: idx.n, sem: o.pos <= idx.n / 3 ? 'verde' : o.pos > idx.n * 2 / 3 ? 'vermelho' : 'amarelo' }; });
+    } catch (e) { ok.ocor = false; window.gnLogError && window.gnLogError('ondeAgir:ocor', e); }
+  }
+  // Visitas: nota média 90 dias e o que reprovou de novo.
+  if (ok.visitas) {
+    try {
+      const r2 = _vckRanking(visitas), reinc = _vckReincidencia(visitas);
+      rk.visitas = {};
+      r2.forEach(v => {
+        const k = _normLoja(v.loja), l = base[k]; if (!l) return;
+        l.visita = v; l.reinc = reinc.filter(x => _normLoja(x.loja) === k && x.seguidas >= 2);
+        if (v.pos) rk.visitas[k] = { pos: v.pos, n: v.total, sem: v.pos <= v.total / 3 ? 'verde' : v.pos > v.total * 2 / 3 ? 'vermelho' : 'amarelo' };
+      });
+    } catch (e) { ok.visitas = false; window.gnLogError && window.gnLogError('ondeAgir:visitas', e); }
+  }
+  const redeCancel = (() => { const c = L.filter(l => l.cancelPct !== null); const f = c.reduce((t, l) => t + l.fat, 0); return f > 0 ? c.reduce((t, l) => t + l.cancel, 0) / f * 100 : null; })();
+  return { per, ok, base, rk, redeCancel };
+}
+
+// As linhas da loja, na ordem de urgência (vermelho, amarelo, verde, sem posição).
+function _ondeAgirLinhas(d, k) {
+  const l = d.base[k]; if (!l) return [];
+  const pc = v => v.toFixed(2).replace('.', ',') + '%';
+  const r = (chave) => (d.rk[chave] || {})[k] || null;
+  const out = [];
+  if (d.ok.fat && d.ok.fech && !(window.gnCancelamentoLiberado && !window.gnCancelamentoLiberado(k)))
+    out.push({ id: 'cancel', ico: '🧾', rot: 'Cancelamento', r: r('cancel'),
+      val: l.cancelPct !== null ? pc(l.cancelPct) : '—',
+      det: `${_fmtBRL(l.cancel)} em ${l.cancelN} nota${l.cancelN === 1 ? '' : 's'}${d.redeCancel !== null ? ' · rede ' + pc(d.redeCancel) : ''}`,
+      conversa: l.cancelN ? _ondeAgirTop(l.cancelItens, 'autorizado_por').map(([n, q]) => `${n} ${q}`).join(', ') : '', conversaRot: 'quem mais autorizou' });
+  if (d.ok.fech && !(window.gnSem10Liberado && !window.gnSem10Liberado(k)))
+    out.push({ id: 'sem10', ico: '💸', rot: 'Notas sem 10%', r: r('sem10'),
+      val: l.dez !== null ? _fmtBRL(l.dez) : 'nenhuma',
+      det: l.sem10N ? `10% perdido em ${l.sem10N} nota${l.sem10N === 1 ? '' : 's'}` : 'nenhuma nota sem 10% lançada',
+      conversa: l.sem10N ? _ondeAgirTop(l.sem10Itens, 'garcom').map(([n, q]) => `${n} ${q}`).join(', ') : '', conversaRot: 'garçons com mais notas' });
+  if (d.ok.fat && d.ok.fech && !(window.gnTransferenciaLiberada && !window.gnTransferenciaLiberada(k)))
+    out.push({ id: 'transf', ico: '🔀', rot: 'Transferências', r: r('transf'),
+      val: `${l.transf}`, det: l.transfTaxa !== null ? `${l.transfTaxa.toFixed(2).replace('.', ',')} a cada R$ 100 mil` : 'sem faturamento no período',
+      conversa: l.transf ? _ondeAgirTop(l.transfItens, 'autorizado_por').map(([n, q]) => `${n} ${q}`).join(', ') : '', conversaRot: 'quem mais autorizou' });
+  if (d.ok.ocor && l.ocor)
+    out.push({ id: 'ocor', ico: '⚠', rot: 'Ocorrências', r: r('ocor'),
+      val: String(l.ocor.total), det: `${l.ocor.n.FALTA || 0} falta${(l.ocor.n.FALTA || 0) === 1 ? '' : 's'} · ${l.ocor.n.ADVERTENCIA || 0} adv. · ${l.ocor.n['SUSPENSÃO'] || 0} susp. · equipe ${l.ocor.equipe}`,
+      conversa: (l.ocor.pessoas || []).slice(0, 3).map(p => `${p.nome}${p.setor ? ' (' + p.setor + ')' : ''} ${_ocorSoma(p)}`).join(', '), conversaRot: 'quem mais teve' });
+  if (d.ok.trios && l.couver !== undefined && (l.couver !== null || l.couverAbertos))
+    out.push({ id: 'couver', ico: '🎵', rot: 'Couvert × cachê', r: r('couver'),
+      val: l.couver !== null ? (l.couver < 0 ? '−' : '+') + _fmtBRL(Math.abs(l.couver)) : '—',
+      det: l.couverAbertos ? `${l.couverAbertos} fim de semana sem o couvert lançado` : 'fins de semana fechados no período',
+      conversa: '', conversaRot: '' });
+  if (d.ok.visitas && l.visita && l.visita.media != null)
+    out.push({ id: 'visitas', ico: '📋', rot: 'Check-list das visitas', r: r('visitas'),
+      val: String(l.visita.media).replace('.', ','), det: `${l.visita.visitas} visita${l.visita.visitas === 1 ? '' : 's'} em ${VIS_REINC_DIAS} dias${l.visita.emFormacao ? ' · ranking em formação' : ''}`,
+      conversa: (l.reinc || []).slice(0, 3).map(x => `${x.label} (${x.seguidas}x seguidas)`).join(', '), conversaRot: 'reprovou de novo' });
+  const peso = { vermelho: 0, amarelo: 1, verde: 2 };
+  return out.sort((a, b) => (a.r ? peso[a.r.sem] : 3) - (b.r ? peso[b.r.sem] : 3) || (b.r ? b.r.pos / b.r.n : 0) - (a.r ? a.r.pos / a.r.n : 0));
+}
+
+function _ondeAgirHtml(d, k) {
+  const esc = s2 => window.escapeHtml(String(s2 == null ? '' : s2));
+  const dm = iso => String(iso).slice(8, 10) + '/' + String(iso).slice(5, 7);
+  const nome = LOJA_DISPLAY[k] || k;
+  const cor = { vermelho: 'var(--txt-red)', amarelo: 'var(--txt-amber)', verde: 'var(--txt-green)' };
+  const bola = { vermelho: '🔴', amarelo: '🟡', verde: '🟢' };
+  const linhas = _ondeAgirLinhas(d, k);
+  const atencao = linhas.filter(x => !x.r || x.r.sem !== 'verde');
+  const bem = linhas.filter(x => x.r && x.r.sem === 'verde');
+  const linhaHtml = x => `<div class="onde-agir-linha" data-id="${x.id}" data-sem="${x.r ? x.r.sem : 'sem'}" style="display:flex;gap:9px;align-items:flex-start;padding:9px 0;border-top:1px solid var(--b1)">
+      <span style="font-size:15px;line-height:1.2;flex-shrink:0">${x.r ? bola[x.r.sem] : '⚪'}</span>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
+          <span style="font-size:12.5px;font-weight:800;color:var(--t1)">${x.ico} ${x.rot}</span>
+          <span style="font-size:13px;font-weight:900;color:${x.r ? cor[x.r.sem] : 'var(--t2)'};font-variant-numeric:tabular-nums;white-space:nowrap">${esc(x.val)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;gap:8px;font-size:10.5px;color:var(--t3);margin-top:1px">
+          <span style="min-width:0">${esc(x.det)}</span>
+          <span style="white-space:nowrap;font-weight:800;color:${x.r ? cor[x.r.sem] : 'var(--t4)'}">${x.r ? `${x.r.pos}º de ${x.r.n}` : 'sem posição'}</span>
+        </div>
+        ${x.conversa && (!x.r || x.r.sem !== 'verde') ? `<div style="font-size:10.5px;color:var(--t2);margin-top:4px;background:var(--fill-sutil);border-radius:7px;padding:4px 7px">💬 ${esc(x.conversaRot)}: <b>${esc(x.conversa)}</b></div>` : ''}
+      </div></div>`;
+  const faltou = Object.entries({ fat: 'faturamento', fech: 'caixa', trios: 'trios', ocor: 'escala', visitas: 'visitas' }).filter(([c]) => !d.ok[c]).map(([, n]) => n);
+  return `<div class="onde-agir">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+      <div><div style="font-size:16px;font-weight:900;color:var(--t1)">🎯 ${esc(nome)} · onde agir</div>
+      <div style="font-size:10.5px;color:var(--t3);margin-top:2px">Últimos ${ONDE_AGIR_DIAS} dias (${dm(d.per.de)} a ${dm(d.per.ate)}) · posição entre as ${_lojasFatConsolidado(LOJAS_TODAS).length} lojas da rede, 1º é o melhor</div></div>
+      <button onclick="fecharTelaSobreposta()" style="background:var(--fill-sutil);border:none;border-radius:9px;width:32px;height:32px;font-size:15px;cursor:pointer;color:var(--t2);flex-shrink:0">✕</button>
+    </div>
+    <div style="margin-top:10px">
+      ${atencao.length ? atencao.map(linhaHtml).join('') : `<div style="padding:12px 0;font-size:12px;color:var(--txt-green);font-weight:800;border-top:1px solid var(--b1)">✓ Nenhum indicador no terço de baixo da rede.</div>`}
+    </div>
+    ${bem.length ? `<details style="margin-top:4px"><summary style="cursor:pointer;font-size:11px;color:var(--t3);padding:7px 0;border-top:1px solid var(--b1)">🟢 Tudo certo em: <b style="color:var(--t2)">${bem.map(x => x.rot).join(', ')}</b> <span style="color:var(--t4)">▾</span></summary>${bem.map(linhaHtml).join('')}</details>` : ''}
+    <div style="font-size:9.5px;color:var(--t4);margin-top:9px;line-height:1.45">🔴 terço de baixo da rede · 🟡 meio · 🟢 terço de cima. Mesmas contas da Home da loja; o período aqui é fixo em ${ONDE_AGIR_DIAS} dias.${faltou.length ? ` Não carregou agora: ${faltou.join(', ')}.` : ''}</div>
+  </div>`;
+}
+
+async function _ondeAgirAbrir(lojaRaw) {
+  const k = _normLoja(lojaRaw);
+  if (!_lojasFatConsolidado(LOJAS_TODAS).includes(k)) return;
+  const ex = document.getElementById('_onde-agir-modal'); if (ex) ex.remove();
+  const modal = document.createElement('div');
+  modal.id = '_onde-agir-modal';
+  // Acima da tela "Visitas por Supervisor" (100000), como o modal do check-list da visita.
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:100050;display:flex;align-items:flex-end;justify-content:center';
+  modal.innerHTML = `<div id="_onde-agir-folha" style="background:var(--s1);border-radius:16px 16px 0 0;width:100%;max-width:520px;max-height:92vh;overflow-y:auto;padding:18px 16px calc(18px + env(safe-area-inset-bottom))">
+    <div style="text-align:center;color:var(--t3);font-size:12px;padding:20px">Carregando os números da rede…</div></div>`;
+  modal.addEventListener('click', e => { if (e.target === modal) fecharTelaSobreposta(); });
+  document.body.appendChild(modal);
+  _registrarTelaSobreposta(modal);
+  const folha = () => document.getElementById('_onde-agir-folha');
+  try {
+    const d = await _ondeAgirBuscar();
+    if (folha()) folha().innerHTML = _ondeAgirHtml(d, k);
+  } catch (e) {
+    window.gnLogError && window.gnLogError('ondeAgir', e);
+    if (folha()) folha().innerHTML = `<div style="text-align:center;color:var(--t2);font-size:12px;padding:20px">Não deu pra carregar agora.<br><button onclick="_ondeAgirCache=null;fecharTelaSobreposta();setTimeout(()=>_ondeAgirAbrir('${String(lojaRaw).replace(/'/g, '')}'),300)" style="margin-top:10px;padding:8px 14px;border-radius:9px;border:1px solid rgba(0,0,0,.15);background:var(--s2);color:var(--t1);font-weight:700;cursor:pointer;font-family:inherit">Tentar de novo</button></div>`;
+  }
+}
+// Botão do "Registrar chegada": abre pra loja escolhida no Destino.
+function _ondeAgirDoDestino(dataStr) {
+  const v = document.getElementById('visreg-destino-' + dataStr)?.value;
+  if (v) _ondeAgirAbrir(v);
+}
+function _ondeAgirBotaoHtml(loja, onclick) {
+  if (!_lojasFatConsolidado(LOJAS_TODAS).includes(_normLoja(loja))) return '';
+  return `<button type="button" onclick="${onclick}" style="width:100%;margin-top:6px;background:rgba(220,38,38,.07);border:1px solid rgba(220,38,38,.3);border-radius:9px;padding:7px;font-size:11px;font-weight:800;color:var(--t1);cursor:pointer;font-family:inherit">🎯 Onde agir nesta loja</button>`;
+}
+
 let _vckResumoCache = {};
 const VCK_LEGADO_TIPO = { checklist: 'salao', cozinha: 'cozinha', auditoria_padrao: 'padrao' };
 function _vckVisitaElegivel(v) {
@@ -10258,7 +10499,8 @@ function _vckBotoesHtml(v) {
   const antigo = legado && !r[legado] && v.data < VCK_INICIO
     ? `<button type="button" onclick="_vckAbrirLegado('${v.id}','${legado}')" style="width:100%;margin-top:5px;background:none;border:1px dashed rgba(0,0,0,.18);border-radius:8px;padding:5px;font-size:10px;font-weight:700;color:var(--t2);cursor:pointer;font-family:inherit">📜 Ver o check-list feito no app Check-list</button>` : '';
   return `<div style="font-size:9px;font-weight:800;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Check-list da visita</div>
-    <div style="display:flex;gap:5px">${btn('salao')}${btn('cozinha')}${btn('padrao')}</div>${antigo}`;
+    <div style="display:flex;gap:5px">${btn('salao')}${btn('cozinha')}${btn('padrao')}</div>${antigo}
+    ${_ondeAgirBotaoHtml(v.loja, `_ondeAgirAbrir('${String(v.loja).replace(/'/g, '')}')`)}`;
 }
 // Dia em que o check-list passou a morar no Painel; antes disso o registro está no app Check-list.
 const VCK_INICIO = '2026-11-14';
@@ -10407,6 +10649,8 @@ function _visCalDetalheHtml(dataStr) {
       <div id="visreg-destino-wrap-${dataStr}">
         <div style="font-size:9px;color:var(--t1);margin-bottom:2px">Destino</div>
         <select id="visreg-destino-${dataStr}" style="width:100%;box-sizing:border-box;background:var(--s1);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 8px;font-size:11px;color:var(--t1);font-family:inherit;margin-bottom:8px">${destinoOpts}</select>
+        <!-- Antes de chegar: o que a loja precisa, com a posição dela na rede (ver _ondeAgirAbrir). -->
+        <button type="button" onclick="_ondeAgirDoDestino('${dataStr}')" style="width:100%;margin:-2px 0 8px;background:rgba(220,38,38,.07);border:1px solid rgba(220,38,38,.3);border-radius:8px;padding:6px;font-size:10.5px;font-weight:800;color:var(--t1);cursor:pointer;font-family:inherit">🎯 Onde agir na loja escolhida</button>
       </div>
 
       <!-- Remoto: várias lojas de uma vez. Um acompanhamento online cobre várias lojas na
