@@ -77,7 +77,7 @@ const REDE = BANGU.concat(OUTRAS);
   // Fase 2 da Home: o quadradinho "Couvert × cachê" leva os MESMOS saldos do card.
   const tile = await a.page.evaluate(() => { const d = document.getElementById('couver-home-card').dataset.homeTile; return d ? JSON.parse(d) : null; });
   check('quadradinho da Home: mês +R$ 530,00 em verde, fim de semana +R$ 665,00 no detalhe',
-    tile && tile.k === 'couvert' && tile.valor === '+R$ 530,00' && tile.cor === 'green' && /fim de semana \+R\$ 665,00/.test(tile.detalhe), JSON.stringify(tile));
+    tile && tile.k === 'couvert' && tile.valor === '+R$ 530,00' && tile.cor === 'green' && /último fds \+R\$ 665,00/.test(tile.detalhe), JSON.stringify(tile));
   check('uma consulta só, da rede (a posição precisa das outras), desde a segunda do último fim de semana',
     r.urls.length === 1 && !/loja=eq/.test(r.urls[0]) && /data=gte\.2026-10-26/.test(r.urls[0]), JSON.stringify(r.urls));
 
@@ -162,6 +162,43 @@ const REDE = BANGU.concat(OUTRAS);
   check('consulta que falha deixa recado, não some calado', /Não deu pra carregar/.test(falha.txt), falha.txt);
   check('nenhum erro de JavaScript', a.erros.length === 0, a.erros.join(' | '));
   await a.ctx.close();
+
+  // ── 15/11 (domingo), o print: "Estamos no fim de semana 14 e 15/11" ──────────────────
+  // Sábado 14 com couvert lançado (931 − 800 = +131); domingo 15 às 13h ainda não tocou.
+  const fds = BANGU.map(x => x.data === '2026-11-07' ? ag('2026-11-07', 800, 700) : x.data === '2026-11-08' ? ag('2026-11-08', 800, 679)
+    : x.data === '2026-11-14' ? ag('2026-11-14', 800, 931) : x.data === '2026-11-15' ? ag('2026-11-15', 800, 0, { horario_inicio: '13:00' }) : x);
+  const c = await abrir('2026-11-15T11:34:00');
+  const r6 = await montar(c.page, fds);
+  check('domingo: o bloco diz "Fim de semana passado 07/11–08/11" (não parece o atual)', /^Fim de semana passado 07\/11–08\/11/.test(r6.blocos[0]), r6.blocos[0]);
+  const linha = await c.page.evaluate(() => { const e = document.querySelector('#couver-home-card .couver-esta-fds'); return e ? e.textContent.replace(/\s+/g, ' ').trim() : ''; });
+  check('…e mostra o fim de semana em andamento: sábado +R$ 131,00, domingo é hoje (couvert depois do show das 13:00)',
+    /Este fim de semana \(14\/11–15\/11\):/.test(linha) && /sábado \+R\$\s?131,00/.test(linha) && /domingo é hoje — o couvert entra depois do show das 13:00/.test(linha), linha);
+  const tile6 = await c.page.evaluate(() => JSON.parse(document.getElementById('couver-home-card').dataset.homeTile || 'null'));
+  check('o quadradinho diz "fds passado", não só "fim de semana"', tile6 && /^fds passado −R\$ 221,00$/.test(tile6.detalhe), JSON.stringify(tile6));
+  check('a consulta cobre o domingo de hoje', /data=lte\.2026-11-(1[5-9]|[23]\d)/.test(r6.urls[0]), r6.urls[0]);
+  await c.ctx.close();
+
+  // Domingo à noite, couvert lançado (700 − 800 = −100): o fim de semana fecha (+131 − 100 = +31).
+  const d2 = await abrir('2026-11-15T22:30:00');
+  const r7 = await montar(d2.page, fds.map(x => x.data === '2026-11-15' ? ag('2026-11-15', 800, 700, { horario_inicio: '13:00' }) : x));
+  const linha7 = await d2.page.evaluate(() => { const e = document.querySelector('#couver-home-card .couver-esta-fds'); return e ? e.textContent.replace(/\s+/g, ' ').trim() : ''; });
+  check('domingo à noite com o couvert lançado: "fechou em +R$ 31,00" (sábado +131, domingo −100)', /fechou em \+R\$\s?31,00/.test(linha7) && /domingo −R\$\s?100,00/.test(linha7), linha7);
+  await d2.ctx.close();
+
+  // Sábado de manhã: sábado é hoje, domingo ainda vem.
+  const e2 = await abrir('2026-11-14T10:00:00');
+  await montar(e2.page, fds.map(x => x.data === '2026-11-14' ? ag('2026-11-14', 800, 0, { horario_inicio: '13:00' }) : x));
+  const linha8 = await e2.page.evaluate(() => { const e = document.querySelector('#couver-home-card .couver-esta-fds'); return e ? e.textContent.replace(/\s+/g, ' ').trim() : ''; });
+  check('sábado de manhã: sábado é hoje, domingo ainda vem (show às 13:00)', /sábado é hoje/.test(linha8) && /domingo ainda vem \(show às 13:00\)/.test(linha8), linha8);
+  await e2.ctx.close();
+
+  // Segunda: sem a linha, e o bloco passa a ser o 14–15 ("Último fim de semana").
+  const f2 = await abrir('2026-11-16T10:00:00');
+  const r9 = await montar(f2.page, fds.map(x => x.data === '2026-11-15' ? ag('2026-11-15', 800, 700) : x));
+  const temLinha = await f2.page.evaluate(() => !!document.querySelector('#couver-home-card .couver-esta-fds'));
+  check('segunda: o bloco vira "Último fim de semana 14/11–15/11" e a linha do fim de semana em andamento some', /^Último fim de semana 14\/11–15\/11/.test(r9.blocos[0]) && !temLinha, r9.blocos[0]);
+  check('nenhum erro de JavaScript nos fins de semana', c.erros.concat(d2.erros, e2.erros, f2.erros).length === 0, c.erros.concat(d2.erros, e2.erros, f2.erros).join(' | '));
+  await f2.ctx.close();
 
   // ── 03/12: nenhum show de dezembro aconteceu ainda ───────────────────────────────────
   const b = await abrir('2026-12-03T15:00:00');
