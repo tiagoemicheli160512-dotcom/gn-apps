@@ -17536,6 +17536,96 @@ function _buildOcorrenciasPanel() {
   return kpis + cab + linhas;
 }
 
+/* ── FOLGAS DA GERÊNCIA (15/11/2026) ────────────────────────────────────────────────────
+   "No painel gestão, na aba equipe, tem como incluir as folgas da equipe gerencial, pois
+   hoje tenho que entrar na loja pra saber quem tá de folga."
+
+   A semana inteira da gerência de cada loja, lida da ESCALA (gn_comissoes, a que o Painel já
+   carrega em _dashComissoesAll — nenhuma consulta nova). É a mesma fonte que trava o app na
+   folga (gn-escala-acesso.js), então o que aparece aqui é o que vale. Gerência = setor
+   "Gerente" ou "Sub Gerente" na escala. Semana sem registro próprio vale por herança, como
+   em todo o resto (_escalaHomeFuncsAtual). No topo, quem está de folga HOJE e a loja que
+   ficou sem nenhum gerente — é o que pede ação. Maglia fora (não citada — CLAUDE.md). */
+let _folgasOff = 0;
+const FOLGAS_ST = {
+  'FOLGA':          { t: 'F',  rot: 'folga',      cor: '#2563eb', fundo: 'rgba(37,99,235,.14)' },
+  'FÉRIAS':         { t: 'Fé', rot: 'férias',     cor: '#7c3aed', fundo: 'rgba(124,58,237,.14)' },
+  'ATESTADO':       { t: 'At', rot: 'atestado',   cor: '#0ea5e9', fundo: 'rgba(14,165,233,.14)' },
+  'FALTA':          { t: 'Fa', rot: 'falta',      cor: 'var(--txt-red)', fundo: 'rgba(239,68,68,.12)' },
+  'SUSPENSÃO':      { t: 'S',  rot: 'suspensão',  cor: '#a855f7', fundo: 'rgba(168,85,247,.12)' },
+  'AFASTAMENTO':    { t: 'Af', rot: 'afastamento', cor: 'var(--t3)', fundo: 'var(--fill-sutil)' },
+  'NÃO TRABALHADO': { t: 'NT', rot: 'não trabalhado', cor: 'var(--t3)', fundo: 'var(--fill-sutil)' },
+};
+function _folgasEhGerencia(f) {
+  const s = String((f && f.setor) || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+  return /GERENTE|GERENCIA/.test(s);
+}
+function _folgasNav(dir) { _folgasOff = Math.max(-4, Math.min(4, _folgasOff + dir)); renderDashboard(); }
+function _folgasDados() {
+  const iso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const hoje = new Date(); hoje.setHours(12, 0, 0, 0);
+  const hojeISO = iso(hoje);
+  const ref = new Date(hoje); ref.setDate(ref.getDate() + 7 * _folgasOff);
+  const idx = _escalaHomeSemIdx(iso(ref));
+  const sem = idx != null ? (typeof COMISSOES_CAL !== 'undefined' ? COMISSOES_CAL : [])[idx] : null;
+  const dias = sem ? sem.days.map(x => `${x.y}-${String(x.m).padStart(2, '0')}-${String(x.d).padStart(2, '0')}`) : [];
+  const diaHoje = dias.indexOf(hojeISO);
+  const porCom = {}; (_dashComissoesAll || []).forEach(r => { porCom[r.loja] = r.all_data || {}; });
+  const lojas = LOJAS_LISTA.filter(k => k !== 'MAGLIA').map(k => {
+    const all = porCom[LOJA_COM_KEY[k] || k];
+    if (!all || idx == null) return { k, nome: LOJA_DISPLAY[k] || k, pessoas: [], semEscala: true };
+    let funcs = [];
+    try { funcs = _escalaHomeFuncsAtual(all, idx) || []; } catch (e) { funcs = []; }
+    const pessoas = funcs.filter(_folgasEhGerencia).map(f => ({
+      nome: String(f.nome).trim(), setor: f.setor,
+      dias: Array.from({ length: 7 }, (_, i) => ((f.dias || [])[i]) || 'PRESENTE'),
+      horas: Array.from({ length: 7 }, (_, i) => ((f.horario_dias || [])[i]) || null),
+    })).sort((a, b) => (/SUB/i.test(a.setor) - /SUB/i.test(b.setor)) || a.nome.localeCompare(b.nome, 'pt-BR'));
+    return { k, nome: LOJA_DISPLAY[k] || k, pessoas, semEscala: false };
+  });
+  const foraHoje = diaHoje < 0 ? [] : lojas.flatMap(l => l.pessoas.filter(p => FOLGAS_ST[p.dias[diaHoje]]).map(p => ({ loja: l.nome, nome: p.nome, setor: p.setor, st: p.dias[diaHoje] })));
+  const semGerenciaHoje = diaHoje < 0 ? [] : lojas.filter(l => l.pessoas.length && l.pessoas.every(p => FOLGAS_ST[p.dias[diaHoje]])).map(l => l.nome);
+  return { idx, dias, diaHoje, lojas, foraHoje, semGerenciaHoje };
+}
+function _buildFolgasGerenciaPanel() {
+  if (!_dashComissoesAll) return _skelPanel(3);
+  const esc = s2 => window.escapeHtml(String(s2 == null ? '' : s2));
+  const d = _folgasDados();
+  const dm = i2 => String(i2).slice(8, 10) + '/' + String(i2).slice(5, 7);
+  const SEM = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
+  const nav = `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px">
+    <button onclick="_folgasNav(-1)" style="background:var(--s2);border:1px solid var(--b1);border-radius:9px;width:34px;height:32px;cursor:pointer;color:var(--t2);font-size:15px">‹</button>
+    <div style="text-align:center;font-size:12px;font-weight:800;color:var(--t1)">${d.dias.length ? `${_folgasOff === 0 ? 'Esta semana' : _folgasOff === 1 ? 'Próxima semana' : _folgasOff === -1 ? 'Semana passada' : 'Semana'} · ${dm(d.dias[0])} a ${dm(d.dias[6])}` : 'Semana fora do calendário'}</div>
+    <button onclick="_folgasNav(1)" style="background:var(--s2);border:1px solid var(--b1);border-radius:9px;width:34px;height:32px;cursor:pointer;color:var(--t2);font-size:15px">›</button></div>`;
+  if (!d.dias.length) return nav;
+  const topo = d.diaHoje >= 0 ? `<div class="folgas-hoje" style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid #2563eb;border-radius:14px;padding:12px 14px;margin-bottom:10px">
+      <div style="font-size:10px;font-weight:800;color:var(--t3);letter-spacing:.5px;margin-bottom:6px">HOJE (${SEM[d.diaHoje]} ${dm(d.dias[d.diaHoje])}) · GERÊNCIA FORA DA LOJA</div>
+      ${d.semGerenciaHoje.length ? `<div style="font-size:11.5px;font-weight:800;color:var(--txt-red);margin-bottom:6px">⚠ Sem nenhum gerente na escala hoje: ${esc(d.semGerenciaHoje.join(', '))}</div>` : ''}
+      ${d.foraHoje.length ? d.foraHoje.map(x => `<div style="display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-top:1px solid var(--b1);font-size:11.5px">
+          <span style="min-width:0;overflow-wrap:anywhere"><b style="color:var(--t1)">${esc(x.nome)}</b> <span style="color:var(--t3)">· ${esc(x.setor)} · ${esc(x.loja)}</span></span>
+          <span style="white-space:nowrap;font-weight:800;color:${FOLGAS_ST[x.st].cor}">${FOLGAS_ST[x.st].rot}</span></div>`).join('')
+        : `<div style="font-size:11.5px;color:var(--txt-green);font-weight:700">Toda a gerência está na escala hoje.</div>`}
+    </div>` : '';
+  const cab = `<div style="display:grid;grid-template-columns:minmax(0,1fr) repeat(7,26px);gap:3px;align-items:center;font-size:9px;font-weight:800;color:var(--t4);margin-bottom:3px">
+      <span></span>${SEM.map((x, i) => `<span style="text-align:center;${i === d.diaHoje ? 'color:var(--t1)' : ''}">${x}<br>${String(d.dias[i]).slice(8, 10)}</span>`).join('')}</div>`;
+  const celula = (st, hd, i) => {
+    const e = FOLGAS_ST[st];
+    const hj = i === d.diaHoje ? 'outline:2px solid var(--t2);outline-offset:-1px;' : '';
+    if (e) return `<span title="${e.rot}" style="${hj}height:24px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:900;color:${e.cor};background:${e.fundo}">${e.t}</span>`;
+    const h = hd && hd.entrada ? String(hd.entrada).slice(0, 2) + 'h' : '✓';
+    return `<span title="trabalha${hd && hd.entrada ? ' ' + hd.entrada + '–' + (hd.saida || '') : ''}" style="${hj}height:24px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:var(--t3);background:var(--fill-sutil)">${h}</span>`;
+  };
+  const blocos = d.lojas.map(l => `<div class="folgas-loja" data-loja="${esc(l.k)}" style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:11px 12px;margin-bottom:9px">
+      <div style="font-size:12.5px;font-weight:800;color:var(--t1);margin-bottom:6px">${esc(l.nome)}</div>
+      ${l.semEscala ? `<div style="font-size:10.5px;color:var(--t3)">Sem escala carregada.</div>`
+        : !l.pessoas.length ? `<div style="font-size:10.5px;color:var(--txt-amber)">Ninguém com setor Gerente ou Sub Gerente na escala.</div>`
+        : cab + l.pessoas.map(p => `<div class="folgas-pessoa" style="display:grid;grid-template-columns:minmax(0,1fr) repeat(7,26px);gap:3px;align-items:center;margin-top:3px">
+            <span style="min-width:0;font-size:11px;font-weight:700;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.nome)}">${esc(p.nome)}<span style="display:block;font-size:9px;font-weight:600;color:var(--t3)">${esc(p.setor)}</span></span>
+            ${p.dias.map((st, i) => celula(st, p.horas[i], i)).join('')}</div>`).join('')}
+    </div>`).join('');
+  return nav + topo + blocos + `<div style="font-size:9.5px;color:var(--t4);line-height:1.45;margin:4px 2px 0">Da escala de cada loja (setor Gerente e Sub Gerente). <b style="color:#2563eb">F</b> folga · <b style="color:#7c3aed">Fé</b> férias · At atestado · Fa falta · S suspensão · NT não trabalhado · o número é a hora de entrada. Semana sem escala salva vale pela última lançada, como no app.</div>`;
+}
+
 function _buildPresencaPanel() {
   if (!_dashPresencaHoje) return _skelPanel(3);
   const d = _presencaMacroDados();
@@ -18685,6 +18775,9 @@ function renderDashboard() {
   } else if (_dashTab==='presenca') {
     content = _buildPresencaPanel();
 
+  } else if (_dashTab==='folgas') {
+    content = _buildFolgasGerenciaPanel();
+
   } else if (_dashTab==='ocorr') {
     content = _buildOcorrenciasPanel();
 
@@ -18759,7 +18852,7 @@ function renderDashboard() {
       </div>
       <button type="button" class="dash-tabs-seta dir off" id="dash-tabs-dir" aria-label="Mais abas" onclick="_dashTabsRolar(1)"><span>›</span></button>
       </div>
-      ${(_dashTab!=='metas'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris'&&_dashTab!=='carnes'&&_dashTab!=='trios'&&_dashTab!=='banco'&&_dashTab!=='extra'&&_dashTab!=='dre')?periodRow:''}
+      ${(_dashTab!=='metas'&&_dashTab!=='folgas'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris'&&_dashTab!=='carnes'&&_dashTab!=='trios'&&_dashTab!=='banco'&&_dashTab!=='extra'&&_dashTab!=='dre')?periodRow:''}
       ${content}
     </div>`;
   _dashTabsDepoisDeDesenhar();
@@ -18883,7 +18976,7 @@ function _dashTabsDepoisDeDesenhar() {
 const DASH_GRUPOS = [
   { g: 'vendas',   rot: '📈 Vendas',   abas: [['fat', '↓ Faturamento'], ['att', '⚠ Atenção'], ['bi', '📊 BI'], ['metas', '⚙ Metas']] },
   { g: 'caixa',    rot: '🧾 Caixa',    abas: [['cancel', '🧾 Cancel. e transf.'], ['sem10', '💸 Sem 10%']] },
-  { g: 'equipe',   rot: '👥 Equipe',   abas: [['presenca', '👤 Presença'], ['ocorr', '⚠ Ocorrências'], ['ferias', '🏖 Férias'], ['xadrez', '🔀 Xadrez'], ['banco', '⏱ Banco'], ['extra', '👷 Extra']] },
+  { g: 'equipe',   rot: '👥 Equipe',   abas: [['presenca', '👤 Presença'], ['folgas', '📅 Folgas'], ['ocorr', '⚠ Ocorrências'], ['ferias', '🏖 Férias'], ['xadrez', '🔀 Xadrez'], ['banco', '⏱ Banco'], ['extra', '👷 Extra']] },
   { g: 'operacao', rot: '🛠 Operação', abas: [['barris', '🍺 Barris'], ['carnes', '🥩 Carnes'], ['trios', '🎵 Trios']] },
   { g: 'dre',      rot: '💰 DRE',      abas: [['dre', '💰 DRE']] },
 ];

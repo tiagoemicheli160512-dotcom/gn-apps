@@ -85,6 +85,19 @@
 
   // ── Utilidades ─────────────────────────────────────────────────────────────
   function _log(tag, e) { try { window.gnLogError && window.gnLogError(tag, e); } catch (_) {} }
+  // ── Virada da meia-noite (15/11/2026) ──────────────────────────────────────
+  // "Tem lojas que fecham um pouco mais tarde, e acaba passando de 00h e acaba que trava,
+  // caso esteja de folga no outro dia. Tem como ter uma tolerância de 2h após 00h?"
+  // Até as 2h da manhã o dia que vale ainda é o ANTERIOR: quem está fechando a loja de
+  // sábado não pode ser barrado pela folga de domingo no meio do fechamento. A mesma regra
+  // está em gn-presenca.js (_presHojeISO). Só vale pra hora do relógio — opts.hoje continua
+  // sendo a data exata pedida.
+  var VIRADA_TOLERANCIA_H = 2;
+  function _agoraOperacional() {
+    var d = new Date();
+    if (d.getHours() < VIRADA_TOLERANCIA_H) return new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1, 12, 0, 0);
+    return d;
+  }
   function _hojeISO(dt) {
     return dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0') + '-' +
            String(dt.getDate()).padStart(2, '0');
@@ -171,7 +184,7 @@
       var vinculo = (sess.permissoes || {}).escala_nome;
       if (!vinculo || !String(vinculo).trim()) return Promise.resolve(vazio);
 
-      var agora = opts.hoje ? new Date(opts.hoje + 'T12:00:00') : new Date();
+      var agora = opts.hoje ? new Date(opts.hoje + 'T12:00:00') : _agoraOperacional();
       var hojeISO = _hojeISO(agora);
 
       var lib = _liberacaoAtiva(sess, hojeISO);
@@ -273,7 +286,7 @@
         return { ok: false, erro: 'Só supervisor ou mestre pode liberar. ' +
                  _esc(u.nome) + ' está como ' + _esc(u.cargo || 'sem cargo') + '.' };
       }
-      var hojeISO = _hojeISO(new Date());
+      var hojeISO = _hojeISO(_agoraOperacional());   // a liberação vale pro mesmo dia que a trava olha
       var reg = { uid: sess.id, dia: hojeISO, por: u.nome, porCargo: cargo, ts: Date.now() };
       try { localStorage.setItem(LIB_KEY, JSON.stringify(reg)); } catch (_) {}
       _registrarLiberacao(sess, u, hojeISO);

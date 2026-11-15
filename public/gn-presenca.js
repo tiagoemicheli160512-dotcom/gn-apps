@@ -241,8 +241,14 @@ let _presTela  = 'quem';  // 'quem' | 'confirmar' | 'corrigir'
 let _presOcupado = false;
 let _presErro = '';
 
+// Até as 2h o dia que vale ainda é o anterior (15/11/2026, mesma regra de
+// gn-escala-acesso.js): quem fecha a loja depois da meia-noite já confirmou a presença do dia
+// que está terminando, e não pode ser cobrado do dia seguinte — nem travado se o dia seguinte
+// é folga — no meio do fechamento.
+const PRES_VIRADA_TOLERANCIA_H = 2;
 function _presHojeISO() {
-  const d = new Date();
+  const agora = new Date();
+  const d = agora.getHours() < PRES_VIRADA_TOLERANCIA_H ? new Date(agora.getFullYear(), agora.getMonth(), agora.getDate() - 1, 12) : agora;
   return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
 }
 function _presChaveLocal(usuarioId, loja) { return 'gn_presenca_' + usuarioId + '_' + loja + '_' + _presHojeISO(); }
