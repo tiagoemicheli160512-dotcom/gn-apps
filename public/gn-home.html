@@ -10276,14 +10276,18 @@ function _ondeAgirBuscar() {
     const idxs = CAL.map((w, i) => (w.days || []).some(dd => dentro.has(_raioxIsoDoDia(dd))) ? i : -1).filter(i => i >= 0);
     const sel = []; if (idxs.length) for (let i = Math.max(0, idxs[0] - 4); i <= idxs[idxs.length - 1]; i++) sel.push(`w${i}:all_data->"${i}"`);
     const comKeys = lojas.map(k => LOJA_COM_KEY[k] || k);
-    const [fat, fech, trios, com, visitas] = await Promise.all([
+    const chkKeys = lojas.map(k => LOJA_DB_KEY[k] || k);
+    const [fat, fech, trios, com, visitas, banco] = await Promise.all([
       window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${per.de}&data_operacao=lte.${per.ate}&select=loja,data_operacao,venda_salao,venda_delivery`, H, 'ondeAgir:fat', null),
-      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${per.de}&data=lte.${per.ate}&select=loja,data,status,sem_cancelamento_por,sem_nota10_por,gn_caixa_cancelamento(valor,autorizado_por),gn_caixa_transferencia(id,autorizado_por),gn_caixa_gorjeta(valor,garcom)`, H, 'ondeAgir:fech', null),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${per.de}&data=lte.${per.ate}&select=loja,data,status,sem_cancelamento_por,sem_nota10_por,gn_caixa_cancelamento(valor,autorizado_por),gn_caixa_transferencia(id,autorizado_por),gn_caixa_gorjeta(valor,garcom),gn_caixa_despesa(categoria,valor,nome,justificativa)&gn_caixa_despesa.categoria=in.(funcionario_extra,outros)`, H, 'ondeAgir:fech', null),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_trios_agenda?data=gte.${per.de}&data=lte.${per.ate}&select=data,loja,artista,cache,couver_qtd,couver_valor,couver_lancado_em,presenca_confirmada,banda_nao_veio,banda_nao_veio_motivo,horario_inicio`, H, 'ondeAgir:trios', null),
       sel.length ? window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=in.(${comKeys.map(c => encodeURIComponent('"' + c + '"')).join(',')})&select=loja,${sel.join(',')}`, H, 'ondeAgir:escala', null) : Promise.resolve(null),
       (window.GNVck && typeof _vckRegistrosRede === 'function') ? _vckRegistrosRede().catch(() => null) : Promise.resolve(null),
+      // Banco de horas da rede inteira (~75 kB): a posição sai das HORAS, que não dependem de
+      // salário. O R$ da loja aberta vem depois, com a escala completa dela (_ondeAgirBancoExato).
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_banco_horas?loja=in.(${chkKeys.map(c => encodeURIComponent('"' + c + '"')).join(',')})&select=loja,mes,registros`, H, 'ondeAgir:banco', null),
     ]);
-    return _ondeAgirCalcular({ per, lojas, fat, fech, trios, com, visitas });
+    return _ondeAgirCalcular({ per, lojas, fat, fech, trios, com, visitas, banco });
   })();
   _ondeAgirCache = { em: Date.now(), chave: per.de, p };
   p.catch(() => { _ondeAgirCache = null; });
@@ -10300,16 +10304,26 @@ function _ondeAgirRank(linhas, valor, menorMelhor) {
   });
   return res;
 }
+// O nome é digitado à mão no caixa: "Magelo" e "magelo" são a mesma pessoa e não podem
+// dividir a contagem. Junta por maiúscula/acento/espaço e mostra a grafia mais usada. Nome
+// diferente ("MAGELO VIEIRA") continua separado — juntar pelo primeiro nome misturaria gente.
 function _ondeAgirTop(lista, campo) {
+  const norm = n => n.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
   const c = {};
-  lista.forEach(x => { const nome = String((x && x[campo]) || '').trim(); if (nome) c[nome] = (c[nome] || 0) + 1; });
-  return Object.entries(c).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'pt-BR')).slice(0, 3);
+  lista.forEach(x => {
+    const nome = String((x && x[campo]) || '').replace(/\s+/g, ' ').trim(); if (!nome) return;
+    const g = c[norm(nome)] = c[norm(nome)] || { n: 0, grafias: {} };
+    g.n++; g.grafias[nome] = (g.grafias[nome] || 0) + 1;
+  });
+  return Object.values(c).map(g => [Object.entries(g.grafias).sort((a, b) => b[1] - a[1])[0][0], g.n])
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'pt-BR')).slice(0, 3);
 }
 
-function _ondeAgirCalcular({ per, lojas, fat, fech, trios, com, visitas }) {
+function _ondeAgirCalcular({ per, lojas, fat, fech, trios, com, visitas, banco }) {
   const base = {}; lojas.forEach(k => { base[k] = { k, nome: LOJA_DISPLAY[k] || k, fat: 0, cancel: 0, cancelN: 0, cancelItens: [],
-    sem10: 0, sem10N: 0, sem10Itens: [], transf: 0, transfItens: [] }; });
-  const ok = { fat: !!fat, fech: !!fech, trios: !!trios, ocor: !!com, visitas: !!visitas };
+    sem10: 0, sem10N: 0, sem10Itens: [], transf: 0, transfItens: [], extra: 0, extraN: 0, extraItens: [] }; });
+  const ok = { fat: !!fat, fech: !!fech, trios: !!trios, ocor: !!com, visitas: !!visitas, banco: !!banco };
+  const comissoes = com ? com.map(r => { const all = {}; Object.keys(r).forEach(c => { const m = /^w(\d+)$/.exec(c); if (m && r[c]) all[m[1]] = r[c]; }); return { loja: r.loja, all_data: all }; }) : [];
   (fat || []).forEach(r => { const l = base[_normLoja(r.loja)]; if (l) l.fat += _redeVendaDia(r); });
   (fech || []).forEach(r => {
     const l = base[_normLoja(r.loja)]; if (!l) return;
@@ -10317,6 +10331,9 @@ function _ondeAgirCalcular({ per, lojas, fat, fech, trios, com, visitas }) {
     arr(r.gn_caixa_cancelamento).forEach(c => { l.cancel += parseFloat(c.valor) || 0; l.cancelN++; l.cancelItens.push(c); });
     arr(r.gn_caixa_gorjeta).forEach(g => { l.sem10 += parseFloat(g.valor) || 0; l.sem10N++; l.sem10Itens.push(g); });
     arr(r.gn_caixa_transferencia).forEach(t => { l.transf++; l.transfItens.push(t); });
+    // Funcionário extra: a MESMA regra da aba 👷 Extra (_extraEhExtra) — pega também o extra
+    // lançado em "Outros" (Guarulhos). Caixa aberto conta: o dinheiro já saiu da gaveta.
+    arr(r.gn_caixa_despesa).forEach(dsp => { if (!_extraEhExtra(dsp)) return; l.extra += parseFloat(dsp.valor) || 0; l.extraN++; l.extraItens.push(dsp); });
   });
   const L = Object.values(base);
   const libC = k => !(window.gnCancelamentoLiberado && !window.gnCancelamentoLiberado(k));
@@ -10326,11 +10343,14 @@ function _ondeAgirCalcular({ per, lojas, fat, fech, trios, com, visitas }) {
     l.cancelPct = ok.fat && ok.fech && l.fat > 0 && libC(l.k) ? l.cancel / l.fat * 100 : null;
     l.dez = ok.fech && libS(l.k) && l.sem10N > 0 ? l.sem10 * 0.10 : null;   // como a Home: só quem lançou nota
     l.transfTaxa = ok.fat && ok.fech && l.fat > 0 && libT(l.k) ? l.transf / l.fat * 100000 : null;
+    // Em % da venda, como a aba Extra: em reais a loja maior parece pior só por ser maior.
+    l.extraPct = ok.fat && ok.fech && l.fat > 0 ? l.extra / l.fat * 100 : null;
   });
   const rk = {
     cancel: _ondeAgirRank(L, l => l.cancelPct, true),
     sem10:  _ondeAgirRank(L, l => l.dez, true),
     transf: _ondeAgirRank(L, l => l.transfTaxa, true),
+    extra:  _ondeAgirRank(L, l => l.extraPct, true),
   };
   // Couvert: soma dos fins de semana que FECHARAM no período (o mesmo critério do card).
   if (ok.trios) {
@@ -10348,7 +10368,6 @@ function _ondeAgirCalcular({ per, lojas, fat, fech, trios, com, visitas }) {
   // Ocorrências: por funcionário, a mesma conta do quadradinho da Home.
   if (ok.ocor) {
     try {
-      const comissoes = com.map(r => { const all = {}; Object.keys(r).forEach(c => { const m = /^w(\d+)$/.exec(c); if (m && r[c]) all[m[1]] = r[c]; }); return { loja: r.loja, all_data: all }; });
       const datas = per.dates.filter(d => d < per.ate);   // hoje ainda está acontecendo
       const oc = lojas.map(k => _ocorDaLoja(k, datas, comissoes));
       const idx = _ocorIndexar(oc);
@@ -10368,8 +10387,35 @@ function _ondeAgirCalcular({ per, lojas, fat, fech, trios, com, visitas }) {
       });
     } catch (e) { ok.visitas = false; window.gnLogError && window.gnLogError('ondeAgir:visitas', e); }
   }
+  // Banco de horas: ciclo vigente, a mesma conta do card da Home (_bancoGerCenarioDaLoja).
+  // Posição pelas horas em aberto (a compensar + a pagar) POR PESSOA da equipe — loja maior
+  // tem mais banco só por ter mais gente, a mesma régua das ocorrências.
+  if (ok.banco && typeof _bancoGerCenarioDaLoja === 'function') {
+    try {
+      const porLoja = {};
+      banco.forEach(r => {
+        const k = _normLoja(r.loja); if (!base[k]) return;
+        const x = porLoja[k] = porLoja[k] || { cfg: null, porMes: {} };
+        if (r.mes === 'CONFIG') x.cfg = r.registros || {}; else x.porMes[r.mes] = Array.isArray(r.registros) ? r.registros : [];
+      });
+      L.forEach(l => {
+        if (l.k === LOJA_FORA_BANCO_GERENCIA) return;
+        const x = porLoja[l.k]; if (!x || !x.cfg) return;
+        const c = _bancoGerCenarioDaLoja(l.k, x.cfg, x.porMes, per.ate, 0, comissoes);
+        if (!c.ciclo) return;
+        l.banco = c; l.bancoRaw = x;
+        // Sem a escala (equipe desconhecida) a régua vira as horas totais — pra TODAS as lojas,
+        // nunca misturando as duas réguas no mesmo ranking.
+        const equipe = l.ocor && l.ocor.equipe;
+        l.bancoPorPessoa = !!ok.ocor;
+        l.bancoIdx = ok.ocor ? (equipe ? (c.neg + c.pos) / equipe : null) : (c.neg + c.pos);
+      });
+      rk.banco = _ondeAgirRank(L, l => l.bancoIdx === undefined ? null : l.bancoIdx, true);
+    } catch (e) { ok.banco = false; window.gnLogError && window.gnLogError('ondeAgir:banco', e); }
+  }
+  const redeExtra = (() => { const c = L.filter(l => l.extraPct !== null); const f = c.reduce((t, l) => t + l.fat, 0); return f > 0 ? c.reduce((t, l) => t + l.extra, 0) / f * 100 : null; })();
   const redeCancel = (() => { const c = L.filter(l => l.cancelPct !== null); const f = c.reduce((t, l) => t + l.fat, 0); return f > 0 ? c.reduce((t, l) => t + l.cancel, 0) / f * 100 : null; })();
-  return { per, ok, base, rk, redeCancel };
+  return { per, ok, base, rk, redeCancel, redeExtra };
 }
 
 // As linhas da loja, na ordem de urgência (vermelho, amarelo, verde, sem posição).
@@ -10392,6 +10438,15 @@ function _ondeAgirLinhas(d, k) {
     out.push({ id: 'transf', ico: '🔀', rot: 'Transferências', r: r('transf'),
       val: `${l.transf}`, det: l.transfTaxa !== null ? `${l.transfTaxa.toFixed(2).replace('.', ',')} a cada R$ 100 mil` : 'sem faturamento no período',
       conversa: l.transf ? _ondeAgirTop(l.transfItens, 'autorizado_por').map(([n, q]) => `${n} ${q}`).join(', ') : '', conversaRot: 'quem mais autorizou' });
+  if (d.ok.fat && d.ok.fech) {
+    const semNome = l.extraItens.filter(x => !String(x.nome || '').trim()).length;
+    const quem = _ondeAgirTop(l.extraItens, 'nome').map(([n, q]) => `${n} ${q}x`).join(', ');
+    out.push({ id: 'extra', ico: '👷', rot: 'Funcionário extra pago', r: r('extra'),
+      val: _fmtBRL(l.extra),
+      det: `${l.extraN} lançamento${l.extraN === 1 ? '' : 's'}${l.extraPct !== null ? ` · ${pc(l.extraPct)} da venda` : ''}${d.redeExtra !== null ? ' · rede ' + pc(d.redeExtra) : ''}`,
+      // Nome que se repete é gente fixa sem registro — é isso que vale levar pra conversa.
+      conversa: [quem, semNome ? `${semNome} sem nome` : ''].filter(Boolean).join(' · '), conversaRot: 'quem mais recebeu' });
+  }
   if (d.ok.ocor && l.ocor)
     out.push({ id: 'ocor', ico: '⚠', rot: 'Ocorrências', r: r('ocor'),
       val: String(l.ocor.total), det: `${l.ocor.n.FALTA || 0} falta${(l.ocor.n.FALTA || 0) === 1 ? '' : 's'} · ${l.ocor.n.ADVERTENCIA || 0} adv. · ${l.ocor.n['SUSPENSÃO'] || 0} susp. · equipe ${l.ocor.equipe}`,
@@ -10401,6 +10456,16 @@ function _ondeAgirLinhas(d, k) {
       val: l.couver !== null ? (l.couver < 0 ? '−' : '+') + _fmtBRL(Math.abs(l.couver)) : '—',
       det: l.couverAbertos ? `${l.couverAbertos} fim de semana sem o couvert lançado` : 'fins de semana fechados no período',
       conversa: '', conversaRot: '' });
+  if (d.ok.banco && l.banco) {
+    const c = l.bancoExato || l.banco;
+    const rs = v => _fmtBRL(Math.abs(v || 0));
+    out.push({ id: 'banco', ico: '⏱', rot: 'Banco de horas', r: r('banco'),
+      val: `−${_bhHorasCurtas(c.neg)} +${_bhHorasCurtas(c.pos)}`,
+      det: (l.bancoExato ? `${rs(c.valorNeg)} a compensar · ${rs(c.valorPos)} a pagar (+50%)` : 'valores em R$ carregando…')
+        + (c.diasPraFechar != null ? ` · ciclo fecha em ${c.diasPraFechar} dias` : '') + (l.bancoIdx != null && l.bancoPorPessoa ? ` · ${l.bancoIdx.toFixed(1).replace('.', ',')}h por pessoa` : ''),
+      conversa: (c.pessoas || []).slice(0, 3).map(p => `${p.nome} ${p.horas < 0 ? '−' : '+'}${_bhHorasCurtas(p.horas)}${l.bancoExato && p.valor ? ' (' + rs(p.valor) + ')' : ''}`).join(', '),
+      conversaRot: 'maiores saldos' });
+  }
   if (d.ok.visitas && l.visita && l.visita.media != null)
     out.push({ id: 'visitas', ico: '📋', rot: 'Check-list das visitas', r: r('visitas'),
       val: String(l.visita.media).replace('.', ','), det: `${l.visita.visitas} visita${l.visita.visitas === 1 ? '' : 's'} em ${VIS_REINC_DIAS} dias${l.visita.emFormacao ? ' · ranking em formação' : ''}`,
@@ -10431,7 +10496,7 @@ function _ondeAgirHtml(d, k) {
         </div>
         ${x.conversa && (!x.r || x.r.sem !== 'verde') ? `<div style="font-size:10.5px;color:var(--t2);margin-top:4px;background:var(--fill-sutil);border-radius:7px;padding:4px 7px">💬 ${esc(x.conversaRot)}: <b>${esc(x.conversa)}</b></div>` : ''}
       </div></div>`;
-  const faltou = Object.entries({ fat: 'faturamento', fech: 'caixa', trios: 'trios', ocor: 'escala', visitas: 'visitas' }).filter(([c]) => !d.ok[c]).map(([, n]) => n);
+  const faltou = Object.entries({ fat: 'faturamento', fech: 'caixa', trios: 'trios', ocor: 'escala', visitas: 'visitas', banco: 'banco de horas' }).filter(([c]) => !d.ok[c]).map(([, n]) => n);
   return `<div class="onde-agir">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
       <div><div style="font-size:16px;font-weight:900;color:var(--t1)">🎯 ${esc(nome)} · onde agir</div>
@@ -10463,12 +10528,26 @@ async function _ondeAgirAbrir(lojaRaw) {
   try {
     const d = await _ondeAgirBuscar();
     if (folha()) folha().innerHTML = _ondeAgirHtml(d, k);
+    if (await _ondeAgirBancoExato(d, k) && folha()) folha().innerHTML = _ondeAgirHtml(d, k);
   } catch (e) {
     window.gnLogError && window.gnLogError('ondeAgir', e);
     if (folha()) folha().innerHTML = `<div style="text-align:center;color:var(--t2);font-size:12px;padding:20px">Não deu pra carregar agora.<br><button onclick="_ondeAgirCache=null;fecharTelaSobreposta();setTimeout(()=>_ondeAgirAbrir('${String(lojaRaw).replace(/'/g, '')}'),300)" style="margin-top:10px;padding:8px 14px;border-radius:9px;border:1px solid rgba(0,0,0,.15);background:var(--s2);color:var(--t1);font-weight:700;cursor:pointer;font-family:inherit">Tentar de novo</button></div>`;
   }
 }
-// Botão do "Registrar chegada": abre pra loja escolhida no Destino.
+// O R$ do banco da loja aberta, com a escala COMPLETA dela — o salário vem do setor, e o setor
+// de quem saiu da escala há meses só está nas semanas antigas. É a mesma leitura do card da
+// Home (_renderBancoHome), então o valor bate com o que a gerência vê. Uma loja só por vez.
+async function _ondeAgirBancoExato(d, k) {
+  const l = d.base[k];
+  if (!l || !l.banco || l.bancoExato) return false;
+  try {
+    const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+    const com = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(LOJA_COM_KEY[k] || k)}&select=loja,all_data`, H, 'ondeAgir:bancoEscala', null);
+    l.bancoExato = _bancoGerCenarioDaLoja(k, l.bancoRaw.cfg, l.bancoRaw.porMes, d.per.ate, 0, com || []);
+    return true;
+  } catch (e) { window.gnLogError && window.gnLogError('ondeAgir:bancoExato', e); return false; }
+}
+// Botão do "Registrar chegada": abre pela loja escolhida no Destino.
 function _ondeAgirDoDestino(dataStr) {
   const v = document.getElementById('visreg-destino-' + dataStr)?.value;
   if (v) _ondeAgirAbrir(v);
