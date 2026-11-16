@@ -164,7 +164,8 @@ async function abrir(browser, estadoEnvio, opts) {
     const linha = grav[0] || {};
     check('a finalização é apagada', grav.length === 1 && linha.final_em === null && linha.final_itens === null, JSON.stringify(linha));
     check('a urgência NÃO é apagada junto', !('urgencia_em' in linha), JSON.stringify(Object.keys(linha)));
-    check('e fica registrado quem reabriu', !!linha.reaberto_por && !!linha.reaberto_em, JSON.stringify(linha.reaberto_por));
+    // Quem autorizou é quem digitou a senha (Tiago), não o João logado no aparelho da loja.
+    check('e fica registrado quem AUTORIZOU com a senha (Tiago, não o João logado)', linha.reaberto_por === 'Tiago' && !!linha.reaberto_em, JSON.stringify(linha.reaberto_por));
 
     const txt2 = await a.page.evaluate(() => document.body.innerText);
     check('depois de reabrir, o Finalizar volta pro fim da lista',
