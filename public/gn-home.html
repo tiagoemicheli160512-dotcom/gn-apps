@@ -14837,8 +14837,8 @@ function _barrisSemFiltroLojaToggle(key, marcado){
 function _barrisSemLojaFiltroHtml(porLoja){
   const chaves = Object.keys(porLoja).sort((a,b)=>(LOJA_DISPLAY[a]||a).localeCompare(LOJA_DISPLAY[b]||b));
   const checks = chaves.map(k => `<label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--t2);cursor:pointer">
-      <input type="checkbox" value="${k}" ${_barrisSemRelatorioLojasFiltro.includes(k)?'checked':''} onchange="_barrisSemFiltroLojaToggle('${k}',this.checked)">
-      ${LOJA_DISPLAY[k]||k}
+      <input type="checkbox" value="${window.escapeHtml(k)}" ${_barrisSemRelatorioLojasFiltro.includes(k)?'checked':''} onchange="_barrisSemFiltroLojaToggle(this.value,this.checked)">
+      ${window.escapeHtml(LOJA_DISPLAY[k]||k)}
     </label>`).join('');
   return `<div style="margin-bottom:8px">
     <label style="font-size:10px;color:var(--t3);font-weight:700;display:block;margin-bottom:4px">Relatório de (marque 1+ lojas; nenhuma marcada = todas):</label>
@@ -15162,8 +15162,8 @@ function _carnesFiltroLojaToggle(key, marcado) {
 function _carnesLojaFiltroHtml(porLoja) {
   const chaves = Object.keys(porLoja).sort((a,b)=>(LOJA_DISPLAY[a]||a).localeCompare(LOJA_DISPLAY[b]||b));
   const checks = chaves.map(k => `<label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--t2);cursor:pointer">
-      <input type="checkbox" value="${k}" ${_carnesRelatorioLojasFiltro.includes(k)?'checked':''} onchange="_carnesFiltroLojaToggle('${k}',this.checked)">
-      ${LOJA_DISPLAY[k]||k}
+      <input type="checkbox" value="${window.escapeHtml(k)}" ${_carnesRelatorioLojasFiltro.includes(k)?'checked':''} onchange="_carnesFiltroLojaToggle(this.value,this.checked)">
+      ${window.escapeHtml(LOJA_DISPLAY[k]||k)}
     </label>`).join('');
   return `<div style="margin-bottom:8px">
     <label style="font-size:10px;color:var(--t3);font-weight:700;display:block;margin-bottom:4px">Relatório de (marque 1+ lojas; nenhuma marcada = todas):</label>
@@ -18110,7 +18110,7 @@ function _buildCancelPanel() {
     // As transferências entram TAMBÉM nesta saída: semana sem nenhum cancelamento é
     // justamente quando a aba sumia inteira — e transferência não depende de ter havido
     // cancelamento pra existir.
-    return _reportBtnsRowHtml('Cancel') + kpis +
+    return _reportBtnsRowHtml('Cancel') + _cancelLojaFiltroHtml() + kpis +
       `<div class="att-item"><div><div class="att-nm">Nenhuma nota cancelada em ${esc(periodo)}</div>
         <div class="att-rs">Nenhuma das ${d.nLojas} lojas lançou cancelamento neste período.</div></div></div>`
       + _cancelSemNadaHtml(d) + _buildTransfPanelHtml();
@@ -18143,7 +18143,7 @@ function _buildCancelPanel() {
       </div>`).join('')}
     </div>`).join('');
 
-  return _reportBtnsRowHtml('Cancel') + kpis + _cancelPorCategoriaHtml(d) + _cancelRankingHtml(d)
+  return _reportBtnsRowHtml('Cancel') + _cancelLojaFiltroHtml() + kpis + _cancelPorCategoriaHtml(d) + _cancelRankingHtml(d)
        + blocos + _cancelSemNadaHtml(d) + _buildTransfPanelHtml();
 }
 
@@ -18162,10 +18162,10 @@ function _buildCancelPanel() {
 function _cancelRankingLinhas(d) {
   const fat = _dashFat || {};
   const linhas = d.lojas.map(l => ({
-    nome: l.nome, qtd: l.itens.length, valor: l.valor, fat: fat[l.k] || 0, zerada: false,
+    k: l.k, nome: l.nome, qtd: l.itens.length, valor: l.valor, fat: fat[l.k] || 0, zerada: false,
   })).concat(
     (d.semCancel || []).filter(l => l.estado === 'declarado').map(l => ({
-      nome: l.nome, qtd: 0, valor: 0, fat: fat[l.k] || 0, zerada: true,
+      k: l.k, nome: l.nome, qtd: 0, valor: 0, fat: fat[l.k] || 0, zerada: true,
     }))
   );
   linhas.forEach(l => { l.pct = l.fat > 0 ? (l.valor / l.fat) * 100 : null; });
@@ -18540,20 +18540,87 @@ function _cancelMacroAbrirFoto(url) {
   _registrarTelaSobreposta(ov);
 }
 
+/* ── Relatório de UMA loja (ou algumas) ────────────────────────────────────────────────
+   "Em cancelamentos e transferências não tenho como mandar só o relatório da loja, ao
+    selecionar vem todas. Poderia colocar por loja igual temos no chopp, nas carnes."
+   (16/11/2026)
+
+   Mesmo padrão de Barris e Carnes: caixinhas "Relatório de", nenhuma marcada = todas. O
+   filtro vale só pro que sai (WhatsApp/PDF) — a tela continua mostrando a rede inteira,
+   que é o que o Painel é. Lojas da lista: as que usam cancelamento OU transferência (a
+   Maglia não usa nenhum dos dois e não aparece).
+
+   Com filtro, o relatório não lista o ranking das outras lojas (é pra mandar pra loja — o
+   mesmo cuidado do ranking de visitas), mas diz a POSIÇÃO de cada loja marcada na rede,
+   calculada com a rede inteira: "3º de 10" só faz sentido contra todas. */
+let _cancelRelatorioLojasFiltro = [];
+function _cancelLojasDaRegraRel() {
+  return LOJAS_LISTA.filter(k =>
+    (!window.gnCancelamentoLiberado || window.gnCancelamentoLiberado(k)) ||
+    (!window.gnTransferenciaLiberada || window.gnTransferenciaLiberada(k)));
+}
+function _cancelFiltroLojaToggle(key, marcado) {
+  _cancelRelatorioLojasFiltro = marcado
+    ? [..._cancelRelatorioLojasFiltro.filter(k => k !== key), key]
+    : _cancelRelatorioLojasFiltro.filter(k => k !== key);
+}
+function _cancelLojaFiltroHtml() {
+  const chaves = _cancelLojasDaRegraRel().slice().sort((a, b) => (LOJA_DISPLAY[a] || a).localeCompare(LOJA_DISPLAY[b] || b));
+  if (chaves.length < 2) return '';
+  const checks = chaves.map(k => `<label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--t2);cursor:pointer">
+      <input type="checkbox" class="cancel-rel-loja" value="${window.escapeHtml(k)}" ${_cancelRelatorioLojasFiltro.includes(k) ? 'checked' : ''} onchange="_cancelFiltroLojaToggle(this.value,this.checked)">
+      ${window.escapeHtml(LOJA_DISPLAY[k] || k)}
+    </label>`).join('');
+  return `<div class="cancel-rel-filtro" style="margin:-6px 0 12px">
+    <label style="font-size:10px;color:var(--t3);font-weight:700;display:block;margin-bottom:4px">Relatório de (marque 1+ lojas; nenhuma marcada = todas):</label>
+    <div style="display:flex;flex-wrap:wrap;gap:6px 14px;padding:8px 10px;background:var(--s1);border:1px solid rgba(0,0,0,.08);border-radius:8px">${checks}</div>
+  <!--/cancel-rel-filtro--></div>`;
+}
+// null = rede inteira. Loja marcada que saiu da regra é ignorada; se não sobrar nenhuma,
+// volta a ser a rede (nunca um relatório vazio por um filtro velho).
+function _cancelRelFiltro() {
+  const validas = _cancelRelatorioLojasFiltro.filter(k => _cancelLojasDaRegraRel().includes(k));
+  return validas.length ? validas : null;
+}
+function _cancelRelNomes(f) {
+  return f.slice().map(k => LOJA_DISPLAY[k] || k).sort((a, b) => a.localeCompare(b, 'pt-BR')).join(', ');
+}
+// Recorta os dados (do cancelamento ou da transferência) às lojas marcadas, recontando os
+// totais. semKey: 'semCancel' | 'semTransf'.
+function _cancelRecortar(d, f, semKey) {
+  if (!f) return d;
+  const lojas = d.lojas.filter(l => f.includes(l.k));
+  const out = Object.assign({}, d, {
+    lojas,
+    qtd: lojas.reduce((a, l) => a + l.itens.length, 0),
+    semFoto: lojas.reduce((a, l) => a + l.semFoto, 0),
+    nLojas: lojas.length + (d[semKey] || []).filter(l => f.includes(l.k)).length,
+  });
+  if ('valor' in d) out.valor = lojas.reduce((a, l) => a + l.valor, 0);
+  out[semKey] = (d[semKey] || []).filter(l => f.includes(l.k));
+  return out;
+}
+
 // Relatórios — mesmo trio das outras abas (ver _reportBtnsRowHtml). O texto não leva a
 // foto: ela é um link do Storage, e colar URL crua no WhatsApp da direção não ajuda
 // ninguém. O que vai é se a nota TEM foto, que é o que diz se dá pra conferir.
 function _cancelRelatorioTexto(wpp) {
-  const d = _cancelMacroDados();
+  const dRede = _cancelMacroDados();
+  const f = _cancelRelFiltro();
+  const d = _cancelRecortar(dRede, f, 'semCancel');
   const periodo = _dashRangeOf(_dashOff()).label;
   const b = t => wpp ? `*${t}*` : t;
   const i = t => wpp ? `_${t}_` : t;
-  let msg = `${wpp ? '🧾 ' : ''}${b(`NOTAS CANCELADAS — ${periodo}`)}\n\n`;
+  const deQuem = f ? ` — ${_cancelRelNomes(f)}` : '';
+  const titulo = `Notas canceladas${deQuem} — ${periodo}`;
+  let msg = `${wpp ? '🧾 ' : ''}${b(`NOTAS CANCELADAS${deQuem.toUpperCase()} — ${periodo}`)}\n\n`;
   if (!d.qtd) {
-    msg += `Nenhuma das ${d.nLojas} lojas lançou cancelamento neste período.\n`;
+    msg += f ? `${_cancelRelNomes(f)}: nenhum cancelamento lançado neste período.\n`
+             : `Nenhuma das ${d.nLojas} lojas lançou cancelamento neste período.\n`;
     msg += _cancelRelatorioSemNada(d, wpp);
+    if (f) msg += _cancelPosicaoRedeTexto(dRede, f, wpp);
     msg += _transfRelatorioTexto(wpp);   // mesma razão da tela: não depende do cancelamento
-    return { msg, titulo: `Notas canceladas — ${periodo}` };
+    return { msg, titulo };
   }
   msg += `${b(`Total: ${_fmtBRL(d.valor)}`)} em ${d.qtd} nota${d.qtd === 1 ? '' : 's'}, ${d.lojas.length} loja${d.lojas.length === 1 ? '' : 's'}\n`;
   msg += `Com foto do cupom: ${d.qtd - d.semFoto} de ${d.qtd}\n`;
@@ -18574,7 +18641,8 @@ function _cancelRelatorioTexto(wpp) {
   }
   // O mesmo ranking da tela. O que o painel mostra e o que o relatório manda têm que ser a
   // mesma coisa — relatório que conta uma história diferente da tela é como não ter nenhum.
-  const _rk = _cancelRankingLinhas(d);
+  const _rk = f ? [] : _cancelRankingLinhas(d);
+  if (f) msg += _cancelPosicaoRedeTexto(dRede, f, wpp);
   if (_rk.length > 1) {
     msg += `\n${b('Lojas, do melhor pro pior')} ${i('(% do faturamento)')}\n`;
     _rk.forEach((l, ix) => {
@@ -18595,22 +18663,42 @@ function _cancelRelatorioTexto(wpp) {
   msg += _cancelRelatorioSemNada(d, wpp);
   if (d.semFoto) msg += `\n${i('As notas sem foto foram lançadas antes da foto do cupom passar a ser exigida.')}\n`;
   msg += _transfRelatorioTexto(wpp);
-  return { msg, titulo: `Notas canceladas — ${periodo}` };
+  return { msg, titulo };
+}
+// Posição de cada loja marcada no ranking da REDE (% do faturamento). Loja fora do ranking
+// (fechou sem assinar, sem caixa) diz por quê, em vez de sumir.
+function _cancelPosicaoRedeTexto(dRede, f, wpp) {
+  const b = t => wpp ? `*${t}*` : t;
+  const rk = _cancelRankingLinhas(dRede);
+  if (rk.length < 2) return '';
+  let out = `\n${b('Posição na rede')} ${wpp ? '_(% do faturamento, do melhor pro pior)_' : '(% do faturamento, do melhor pro pior)'}\n`;
+  f.slice().sort((a, b2) => (LOJA_DISPLAY[a] || a).localeCompare(LOJA_DISPLAY[b2] || b2)).forEach(k => {
+    const ix = rk.findIndex(l => l.k === k);
+    const nome = LOJA_DISPLAY[k] || k;
+    if (ix < 0) { out += `   ${nome}: fora do ranking (zero não confirmado no caixa ou sem caixa fechado)\n`; return; }
+    const l = rk[ix];
+    const pct = l.pct === null ? '—' : l.pct.toFixed(2).replace('.', ',') + '%';
+    out += `   ${nome}: ${ix + 1}º de ${rk.length} · ${pct}\n`;
+  });
+  return out;
 }
 
 // As transferências entram no MESMO relatório exportado, porque estão na mesma tela: um
 // PDF que mostrasse só metade do que a aba mostra viraria uma segunda versão dos fatos.
 function _transfRelatorioTexto(wpp) {
   if (!_dashTransfPer) return '';
-  const d = _transfMacroDados();
+  const dRede = _transfMacroDados();
+  const f = _cancelRelFiltro();
+  const d = _cancelRecortar(dRede, f, 'semTransf');
   const b = t => wpp ? `*${t}*` : t;
   const cx = n => n + ' caixa' + (n === 1 ? '' : 's');
   let msg = `\n${wpp ? '🔄 ' : ''}${b('TRANSFERÊNCIAS DE MESA')}\n`;
-  if (!d.qtd) msg += `Nenhuma das ${d.nLojas} lojas lançou transferência no período.\n`;
+  if (!d.qtd) msg += f ? `${_cancelRelNomes(f)}: nenhuma transferência lançada no período.\n`
+                       : `Nenhuma das ${d.nLojas} lojas lançou transferência no período.\n`;
   else {
     msg += `${d.qtd} transferência${d.qtd === 1 ? '' : 's'} em ${d.lojas.length} loja${d.lojas.length === 1 ? '' : 's'}`;
     msg += d.semFoto ? ` · ${d.semFoto} sem foto da comanda\n` : '\n';
-    const rk = _transfRankingLinhas(d, 'qtd');
+    const rk = f ? [] : _transfRankingLinhas(d, 'qtd');
     if (rk.length >= 2) {
       msg += `\n${b('Ranking — de quem menos transfere pra quem mais')}\n`;
       rk.forEach(l => { msg += `   ${l.pos}º ${l.nome} — ${l.qtd}\n`; });
@@ -18626,6 +18714,19 @@ function _transfRelatorioTexto(wpp) {
         msg += `   Mesa ${t.origem || '—'} → ${t.destino || '—'} — ${t.motivo || '—'} · ${t.autor || '—'} · ${dia}${t.foto ? '' : ' · sem foto'}\n`;
       });
     });
+  }
+  if (f) {
+    const rq = _transfRankingLinhas(dRede, 'qtd'), rf = _transfRankingLinhas(dRede, 'fat');
+    if (rq.length >= 2) {
+      msg += `\n${b('Posição na rede')} ${wpp ? '_(de quem menos transfere pra quem mais)_' : '(de quem menos transfere pra quem mais)'}\n`;
+      f.slice().sort((a, b2) => (LOJA_DISPLAY[a] || a).localeCompare(LOJA_DISPLAY[b2] || b2)).forEach(k => {
+        const nome = LOJA_DISPLAY[k] || k;
+        const lq = rq.find(l => l.k === k), lf = rf.find(l => l.k === k);
+        if (!lq) { msg += `   ${nome}: fora do ranking (zero não confirmado no caixa ou sem caixa fechado)\n`; return; }
+        msg += `   ${nome}: ${lq.pos}º de ${rq.length} em quantidade (${lq.qtd})` +
+               (lf ? ` · ${lf.pos}º de ${rf.length} por faturamento (${_transfTaxaFmt(lf.taxa)} a cada R$ 100 mil)` : '') + '\n';
+      });
+    }
   }
   if (d.semTransf.length) {
     const porEstado = e => d.semTransf.filter(l => l.estado === e);
@@ -18681,8 +18782,8 @@ function gerarPDFCancel() {
   if (!_dashCancelPer) { alert('Aguarde os dados carregarem.'); return; }
   const r = _cancelRelatorioTexto(false);
   // Com os KPIs no topo, como o relatório do Painel: o número que a direção procura
-  // primeiro não devia estar no meio de um parágrafo.
-  const d = _cancelMacroDados();
+  // primeiro não devia estar no meio de um parágrafo. Com o mesmo recorte de lojas do texto.
+  const d = _cancelRecortar(_cancelMacroDados(), _cancelRelFiltro(), 'semCancel');
   const periodo = _dashRangeOf(_dashOff()).label;
   window.gnRelatorioPDF({
     titulo: r.titulo,

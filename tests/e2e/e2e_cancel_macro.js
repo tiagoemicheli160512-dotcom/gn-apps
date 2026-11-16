@@ -104,8 +104,10 @@ const check = (n, c, extra) => {
   check('loja que fechou e ninguém confirmou NÃO é tratada como "não teve"',
     /Itaquera[\s\S]{0,200}sem ninguém confirmar que não houve cancelamento/.test(r.painel),
     r.painel.match(/Itaquera[\s\S]{0,240}/));
+  // O seletor "Relatório de" (16/11/2026) lista as lojas no topo; o bloco medido aqui é o de
+  // "sem cancelamento", então a busca começa depois do seletor.
   check('e sai em âmbar, não em verde junto das que responderam', (() => {
-    const i = r.painel.indexOf('Itaquera');
+    const i = r.painel.indexOf('Itaquera', r.painel.indexOf('<!--/cancel-rel-filtro-->'));
     const trecho = r.painel.slice(Math.max(0, i - 220), i);
     return /var\(--txt-amber\)/.test(trecho);
   })(), r.painel.slice(Math.max(0, r.painel.indexOf('Itaquera') - 220), r.painel.indexOf('Itaquera') + 40));

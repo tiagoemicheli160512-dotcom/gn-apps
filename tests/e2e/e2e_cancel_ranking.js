@@ -92,6 +92,8 @@ const FIX = {
   // ── Onde fica na tela ──────────────────────────────────────────────────────────────
   const pos = await page.evaluate(h => {
     const d2 = document.createElement('div'); d2.innerHTML = h;
+    // O seletor "Relatório de" (16/11/2026) lista os nomes das lojas no topo; fora da conta.
+    d2.querySelectorAll('.cancel-rel-filtro').forEach(e => e.remove());
     const txt = d2.textContent;
     return { cat: txt.indexOf('POR CATEGORIA'), rank: txt.indexOf('DO MELHOR PRO PIOR'),
              lojas: txt.indexOf('Itaquera'), criterio: /% do faturamento/.test(txt) };
