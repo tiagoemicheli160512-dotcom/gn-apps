@@ -1721,6 +1721,7 @@
       <div style="font-size:10px;color:var(--t2);" id="utens-count">0 lançamentos</div>
     </div>
     <div style="display:flex;gap:6px;">
+      <button class="btn-secondary" id="utens-btn-entrada" style="padding:7px 12px;font-size:12px;" onclick="abrirEntradaUtensilio()">📥 Entrada</button>
       <button class="btn-secondary" style="padding:7px 12px;font-size:12px;" onclick="abrirContagemUtensilio()">📋 Contar</button>
       <button class="btn-primary" style="padding:7px 12px;font-size:12px;" onclick="addUtensilio()">+ Registrar</button>
     </div>
@@ -1730,7 +1731,9 @@
     Vai direto pro pessoal de manutenção, e o saldo de cada peça fica no fim desta tela.
     Use <b>📋 Contar</b> pra informar quantas a loja tem de uma peça sem que nada tenha
     quebrado — é assim que o controle de uma peça nova começa.
+    <span id="utens-entrada-explica"> Use <b>📥 Entrada</b> quando chegar peça que a própria loja comprou (ou que veio por fora da manutenção) — soma no saldo, com a assinatura de quem recebeu.</span>
   </div>
+  <div id="utens-entrada"></div>
   <div id="utens-contar"></div>
   <div id="utens-novo"></div>
   <div id="utens-lista" style="display:flex;flex-direction:column;gap:8px;"></div>
@@ -11858,6 +11861,7 @@ function _utensFalta(nome, qtd){
   return f.length ? 'Falta dizer '+f.join(' e ')+'.' : '';
 }
 function addUtensilio(){
+  _utensEntrada = null;
   if(!_utensNovo) _utensNovo={setor:'Salão',situacao:MANUT_SITUACOES_UTENSILIO[0],nome:'',qtd:''};
   renderUtensilios();
   const i=document.getElementById('utens-novo-nome');
@@ -11904,6 +11908,7 @@ function _utensNovoRegistrar(){
 let _utensContar = null;
 function abrirContagemUtensilio(){
   _utensNovo = null;                   // os dois formulários não ficam abertos juntos
+  _utensEntrada = null;
   if(!_utensContar) _utensContar = { nome:'', qtd:'' };
   renderUtensilios();
   const i=document.getElementById('utens-contar-nome');
@@ -11983,6 +11988,162 @@ async function _utensContarSalvar(){
   }
   renderUtensilios();
 }
+/* ── Entrada de peça pela loja ─────────────────────────────────────────────────────────
+   "Quero colocar a opção de dar entrada em utensílios pela loja, com assinatura de quem
+    deu entrada, e somar a quantidade em estoque, pois hoje seria pela aba manutenção, mas
+    nem sempre chega por lá, às vezes a própria loja compra." (16/11/2026)
+
+   Soma no saldo (nunca substitui — substituir é o "corrigir" da supervisão) e guarda cada
+   entrada no próprio registro da peça (entradas[]: quando, quantas, origem, quem assinou,
+   quem estava logado). A assinatura é nome + senha de quem recebeu, conferidos no
+   verificar_login com a mesma regra do login do Check-list (usuário desta loja ou GERAL) —
+   o login do aparelho é da loja inteira, e quem responde pela entrada é quem recebeu.
+
+   Peça que ainda não está no controle: a entrada abre a linha com o que chegou, como a
+   reposição do app Manutenção já faz. A tela avisa, porque o saldo só fica certo depois
+   que alguém contar o que já havia. */
+const UTENS_ENTRADA_ORIGENS = ['Compra da loja', 'Veio de outra loja', 'Outro'];
+const UTENS_ENTRADAS_GUARDA = 60;   // por peça, as últimas — o jsonb da loja não cresce sem fim
+let _utensEntrada = null;
+function _utensEntradaLiberada(){ return LOJA !== 'Maglia'; }
+function abrirEntradaUtensilio(){
+  if(!_utensEntradaLiberada()) return;
+  _utensNovo = null; _utensContar = null;
+  if(!_utensEntrada) _utensEntrada = { nome:'', qtd:'', origem:UTENS_ENTRADA_ORIGENS[0], obs:'', assNome:'', assSenha:'' };
+  renderUtensilios();
+  const i=document.getElementById('utens-entrada-nome');
+  if(i){ i.focus(); i.scrollIntoView({block:'center',behavior:'smooth'}); }
+}
+function _utensEntradaCancelar(){ _utensEntrada=null; renderUtensilios(); }
+function _utensEntradaSet(campo,val){
+  if(!_utensEntrada) return;
+  _utensEntrada[campo]=val;
+  const ok=!_utensEntradaFalta();
+  const b=document.getElementById('utens-entrada-ok');
+  if(b){ b.disabled=!ok; b.style.opacity=ok?'':'.45'; }
+  const d=document.getElementById('utens-entrada-dica');
+  if(d) d.textContent=_utensEntradaFalta();
+  if(campo==='nome'){
+    const a=document.getElementById('utens-entrada-nova');
+    if(a) a.style.display=(String(val||'').trim() && !_utensilioDe(val))?'':'none';
+  }
+}
+function _utensEntradaFalta(){
+  const e=_utensEntrada; if(!e) return '';
+  const f=[];
+  if(!String(e.nome||'').trim()) f.push('qual é a peça');
+  const q=parseFloat(String(e.qtd).replace(',','.'));
+  if(!isFinite(q)||q<=0||Math.floor(q)!==q) f.push('quantas chegaram');
+  if(!String(e.assNome||'').trim()||!String(e.assSenha||'')) f.push('a assinatura (nome e senha de quem recebeu)');
+  return f.length ? 'Falta '+f.join(', ')+'.' : '';
+}
+async function _utensEntradaSalvar(){
+  const falta=_utensEntradaFalta();
+  if(falta){ showToast('⚠️ '+falta,'error'); return; }
+  const e=_utensEntrada;
+  const nome=String(e.nome).trim();
+  const qtd=parseFloat(String(e.qtd).replace(',','.'));
+  const btn=document.getElementById('utens-entrada-ok');
+  if(btn){ btn.disabled=true; btn.textContent='Conferindo assinatura…'; }
+  // 1. Assinatura: mesma regra do login do Check-list (usuário desta loja ou GERAL).
+  let assinante=null;
+  try{
+    const lojaKey = LOJA_MAP[LOJA] || LOJA.toUpperCase();
+    const {data:rows,error} = await sb.rpc('verificar_login', { p_nome: String(e.assNome).trim(), p_senha: e.assSenha, p_app: 'gn-checklist:entradaUtensilio' });
+    assinante = !error && (rows||[]).find(u => u.loja === lojaKey || u.loja === 'GERAL');
+    if(error) throw error;
+  }catch(err){
+    window.gnLogError && window.gnLogError('checklist:entradaUtensilio:assinatura', err);
+    showToast('⚠️ Não consegui conferir a assinatura agora (conexão). Nada foi lançado.','error');
+    renderUtensilios(); return;
+  }
+  if(!assinante){
+    _utensEntrada.assSenha='';
+    showToast('⚠️ Nome ou senha de quem recebeu não conferem (ou o usuário não é desta loja). Nada foi lançado.','error');
+    renderUtensilios(); return;
+  }
+  // 2. Soma no saldo (relê a linha da loja antes de gravar — _utensiliosGravar).
+  const chave=_utensilioChave(nome);
+  const agora=new Date().toISOString();
+  const logado=(usuarioLogado&&usuarioLogado.nome)||LOJA;
+  let novoSaldo=0, eraNova=false;
+  try{
+    await _utensiliosGravar(saldos=>{
+      eraNova=!saldos[chave];
+      const reg=saldos[chave]||{nome, qtd:0, inicial:0, inicial_em:agora, inicial_por:assinante.nome, aberto_por_entrada:true};
+      reg.qtd=(parseFloat(reg.qtd)||0)+qtd;
+      novoSaldo=reg.qtd;
+      const ents=Array.isArray(reg.entradas)?reg.entradas:[];
+      ents.push({ em:agora, qtd, origem:e.origem||UTENS_ENTRADA_ORIGENS[0], obs:String(e.obs||'').trim().slice(0,200),
+                  assinado_por:assinante.nome, assinado_cargo:assinante.cargo||'', registrado_por:logado });
+      reg.entradas=ents.slice(-UTENS_ENTRADAS_GUARDA);
+      reg.atualizado_em=agora; reg.atualizado_por=assinante.nome;
+      saldos[chave]=reg;
+      return saldos;
+    });
+  }catch(err){
+    window.gnLogError && window.gnLogError('checklist:entradaUtensilio', err);
+    showToast('⚠️ Não consegui gravar a entrada agora. Tenta de novo.','error');
+    renderUtensilios(); return;
+  }
+  _logAuditoriaChk('ENTRADA_UTENSILIO',{peca:nome,qtd,origem:e.origem,assinado_por:assinante.nome,saldo:novoSaldo,peca_nova:eraNova});
+  _utensEntrada=null;
+  showToast(eraNova
+    ? `✅ Entrada de ${qtd} "${nome}" — peça nova no controle, saldo ${novoSaldo}. Conte o que já havia pra o saldo ficar certo.`
+    : `✅ Entrada de ${qtd} "${nome}" assinada por ${assinante.nome}. Saldo agora: ${novoSaldo}.`);
+  renderUtensilios();
+}
+function _utensEntradaHtml(){
+  if(!_utensEntrada) return '';
+  const e=_utensEntrada;
+  const nomes=Object.values(_utensiliosSaldo()).filter(v=>v&&v.nome).map(v=>v.nome);
+  const falta=_utensEntradaFalta();
+  const nova=String(e.nome||'').trim() && !_utensilioDe(e.nome);
+  return `<div class="card p-3" style="border:1.5px solid #0891b2;background:rgba(8,145,178,.05);margin-bottom:8px;">
+    <div style="font-size:12.5px;font-weight:800;color:#0e7490;margin-bottom:4px;">📥 Entrada de peças</div>
+    <div style="font-size:11px;color:var(--t2);line-height:1.45;margin-bottom:8px;">
+      Chegou peça que a loja comprou (ou que veio por fora da manutenção)? Lance aqui: <b>soma no saldo</b> da peça.
+    </div>
+    <div style="display:flex;flex-direction:column;gap:7px;">
+      <div><label class="field-label">Qual a peça *</label>
+        <input type="text" id="utens-entrada-nome" autocomplete="off" style="font-size:12px;"
+          ${nomes.length?'list="utens-nomes-entrada"':''} placeholder="ex.: copo de chopp, prato fundo, garfo"
+          value="${escHtml(e.nome||'')}" oninput="_utensEntradaSet('nome',this.value)">
+        ${nomes.length?`<datalist id="utens-nomes-entrada">${nomes.map(n=>`<option value="${escHtml(n)}"></option>`).join('')}</datalist>`:''}
+        <div id="utens-entrada-nova" style="font-size:10.5px;color:var(--txt-amber);margin-top:3px;line-height:1.35;${nova?'':'display:none'}">Peça ainda fora do controle: a entrada abre o saldo só com o que chegou. Se a loja já tinha peças dessas, cancele e use 📋 Contar primeiro — depois dê a entrada.</div></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;">
+        <div><label class="field-label">Quantas chegaram *</label>
+          <input type="number" id="utens-entrada-qtd" min="1" step="1" inputmode="numeric" style="font-size:12px;" placeholder="ex.: 24"
+            value="${escHtml(e.qtd||'')}" oninput="_utensEntradaSet('qtd',this.value)"></div>
+        <div><label class="field-label">De onde veio</label>
+          <select id="utens-entrada-origem" onchange="_utensEntradaSet('origem',this.value)">
+            ${UTENS_ENTRADA_ORIGENS.map(o=>`<option value="${o}" ${e.origem===o?'selected':''}>${o}</option>`).join('')}
+          </select></div>
+      </div>
+      <div><label class="field-label">Observação</label>
+        <input type="text" id="utens-entrada-obs" maxlength="200" style="font-size:12px;" placeholder="ex.: nota 1234, loja X"
+          value="${escHtml(e.obs||'')}" oninput="_utensEntradaSet('obs',this.value)"></div>
+      <div style="border-top:1px dashed rgba(0,0,0,.15);padding-top:7px;">
+        <div style="font-size:11px;font-weight:800;color:var(--t1);margin-bottom:4px;">✍️ Assinatura de quem recebeu</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;">
+          <div><label class="field-label">Nome (usuário) *</label>
+            <input type="text" id="utens-entrada-ass-nome" autocomplete="off" style="font-size:12px;"
+              value="${escHtml(e.assNome||'')}" oninput="_utensEntradaSet('assNome',this.value)"></div>
+          <div><label class="field-label">Senha *</label>
+            <input type="password" id="utens-entrada-ass-senha" autocomplete="off" style="font-size:12px;"
+              value="${escHtml(e.assSenha||'')}" oninput="_utensEntradaSet('assSenha',this.value)"></div>
+        </div>
+      </div>
+      <div id="utens-entrada-dica" style="font-size:11px;color:var(--txt-amber);font-weight:700;min-height:14px;line-height:1.35;">${escHtml(falta)}</div>
+      <div style="display:flex;gap:7px;">
+        <button class="btn-primary" id="utens-entrada-ok" style="flex:1;font-size:12px;padding:9px;${falta?'opacity:.45':''}"
+          ${falta?'disabled':''} onclick="_utensEntradaSalvar()">Assinar e dar entrada</button>
+        <button class="btn-secondary" style="font-size:12px;padding:9px 14px;" onclick="_utensEntradaCancelar()">Cancelar</button>
+      </div>
+    </div>
+  </div>`;
+}
+
 function _utensContarHtml(){
   if(!_utensContar) return '';
   // Mesma lista de sugestões do outro formulário: a peça escrita de dois jeitos vira duas
@@ -12074,9 +12235,16 @@ function renderUtensilios(){
   if(form) form.innerHTML=_utensNovoHtml();
   const formC=document.getElementById('utens-contar');
   if(formC) formC.innerHTML=_utensContarHtml();
+  const formE=document.getElementById('utens-entrada');
+  if(formE) formE.innerHTML=_utensEntradaHtml();
+  // Entrada pela loja: pedido das 11 lojas (16/11/2026), sem citar a Maglia — regra do
+  // CLAUDE.md. Ela segue com o fluxo de antes (Contar/Registrar).
+  const bE=document.getElementById('utens-btn-entrada'), xE=document.getElementById('utens-entrada-explica');
+  if(bE) bE.style.display=_utensEntradaLiberada()?'':'none';
+  if(xE) xE.style.display=_utensEntradaLiberada()?'':'none';
   // Com o formulário aberto, o "nada lançado ainda" sumiria atrás dele e ainda mandaria
   // tocar no botão que a pessoa acabou de tocar.
-  if(empty) empty.style.display=(itens.length||_utensNovo||_utensContar)?'none':'block';
+  if(empty) empty.style.display=(itens.length||_utensNovo||_utensContar||_utensEntrada)?'none':'block';
   lista.innerHTML=itens.map(_manutCardHtml).join('');
 
   // O saldo mora no fim desta tela (antes ficava na Manutenção). É o controle de verdade:
@@ -12098,7 +12266,7 @@ function _utensSaldosHtml(){
   const podeCorrigir=_utensilioPodeCorrigir();
   return `<div style="margin-top:16px;padding-top:12px;border-top:1px solid rgba(0,0,0,.1)">
     <div style="font-size:11px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">🍽️ Controle de utensílios</div>
-    <div style="font-size:10.5px;color:var(--t3);margin-bottom:8px;line-height:1.45">Quantas a loja tem em bom estado. Cai quando é lançada uma quebra e sobe quando a manutenção informa o que repôs.${podeCorrigir?'':' Quem corrige o saldo é a supervisão.'}</div>
+    <div style="font-size:10.5px;color:var(--t3);margin-bottom:8px;line-height:1.45">Quantas a loja tem em bom estado. Cai quando é lançada uma quebra e sobe quando a manutenção informa o que repôs${_utensEntradaLiberada()?' ou quando a loja dá 📥 Entrada':''}.${podeCorrigir?'':' Quem corrige o saldo é a supervisão.'}</div>
     ${saldos.map(([chave,v])=>{
       const q=parseFloat(v.qtd)||0;
       const cor=q<=0?'#DC2626':q<=2?'#B45309':'#047857';
@@ -12106,6 +12274,8 @@ function _utensSaldosHtml(){
         <div style="min-width:0;flex:1">
           <div style="font-size:12px;font-weight:700;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(v.nome)}</div>
           <div style="font-size:10px;color:var(--t3);margin-top:1px">${v.atualizado_em?('atualizado em '+String(v.atualizado_em).slice(8,10)+'/'+String(v.atualizado_em).slice(5,7)):''}${v.atualizado_por?' por '+escHtml(v.atualizado_por):''}${v.corrigido?' · corrigido':''}</div>
+          ${(()=>{ const ue=Array.isArray(v.entradas)&&v.entradas.length?v.entradas[v.entradas.length-1]:null;
+            return ue?`<div class="utens-ult-entrada" style="font-size:10px;color:var(--txt-green);margin-top:1px">📥 última entrada: +${escHtml(ue.qtd)} em ${String(ue.em).slice(8,10)}/${String(ue.em).slice(5,7)} · assinada por ${escHtml(ue.assinado_por||'—')}</div>`:''; })()}
         </div>
         <div style="font-size:16px;font-weight:900;color:${cor};font-variant-numeric:tabular-nums">${q}</div>
         ${podeCorrigir?`<button class="btn-secondary" style="font-size:10px;padding:4px 8px;flex-shrink:0" onclick="corrigirSaldoUtensilio('${escHtml(chave).replace(/'/g,"\\\\'")}')">corrigir</button>`:''}
