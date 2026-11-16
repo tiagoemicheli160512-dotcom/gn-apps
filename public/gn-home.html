@@ -624,6 +624,7 @@
   <div id="banco-horas-fecha-home-card"></div>
 
   <div id="barris-semanal-home-card"></div>
+  <div id="avarias-semana-home-card"></div>
 
   <div id="pendencias-loja-home-card"></div>
 
@@ -7009,6 +7010,122 @@ async function _calcularBarrisSemanalHome(sess, isMaster) {
   document.body.appendChild(overlay);
 }
 
+/* ── AVARIAS DA SEMANA: zero lançado precisa da gerência (16/11/2026) ──────────────────
+   "No app lojas temos a aba avarias, porém tem loja que não tá fazendo 100%. Precisamos
+   colocar ao final de cada semana, ou seja na segunda-feira, a confirmação de lojas que não
+   colocaram nada, a validação da gerência ou sub."
+
+   Semana FECHADA (segunda a domingo anteriores). Loja que lançou alguma avaria não é cobrada
+   — o lançamento já é a resposta. Loja com ZERO lançado vê o card a partir da segunda: ou
+   lança no app Lojas, ou a gerência/sub confirma com a SENHA que não houve avaria. Sem senha
+   o "não houve" não vale nada — é o mesmo motivo da ciência do mês (_cienteConfirmar).
+   Conta como avaria o mesmo que o resto do app: tira cancelada, transferência paga em
+   dinheiro e saída pra terceiro. O card fica até a semana virar (a cobrança é da semana
+   fechada; na outra segunda começa a próxima). Guardado em gn_lojas, linha
+   AVARIAS_SEM_SEMANA ({semana: {loja: {nome, cargo, em}}}) — sem tabela nova. Falha aberto:
+   sem os dados, não cobra. Maglia fora (não citada — CLAUDE.md). */
+const AVARIAS_SEM_LINHA = 'AVARIAS_SEM_SEMANA';
+const AVARIAS_SEM_FORA = ['MAGLIA'];
+let _avSemEstado = null;     // { loja, comKey, semIni, semFim, qtd, conf, form, erro, salvando }
+function _avSemSemanaFechada(hoje) {
+  const d = new Date(hoje || new Date()); d.setHours(12, 0, 0, 0);
+  const seg = new Date(d); seg.setDate(d.getDate() - ((d.getDay() + 6) % 7) - 7);
+  const dom = new Date(seg); dom.setDate(seg.getDate() + 6);
+  return { ini: _carnesISO(seg), fim: _carnesISO(dom) };
+}
+function _avSemContaAvaria(a) {
+  return a && a.status !== 'cancelado' && a.tipo !== 'transferencia_dinheiro' && a.tipo !== 'saida_terceiro';
+}
+async function _renderAvariasSemanaHome(mostrar, sess, isMaster) {
+  const el = document.getElementById('avarias-semana-home-card');
+  if (!el) return;
+  const loja = (isMaster && masterLoja) ? masterLoja : (sess && sess.loja);
+  if (!mostrar || !loja || loja === 'GERAL' || AVARIAS_SEM_FORA.includes(loja) || !LOJAS_LISTA.includes(loja)) { el.innerHTML = ''; _homeMarcar && _homeMarcar(el, null); return; }
+  const comKey = LOJA_COM_KEY[loja] || loja;
+  const { ini, fim } = _avSemSemanaFechada();
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  try {
+    const [lojaRows, confRows] = await Promise.all([
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'avSem:loja', null),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${AVARIAS_SEM_LINHA}&select=all_data`, H, 'avSem:conf', null),
+    ]);
+    if (lojaRows === null || confRows === null) { el.innerHTML = ''; return; }   // falha aberto
+    const all = (lojaRows[0] && lojaRows[0].all_data) || {};
+    // A semana do registro (a.semana, a segunda-feira que o app Lojas grava) manda; o ts é
+    // UTC, e uma avaria lançada domingo às 22h cairia na segunda pelo ts. Sem a.semana, o ts
+    // convertido pro dia local.
+    const diaLocal = ts => { const d = new Date(ts); return isNaN(d) ? '' : _carnesISO(d); };
+    const avs = Object.values(all.avariasAll || {}).flatMap(v => Array.isArray(v) ? v : [])
+      .filter(a => _avSemContaAvaria(a) && (a.semana ? a.semana === ini : (diaLocal(a.ts) >= ini && diaLocal(a.ts) <= fim)));
+    const conf = (((confRows[0] && confRows[0].all_data) || {})[ini] || {})[loja] || null;
+    const ant = _avSemEstado && _avSemEstado.loja === loja && _avSemEstado.semIni === ini ? _avSemEstado : {};
+    _avSemEstado = { loja, comKey, semIni: ini, semFim: fim, qtd: avs.length, conf, form: !!ant.form, erro: ant.erro || '', salvando: false };
+    _avSemPintar();
+  } catch (e) {
+    window.gnLogError && window.gnLogError('avSem', e);
+    el.innerHTML = '';
+  }
+}
+function _avSemPintar() {
+  const el = document.getElementById('avarias-semana-home-card');
+  const st = _avSemEstado;
+  if (!el || !st) return;
+  // Lançou avaria, ou a gerência já confirmou: nada a cobrar.
+  if (st.qtd > 0 || st.conf) { el.innerHTML = ''; _homeMarcar(el, null); return; }
+  const esc = s2 => window.escapeHtml ? window.escapeHtml(String(s2 == null ? '' : s2)) : String(s2);
+  const dm = i2 => String(i2).slice(8, 10) + '/' + String(i2).slice(5, 7);
+  _homeMarcar(el, 'acao', { icone: '⚠️', titulo: 'Avarias da semana', urgente: true, resumo: `nenhuma lançada de ${dm(st.semIni)} a ${dm(st.semFim)} — gerência confirma` });
+  const form = st.form ? `<div style="margin-top:9px;background:var(--fill-sutil);border:1px solid rgba(0,0,0,.1);border-radius:10px;padding:10px">
+      <div style="font-size:10.5px;font-weight:800;color:var(--t2);margin-bottom:6px">SENHA DA GERÊNCIA OU SUB-GERÊNCIA</div>
+      <input id="avsem-user" type="text" placeholder="Usuário" autocomplete="off" style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.14);border-radius:8px;padding:9px;font-size:12px;margin-bottom:6px;font-family:inherit">
+      <input id="avsem-senha" type="password" placeholder="Senha" autocomplete="off" onkeydown="if(event.key==='Enter')_avSemConfirmar()" style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.14);border-radius:8px;padding:9px;font-size:12px;font-family:inherit">
+      ${st.erro ? `<div style="font-size:11px;color:var(--txt-red);margin-top:6px">${esc(st.erro)}</div>` : ''}
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button onclick="_avSemConfirmar()" ${st.salvando ? 'disabled' : ''} style="flex:1;background:#059669;border:none;border-radius:9px;padding:10px;color:#fff;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">${st.salvando ? 'Registrando...' : 'Confirmar: não houve avaria'}</button>
+        <button onclick="_avSemEstado.form=false;_avSemEstado.erro='';_avSemPintar()" style="background:var(--fill-sutil);border:1px solid rgba(0,0,0,.1);border-radius:9px;padding:10px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--t2)">Cancelar</button>
+      </div></div>` : '';
+  el.innerHTML = `<div style="background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.22);border-left:3px solid #dc2626;border-radius:18px;padding:14px 16px;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05)">
+    <div style="font-size:12px;font-weight:800;color:var(--t1);margin-bottom:4px">⚠️ Avarias da semana ${dm(st.semIni)} a ${dm(st.semFim)}: nenhuma lançada</div>
+    <div style="font-size:11px;color:var(--t2);line-height:1.5">Se houve avaria ou desperdício, lance no app Lojas (aba Avarias). Se a semana foi mesmo sem avaria, a <b>gerência ou a sub</b> confirma com a senha.</div>
+    ${st.form ? form : `<div style="display:flex;gap:6px;margin-top:9px">
+      <button onclick="navTo('gn-lojas.html?tab=avarias')" style="flex:1;background:var(--s2);border:1px solid rgba(239,68,68,.35);border-radius:9px;padding:9px;font-size:11.5px;font-weight:800;color:var(--t1);cursor:pointer;font-family:inherit">⚠️ Lançar avaria</button>
+      <button onclick="_avSemEstado.form=true;_avSemPintar()" style="flex:1;background:#059669;border:none;border-radius:9px;padding:9px;font-size:11.5px;font-weight:800;color:#fff;cursor:pointer;font-family:inherit">✓ Não houve avaria</button>
+    </div>`}
+  </div>`;
+}
+async function _avSemConfirmar() {
+  const st = _avSemEstado;
+  if (!st || st.salvando) return;
+  const user = (document.getElementById('avsem-user')?.value || '').trim();
+  const pass = document.getElementById('avsem-senha')?.value || '';
+  if (!user || !pass) { st.erro = 'Preencha usuário e senha.'; _avSemPintar(); return; }
+  st.salvando = true; st.erro = ''; _avSemPintar();
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+  try {
+    const auth = await window.gnFetchJson(`${SB_URL}/rest/v1/rpc/verificar_login`, H, 'avSem:auth', [],
+      { method: 'POST', body: JSON.stringify({ p_nome: user, p_senha: pass, p_app: 'gn-home:avarias-semana' }) });
+    const cargo = (auth[0] && auth[0].cargo || '').toLowerCase();
+    if (!auth.length) { st.erro = 'Usuário ou senha incorretos.'; return; }
+    if (!CIENTE_CARGOS.includes(cargo)) { st.erro = `A confirmação é da gerência ou da sub-gerência. ${auth[0].nome} está como ${auth[0].cargo || 'sem cargo'}.`; return; }
+    // Relê antes de gravar: a linha é de todas as lojas.
+    const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${AVARIAS_SEM_LINHA}&select=all_data`, { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY }, 'avSem:reler', null);
+    if (rows === null) { st.erro = 'Sem conexão com o banco. Tente de novo.'; return; }
+    const dados = JSON.parse(JSON.stringify((rows[0] && rows[0].all_data) || {}));
+    dados[st.semIni] = dados[st.semIni] || {};
+    dados[st.semIni][st.loja] = { nome: auth[0].nome, cargo, em: new Date().toISOString(), semFim: st.semFim };
+    await _gnLojasUpsert(AVARIAS_SEM_LINHA, dados, auth[0].nome);
+    st.conf = dados[st.semIni][st.loja];
+    st.form = false;
+    window.showToast && window.showToast('✓ Registrado: semana sem avaria', 'success');
+  } catch (e) {
+    window.gnLogError && window.gnLogError('avSem:confirmar', e);
+    st.erro = 'Não consegui registrar agora. Confere a internet e tenta de novo.';
+  } finally {
+    st.salvando = false;
+    _avSemPintar();
+  }
+}
+
 // Card de aviso da segunda-feira — some no instante em que a loja confirma a contagem, e
 // na terça dá lugar ao bloqueio acima.
 function _renderBarrisSemanalHome(mostrar) {
@@ -8250,6 +8367,7 @@ function showHome(sess) {
   setTheme(lojaEfetiva);
   _verificarBloqueioCaixaOntem(sess, isMaster);
   _verificarBarrisSemanalHome(sess, isMaster);
+  _renderAvariasSemanaHome((!isMaster || !!masterLoja) && !_ehCargoModuloUnico(sess), sess, isMaster);
   // Presença na loja: a trava mora em gn-presenca.js, compartilhada com os outros 12 apps
   // (os 13 dividem a mesma sessão, então trava só aqui seria porta destrancada). Não dá
   // await de propósito — a Home monta normalmente por baixo, e a trava sobe quando (e se)
