@@ -2778,6 +2778,42 @@ function _pedirReabrirFinalizacao() {
   pedirSenhaMestre(function(){ _reabrirFinalizacaoSemana(); });
 }
 
+// Reabre a URGÊNCIA da semana, no mesmo padrão da finalização acima (senha mestre).
+//
+// Caso real, 16/11/2026: Nova Iguaçu tocou em ⚡ Enviar a urgência com a contagem pela
+// metade (61 itens) e não tinha como mandar de novo — confirmarPedido barra a 2ª urgência
+// da semana, e o único caminho era "fale com o Compras".
+//
+// Limpa só urgencia_em/_por/_itens: com isso a trava da urgência volta (a lista fica só nos
+// itens de urgência até reenviar) e o ⚡ reaparece. A contagem lançada fica — o reenvio
+// desconta o que o envio anterior tinha gravado (ver pedidoAnterior em confirmarPedido), então
+// não dobra estoque. O alerta que já foi pro Compras (gn_alertas_compras) também fica: é o
+// histórico de clique a clique. Quem reabriu vai em colunas próprias, separadas de
+// reaberto_em/_por, que são da finalização.
+// Finalizada a semana, não reabre a urgência direto: primeiro reabre a finalização — senão o
+// painel do Compras mostraria "pedido feito" sem urgência.
+async function _reabrirUrgenciaSemana(autorizou) {
+  const e = _envioSemana || {};
+  if (!e.urgencia_em) { showToast('A urgência desta semana não foi enviada ainda.', 'warn'); return; }
+  if (e.final_em) { showToast('O pedido desta semana está finalizado — reabra a finalização primeiro.', 'warn', 5000); return; }
+  await _registrarEnvioSemana({
+    urgencia_em: null, urgencia_por: null, urgencia_itens: null,
+    urgencia_reaberta_em: new Date().toISOString(),
+    urgencia_reaberta_por: (autorizou && autorizou.nome) || (usuarioAtual ? usuarioAtual.nome : null),
+  });
+  if (_envioSemanaFalhou) {
+    showToast('⚠️ Não deu pra reabrir a urgência agora (sem conexão). Tente de novo em instantes.', 'err', 6000);
+    return;
+  }
+  _urgPendente = _urgAplicavel();
+  showToast('🔓 Urgência reaberta. Complete a contagem e toque em ⚡ Enviar a urgência de novo.', 'success', 7000);
+  render();
+}
+function _pedirReabrirUrgencia() {
+  if (!confirm('Reabrir a urgência desta semana?\n\nA loja vai poder enviar a urgência de novo. A contagem já lançada não se perde.')) return;
+  pedirSenhaMestre(function(u){ _reabrirUrgenciaSemana(u); });
+}
+
 // Faixa de confirmação no topo da aba Pedido: o que a loja JÁ enviou nesta semana e o que
 // falta. A loja não tinha como saber se tinha finalizado — a única confirmação era um toast
 // que desaparecia, e quem ficava na dúvida reenviava ou simplesmente não enviava. Aqui fica
@@ -2826,6 +2862,14 @@ function _faixaEnvioSemanaHtml(urgTrava) {
       '<div style="font-weight:800;color:var(--txt-amber);margin-bottom:2px">⚠️ FALTA FINALIZAR o pedido desta semana</div>' +
       linha('⚡', '#78350f', 'Urgência enviada', hora(e.urgencia_em) + quem(e.urgencia_por) + (e.urgencia_itens ? ' · ' + e.urgencia_itens + ' itens' : '')) +
       linha('📦', '#B45309', 'Pedido ainda não finalizado', '— termine a contagem e toque em ✅ Finalizar') +
+      (e.urgencia_reaberta_em ? linha('🔓', '#78350f', 'Urgência já reaberta uma vez', hora(e.urgencia_reaberta_em) + quem(e.urgencia_reaberta_por)) : '') +
+      // Mesma saída da finalização, pra urgência mandada com a contagem pela metade.
+      '<div style="margin-top:8px;border-top:1px solid rgba(180,83,9,.25);padding-top:8px">' +
+      '<div style="font-size:10.5px;color:var(--t3);line-height:1.45;margin-bottom:6px">' +
+      'Enviou a urgência sem querer ou com a contagem incompleta? Um responsável reabre com a senha mestre — ' +
+      'a contagem já lançada não se perde.</div>' +
+      '<button onclick="_pedirReabrirUrgencia()" style="width:100%;background:var(--s2);border:1px solid rgba(180,83,9,.45);border-radius:10px;padding:8px 10px;color:var(--txt-amber);font-weight:800;font-size:11.5px;cursor:pointer">' +
+      '🔓 Reabrir a urgência pra enviar de novo (senha mestre)</button></div>' +
       '</div>';
   }
   // Nada enviado ainda. Não aparece enquanto a trava da urgência está na tela (ali o aviso
@@ -7411,7 +7455,7 @@ async function confirmarPedido(modo) {
   const _semanaHoje = wkKey(getMonday(new Date()));
   const _jaEnviado = (_urgSemanaIni === _semanaHoje) ? (_envioSemana || {}) : {};
   if (modo === 'urgencia' && _jaEnviado.urgencia_em) {
-    showToast('A urgência desta semana já foi enviada. Fale com o Compras pra reabrir.', 'warn', 5000);
+    showToast('A urgência desta semana já foi enviada. Pra mandar de novo, um responsável toca em 🔓 Reabrir a urgência (senha mestre), no topo da aba.', 'warn', 6000);
     return;
   }
   if (modo === 'final' && _jaEnviado.final_em) {
@@ -14096,7 +14140,9 @@ async function confirmarSenhaMestre() {
                     || u.loja === 'GERAL' || masterFlag;
     if (!podeMaster) { erroEl.textContent = '🚫 Usuário sem permissão para correção.'; return; }
     fecharMasterModal();
-    if (_masterAcao) _masterAcao();
+    // Passa quem digitou a senha: quem autorizou (ex.: reabrir a urgência) é essa pessoa, não
+    // o usuário logado no aparelho da loja. As outras ações ignoram o argumento.
+    if (_masterAcao) _masterAcao(u);
     _masterAcao = null;
   } catch(e) { erroEl.textContent = 'Erro de conexão.'; }
 }
