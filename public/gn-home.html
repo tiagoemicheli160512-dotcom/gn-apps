@@ -7205,6 +7205,97 @@ async function _semLancConfirmar(tipo) {
    ou pendente. O que importa ver aqui é a loja que confirma "não houve" toda semana em vez
    de lançar — é o sinal de que o controle não está sendo feito. */
 let _semLancPainel = null, _semLancPainelCarregando = false;
+
+/* ── 🍴 ENTRADAS DE UTENSÍLIOS (Painel › Operação) ─────────────────────────────────────
+   "Pode fazer a visão das entradas no painel de gestão." (16/11/2026)
+
+   Lê o que o Check-list grava ao dar 📥 Entrada (gn_lojas.all_data.utensilios_saldo, na
+   linha da loja: entradas[] dentro de cada peça) — uma requisição pras lojas todas,
+   nenhuma tabela nova. Janela própria (30 ou 90 dias), sem o seletor de período do Painel:
+   entrada de louça é esporádica, e numa semana quase sempre não há nada.
+   Maglia fora: a entrada pela loja não existe pra ela (não citada no pedido). */
+let _utensEntPainel = null, _utensEntCarregando = false, _utensEntDias = 30;
+async function _loadUtensEntradasPainel() {
+  if (_utensEntCarregando) return;
+  _utensEntCarregando = true;
+  try {
+    const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+    const lojas = LOJAS_LISTA.filter(k => k !== 'MAGLIA');
+    const comKeys = lojas.map(k => '"' + (LOJA_COM_KEY[k] || k) + '"');
+    const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=in.(${encodeURIComponent(comKeys.join(','))})&select=loja,us:all_data->utensilios_saldo`, H, 'utensEntPainel', null);
+    if (rows === null) { _utensEntPainel = { erro: true }; return; }
+    const entradas = [], saldos = {};
+    lojas.forEach(k => {
+      const r = rows.find(x => x.loja === (LOJA_COM_KEY[k] || k));
+      const us = (r && r.us && typeof r.us === 'object') ? r.us : {};
+      saldos[k] = us;
+      Object.values(us).forEach(p => {
+        if (!p || !p.nome || !Array.isArray(p.entradas)) return;
+        p.entradas.forEach(e => { if (e && e.em) entradas.push(Object.assign({ k, loja: LOJA_DISPLAY[k] || k, peca: p.nome, saldo: parseFloat(p.qtd) || 0 }, e)); });
+      });
+    });
+    entradas.sort((a, b) => String(b.em).localeCompare(String(a.em)));
+    _utensEntPainel = { lojas, entradas, saldos };
+  } catch (e) {
+    window.gnLogError && window.gnLogError('utensEntPainel', e);
+    _utensEntPainel = { erro: true };
+  } finally {
+    _utensEntCarregando = false;
+    if (_dashTab === 'utensent') renderDashboard();
+  }
+}
+function _utensEntDiasTrocar(n) { _utensEntDias = n; renderDashboard(); }
+function _utensEntDados() {
+  const d = _utensEntPainel;
+  const corte = new Date(Date.now() - _utensEntDias * 864e5).toISOString();
+  const lista = d.entradas.filter(e => String(e.em) >= corte);
+  const porLoja = d.lojas.map(k => {
+    const its = lista.filter(e => e.k === k);
+    return { k, nome: LOJA_DISPLAY[k] || k, itens: its, pecas: its.reduce((a, e) => a + (parseFloat(e.qtd) || 0), 0) };
+  });
+  return {
+    lista, porLoja,
+    total: lista.reduce((a, e) => a + (parseFloat(e.qtd) || 0), 0),
+    com: porLoja.filter(l => l.itens.length).sort((a, b) => b.pecas - a.pecas || a.nome.localeCompare(b.nome, 'pt-BR')),
+    sem: porLoja.filter(l => !l.itens.length).map(l => l.nome),
+  };
+}
+function _buildUtensEntradasPanel() {
+  const d = _utensEntPainel;
+  if (!d) { if (!_utensEntCarregando) _loadUtensEntradasPainel(); return _skelPanel(3); }
+  if (d.erro) return `<div class="att-item"><div><div class="att-nm">Não deu pra carregar agora</div><div class="att-rs"><button onclick="_utensEntPainel=null;_loadUtensEntradasPainel();renderDashboard()" style="margin-top:6px;padding:6px 12px;border-radius:8px;border:1px solid var(--b1);background:var(--s2);color:var(--t1);font-weight:700;cursor:pointer;font-family:inherit">Tentar de novo</button></div></div></div>`;
+  const esc = s2 => window.escapeHtml(String(s2 == null ? '' : s2));
+  const dm = i2 => String(i2).slice(8, 10) + '/' + String(i2).slice(5, 7);
+  const x = _utensEntDados();
+  const bt = n => `<button type="button" onclick="_utensEntDiasTrocar(${n})" style="padding:5px 11px;border-radius:999px;font-size:11px;font-weight:800;font-family:inherit;cursor:pointer;border:1px solid ${_utensEntDias === n ? 'var(--cor)' : 'var(--b1)'};background:${_utensEntDias === n ? 'var(--cor)' : 'var(--s2)'};color:${_utensEntDias === n ? '#1A1D23' : 'var(--t2)'}">${n} dias</button>`;
+  const topo = `<div style="display:flex;gap:6px;align-items:center;margin-bottom:10px"><span style="font-size:11px;color:var(--t3);font-weight:700">Entradas lançadas pelas lojas nos últimos</span>${bt(30)}${bt(90)}</div>
+    <div class="kpi-row">
+      <div class="kpi-tile" style="border-left-color:#0891b2"><div class="kpi-tile-lbl">Peças que entraram</div><div class="kpi-tile-val" style="color:#0e7490">${x.total}</div><div class="kpi-tile-sub">${x.lista.length} entrada${x.lista.length === 1 ? '' : 's'} · ${x.com.length} loja${x.com.length === 1 ? '' : 's'}</div></div>
+      <div class="kpi-tile" style="border-left-color:var(--t3)"><div class="kpi-tile-lbl">Lojas sem entrada</div><div class="kpi-tile-val">${x.sem.length}</div><div class="kpi-tile-sub">de ${d.lojas.length} no período</div></div>
+    </div>`;
+  if (!x.lista.length) {
+    return topo + `<div class="att-item"><div><div class="att-nm">Nenhuma entrada de utensílio nos últimos ${_utensEntDias} dias</div>
+      <div class="att-rs">As lojas dão entrada no Check-list › Utensílios › 📥 Entrada, quando chega peça comprada pela loja ou fora da manutenção.</div></div></div>`;
+  }
+  const blocos = x.com.map(l => `<div class="utensent-loja" data-loja="${esc(l.k)}" style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid #0891b2;border-radius:14px;padding:12px 14px;margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:4px">
+        <div style="font-size:13px;font-weight:800;color:var(--t1);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.nome)}</div>
+        <div style="font-size:12.5px;font-weight:800;color:#0e7490;white-space:nowrap">+${l.pecas} peça${l.pecas === 1 ? '' : 's'}</div>
+      </div>
+      ${l.itens.map(e => `<div class="utensent-item" style="display:flex;gap:9px;align-items:baseline;padding:6px 0;border-top:1px solid var(--b1)">
+        <div style="font-size:9.5px;color:var(--t3);min-width:34px;font-variant-numeric:tabular-nums">${dm(e.em)}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:11.5px;font-weight:700;color:var(--t1);overflow-wrap:anywhere">${esc(e.peca)}</div>
+          <div style="font-size:9.5px;color:var(--t3);overflow-wrap:anywhere">${esc(e.origem || '—')}${e.obs ? ' · ' + esc(e.obs) : ''} · assinado por <b>${esc(e.assinado_por || '—')}</b>${e.registrado_por && e.registrado_por !== e.assinado_por ? ' (aparelho: ' + esc(e.registrado_por) + ')' : ''}</div>
+        </div>
+        <div style="text-align:right;white-space:nowrap">
+          <div style="font-size:12.5px;font-weight:800;color:#0e7490;font-variant-numeric:tabular-nums">+${esc(e.qtd)}</div>
+          <div style="font-size:9px;color:var(--t4)">saldo hoje ${e.saldo}</div>
+        </div>
+      </div>`).join('')}
+    </div>`).join('');
+  return topo + blocos + (x.sem.length ? `<div style="font-size:10.5px;color:var(--t3);line-height:1.5;margin:2px 2px 0">Sem entrada no período: ${esc(x.sem.join(', '))}.</div>` : '');
+}
 async function _loadSemLancPainel() {
   if (_semLancPainelCarregando) return;
   _semLancPainelCarregando = true;
@@ -19210,6 +19301,9 @@ function renderDashboard() {
   } else if (_dashTab==='semlanc') {
     content = _buildSemLancPanel();
 
+  } else if (_dashTab==='utensent') {
+    content = _buildUtensEntradasPanel();
+
   } else if (_dashTab==='folgas') {
     content = _buildFolgasGerenciaPanel();
 
@@ -19287,7 +19381,7 @@ function renderDashboard() {
       </div>
       <button type="button" class="dash-tabs-seta dir off" id="dash-tabs-dir" aria-label="Mais abas" onclick="_dashTabsRolar(1)"><span>›</span></button>
       </div>
-      ${(_dashTab!=='metas'&&_dashTab!=='folgas'&&_dashTab!=='semlanc'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris'&&_dashTab!=='carnes'&&_dashTab!=='trios'&&_dashTab!=='banco'&&_dashTab!=='extra'&&_dashTab!=='dre')?periodRow:''}
+      ${(_dashTab!=='metas'&&_dashTab!=='folgas'&&_dashTab!=='semlanc'&&_dashTab!=='utensent'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris'&&_dashTab!=='carnes'&&_dashTab!=='trios'&&_dashTab!=='banco'&&_dashTab!=='extra'&&_dashTab!=='dre')?periodRow:''}
       ${content}
     </div>`;
   _dashTabsDepoisDeDesenhar();
@@ -19412,7 +19506,7 @@ const DASH_GRUPOS = [
   { g: 'vendas',   rot: '📈 Vendas',   abas: [['fat', '↓ Faturamento'], ['att', '⚠ Atenção'], ['bi', '📊 BI'], ['metas', '⚙ Metas']] },
   { g: 'caixa',    rot: '🧾 Caixa',    abas: [['cancel', '🧾 Cancel. e transf.'], ['sem10', '💸 Sem 10%']] },
   { g: 'equipe',   rot: '👥 Equipe',   abas: [['presenca', '👤 Presença'], ['folgas', '📅 Folgas'], ['ocorr', '⚠ Ocorrências'], ['ferias', '🏖 Férias'], ['xadrez', '🔀 Xadrez'], ['banco', '⏱ Banco'], ['extra', '👷 Extra']] },
-  { g: 'operacao', rot: '🛠 Operação', abas: [['barris', '🍺 Barris'], ['carnes', '🥩 Carnes'], ['trios', '🎵 Trios'], ['semlanc', '✅ Validações']] },
+  { g: 'operacao', rot: '🛠 Operação', abas: [['barris', '🍺 Barris'], ['carnes', '🥩 Carnes'], ['trios', '🎵 Trios'], ['semlanc', '✅ Validações'], ['utensent', '🍴 Utensílios']] },
   { g: 'dre',      rot: '💰 DRE',      abas: [['dre', '💰 DRE']] },
 ];
 const _dashGrupoUltima = {};
