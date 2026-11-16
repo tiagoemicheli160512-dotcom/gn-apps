@@ -89,6 +89,26 @@ const decl = (caixas, quem) => ({ caixas, declarados: caixas, abertos: 0, respon
   check('loja sem cancelamento no período (Guarulhos): diz que não teve e quem confirmou', /Guarulhos: nenhum cancelamento lançado/.test(r.gua) && /confirmado por Rafael/.test(r.gua) && !/Bangu|Caxias/.test(r.gua), r.gua);
   check('desmarcando tudo volta a ser a rede', r.voltou === r.todas);
 
+  // Mesmo padrão nos seletores de Chopp (barris) e Carnes: nome da loja escapado, e o clique
+  // na caixinha continua marcando a loja certa (o onchange passou a ler this.value).
+  const esc = await page.evaluate(() => {
+    const salvo = LOJA_DISPLAY.BANGU; LOJA_DISPLAY.BANGU = 'Ban<img src=x onerror=window.__xss=1>gu';
+    const out = {};
+    [['barris', () => _barrisSemLojaFiltroHtml({ BANGU: {}, CAXIAS: {} }), () => _barrisSemRelatorioLojasFiltro],
+     ['carnes', () => _carnesLojaFiltroHtml({ BANGU: {}, CAXIAS: {} }), () => _carnesRelatorioLojasFiltro],
+     ['cancel', () => _cancelLojaFiltroHtml(), () => _cancelRelatorioLojasFiltro]].forEach(([nome, html, filtro]) => {
+      const host = document.createElement('div'); host.innerHTML = html(); document.body.appendChild(host);
+      const inp = [...host.querySelectorAll('input[type=checkbox]')].find(i => i.value === 'BANGU');
+      inp.click();
+      out[nome] = { escapado: !host.querySelector('img') && /Ban<img/.test(host.textContent), marcou: filtro().includes('BANGU') };
+      inp.click(); host.remove();
+    });
+    LOJA_DISPLAY.BANGU = salvo; out.xss = !!window.__xss;
+    return out;
+  });
+  check('Chopp, Carnes e Cancel.: nome de loja com HTML sai como texto, não vira elemento', esc.barris.escapado && esc.carnes.escapado && esc.cancel.escapado && !esc.xss, esc);
+  check('…e o toque na caixinha continua marcando a loja nos três', esc.barris.marcou && esc.carnes.marcou && esc.cancel.marcou, esc);
+
   check('nenhum erro de JavaScript', erros.length === 0, erros);
   console.log(`\n${ok} OK, ${falhou} falhou`);
   await browser.close();
