@@ -72,12 +72,13 @@ const estado = page => page.evaluate(() => {
     const { ctx, page } = await abrir(browser, 390);
     const ids = await page.evaluate(() => DASH_GRUPOS.flatMap(g => g.abas.map(a => a[0])));
     // 12/11/2026: + 'ocorr' (Equipe › Ocorrências) — 16 abas. 15/11/2026: + 'folgas' — 17.
-    const esperadas = ['fat', 'att', 'cancel', 'sem10', 'presenca', 'folgas', 'ocorr', 'ferias', 'xadrez', 'bi', 'barris', 'carnes', 'trios', 'banco', 'extra', 'dre', 'metas'];
-    check('as 17 abas (16 de antes + Folgas da gerência) estão nos grupos, cada uma uma vez só', ids.length === 17 && esperadas.every(x => ids.filter(y => y === x).length === 1), JSON.stringify(ids));
+    // 16/11/2026: + 'semlanc' (Operação › Validações) — 18.
+    const esperadas = ['fat', 'att', 'cancel', 'sem10', 'presenca', 'folgas', 'ocorr', 'ferias', 'xadrez', 'bi', 'barris', 'carnes', 'trios', 'semlanc', 'banco', 'extra', 'dre', 'metas'];
+    check('as 18 abas (17 de antes + Validações) estão nos grupos, cada uma uma vez só', ids.length === 18 && esperadas.every(x => ids.filter(y => y === x).length === 1), JSON.stringify(ids));
     // Cada aba abre e marca o grupo certo.
     const r = await page.evaluate(esp => esp.map(t => { _setDashTab(t); const on = document.querySelector('.dash-grupo.on'); const aba = document.querySelector('#dash-tabs .dash-tab.on');
       return { t, grupo: on && on.dataset.grupo, abaOk: _dashGrupoDe(t).abas.length < 2 || !!aba }; }), esperadas);
-    check('abrir qualquer aba acende o grupo dela e marca a aba', r.every(x => x.grupo === (({ fat: 'vendas', att: 'vendas', bi: 'vendas', metas: 'vendas', cancel: 'caixa', sem10: 'caixa', dre: 'dre', barris: 'operacao', carnes: 'operacao', trios: 'operacao' })[x.t] || 'equipe') && x.abaOk), JSON.stringify(r));
+    check('abrir qualquer aba acende o grupo dela e marca a aba', r.every(x => x.grupo === (({ fat: 'vendas', att: 'vendas', bi: 'vendas', metas: 'vendas', cancel: 'caixa', sem10: 'caixa', dre: 'dre', barris: 'operacao', carnes: 'operacao', trios: 'operacao', semlanc: 'operacao' })[x.t] || 'equipe') && x.abaOk), JSON.stringify(r));
     await ctx.close();
   }
 

@@ -625,6 +625,7 @@
 
   <div id="barris-semanal-home-card"></div>
   <div id="avarias-semana-home-card"></div>
+  <div id="utensilios-semana-home-card"></div>
 
   <div id="pendencias-loja-home-card"></div>
 
@@ -7010,23 +7011,37 @@ async function _calcularBarrisSemanalHome(sess, isMaster) {
   document.body.appendChild(overlay);
 }
 
-/* ── AVARIAS DA SEMANA: zero lançado precisa da gerência (16/11/2026) ──────────────────
+/* ── SEMANA SEM LANÇAMENTO: AVARIAS E UTENSÍLIOS (16/11/2026) ────────────────────────────
    "No app lojas temos a aba avarias, porém tem loja que não tá fazendo 100%. Precisamos
    colocar ao final de cada semana, ou seja na segunda-feira, a confirmação de lojas que não
-   colocaram nada, a validação da gerência ou sub."
+   colocaram nada, a validação da gerência ou sub." Depois: "Pode fazer as 3 [cobrança, trava
+   a partir de terça e lista no Painel]. No caso dos utensílios, preciso ter a mesma coisa."
 
-   Semana FECHADA (segunda a domingo anteriores). Loja que lançou alguma avaria não é cobrada
-   — o lançamento já é a resposta. Loja com ZERO lançado vê o card a partir da segunda: ou
-   lança no app Lojas, ou a gerência/sub confirma com a SENHA que não houve avaria. Sem senha
-   o "não houve" não vale nada — é o mesmo motivo da ciência do mês (_cienteConfirmar).
-   Conta como avaria o mesmo que o resto do app: tira cancelada, transferência paga em
-   dinheiro e saída pra terceiro. O card fica até a semana virar (a cobrança é da semana
-   fechada; na outra segunda começa a próxima). Guardado em gn_lojas, linha
-   AVARIAS_SEM_SEMANA ({semana: {loja: {nome, cargo, em}}}) — sem tabela nova. Falha aberto:
-   sem os dados, não cobra. Maglia fora (não citada — CLAUDE.md). */
-const AVARIAS_SEM_LINHA = 'AVARIAS_SEM_SEMANA';
-const AVARIAS_SEM_FORA = ['MAGLIA'];
-let _avSemEstado = null;     // { loja, comKey, semIni, semFim, qtd, conf, form, erro, salvando }
+   Uma regra só, duas listas (SEM_LANC_TIPOS). Semana FECHADA (seg–dom anteriores):
+   - lançou alguma coisa → não é cobrada (o lançamento é a resposta);
+   - zero lançado → card urgente a partir da segunda, com "Lançar" ou "Não houve", este com
+     a SENHA de gerente ou sub (sem senha o "não houve" não vale — mesmo motivo da ciência do
+     mês, _cienteConfirmar);
+   - da terça em diante (e domingo), sem resposta, o app TRAVA pra gerente e sub — o mesmo
+     calendário dos barris (_barrisSemDiaDeTravar). Os outros cargos só veem o card: não
+     podem resolver, e parar a loja não ajuda.
+   Avaria conta como no resto do app (sem cancelada, transferência paga em dinheiro e saída
+   pra terceiro), pela semana gravada no registro (a.semana; o ts é UTC). Utensílio conta
+   qualquer lançamento "Utensílio / Louça" do Check-list na semana (quebrou ou falta).
+   Confirmação em gn_lojas, linhas AVARIAS_SEM_SEMANA / UTENSILIOS_SEM_SEMANA
+   ({semana: {loja: {nome, cargo, em}}}) — sem tabela nova. Falha aberto. Maglia fora. */
+const SEM_LANC_TIPOS = {
+  avarias: { linha: 'AVARIAS_SEM_SEMANA', el: 'avarias-semana-home-card', ico: '⚠️', nome: 'Avarias',
+    nada: 'nenhuma lançada', houve: 'Não houve avaria', lancar: '⚠️ Lançar avaria', url: 'gn-lojas.html?tab=avarias',
+    explica: 'Se houve avaria ou desperdício, lance no app Lojas (aba Avarias).', ok: 'semana sem avaria' },
+  utensilios: { linha: 'UTENSILIOS_SEM_SEMANA', el: 'utensilios-semana-home-card', ico: '🍴', nome: 'Utensílios',
+    nada: 'nenhuma quebra lançada', houve: 'Não houve quebra', lancar: '🍴 Lançar quebra', url: 'gn-checklist.html?tab=utensilios&novo=1',
+    explica: 'Se quebrou ou sumiu copo, prato, talher, lance no Check-list (aba Utensílios).', ok: 'semana sem quebra de utensílio' },
+};
+const SEM_LANC_FORA = ['MAGLIA'];
+const SEM_LANC_TRAVA_ID = 'sem-lanc-trava';
+let _semLanc = {};           // tipo → { loja, semIni, semFim, qtd, conf, form, erro, salvando }
+let _semLancCtx = null;      // { loja, cargo }
 function _avSemSemanaFechada(hoje) {
   const d = new Date(hoje || new Date()); d.setHours(12, 0, 0, 0);
   const seg = new Date(d); seg.setDate(d.getDate() - ((d.getDay() + 6) % 7) - 7);
@@ -7036,94 +7051,219 @@ function _avSemSemanaFechada(hoje) {
 function _avSemContaAvaria(a) {
   return a && a.status !== 'cancelado' && a.tipo !== 'transferencia_dinheiro' && a.tipo !== 'saida_terceiro';
 }
-async function _renderAvariasSemanaHome(mostrar, sess, isMaster) {
-  const el = document.getElementById('avarias-semana-home-card');
-  if (!el) return;
+// Quantos lançamentos a loja fez na semana, por tipo. null = não deu pra ler.
+function _semLancContar(tipo, lojaAllData, diasChk, ini, fim) {
+  if (tipo === 'avarias') {
+    if (!lojaAllData) return null;
+    const diaLocal = ts => { const d = new Date(ts); return isNaN(d) ? '' : _carnesISO(d); };
+    return Object.values(lojaAllData.avariasAll || {}).flatMap(v => Array.isArray(v) ? v : [])
+      .filter(a => _avSemContaAvaria(a) && (a.semana ? a.semana === ini : (diaLocal(a.ts) >= ini && diaLocal(a.ts) <= fim))).length;
+  }
+  if (!diasChk) return null;
+  return diasChk.filter(d => d.data_operacao >= ini && d.data_operacao <= fim)
+    .flatMap(d => Array.isArray(d.manutencao) ? d.manutencao : [])
+    .filter(m => m && m.tipo === 'Utensílio / Louça').length;   // o tipo que o Check-list grava (aba Utensílios)
+}
+// Compatível com quem já chamava (o card das avarias nasceu primeiro).
+async function _renderAvariasSemanaHome(mostrar, sess, isMaster) { return _renderSemLancHome(mostrar, sess, isMaster); }
+async function _renderSemLancHome(mostrar, sess, isMaster) {
   const loja = (isMaster && masterLoja) ? masterLoja : (sess && sess.loja);
-  if (!mostrar || !loja || loja === 'GERAL' || AVARIAS_SEM_FORA.includes(loja) || !LOJAS_LISTA.includes(loja)) { el.innerHTML = ''; _homeMarcar && _homeMarcar(el, null); return; }
-  const comKey = LOJA_COM_KEY[loja] || loja;
+  const limpar = () => { Object.values(SEM_LANC_TIPOS).forEach(t => { const e = document.getElementById(t.el); if (e) { e.innerHTML = ''; _homeMarcar(e, null); } }); _semLancTravaTirar(); };
+  if (!mostrar || !loja || loja === 'GERAL' || SEM_LANC_FORA.includes(loja) || !LOJAS_LISTA.includes(loja)) { _semLanc = {}; limpar(); return; }
+  const comKey = LOJA_COM_KEY[loja] || loja, chkKey = LOJA_DB_KEY[loja] || loja;
   const { ini, fim } = _avSemSemanaFechada();
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
   try {
-    const [lojaRows, confRows] = await Promise.all([
-      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'avSem:loja', null),
-      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${AVARIAS_SEM_LINHA}&select=all_data`, H, 'avSem:conf', null),
+    const [lojaRows, diasChk, confRows] = await Promise.all([
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'semLanc:loja', null),
+      window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${ini}&data_operacao=lte.${fim}&select=data_operacao,manutencao`, H, 'semLanc:chk', null),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=in.(${Object.values(SEM_LANC_TIPOS).map(t => t.linha).join(',')})&select=loja,all_data`, H, 'semLanc:conf', null),
     ]);
-    if (lojaRows === null || confRows === null) { el.innerHTML = ''; return; }   // falha aberto
-    const all = (lojaRows[0] && lojaRows[0].all_data) || {};
-    // A semana do registro (a.semana, a segunda-feira que o app Lojas grava) manda; o ts é
-    // UTC, e uma avaria lançada domingo às 22h cairia na segunda pelo ts. Sem a.semana, o ts
-    // convertido pro dia local.
-    const diaLocal = ts => { const d = new Date(ts); return isNaN(d) ? '' : _carnesISO(d); };
-    const avs = Object.values(all.avariasAll || {}).flatMap(v => Array.isArray(v) ? v : [])
-      .filter(a => _avSemContaAvaria(a) && (a.semana ? a.semana === ini : (diaLocal(a.ts) >= ini && diaLocal(a.ts) <= fim)));
-    const conf = (((confRows[0] && confRows[0].all_data) || {})[ini] || {})[loja] || null;
-    const ant = _avSemEstado && _avSemEstado.loja === loja && _avSemEstado.semIni === ini ? _avSemEstado : {};
-    _avSemEstado = { loja, comKey, semIni: ini, semFim: fim, qtd: avs.length, conf, form: !!ant.form, erro: ant.erro || '', salvando: false };
-    _avSemPintar();
+    if (confRows === null) { _semLanc = {}; limpar(); return; }   // falha aberto
+    const confDe = linha => (((confRows.find(r => r.loja === linha) || {}).all_data || {})[ini] || {})[loja] || null;
+    const allData = lojaRows === null ? null : ((lojaRows[0] && lojaRows[0].all_data) || {});
+    const novo = {};
+    Object.keys(SEM_LANC_TIPOS).forEach(tipo => {
+      const qtd = _semLancContar(tipo, allData, diasChk, ini, fim);
+      if (qtd === null) return;                                    // não leu: não cobra
+      const ant = _semLanc[tipo] && _semLanc[tipo].loja === loja && _semLanc[tipo].semIni === ini ? _semLanc[tipo] : {};
+      novo[tipo] = { loja, semIni: ini, semFim: fim, qtd, conf: confDe(SEM_LANC_TIPOS[tipo].linha), form: !!ant.form, erro: ant.erro || '', salvando: false };
+    });
+    _semLanc = novo;
+    _semLancCtx = { loja, cargo: String((sess && sess.cargo) || '').toLowerCase(), isMaster: !!isMaster };
+    _semLancPintar();
   } catch (e) {
-    window.gnLogError && window.gnLogError('avSem', e);
-    el.innerHTML = '';
+    window.gnLogError && window.gnLogError('semLanc', e);
+    _semLanc = {}; limpar();
   }
 }
-function _avSemPintar() {
-  const el = document.getElementById('avarias-semana-home-card');
-  const st = _avSemEstado;
-  if (!el || !st) return;
-  // Lançou avaria, ou a gerência já confirmou: nada a cobrar.
-  if (st.qtd > 0 || st.conf) { el.innerHTML = ''; _homeMarcar(el, null); return; }
+const _semLancPendente = tipo => { const st = _semLanc[tipo]; return !!(st && st.qtd === 0 && !st.conf); };
+// Trava: terça a domingo, só pra quem resolve (gerente/sub da própria loja, não o mestre).
+function _semLancDeveTravar() {
+  const c = _semLancCtx;
+  if (!c || c.isMaster || !CIENTE_CARGOS.includes(c.cargo)) return false;
+  if (!_barrisSemDiaDeTravar(new Date())) return false;
+  return Object.keys(SEM_LANC_TIPOS).some(_semLancPendente);
+}
+function _semLancBlocoHtml(tipo, naTrava) {
+  const st = _semLanc[tipo], T = SEM_LANC_TIPOS[tipo];
   const esc = s2 => window.escapeHtml ? window.escapeHtml(String(s2 == null ? '' : s2)) : String(s2);
   const dm = i2 => String(i2).slice(8, 10) + '/' + String(i2).slice(5, 7);
-  _homeMarcar(el, 'acao', { icone: '⚠️', titulo: 'Avarias da semana', urgente: true, resumo: `nenhuma lançada de ${dm(st.semIni)} a ${dm(st.semFim)} — gerência confirma` });
-  const form = st.form ? `<div style="margin-top:9px;background:var(--fill-sutil);border:1px solid rgba(0,0,0,.1);border-radius:10px;padding:10px">
+  const form = `<div style="margin-top:9px;background:var(--fill-sutil);border:1px solid rgba(0,0,0,.1);border-radius:10px;padding:10px">
       <div style="font-size:10.5px;font-weight:800;color:var(--t2);margin-bottom:6px">SENHA DA GERÊNCIA OU SUB-GERÊNCIA</div>
-      <input id="avsem-user" type="text" placeholder="Usuário" autocomplete="off" style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.14);border-radius:8px;padding:9px;font-size:12px;margin-bottom:6px;font-family:inherit">
-      <input id="avsem-senha" type="password" placeholder="Senha" autocomplete="off" onkeydown="if(event.key==='Enter')_avSemConfirmar()" style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.14);border-radius:8px;padding:9px;font-size:12px;font-family:inherit">
+      <input id="semlanc-${tipo}-user" type="text" placeholder="Usuário" autocomplete="off" style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.14);border-radius:8px;padding:9px;font-size:12px;margin-bottom:6px;font-family:inherit">
+      <input id="semlanc-${tipo}-senha" type="password" placeholder="Senha" autocomplete="off" onkeydown="if(event.key==='Enter')_semLancConfirmar('${tipo}')" style="width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.14);border-radius:8px;padding:9px;font-size:12px;font-family:inherit">
       ${st.erro ? `<div style="font-size:11px;color:var(--txt-red);margin-top:6px">${esc(st.erro)}</div>` : ''}
       <div style="display:flex;gap:6px;margin-top:8px">
-        <button onclick="_avSemConfirmar()" ${st.salvando ? 'disabled' : ''} style="flex:1;background:#059669;border:none;border-radius:9px;padding:10px;color:#fff;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">${st.salvando ? 'Registrando...' : 'Confirmar: não houve avaria'}</button>
-        <button onclick="_avSemEstado.form=false;_avSemEstado.erro='';_avSemPintar()" style="background:var(--fill-sutil);border:1px solid rgba(0,0,0,.1);border-radius:9px;padding:10px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--t2)">Cancelar</button>
-      </div></div>` : '';
-  el.innerHTML = `<div style="background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.22);border-left:3px solid #dc2626;border-radius:18px;padding:14px 16px;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05)">
-    <div style="font-size:12px;font-weight:800;color:var(--t1);margin-bottom:4px">⚠️ Avarias da semana ${dm(st.semIni)} a ${dm(st.semFim)}: nenhuma lançada</div>
-    <div style="font-size:11px;color:var(--t2);line-height:1.5">Se houve avaria ou desperdício, lance no app Lojas (aba Avarias). Se a semana foi mesmo sem avaria, a <b>gerência ou a sub</b> confirma com a senha.</div>
+        <button onclick="_semLancConfirmar('${tipo}')" ${st.salvando ? 'disabled' : ''} style="flex:1;background:#059669;border:none;border-radius:9px;padding:10px;color:#fff;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">${st.salvando ? 'Registrando...' : 'Confirmar: ' + T.houve.toLowerCase()}</button>
+        <button onclick="_semLanc['${tipo}'].form=false;_semLanc['${tipo}'].erro='';_semLancPintar()" style="background:var(--fill-sutil);border:1px solid rgba(0,0,0,.1);border-radius:9px;padding:10px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--t2)">Cancelar</button>
+      </div></div>`;
+  return `<div class="semlanc-bloco" data-tipo="${tipo}" style="background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.22);border-left:3px solid #dc2626;border-radius:18px;padding:14px 16px;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05)">
+    <div style="font-size:12px;font-weight:800;color:var(--t1);margin-bottom:4px">${T.ico} ${T.nome} da semana ${dm(st.semIni)} a ${dm(st.semFim)}: ${T.nada}</div>
+    <div style="font-size:11px;color:var(--t2);line-height:1.5">${T.explica} Se a semana foi mesmo sem, a <b>gerência ou a sub</b> confirma com a senha.${naTrava ? '' : (_barrisSemDiaDeTravar(new Date()) ? '' : ' <b>A partir de amanhã o app trava</b> pra gerência até resolver.')}</div>
     ${st.form ? form : `<div style="display:flex;gap:6px;margin-top:9px">
-      <button onclick="navTo('gn-lojas.html?tab=avarias')" style="flex:1;background:var(--s2);border:1px solid rgba(239,68,68,.35);border-radius:9px;padding:9px;font-size:11.5px;font-weight:800;color:var(--t1);cursor:pointer;font-family:inherit">⚠️ Lançar avaria</button>
-      <button onclick="_avSemEstado.form=true;_avSemPintar()" style="flex:1;background:#059669;border:none;border-radius:9px;padding:9px;font-size:11.5px;font-weight:800;color:#fff;cursor:pointer;font-family:inherit">✓ Não houve avaria</button>
+      <button onclick="navTo('${T.url}')" style="flex:1;background:var(--s2);border:1px solid rgba(239,68,68,.35);border-radius:9px;padding:9px;font-size:11.5px;font-weight:800;color:var(--t1);cursor:pointer;font-family:inherit">${T.lancar}</button>
+      <button onclick="_semLanc['${tipo}'].form=true;_semLancPintar()" style="flex:1;background:#059669;border:none;border-radius:9px;padding:9px;font-size:11.5px;font-weight:800;color:#fff;cursor:pointer;font-family:inherit">✓ ${T.houve}</button>
     </div>`}
   </div>`;
 }
-async function _avSemConfirmar() {
-  const st = _avSemEstado;
+function _semLancPintar() {
+  const trava = _semLancDeveTravar();
+  const dm = i2 => String(i2).slice(8, 10) + '/' + String(i2).slice(5, 7);
+  Object.keys(SEM_LANC_TIPOS).forEach(tipo => {
+    const el = document.getElementById(SEM_LANC_TIPOS[tipo].el);
+    if (!el) return;
+    // Na trava o bloco mora nela (e só nela — campo de senha duplicado confunde o id).
+    if (!_semLancPendente(tipo) || trava) { el.innerHTML = ''; _homeMarcar(el, null); return; }
+    const st = _semLanc[tipo];
+    _homeMarcar(el, 'acao', { icone: SEM_LANC_TIPOS[tipo].ico, titulo: SEM_LANC_TIPOS[tipo].nome + ' da semana', urgente: true,
+      resumo: `${SEM_LANC_TIPOS[tipo].nada} de ${dm(st.semIni)} a ${dm(st.semFim)} — gerência confirma` });
+    el.innerHTML = _semLancBlocoHtml(tipo, false);
+  });
+  if (trava) _semLancTravaMostrar(); else _semLancTravaTirar();
+}
+function _semLancTravaMostrar() {
+  let ov = document.getElementById(SEM_LANC_TRAVA_ID);
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.id = SEM_LANC_TRAVA_ID;
+    // Mesma camada da trava dos barris (abaixo do alerta urgente do mestre).
+    ov.style.cssText = 'position:fixed;inset:0;background:var(--s1);z-index:99998;overflow-y:auto;-webkit-overflow-scrolling:touch';
+    document.body.appendChild(ov);
+  }
+  const pend = Object.keys(SEM_LANC_TIPOS).filter(_semLancPendente);
+  ov.innerHTML = `<div style="max-width:560px;margin:0 auto;padding:16px 0 26px">
+    <div style="padding:4px 16px 12px">
+      <div style="font-size:9px;font-weight:800;letter-spacing:1.6px;text-transform:uppercase;color:var(--t4)">Gigante Nordestino</div>
+      <div style="font-size:16px;font-weight:900;color:var(--t1);margin-top:3px">Antes de seguir: validação da semana</div>
+      <div style="font-size:11.5px;color:var(--t3);margin-top:4px;line-height:1.45">A semana fechou sem nenhum lançamento abaixo. Lance o que houve, ou a gerência/sub confirma com a senha que não houve — o app libera na hora.</div>
+    </div>
+    ${pend.map(t => _semLancBlocoHtml(t, true)).join('')}
+    <div style="padding:4px 16px 0"><button onclick="doLogout()" style="width:100%;padding:10px;border-radius:12px;border:1px solid rgba(0,0,0,.15);cursor:pointer;font-family:inherit;font-size:12px;font-weight:700;background:transparent;color:var(--t3)">Não sou eu — sair</button></div>
+  </div>`;
+  document.body.style.overflow = 'hidden';
+}
+function _semLancTravaTirar() {
+  const ov = document.getElementById(SEM_LANC_TRAVA_ID);
+  if (ov) { ov.remove(); document.body.style.overflow = ''; }
+}
+async function _semLancConfirmar(tipo) {
+  const st = _semLanc[tipo], T = SEM_LANC_TIPOS[tipo];
   if (!st || st.salvando) return;
-  const user = (document.getElementById('avsem-user')?.value || '').trim();
-  const pass = document.getElementById('avsem-senha')?.value || '';
-  if (!user || !pass) { st.erro = 'Preencha usuário e senha.'; _avSemPintar(); return; }
-  st.salvando = true; st.erro = ''; _avSemPintar();
+  const user = (document.getElementById(`semlanc-${tipo}-user`)?.value || '').trim();
+  const pass = document.getElementById(`semlanc-${tipo}-senha`)?.value || '';
+  if (!user || !pass) { st.erro = 'Preencha usuário e senha.'; _semLancPintar(); return; }
+  st.salvando = true; st.erro = ''; _semLancPintar();
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
   try {
-    const auth = await window.gnFetchJson(`${SB_URL}/rest/v1/rpc/verificar_login`, H, 'avSem:auth', [],
-      { method: 'POST', body: JSON.stringify({ p_nome: user, p_senha: pass, p_app: 'gn-home:avarias-semana' }) });
+    const auth = await window.gnFetchJson(`${SB_URL}/rest/v1/rpc/verificar_login`, H, 'semLanc:auth', [],
+      { method: 'POST', body: JSON.stringify({ p_nome: user, p_senha: pass, p_app: 'gn-home:' + tipo + '-semana' }) });
     const cargo = (auth[0] && auth[0].cargo || '').toLowerCase();
     if (!auth.length) { st.erro = 'Usuário ou senha incorretos.'; return; }
     if (!CIENTE_CARGOS.includes(cargo)) { st.erro = `A confirmação é da gerência ou da sub-gerência. ${auth[0].nome} está como ${auth[0].cargo || 'sem cargo'}.`; return; }
     // Relê antes de gravar: a linha é de todas as lojas.
-    const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${AVARIAS_SEM_LINHA}&select=all_data`, { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY }, 'avSem:reler', null);
+    const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${T.linha}&select=all_data`, { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY }, 'semLanc:reler', null);
     if (rows === null) { st.erro = 'Sem conexão com o banco. Tente de novo.'; return; }
     const dados = JSON.parse(JSON.stringify((rows[0] && rows[0].all_data) || {}));
     dados[st.semIni] = dados[st.semIni] || {};
     dados[st.semIni][st.loja] = { nome: auth[0].nome, cargo, em: new Date().toISOString(), semFim: st.semFim };
-    await _gnLojasUpsert(AVARIAS_SEM_LINHA, dados, auth[0].nome);
+    await _gnLojasUpsert(T.linha, dados, auth[0].nome);
     st.conf = dados[st.semIni][st.loja];
     st.form = false;
-    window.showToast && window.showToast('✓ Registrado: semana sem avaria', 'success');
+    window.showToast && window.showToast('✓ Registrado: ' + T.ok, 'success');
   } catch (e) {
-    window.gnLogError && window.gnLogError('avSem:confirmar', e);
+    window.gnLogError && window.gnLogError('semLanc:confirmar', e);
     st.erro = 'Não consegui registrar agora. Confere a internet e tenta de novo.';
   } finally {
     st.salvando = false;
-    _avSemPintar();
+    _semLancPintar();
   }
+}
+
+/* ── Painel › Operação › ✅ Validações: quem lançou, quem só confirmou ───────────────────
+   As 4 últimas semanas fechadas, por loja: lançou (quantos), confirmou "não houve" (quem),
+   ou pendente. O que importa ver aqui é a loja que confirma "não houve" toda semana em vez
+   de lançar — é o sinal de que o controle não está sendo feito. */
+let _semLancPainel = null, _semLancPainelCarregando = false;
+async function _loadSemLancPainel() {
+  if (_semLancPainelCarregando) return;
+  _semLancPainelCarregando = true;
+  try {
+    const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+    const lojas = LOJAS_LISTA.filter(k => !SEM_LANC_FORA.includes(k));
+    const semanas = [0, 1, 2, 3].map(n => { const d = new Date(); d.setDate(d.getDate() - 7 * n); return _avSemSemanaFechada(d); });
+    const de = semanas[3].ini, ate = semanas[0].fim;
+    const comKeys = lojas.map(k => '"' + (LOJA_COM_KEY[k] || k) + '"');
+    const [lojaRows, chkRows, confRows] = await Promise.all([
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=in.(${encodeURIComponent(comKeys.join(','))})&select=loja,av:all_data->avariasAll`, H, 'semLancPainel:lojas', null),
+      window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${de}&data_operacao=lte.${ate}&select=loja,data_operacao,manutencao`, H, 'semLancPainel:chk', null),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=in.(${Object.values(SEM_LANC_TIPOS).map(t => t.linha).join(',')})&select=loja,all_data`, H, 'semLancPainel:conf', null),
+    ]);
+    if (lojaRows === null || chkRows === null || confRows === null) { _semLancPainel = { erro: true }; return; }
+    const linhas = lojas.map(k => {
+      const lr = lojaRows.find(r => r.loja === (LOJA_COM_KEY[k] || k));
+      const chk = chkRows.filter(r => _normLoja(r.loja) === k);
+      const por = {};
+      Object.keys(SEM_LANC_TIPOS).forEach(tipo => {
+        const conf = ((confRows.find(r => r.loja === SEM_LANC_TIPOS[tipo].linha) || {}).all_data) || {};
+        por[tipo] = semanas.map(w => ({ semIni: w.ini, qtd: _semLancContar(tipo, { avariasAll: (lr && lr.av) || {} }, chk, w.ini, w.fim), conf: (conf[w.ini] || {})[k] || null }));
+      });
+      return { k, nome: LOJA_DISPLAY[k] || k, por };
+    });
+    _semLancPainel = { semanas, linhas };
+  } catch (e) {
+    window.gnLogError && window.gnLogError('semLancPainel', e);
+    _semLancPainel = { erro: true };
+  } finally {
+    _semLancPainelCarregando = false;
+    if (_dashTab === 'semlanc') renderDashboard();
+  }
+}
+function _buildSemLancPanel() {
+  const d = _semLancPainel;
+  if (!d) { if (!_semLancPainelCarregando) _loadSemLancPainel(); return _skelPanel(3); }
+  if (d.erro) return `<div class="att-item"><div><div class="att-nm">Não deu pra carregar agora</div><div class="att-rs"><button onclick="_semLancPainel=null;_loadSemLancPainel();renderDashboard()" style="margin-top:6px;padding:6px 12px;border-radius:8px;border:1px solid var(--b1);background:var(--s2);color:var(--t1);font-weight:700;cursor:pointer;font-family:inherit">Tentar de novo</button></div></div></div>`;
+  const esc = s2 => window.escapeHtml(String(s2 == null ? '' : s2));
+  const dm = i2 => String(i2).slice(8, 10) + '/' + String(i2).slice(5, 7);
+  const cel = x => x.qtd > 0 ? `<span title="${x.qtd} lançamento(s)" style="color:var(--txt-green);font-weight:800">${x.qtd}</span>`
+    : x.conf ? `<span title="Confirmado por ${esc(x.conf.nome)}" style="color:#d97706;font-weight:800">0✓</span>`
+    : `<span title="Sem lançamento e sem confirmação" style="color:var(--txt-red);font-weight:900">—</span>`;
+  const sems = d.semanas.slice().reverse();
+  const tabela = tipo => {
+    const T = SEM_LANC_TIPOS[tipo];
+    const pendHoje = d.linhas.filter(l => { const w = l.por[tipo][0]; return w.qtd === 0 && !w.conf; }).map(l => l.nome);
+    const soConfirma = d.linhas.filter(l => l.por[tipo].filter(w => w.qtd === 0).length >= 3 && l.por[tipo].some(w => w.conf)).map(l => l.nome);
+    return `<div class="semlanc-painel" data-tipo="${tipo}" style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:12px 14px;margin-bottom:10px">
+      <div style="font-size:12.5px;font-weight:800;color:var(--t1);margin-bottom:6px">${T.ico} ${T.nome} — últimas 4 semanas</div>
+      ${pendHoje.length ? `<div style="font-size:11px;color:var(--txt-red);font-weight:800;margin-bottom:4px">Sem resposta da semana ${dm(d.semanas[0].ini)}: ${esc(pendHoje.join(', '))}</div>` : `<div style="font-size:11px;color:var(--txt-green);font-weight:700;margin-bottom:4px">Todas responderam a semana ${dm(d.semanas[0].ini)}.</div>`}
+      ${soConfirma.length ? `<div style="font-size:11px;color:#d97706;font-weight:700;margin-bottom:6px">🔎 Sem nenhum lançamento em 3 das 4 semanas, só confirmando: ${esc(soConfirma.join(', '))}</div>` : ''}
+      <div style="display:grid;grid-template-columns:minmax(0,1fr) repeat(4,46px);gap:3px;font-size:9.5px;font-weight:800;color:var(--t4);margin-top:4px"><span></span>${sems.map(w => `<span style="text-align:center">${dm(w.ini)}</span>`).join('')}</div>
+      ${d.linhas.map(l => `<div style="display:grid;grid-template-columns:minmax(0,1fr) repeat(4,46px);gap:3px;align-items:center;padding:4px 0;border-top:1px solid var(--b1);font-size:11.5px">
+        <span style="font-weight:700;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.nome)}</span>
+        ${l.por[tipo].slice().reverse().map(w => `<span style="text-align:center">${cel(w)}</span>`).join('')}</div>`).join('')}
+    </div>`;
+  };
+  return tabela('avarias') + tabela('utensilios') + `<div style="font-size:9.5px;color:var(--t4);line-height:1.45;margin:2px 2px 0"><b style="color:var(--txt-green)">número</b> = lançamentos na semana · <b style="color:#d97706">0✓</b> = gerência confirmou que não houve (toque pra ver quem) · <b style="color:var(--txt-red)">—</b> = sem lançamento e sem confirmação. Semana de segunda a domingo.</div>`;
 }
 
 // Card de aviso da segunda-feira — some no instante em que a loja confirma a contagem, e
@@ -8326,6 +8466,7 @@ function doLogout() {
   // Sem isto, o "já respondeu" de quem saiu valeria pro próximo que entrasse no aparelho.
   _gateReset();
   _cienteTravaLiberar();
+  _semLancTravaTirar();
   // A trava de presença é overlay fixo: sem tirar ela aqui, "Não sou eu — sair" deslogava
   // por baixo e deixava a própria trava cobrindo a tela de login — a porta de saída não
   // levava a lugar nenhum.
@@ -18907,6 +19048,9 @@ function renderDashboard() {
   } else if (_dashTab==='presenca') {
     content = _buildPresencaPanel();
 
+  } else if (_dashTab==='semlanc') {
+    content = _buildSemLancPanel();
+
   } else if (_dashTab==='folgas') {
     content = _buildFolgasGerenciaPanel();
 
@@ -18984,7 +19128,7 @@ function renderDashboard() {
       </div>
       <button type="button" class="dash-tabs-seta dir off" id="dash-tabs-dir" aria-label="Mais abas" onclick="_dashTabsRolar(1)"><span>›</span></button>
       </div>
-      ${(_dashTab!=='metas'&&_dashTab!=='folgas'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris'&&_dashTab!=='carnes'&&_dashTab!=='trios'&&_dashTab!=='banco'&&_dashTab!=='extra'&&_dashTab!=='dre')?periodRow:''}
+      ${(_dashTab!=='metas'&&_dashTab!=='folgas'&&_dashTab!=='semlanc'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris'&&_dashTab!=='carnes'&&_dashTab!=='trios'&&_dashTab!=='banco'&&_dashTab!=='extra'&&_dashTab!=='dre')?periodRow:''}
       ${content}
     </div>`;
   _dashTabsDepoisDeDesenhar();
@@ -19109,7 +19253,7 @@ const DASH_GRUPOS = [
   { g: 'vendas',   rot: '📈 Vendas',   abas: [['fat', '↓ Faturamento'], ['att', '⚠ Atenção'], ['bi', '📊 BI'], ['metas', '⚙ Metas']] },
   { g: 'caixa',    rot: '🧾 Caixa',    abas: [['cancel', '🧾 Cancel. e transf.'], ['sem10', '💸 Sem 10%']] },
   { g: 'equipe',   rot: '👥 Equipe',   abas: [['presenca', '👤 Presença'], ['folgas', '📅 Folgas'], ['ocorr', '⚠ Ocorrências'], ['ferias', '🏖 Férias'], ['xadrez', '🔀 Xadrez'], ['banco', '⏱ Banco'], ['extra', '👷 Extra']] },
-  { g: 'operacao', rot: '🛠 Operação', abas: [['barris', '🍺 Barris'], ['carnes', '🥩 Carnes'], ['trios', '🎵 Trios']] },
+  { g: 'operacao', rot: '🛠 Operação', abas: [['barris', '🍺 Barris'], ['carnes', '🥩 Carnes'], ['trios', '🎵 Trios'], ['semlanc', '✅ Validações']] },
   { g: 'dre',      rot: '💰 DRE',      abas: [['dre', '💰 DRE']] },
 ];
 const _dashGrupoUltima = {};
