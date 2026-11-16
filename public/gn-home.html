@@ -17994,7 +17994,7 @@ function _buildSem10Panel() {
     </div>` : '';
 
   if (!d.qtd) {
-    return _reportBtnsRowHtml('Sem10') + kpis +
+    return _reportBtnsRowHtml('Sem10') + _sem10LojaFiltroHtml() + kpis +
       `<div class="att-item"><div><div class="att-nm">Nenhuma nota sem 10% em ${esc(periodo)}</div>
         <div class="att-rs">Nenhuma das ${d.nLojas} lojas lançou nota neste período.</div></div></div>`
       + _sem10SemNadaHtml(d);
@@ -18021,7 +18021,7 @@ function _buildSem10Panel() {
       </div>`).join('')}
     </div>`).join('');
 
-  return _reportBtnsRowHtml('Sem10') + kpis + conferir + _sem10RankingHtml(d) + blocos + _sem10SemNadaHtml(d);
+  return _reportBtnsRowHtml('Sem10') + _sem10LojaFiltroHtml() + kpis + conferir + _sem10RankingHtml(d) + blocos + _sem10SemNadaHtml(d);
 }
 
 // Ranking do melhor pro pior, como no painel de cancelamento: quem menos deixou de
@@ -18047,15 +18047,73 @@ function _sem10RankingHtml(d) {
 function _sem10SemNadaHtml(d) {
   return _declSemNadaHtml(d.semNota, 'Sem nota no período', 'nota sem 10%');
 }
+/* ── Relatório de UMA loja (ou algumas) — mesmo seletor de Cancel. e transf. ──────────
+   "Notas sem 10%, também poderia fazer a mesma coisa?" (16/11/2026)
+   Nenhuma marcada = rede. O recorte vale pro WhatsApp/PDF; a tela segue com a rede. Com
+   filtro, o relatório não lista as outras lojas: diz a posição da loja marcada no ranking
+   da tela (10% não cobrado, de quem menos deixou de cobrar pra quem mais). */
+let _sem10RelatorioLojasFiltro = [];
+function _sem10LojasDaRegraRel() { return LOJAS_LISTA.filter(_sem10LojaDentro); }
+function _sem10FiltroLojaToggle(key, marcado) {
+  _sem10RelatorioLojasFiltro = marcado
+    ? [..._sem10RelatorioLojasFiltro.filter(k => k !== key), key]
+    : _sem10RelatorioLojasFiltro.filter(k => k !== key);
+}
+function _sem10LojaFiltroHtml() {
+  const chaves = _sem10LojasDaRegraRel().slice().sort((a, b) => (LOJA_DISPLAY[a] || a).localeCompare(LOJA_DISPLAY[b] || b));
+  if (chaves.length < 2) return '';
+  const checks = chaves.map(k => `<label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--t2);cursor:pointer">
+      <input type="checkbox" class="sem10-rel-loja" value="${window.escapeHtml(k)}" ${_sem10RelatorioLojasFiltro.includes(k) ? 'checked' : ''} onchange="_sem10FiltroLojaToggle(this.value,this.checked)">
+      ${window.escapeHtml(LOJA_DISPLAY[k] || k)}
+    </label>`).join('');
+  return `<div class="sem10-rel-filtro" style="margin:-6px 0 12px">
+    <label style="font-size:10px;color:var(--t3);font-weight:700;display:block;margin-bottom:4px">Relatório de (marque 1+ lojas; nenhuma marcada = todas):</label>
+    <div style="display:flex;flex-wrap:wrap;gap:6px 14px;padding:8px 10px;background:var(--s1);border:1px solid rgba(0,0,0,.08);border-radius:8px">${checks}</div>
+  <!--/sem10-rel-filtro--></div>`;
+}
+function _sem10RelFiltro() {
+  const validas = _sem10RelatorioLojasFiltro.filter(k => _sem10LojasDaRegraRel().includes(k));
+  return validas.length ? validas : null;
+}
+function _sem10Recortar(d, f) {
+  if (!f) return d;
+  const lojas = d.lojas.filter(l => f.includes(l.k));
+  const valor = lojas.reduce((a, l) => a + l.valor, 0);
+  return Object.assign({}, d, {
+    lojas, valor, dez: valor * 0.10,
+    qtd: lojas.reduce((a, l) => a + l.itens.length, 0),
+    suspeitas: lojas.reduce((a, l) => a + l.suspeitas, 0),
+    semTotalDia: lojas.reduce((a, l) => a + l.semTotalDia, 0),
+    semNota: (d.semNota || []).filter(l => f.includes(l.k)),
+    nLojas: f.length,
+  });
+}
+
 // ── Relatórios da aba 💸 Sem 10% (mesmo padrão gerarWpp/gerarPDF/enviarPDF...Wpp) ────
 function _sem10RelatorioTexto(wpp) {
   if (!_dashSem10Per) return null;
-  const d = _sem10MacroDados();
+  const dRede = _sem10MacroDados();
+  const f = _sem10RelFiltro();
+  const d = _sem10Recortar(dRede, f);
+  const nomes = f ? f.map(k => LOJA_DISPLAY[k] || k).sort((a, b2) => a.localeCompare(b2, 'pt-BR')).join(', ') : '';
   const b = s => wpp ? '*' + s + '*' : s;
   const dm = iso => String(iso || '').slice(8, 10) + '/' + String(iso || '').slice(5, 7);
   const periodo = _dashRangeOf(_dashOff()).label;
-  let msg = `${wpp ? '💸 ' : ''}${b('NOTAS SEM 10%')}\n${periodo}\n`;
+  let msg = `${wpp ? '💸 ' : ''}${b('NOTAS SEM 10%' + (f ? ' — ' + nomes.toUpperCase() : ''))}\n${periodo}\n`;
   msg += `\n10% não cobrado: ${_fmtBRL(d.dez)}\nValor das notas: ${_fmtBRL(d.valor)} (${d.qtd} nota${d.qtd === 1 ? '' : 's'})\n`;
+  if (f) {
+    // Mesma ordem do ranking da tela (_sem10RankingHtml): só quem lançou nota entra.
+    const rk = dRede.lojas.slice().sort((a, b2) => a.dez - b2.dez);
+    if (rk.length >= 2) {
+      msg += `\n${b('Posição na rede')} ${wpp ? '_(10% não cobrado, de quem menos deixou de cobrar pra quem mais)_' : '(10% não cobrado, de quem menos deixou de cobrar pra quem mais)'}\n`;
+      f.slice().sort((a, b2) => (LOJA_DISPLAY[a] || a).localeCompare(LOJA_DISPLAY[b2] || b2)).forEach(k => {
+        const ix = rk.findIndex(l => l.k === k);
+        const nome = LOJA_DISPLAY[k] || k;
+        msg += ix < 0 ? `   ${nome}: fora do ranking (nenhuma nota no período)\n`
+                      : `   ${nome}: ${ix + 1}º de ${rk.length} · ${_fmtBRL(rk[ix].dez)}\n`;
+      });
+    }
+  }
   d.lojas.forEach(l => {
     msg += `\n${wpp ? '🏪 ' : ''}${b(LOJA_DISPLAY[l.k] || l.k)}\n`;
     msg += `  10% não cobrado: ${_fmtBRL(l.dez)}  ·  notas: ${_fmtBRL(l.valor)} (${l.itens.length})\n`;
@@ -18065,7 +18123,7 @@ function _sem10RelatorioTexto(wpp) {
     });
   });
   msg += _sem10RelatorioSemNada(d, wpp);
-  return { msg, titulo: 'Notas sem 10% · ' + periodo };
+  return { msg, titulo: 'Notas sem 10%' + (f ? ' — ' + nomes : '') + ' · ' + periodo };
 }
 // Mesmo trecho do relatório de cancelamento (_declRelatorioSemNada): é a mesma assinatura
 // lida em outro campo do fechamento, então é a mesma cobrança.
