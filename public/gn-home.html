@@ -7275,7 +7275,7 @@ function _buildUtensEntradasPanel() {
     </div>`;
   if (!x.lista.length) {
     return topo + `<div class="att-item"><div><div class="att-nm">Nenhuma entrada de utensílio nos últimos ${_utensEntDias} dias</div>
-      <div class="att-rs">As lojas dão entrada no Check-list › Utensílios › 📥 Entrada, quando chega peça comprada pela loja ou fora da manutenção.</div></div></div>`;
+      <div class="att-rs">As lojas dão entrada no Check-list › Utensílios › 📥 Entrada, quando chega peça comprada pela loja ou fora da manutenção.</div></div></div>` + _utensEstoqueHtml(d);
   }
   const blocos = x.com.map(l => `<div class="utensent-loja" data-loja="${esc(l.k)}" style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid #0891b2;border-radius:14px;padding:12px 14px;margin-bottom:10px">
       <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:4px">
@@ -7294,7 +7294,71 @@ function _buildUtensEntradasPanel() {
         </div>
       </div>`).join('')}
     </div>`).join('');
-  return topo + blocos + (x.sem.length ? `<div style="font-size:10.5px;color:var(--t3);line-height:1.5;margin:2px 2px 0">Sem entrada no período: ${esc(x.sem.join(', '))}.</div>` : '');
+  return topo + blocos + (x.sem.length ? `<div style="font-size:10.5px;color:var(--t3);line-height:1.5;margin:2px 2px 0">Sem entrada no período: ${esc(x.sem.join(', '))}.</div>` : '') + _utensEstoqueHtml(d);
+}
+
+/* ── Estoque de utensílios por loja: quem tem o controle e quem não fez ────────────────
+   "Tem como colocar os estoques de quem tem e quem não fez ainda também, até pra cobrar a
+    gerência." (17/11/2026)
+
+   Mesma leitura da aba (utensilios_saldo de cada loja) — nenhuma requisição a mais. Quem
+   não tem nenhuma peça no controle vem primeiro, em vermelho: é a cobrança. Depois as que
+   têm, da contagem mais antiga pra mais recente (a mais parada é a próxima a cobrar), com
+   peças, unidades, zeradas e a data da última mexida. Toque na loja abre as peças. */
+let _utensEstAberta = new Set();
+function _utensEstToggle(k) { _utensEstAberta.has(k) ? _utensEstAberta.delete(k) : _utensEstAberta.add(k); renderDashboard(); }
+function _utensEstoqueDados(d) {
+  const linhas = d.lojas.map(k => {
+    const us = d.saldos[k] || {};
+    const pecas = Object.values(us).filter(v => v && v.nome).map(v => ({
+      nome: v.nome, qtd: parseFloat(v.qtd) || 0,
+      quando: v.atualizado_em || v.contado_em || v.inicial_em || '',
+    })).sort((a, b) => a.qtd - b.qtd || a.nome.localeCompare(b.nome, 'pt-BR'));
+    const ult = pecas.reduce((m, p) => (p.quando > m ? p.quando : m), '');
+    return { k, nome: LOJA_DISPLAY[k] || k, pecas, unidades: pecas.reduce((a, p) => a + p.qtd, 0),
+             zeradas: pecas.filter(p => p.qtd <= 0).length, ult };
+  });
+  return {
+    semControle: linhas.filter(l => !l.pecas.length).map(l => l.nome).sort((a, b) => a.localeCompare(b, 'pt-BR')),
+    comControle: linhas.filter(l => l.pecas.length).sort((a, b) => String(a.ult).localeCompare(String(b.ult)) || a.nome.localeCompare(b.nome, 'pt-BR')),
+  };
+}
+function _utensEstoqueHtml(d) {
+  const esc = s2 => window.escapeHtml(String(s2 == null ? '' : s2));
+  const e = _utensEstoqueDados(d);
+  const diasDesde = iso => iso ? Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 864e5)) : null;
+  const quando = iso => { const n = diasDesde(iso); return n === null ? '—' : n === 0 ? 'hoje' : n === 1 ? 'ontem' : `há ${n} dias`; };
+  const cobrar = e.semControle.length ? `<div class="utensest-sem" style="background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.25);border-left:3px solid #dc2626;border-radius:12px;padding:10px 12px;margin-bottom:8px">
+      <div style="font-size:12px;font-weight:800;color:var(--txt-red);margin-bottom:3px">⚠ Não fizeram a contagem (${e.semControle.length})</div>
+      <div style="font-size:11.5px;color:var(--t1);font-weight:700;line-height:1.45">${esc(e.semControle.join(', '))}</div>
+      <div style="font-size:10px;color:var(--t3);margin-top:3px;line-height:1.4">Nenhuma peça no controle. A gerência conta no Check-list › Utensílios › 📋 Contar.</div>
+    </div>` : `<div style="font-size:11px;color:var(--txt-green);font-weight:700;margin-bottom:8px">✓ Todas as lojas têm o controle de utensílios começado.</div>`;
+  const linhas = e.comControle.map(l => {
+    const aberta = _utensEstAberta.has(l.k);
+    const velho = diasDesde(l.ult) !== null && diasDesde(l.ult) > 30;
+    return `<div class="utensest-loja" data-loja="${esc(l.k)}" style="border-top:1px solid var(--b1)">
+      <div onclick="_utensEstToggle('${esc(l.k)}')" style="display:flex;align-items:center;gap:8px;padding:8px 0;cursor:pointer">
+        <span style="font-size:10px;color:var(--t4);width:10px">${aberta ? '▾' : '▸'}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;font-weight:800;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.nome)}</div>
+          <div style="font-size:10px;color:${velho ? 'var(--txt-amber)' : 'var(--t3)'}">${l.pecas.length} peça${l.pecas.length === 1 ? '' : 's'} no controle · atualizado ${quando(l.ult)}${velho ? ' — parado' : ''}</div>
+        </div>
+        <div style="text-align:right;white-space:nowrap">
+          <div style="font-size:13px;font-weight:900;color:var(--t1);font-variant-numeric:tabular-nums">${l.unidades}</div>
+          <div style="font-size:9px;color:${l.zeradas ? 'var(--txt-red)' : 'var(--t4)'};font-weight:${l.zeradas ? 800 : 400}">${l.zeradas ? l.zeradas + ' zerada' + (l.zeradas === 1 ? '' : 's') : 'unidades'}</div>
+        </div>
+      </div>
+      ${aberta ? `<div class="utensest-pecas" style="padding:0 0 8px 18px">${l.pecas.map(p => `<div style="display:flex;justify-content:space-between;gap:8px;font-size:11px;padding:3px 0;border-top:1px dashed var(--b1)">
+        <span style="color:var(--t2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.nome)}</span>
+        <span style="font-weight:800;font-variant-numeric:tabular-nums;color:${p.qtd <= 0 ? 'var(--txt-red)' : p.qtd <= 2 ? 'var(--txt-amber)' : 'var(--t1)'}">${p.qtd}</span></div>`).join('')}</div>` : ''}
+    </div>`;
+  }).join('');
+  return `<div class="utensest" style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:12px 14px;margin:14px 0 10px">
+    <div style="font-size:12.5px;font-weight:800;color:var(--t1);margin-bottom:2px">📦 Estoque de utensílios por loja</div>
+    <div style="font-size:10px;color:var(--t3);margin-bottom:9px">${e.comControle.length} de ${d.lojas.length} lojas com o controle começado. Toque na loja pra ver as peças.</div>
+    ${cobrar}
+    ${linhas}
+  </div>`;
 }
 async function _loadSemLancPainel() {
   if (_semLancPainelCarregando) return;
