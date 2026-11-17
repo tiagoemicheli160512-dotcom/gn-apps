@@ -1249,6 +1249,9 @@ async function carregarPedidoAtual() {
   const mondayHoje = getMondayOfWeek();
   const ehSemAtual = S.semanaAtiva.toDateString() === mondayHoje.toDateString();
   await carregarProvisaoAnterior();
+  // Aviso de fornecedor que ficou sem confirmar na semana passada (só olhando a semana de
+  // hoje — é ela que está recebendo as entregas daquele pedido).
+  S.pendSemanaAnterior = ehSemAtual ? await _carregarPendSemanaAnterior(mondayHoje) : [];
 
   // Busca os pedidos da semana (ignora CANCELADO), do mais novo pro mais antigo.
   //
@@ -4046,6 +4049,83 @@ function _nomesEscopo() {
   const escopo = _pedidoEscopoLojas() || [];
   return escopo.map(s => (S.lojas.find(l => l.slug_pedido === s) || {}).nome_display || s);
 }
+/* ── FORNECEDOR COM ITENS E SEM CONFIRMAR ─────────────────────────────────────────────
+   Caso real, 17/11/2026: o pedido da CIA MATHEUS da semana de 09/11 (toucinho e
+   calabresa, 17 itens em 9 lojas) foi lançado mas nunca confirmado no app. Sem a
+   confirmação não nasce a previsão de entrega, e na terça São Gonçalo dizia "não tem
+   nada pra nós hoje" enquanto o comprador via o pedido lá. Na semana anterior a mesma
+   CIA MATHEUS tinha sido confirmada na quinta, 16h51 — foi esquecimento, não regra.
+
+   Dois avisos:
+   · SEMANA PASSADA (vermelho, sempre que houver): fornecedor com quantidade lançada e
+     NENHUMA previsão gerada. É o esquecimento que já virou entrega sem previsão.
+   · ESTA SEMANA (âmbar, de quarta em diante): fornecedor com itens e ainda sem confirmar.
+     Segunda e terça o pedido ainda está sendo montado — avisar ali seria só barulho.
+   "Não vai ser pedido" esconde o fornecedor naquela semana, neste aparelho. */
+const PEND_FORN_DISPENSA_KEY = 'gn_pedidos_pend_forn_dispensa';
+function _pendFornDispensados() { try { return JSON.parse(localStorage.getItem(PEND_FORN_DISPENSA_KEY) || '{}') || {}; } catch (e) { return {}; } }
+function _pendFornDispensar(chave) {
+  const d = _pendFornDispensados(); d[chave] = Date.now();
+  try { localStorage.setItem(PEND_FORN_DISPENSA_KEY, JSON.stringify(d)); } catch (e) {}
+  renderPedido();
+}
+async function _carregarPendSemanaAnterior(mondayHoje) {
+  try {
+    const ant = new Date(mondayHoje); ant.setDate(ant.getDate() - 7);
+    const semAnt = ant.toISOString().split('T')[0];
+    const { data: peds } = await db.from('gn_pedidos').select('id')
+      .eq('semana_inicio', semAnt).eq('regiao', S.regiao).in('status', ['CONFIRMADO', 'ENVIADO', 'RASCUNHO']);
+    const ids = (peds || []).map(p => p.id);
+    if (!ids.length) return [];
+    const itens = await _fetchTodasPaginas(() => db.from('gn_pedido_itens').select('catalogo_id,loja_slug,qtd_pedida').in('pedido_id', ids).gt('qtd_pedida', 0));
+    const provs = await _fetchTodasPaginas(() => db.from('gn_provisoes').select('fornecedor,catalogo_id').in('pedido_id', ids));
+    const catForn = {}; (S.catalogo || []).forEach(c => { catForn[c.id] = c.fornecedor; });
+    const fornComProv = new Set((provs || []).map(p => catForn[p.catalogo_id] || p.fornecedor));
+    const por = {};
+    (itens || []).forEach(i => {
+      const f = catForn[i.catalogo_id]; if (!f || fornComProv.has(f)) return;
+      (por[f] = por[f] || { forn: f, itens: 0, lojas: new Set() }); por[f].itens++; por[f].lojas.add(i.loja_slug);
+    });
+    return Object.values(por).map(x => ({ forn: x.forn, itens: x.itens, lojas: x.lojas.size, semana: semAnt }))
+      .sort((a, b) => b.itens - a.itens || a.forn.localeCompare(b.forn, 'pt-BR'));
+  } catch (e) {
+    window.gnLogError && window.gnLogError('pedidos:pendSemanaAnterior', e);
+    return [];
+  }
+}
+function _avisoFornSemConfirmarHtml() {
+  if (S.hortifrutiAtivo) return '';
+  const disp = _pendFornDispensados();
+  const dm = iso => String(iso).slice(8, 10) + '/' + String(iso).slice(5, 7);
+  const btnDisp = chave => `<button data-chave="${esc(chave)}" onclick="_pendFornDispensar(this.dataset.chave)" style="margin-left:6px;background:none;border:1px solid var(--muted);border-radius:6px;padding:1px 7px;font-size:10px;color:var(--muted);cursor:pointer">não vai ser pedido</button>`;
+  let out = '';
+  const ant = (S.pendSemanaAnterior || []).filter(x => !disp[x.semana + '|' + x.forn]);
+  if (ant.length) {
+    out += `<div class="aviso-pend-forn-ant" style="background:rgba(220,38,38,.1);border:1px solid rgba(220,38,38,.4);border-left:3px solid #dc2626;border-radius:10px;padding:9px 12px;margin-bottom:8px;font-size:11.5px;color:var(--fg);line-height:1.55">
+      <b style="color:#dc2626">⚠ Semana passada (${dm(ant[0].semana)}) ficou sem confirmar:</b>
+      ${ant.map(x => `<div>• <b>${esc(x.forn)}</b> — ${x.itens} ite${x.itens === 1 ? 'm' : 'ns'} em ${x.lojas} loja${x.lojas === 1 ? '' : 's'}${btnDisp(x.semana + '|' + x.forn)}</div>`).join('')}
+      <div style="color:var(--muted);margin-top:3px">Sem confirmar, as lojas não veem essa entrega. Se o pedido foi feito, volte pra semana passada (‹) e confirme marcando 📅 <b>entrega essa semana</b> nos itens.</div>
+    </div>`;
+  }
+  const semIso = S.semanaAtiva ? S.semanaAtiva.toISOString().split('T')[0] : '';
+  const ehSemAtual = S.semanaAtiva && S.semanaAtiva.toDateString() === getMondayOfWeek().toDateString();
+  const dow = new Date().getDay();   // 0 dom … 6 sáb
+  if (S.pedidoAtual && ehSemAtual && (dow === 0 || dow >= 3)) {
+    let pend = _fornecedoresComItensPedido().filter(f => !S.fornecedoresConfirmados.has(f) || S.fornecedoresReabertos.has(f));
+    const escopo = S.eduAtivo || S.oseasAtivo || S.matheusAtivo;
+    if (escopo) pend = pend.filter(f => _fornecedorNoEscopoAtivo(f));
+    pend = pend.filter(f => !disp[semIso + '|' + f]);
+    if (pend.length) {
+      out += `<div class="aviso-pend-forn" style="background:rgba(217,119,6,.1);border:1px solid rgba(217,119,6,.35);border-left:3px solid #d97706;border-radius:10px;padding:9px 12px;margin-bottom:8px;font-size:11.5px;color:var(--fg);line-height:1.55">
+        <b style="color:#b45309">📋 ${pend.length} fornecedor${pend.length === 1 ? '' : 'es'} com itens e ainda sem confirmar nesta semana:</b>
+        ${pend.map(f => `<div>• ${esc(f)}${btnDisp(semIso + '|' + f)}</div>`).join('')}
+        <div style="color:var(--muted);margin-top:3px">Sem confirmar, a previsão de entrega não chega nas lojas.</div>
+      </div>`;
+    }
+  }
+  return out;
+}
+
 function _avisoEscopoHtml() {
   const escopo = _pedidoEscopoLojas();
   if (!escopo) return '';
@@ -4347,7 +4427,7 @@ function renderPedido() {
     // O painel de status entra aqui também: "nenhum pedido nesta semana" é exatamente quando
     // saber que nenhuma loja enviou nada importa mais, e sem isto a tela ficava muda.
     $('content').innerHTML = semNavHtmlAtivo + _datasEspeciaisCardHtml() + _carneObrigatorioCardHtml() + _hortifrutiBloqueioCardHtml() + _hortifrutiLiberacaoCardHtml() + _vendaSemanaAntCardHtml() +
-      (S.hortifrutiAtivo ? '' : _painelEnvioSemanaHtml()) + `
+      (S.hortifrutiAtivo ? '' : _painelEnvioSemanaHtml() + _avisoFornSemConfirmarHtml()) + `
       <div class="empty" style="margin-top:20px">
         <div class="empty-icon">📋</div>
         <div class="empty-texto">${S.hortifrutiAtivo ? 'Nenhum pedido de Hortifruti nesse dia' : 'Nenhum pedido nesta semana'}</div>
@@ -4747,6 +4827,7 @@ function renderPedido() {
     </div>` : ''}
 
     ${_painelEnvioSemanaHtml()}
+    ${_avisoFornSemConfirmarHtml()}
     ${_avisoEscopoHtml()}
     ${_avisoPedidoRefHtml()}
 
