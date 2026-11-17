@@ -229,7 +229,7 @@ const DIA = '2026-10-01';
     await _visFotoCompartilhar('777', 'chegada'); return window.__share;
   });
   check('no celular: compartilha a FOTO anexada (jpg), não só o link', sh && sh.n === 1 && sh.tipo === 'image/jpeg' && sh.tam > 100 && /visita-Bangu-2026-10-01-chegada\.jpg/.test(sh.nome), JSON.stringify(sh));
-  check('…com o texto da visita: loja, data, horários, quem, endereço e observação', sh && /Visita — Bangu \(chegada\)/.test(sh.text) && /01\/10\/2026/.test(sh.text) && /09:00 → 11:30 \(2h 30min\)/.test(sh.text) && /Carlos · supervisor/.test(sh.text) && /Rua de Teste, 10 - Bangu/.test(sh.text) && /Treinamento do salão/.test(sh.text), sh && sh.text);
+  check('…com o texto da visita: loja, data, horários, quem, endereço e observação', sh && /Visita — Bangu \(chegada\)/.test(sh.text) && /01\/10\/2026/.test(sh.text) && /09:00 → 11:30 \(2h 30min\)/.test(sh.text) && /Carlos · Supervisão/.test(sh.text) /* 17/11/2026: cargo vira título no relatório (gnCargoTitulo) */ && /^(Bom dia|Boa tarde|Boa noite)!\n/.test(sh.text) && /Rua de Teste, 10 - Bangu/.test(sh.text) && /Treinamento do salão/.test(sh.text), sh && sh.text);
   const sh2 = await page.evaluate(async () => { await _visFotoCompartilhar('777', 'saida'); return window.__share; });
   check('na foto da saída, o endereço é o da SAÍDA', sh2 && /\(saída\)/.test(sh2.text) && /Rua de Teste, 12/.test(sh2.text), sh2 && sh2.text);
   const fb = await page.evaluate(async () => {
