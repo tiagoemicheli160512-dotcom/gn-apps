@@ -61,6 +61,52 @@ const ROWS = [
   check('lista quem não teve entrada (Caxias)', /Sem entrada no período: Caxias/.test(r.d30.txt), r.d30.txt);
   check('Maglia não aparece', !/Maglia|Taça/.test(r.d30.txt + r.d90.txt));
 
+  // ── "Tem como colocar os estoques de quem tem e quem não fez ainda também, até pra cobrar
+  //     a gerência." (17/11/2026) ──
+  const est = await page.evaluate(() => {
+    _utensEntDias = 30; _utensEstAberta = new Set();
+    const pega = () => { const h = document.createElement('div'); h.innerHTML = _buildUtensEntradasPanel(); document.body.appendChild(h);
+      const bloco = h.querySelector('.utensest');
+      const out = { txt: bloco ? bloco.innerText.replace(/\s+/g, ' ') : '', sem: (h.querySelector('.utensest-sem') || {}).innerText || '',
+        lojas: [...h.querySelectorAll('.utensest-loja')].map(x => x.dataset.loja), pecas: [...h.querySelectorAll('.utensest-pecas div')].map(x => x.innerText.replace(/\s+/g, ' ')) };
+      h.remove(); return out; };
+    const fechado = pega();
+    _utensEstToggle('BANGU');
+    const aberto = pega();
+    // Sem nenhuma entrada no período, o estoque continua aparecendo.
+    const salvo = _utensEntPainel.entradas; _utensEntPainel.entradas = [];
+    const vazio = pega(); _utensEntPainel.entradas = salvo;
+    return { fechado, aberto, vazio };
+  });
+  check('estoque: quem NÃO fez a contagem aparece primeiro, pra cobrar (Caxias)', /Não fizeram a contagem \(1\)/.test(est.fechado.sem) && /Caxias/.test(est.fechado.sem), est.fechado.sem);
+  check('…quem tem o controle aparece com peças, unidades e zeradas (Bangu: 2 peças, 65 unidades; Norte: 1 peça, 80)',
+    /Bangu 2 peças no controle/.test(est.fechado.txt) && /\b65\b/.test(est.fechado.txt) && /Norte Shopping 1 peça no controle/.test(est.fechado.txt) && /\b80\b/.test(est.fechado.txt), est.fechado.txt);
+  check('…sem a Maglia', !est.fechado.lojas.includes('MAGLIA') && !/Maglia/.test(est.fechado.txt + est.fechado.sem), est.fechado.lojas);
+  check('…"2 de 3 lojas com o controle começado"', /2 de 3 lojas com o controle começado/.test(est.fechado.txt), est.fechado.txt);
+  check('tocar na loja abre as peças, da menor quantidade pra maior (Prato fundo 5, Copo de chopp 60)',
+    est.fechado.pecas.length === 0 && est.aberto.pecas.length === 2 && /Prato fundo 5/.test(est.aberto.pecas[0]) && /Copo de chopp 60/.test(est.aberto.pecas[1]), est.aberto.pecas);
+  check('mesmo sem nenhuma entrada no período, o estoque aparece', /Não fizeram a contagem/.test(est.vazio.sem) && est.vazio.lojas.length === 2, est.vazio);
+
+  // ── "Ter a opção de gerar relatórios, como no padrão dos cancelamentos." (17/11/2026) ──
+  const rel = await page.evaluate(() => {
+    _utensEntDias = 30; _utensRelLojasFiltro = [];
+    const h = document.createElement('div'); h.innerHTML = _buildUtensEntradasPanel(); document.body.appendChild(h);
+    const botoes = ['gerarWppUtens()', 'gerarPDFUtens()', 'enviarPDFUtensWpp()'].every(o => !!h.querySelector(`button[onclick="${o}"]`));
+    const caixas = [...h.querySelectorAll('input.utens-rel-loja')].map(i => i.value);
+    h.querySelector('input.utens-rel-loja[value="BANGU"]').click(); h.remove();
+    const rede = (() => { const sv = _utensRelLojasFiltro; _utensRelLojasFiltro = []; const m = _utensRelatorioTexto(true).msg; _utensRelLojasFiltro = sv; return m; })();
+    const bangu = _utensRelatorioTexto(true);
+    let pdf = null; const o = window.gnRelatorioPDF; window.gnRelatorioPDF = a => { pdf = a; }; gerarPDFUtens(); window.gnRelatorioPDF = o;
+    _utensRelLojasFiltro = ['CAXIAS']; const cax = _utensRelatorioTexto(true).msg;
+    _utensRelLojasFiltro = [];
+    return { botoes, caixas, rede, bangu: bangu.msg, bTitulo: bangu.titulo, pdf };
+  });
+  check('relatórios: os 3 botões dos cancelamentos (WhatsApp, PDF, PDF no Whats)', rel.botoes);
+  check('…e o "Relatório de" com as lojas (sem a Maglia)', rel.caixas.length === 3 && !rel.caixas.includes('MAGLIA'), rel.caixas);
+  check('rede: começa por quem não fez a contagem (Caxias), depois estoque e entradas', /Não fizeram a contagem:\* Caxias/.test(rel.rede) && /Estoque/.test(rel.rede) && /Bangu: 2 peças, 65 unidades/.test(rel.rede) && /Entradas — últimos 30 dias/.test(rel.rede) && /74 peças em 2 entradas/.test(rel.rede), rel.rede);
+  check('só Bangu: título com a loja, a lista das peças e só as entradas dela', /UTENSÍLIOS — BANGU/.test(rel.bangu) && /Prato fundo: 5/.test(rel.bangu) && /Copo de chopp: 60/.test(rel.bangu) && /\+24 · Compra da loja · nota 1234 · assinado por Carla/.test(rel.bangu) && !/Norte|Garfo|Caxias/.test(rel.bangu), rel.bangu);
+  check('…o PDF sai com o mesmo recorte e os números de Bangu (1/1 com controle, 65 unidades, 24 entradas)', rel.pdf && /Bangu/.test(rel.pdf.titulo) && rel.pdf.kpis[0].valor === '1/1' && rel.pdf.kpis[1].valor === '65' && rel.pdf.kpis[2].valor === '24', rel.pdf && rel.pdf.kpis);
+
   check('nenhum erro de JavaScript', erros.length === 0, erros);
   console.log(`\n${ok} OK, ${falhou} falhou`);
   await browser.close();
