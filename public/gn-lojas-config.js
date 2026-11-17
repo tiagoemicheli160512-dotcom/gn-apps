@@ -1751,3 +1751,23 @@ window.gnConfirmarExclusaoFunc = function (opts) {
     });
   });
 };
+
+/* ── Cargo como aparece nos RELATÓRIOS de visita, e saudação pela hora ────────────────
+   "Quando tiro a foto e envio, aparece mestre, e no relatório aparece Tiago mestre. Queria
+    mudar nos relatórios essa nomenclatura, dar um ar de superioridade, e também acrescentar
+    bom dia, boa tarde e boa noite de acordo com o horário." (17/11/2026)
+
+   O cargo gravado continua "mestre"/"supervisor" (é chave de permissão em vários apps);
+   muda só o RÓTULO impresso. Um lugar só pra trocar o título, se o dono quiser outro.
+   Saudação: 05h–11h59 bom dia, 12h–17h59 boa tarde, 18h–04h59 boa noite (madrugada é noite). */
+window.GN_CARGO_TITULO = { mestre: 'Diretoria', supervisor: 'Supervisão' };
+window.gnCargoTitulo = function (cargo) {
+  var c = String(cargo == null ? '' : cargo).trim();
+  if (!c) return '';
+  var t = window.GN_CARGO_TITULO[c.toLowerCase()];
+  return t || (c.charAt(0).toUpperCase() + c.slice(1));
+};
+window.gnSaudacao = function (quando) {
+  var h = (quando instanceof Date ? quando : new Date()).getHours();
+  return h >= 5 && h < 12 ? 'Bom dia' : h >= 12 && h < 18 ? 'Boa tarde' : 'Boa noite';
+};

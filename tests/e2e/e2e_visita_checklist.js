@@ -319,6 +319,8 @@ async function rota(route) {
   check('…a nota de cada setor e item avaliado', /Segurança Alimentar e Validades/.test(rel.r.texto) && /Validades em dia na cozinha — nenhum produto vencido: \*4\*/.test(rel.r.texto), rel.r.texto);
   check('…os críticos com o plano de ação escolhido', /Críticos \(1\)/.test(rel.r.texto) && /Ação: Descartar na hora os vencidos e registrar a perda; até sexta, com o Marcos/.test(rel.r.texto), rel.r.texto);
   check('…e quem finalizou', /Finalizado por Carlos/.test(rel.r.texto));
+  // 17/11/2026: saudação pela hora no topo do WhatsApp (o PDF não leva).
+  check('…e abre com a saudação da hora (bom dia / boa tarde / boa noite)', /^(Bom dia|Boa tarde|Boa noite)!\n\n/.test(rel.r.texto), rel.r.texto.slice(0, 60));
   check('WhatsApp abre com o texto do relatório', /^https:\/\/wa\.me\/\?text=/.test(rel.cap.wpp || '') && decodeURIComponent(rel.cap.wpp).includes('NOTA: ' + notaEsperada));
   const tx = rel.cap.textos.join(' | ');
   check('PDF no padrão GN: marca, título, cartões de resumo e seções', /^GN \| SISTEMA DE GESTÃO/.test(tx) && /Supervisão salão - Bangu/.test(tx) && /NOTA/.test(tx) && /CLASSIFICAÇÃO/.test(tx) && /ITENS CRÍTICOS/.test(tx) && /Segurança Alimentar e Validades/.test(tx) && /Críticos \(1\)/.test(tx), tx.slice(0, 300));

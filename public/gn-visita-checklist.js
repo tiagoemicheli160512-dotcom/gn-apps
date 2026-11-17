@@ -687,7 +687,8 @@
     const lojaNome = (CFG.nomeLoja && CFG.nomeLoja(v.loja)) || v.loja || '';
     const M = { tipo: _ctx.tipo, icone: t.icon, tipoLabel: t.label, loja: lojaNome, data: v.data, info: [], kpis: [], secoes: [], fotos: [], obs: d.obs || '', fim: '' };
     const foto = (url, legenda) => { if (url && /^https:\/\//.test(url)) M.fotos.push({ url, legenda: `${lojaNome} · ${_dmY(v.data)}\n${legenda}` }); };
-    if (v.visitante) M.info.push('Supervisão: ' + v.visitante);
+    // Rótulo pelo cargo de quem visitou (Diretoria/Supervisão — gnCargoTitulo, gn-lojas-config.js).
+    if (v.visitante) M.info.push(((v.cargo && window.gnCargoTitulo) ? window.gnCargoTitulo(v.cargo) : 'Supervisão') + ': ' + v.visitante);
     if (v.hora_chegada && v.hora_chegada !== 'PLAN') M.info.push('Chegada ' + v.hora_chegada + (v.hora_saida ? ' → saída ' + v.hora_saida : ''));
     const corN = n => n < 7 ? 'ruim' : n < 9 ? 'aten' : 'ok';
     const corPct = (p, crit) => p === null ? 'na' : crit ? 'ruim' : p >= 80 ? 'ok' : p >= 60 ? 'aten' : 'ruim';
@@ -781,6 +782,8 @@
     if (M.obs) L.push('', '📝 *Observações*', M.obs);
     if (M.fim) L.push('', '✅ ' + M.fim);
     if (M.ciente) L.push('👁 ' + M.ciente);
+    // Saudação pela hora no topo da mensagem (só no WhatsApp; o PDF sai do modelo).
+    if (window.gnSaudacao) L.unshift(window.gnSaudacao() + '!', '');
     return { titulo: M.arquivo, texto: L.join('\n'), fotos: M.fotos, modelo: M };
   }
   // Só pros testes / quem ainda quiser o texto sem emoji.
