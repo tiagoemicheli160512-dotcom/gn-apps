@@ -16,6 +16,9 @@ const FEITO = 'Contagem de barris travando a segunda\nValor do estoque separado 
 (async () => {
   const browser = await chromium.launch({ executablePath: CAMINHOS.CHROMIUM });
   const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 430, height: 950 } });
+  // 17/11/2026: registrar chegada em dia que não é hoje passou a perguntar (ver
+  // _visDiaErradoConfirmar). O teste registra no dia DIA, então o relógio fica nesse dia.
+  await CAMINHOS.fixarRelogio(ctx, DIA + 'T10:30:00');
 
   let proxId = 1;
   const escritas = [];
