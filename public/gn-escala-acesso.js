@@ -65,6 +65,55 @@
     return true;
   }
 
+  // ── Horário do estoque (18/11/2026) ────────────────────────────────────────
+  // "Estoquista: acesso só de 08h às 17h na semana, sábado de 08h às 12h; domingo e feriado
+  // são folga automática — podendo acrescentar folga normalmente em qualquer dia."
+  // Vale pelo CARGO, sem depender de vínculo com a escala (a folga da escala continua
+  // valendo por cima, pra quem tem vínculo). 11 lojas; Maglia fora (regra do projeto).
+  // Usa o relógio real — a tolerância de 2h da virada é pra quem fecha a loja, não pro estoque.
+  var ESTOQUE_CARGOS = ['estoquista'];
+  var ESTOQUE_LOJAS_FORA = ['MAGLIA'];
+  var ESTOQUE_JANELA = { 1: [8, 17], 2: [8, 17], 3: [8, 17], 4: [8, 17], 5: [8, 17], 6: [8, 12] };   // getDay(): Seg=1 … Sáb=6; Dom fora
+  function _pascoa(ano) {
+    var a = ano % 19, b = Math.floor(ano / 100), c = ano % 100, d = Math.floor(b / 4), e = b % 4,
+        f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30,
+        i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451),
+        mes = Math.floor((h + l - 7 * m + 114) / 31), dia = ((h + l - 7 * m + 114) % 31) + 1;
+    return new Date(ano, mes - 1, dia, 12);
+  }
+  // Nacionais (inclui 20/11, Consciência Negra — nacional desde a Lei 14.759/2023) +
+  // estaduais/municipais da loja (gn-lojas-config.js, mesma fonte do Check-list).
+  function _feriadoDoDia(dt, lojaDoLogin) {
+    var ano = dt.getFullYear(), iso = _hojeISO(dt);
+    var p = _pascoa(ano), mais = function (n) { var x = new Date(p); x.setDate(x.getDate() + n); return _hojeISO(x); };
+    var nac = {};
+    nac[ano + '-01-01'] = 'Confraternização Universal'; nac[mais(-48)] = 'Carnaval'; nac[mais(-47)] = 'Carnaval';
+    nac[mais(-2)] = 'Sexta-feira Santa'; nac[ano + '-04-21'] = 'Tiradentes'; nac[ano + '-05-01'] = 'Dia do Trabalho';
+    nac[mais(60)] = 'Corpus Christi'; nac[ano + '-09-07'] = 'Independência'; nac[ano + '-10-12'] = 'N. Sra. Aparecida';
+    nac[ano + '-11-02'] = 'Finados'; nac[ano + '-11-15'] = 'Proclamação da República';
+    nac[ano + '-11-20'] = 'Consciência Negra'; nac[ano + '-12-25'] = 'Natal';
+    if (nac[iso]) return nac[iso];
+    try {
+      var loc = window.gnFeriadosLocais ? window.gnFeriadosLocais(lojaDoLogin, ano) : [];
+      for (var j = 0; j < loc.length; j++) if (loc[j].data === iso) return loc[j].nome;
+    } catch (_) {}
+    return null;
+  }
+  function _horarioEstoque(sess, comKey, agora) {
+    if (ESTOQUE_CARGOS.indexOf(String(sess.cargo || '').toLowerCase()) < 0) return null;
+    if (!comKey || ESTOQUE_LOJAS_FORA.indexOf(comKey) >= 0) return null;
+    var dow = agora.getDay();
+    if (dow === 0) return { bloqueado: true, motivo: 'estoque_domingo', origem: 'horario' };
+    var fer = _feriadoDoDia(agora, sess.loja);
+    if (fer) return { bloqueado: true, motivo: 'estoque_feriado', feriado: fer, origem: 'horario' };
+    var jan = ESTOQUE_JANELA[dow], h = agora.getHours() + agora.getMinutes() / 60;
+    if (!jan || h < jan[0] || h >= jan[1]) {
+      return { bloqueado: true, motivo: 'estoque_horario', origem: 'horario',
+               hora: String(agora.getHours()).padStart(2, '0') + ':' + String(agora.getMinutes()).padStart(2, '0') };
+    }
+    return null;
+  }
+
   var CACHE_MS = 5 * 60 * 1000;   // só o resultado LIBERADO é cacheado (ver _cacheLer)
   var LIB_KEY = 'gn_escala_liberacao';
   var CACHE_KEY = 'gn_escala_cache';
@@ -202,9 +251,6 @@
         if (String(EXCECOES_FIXAS[i].id) === String(sess.id)) return Promise.resolve(vazio);
       }
 
-      var vinculo = (sess.permissoes || {}).escala_nome;
-      if (!vinculo || !String(vinculo).trim()) return Promise.resolve(vazio);
-
       var agora = opts.hoje ? new Date(opts.hoje + 'T12:00:00') : _agoraOperacional();
       var hojeISO = _hojeISO(agora);
 
@@ -212,6 +258,15 @@
       if (lib) return Promise.resolve(vazio);
 
       var comKey = _comKey(sess.loja);
+
+      // Horário do estoque: pelo relógio de verdade (ou o pedido no teste), antes de tudo
+      // que depende de vínculo e de rede — é uma regra fixa, não precisa do banco.
+      var relogio = opts.agora ? new Date(opts.agora) : new Date();
+      var hEst = _horarioEstoque(sess, comKey, relogio);
+      if (hEst) return Promise.resolve(hEst);
+
+      var vinculo = (sess.permissoes || {}).escala_nome;
+      if (!vinculo || !String(vinculo).trim()) return Promise.resolve(vazio);
       if (!comKey) return Promise.resolve(vazio);
 
       var idx = _semIdx(agora);
@@ -356,6 +411,20 @@
   var _overlay = null;
 
   function _texto(res) {
+    var regraEstoque = 'O acesso do estoque é de <b>segunda a sexta, das 08h às 17h</b>, e ' +
+      '<b>sábado das 08h às 12h</b>. Domingo e feriado são folga.';
+    if (res.motivo === 'estoque_domingo') {
+      return { icone: '🌴', titulo: 'Domingo é folga do estoque', corpo: regraEstoque };
+    }
+    if (res.motivo === 'estoque_feriado') {
+      return { icone: '🎉', titulo: 'Feriado — folga do estoque',
+               corpo: 'Hoje é feriado (<b>' + _esc(res.feriado || '') + '</b>). ' + regraEstoque };
+    }
+    if (res.motivo === 'estoque_horario') {
+      return { icone: '🕗', titulo: 'Fora do horário do estoque',
+               corpo: 'Agora são <b>' + _esc(res.hora || '') + '</b>. ' + regraEstoque +
+                      ' Precisa entrar agora? Peça a liberação a um supervisor.' };
+    }
     if (res.motivo === 'sem_folga') {
       return {
         icone: '📅', titulo: 'Sua escala está sem folga nesta semana',
@@ -414,7 +483,7 @@
           '<button id="gn-eb-abrir" style="width:100%;background:#facc15;border:none;border-radius:11px;' +
             'padding:12px;font-size:13px;font-weight:800;color:#1a1d23;cursor:pointer;font-family:inherit">' +
             '🔑 Liberar com senha de supervisão</button>' +
-          '<button id="gn-eb-retry" style="width:100%;background:rgba(255,255,255,.07);' +
+          '<button id="gn-eb-retry" style="' + (res.origem === 'horario' ? 'display:none;' : '') + 'width:100%;background:rgba(255,255,255,.07);' +
             'border:1px solid rgba(255,255,255,.12);border-radius:11px;padding:11px;font-size:12px;' +
             'font-weight:700;color:#e8eaed;cursor:pointer;font-family:inherit">' +
             '↻ Já corrigiram a escala — verificar de novo</button>' +
@@ -634,6 +703,12 @@
   function _iniciar() {
     _rodada();
     setInterval(_rodada, 3000);
+    // O horário do estoque muda sem a sessão mudar (17h fecha, 08h abre): reavalia a cada
+    // minuto quem é do estoque.
+    setInterval(function () {
+      var s = _lerSessao();
+      if (s && ESTOQUE_CARGOS.indexOf(String(s.cargo || '').toLowerCase()) >= 0) { _ultimaBruta = null; _rodada(); }
+    }, 60000);
     document.addEventListener('visibilitychange', function () {
       if (!document.hidden) { _ultimaBruta = null; _rodada(); }
     });
@@ -655,6 +730,8 @@
     _diaIdx: _diaIdx,
     _avaliar: _avaliar,
     _semFolga: _semFolga,
+    _horarioEstoque: _horarioEstoque,
+    _feriadoDoDia: _feriadoDoDia,
     _primeiroNome: _primeiroNome
   };
 })();
