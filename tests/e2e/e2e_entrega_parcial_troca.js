@@ -302,6 +302,20 @@ const HOJE = '2026-11-05';
   check('outros itens da ARCO (ketchup, knorr, sal) NÃO ganham a troca pela RIO',
     await page.evaluate(() => [170, 150, 163].every(i => !_epGrupoSubst('ARCO', { gn_catalogo: { item_id: i } }))));
   check('em SP (açúcar sachê da PMG, item 1165) nada muda', await page.evaluate(() => !_epGrupoSubst('PMG', { gn_catalogo: { item_id: 1165, origem_item_id: 165 } })));
+  // 18/11/2026 (Nova América): "recebi pé de porco, lombo e costela pela Nogmix, mas no app
+  // está Saudali/Ciacarne". Só os suínos salgados da Saudali ganham a troca pela Nogmix.
+  const opPe = await page.evaluate(() => { provisoesEntrega = [Object.assign({}, provisoesEntrega[0], { id: 'pe', fornecedor: 'SAUDALI/CIACARNE', fornecedor_entregue: null, gn_catalogo: { produto: 'PÉ DE PORCO', und: 'KG', item_id: 505, origem_item_id: null } })]; abrirTrocaFornecedorEntrega('pe'); const m = document.getElementById('modalTrocaForn'); const o = Array.from(m.querySelectorAll('button[data-forn]')).map(b => b.dataset.forn); m.remove(); return o; });
+  check('pé de porco da SAUDALI/CIACARNE pode virar NOGMIX - JBS (ou NOGMIX / JBS)', JSON.stringify(opPe) === JSON.stringify(['NOGMIX - JBS', 'NOGMIX', 'JBS']), JSON.stringify(opPe));
+  await page.evaluate(async () => { window.__gravado = []; await _epAplicarTrocaForn('pe', 'NOGMIX - JBS'); });
+  const gPe = await gravado();
+  check('…grava "entregue por NOGMIX - JBS" mantendo o pedido na Saudali', gPe.length && gPe[gPe.length - 1].corpo.fornecedor_entregue === 'NOGMIX - JBS'
+    && await page.evaluate(() => /Pedido em SAUDALI\/CIACARNE · entregue por NOGMIX - JBS/.test(_epRessalvaForn(provisoesEntrega[0]))), JSON.stringify(gPe[gPe.length - 1]));
+  check('lombo, costela, calabresa, paio e orelha da Saudali também; em SP casam pela origem (calabresa 1397)',
+    await page.evaluate(() => [395, 396, 397, 398, 501].every(i => (_epGrupoSubst('SAUDALI/CIACARNE', { gn_catalogo: { item_id: i } }) || {}).tipo === 'Suínos salgados (Saudali/Ciacarne ↔ Nogmix)')
+      && !!_epGrupoSubst('SAUDALI/CIACARNE', { gn_catalogo: { item_id: 1397, origem_item_id: 397 } })));
+  check('carne bovina da Nogmix continua no grupo Carnes (troca com JBS/Nogmix Matheus, nunca com a Saudali)',
+    await page.evaluate(() => { const g = _epGrupoSubst('NOGMIX - JBS', { gn_catalogo: { item_id: 999 } }); return g && g.tipo === 'Carnes (JBS/Nogmix)' && !g.fornecedores.includes('SAUDALI/CIACARNE'); }));
+  check('item da Saudali fora da lista (filé mignon suíno, 229) não ganha troca', await page.evaluate(() => _epGrupoSubst('SAUDALI/CIACARNE', { gn_catalogo: { item_id: 229 } }) === null));
   // volta o item da margarina pro teste da batata logo abaixo
   await page.evaluate(() => { provisoesEntrega = [Object.assign({}, provisoesEntrega[0], { id: 'm', fornecedor: 'TOP ALTO', fornecedor_entregue: 'NUTRIMAX', gn_catalogo: { produto: 'Margarina Balde 15 L', und: 'BB', item_id: 187, origem_item_id: null } })]; });
   await page.evaluate(async () => { window.__gravado = []; await _epAplicarTrocaForn('m', 'TOP ALTO'); provisoesEntrega[0].gn_catalogo = { produto: 'Batata', item_id: 199 }; window.__gravado = []; await _epAplicarTrocaForn('m', 'NUTRIMAX'); });
