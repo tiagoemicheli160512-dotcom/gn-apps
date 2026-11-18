@@ -514,8 +514,20 @@
   const _ro = () => !!(R && (R.somenteLeitura || (R.dados && R.dados.fechada)));
   const card = (inner, extra) => `<div style="background:var(--s2,#fff);border:1px solid var(--b1,rgba(0,0,0,.08));border-radius:14px;padding:12px 14px;margin-bottom:10px;${extra || ''}">${inner}</div>`;
   const inputCss = 'width:100%;box-sizing:border-box;padding:8px 10px;border-radius:9px;border:1px solid var(--b2,rgba(0,0,0,.12));background:var(--s1,#fff);color:var(--t1);font-size:16px;font-family:inherit';
+  // Só leitura (resultado da visita na Home da loja, visita finalizada): texto corrido em
+  // vez de campo. O campo de uma linha cortava "Líder de cozinha; Sub-gerente; Gerent…" e a
+  // caixa de 2 linhas escondia o resto da ação atrás de uma rolagem interna (print de
+  // 18/11/2026). Partes separadas por ";" viram uma lista.
+  function _textoLeituraHtml(valor) {
+    const partes = _partes(valor);
+    if (!partes.length) return '<div class="vck-ro-txt" style="font-size:13px;color:var(--t4);padding:2px 0 4px">—</div>';
+    return `<div class="vck-ro-txt" style="font-size:13.5px;line-height:1.45;color:var(--t1);padding:2px 0 4px;overflow-wrap:anywhere">${partes.length === 1
+      ? esc(partes[0])
+      : partes.map(x => `<div style="display:flex;gap:6px"><span style="color:var(--t3)">•</span><span style="min-width:0">${esc(x)}</span></div>`).join('')}</div>`;
+  }
   function _campoTexto(path, valor, ph, rows) {
-    const ro = _ro() ? 'readonly' : '';
+    if (_ro()) return _textoLeituraHtml(valor);
+    const ro = '';
     const p = attr(JSON.stringify(path));
     return rows
       ? `<textarea ${ro} rows="${rows}" placeholder="${attr(ph)}" onchange="GNVck._texto(this, ${p})" style="${inputCss};resize:vertical">${esc(valor || '')}</textarea>`
@@ -959,17 +971,23 @@
   // ── Auditoria de padrão ──
   function _padraoHtml() {
     const d = R.dados;
-    const pills = `<div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;margin-bottom:10px">${AUDP_TIPOS.map(t => {
+    // Seções em grade, todas à vista. Antes era uma faixa que rolava pro lado e só a 1ª
+    // aparecia — "tem loja que não vai nem perceber que tem que arrastar pro lado" (18/11).
+    const pills = `<div style="font-size:10px;font-weight:800;color:var(--t3);letter-spacing:.6px;text-transform:uppercase;margin-bottom:6px">Seções da auditoria · toque pra ver</div>
+      <div class="vck-secoes" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(min(150px,100%),1fr));gap:6px;margin-bottom:12px">${AUDP_TIPOS.map(t => {
       const c = calcPadrao(d, t.key), inf = infoPadrao(c.status), on = t.key === _padraoTipo;
-      return `<button type="button" onclick="GNVck._padraoTipo('${t.key}')" style="white-space:nowrap;flex-shrink:0;padding:8px 11px;border-radius:10px;font-size:11px;font-weight:800;font-family:inherit;cursor:pointer;border:1px solid ${on ? inf.cor : 'var(--b2,rgba(0,0,0,.12))'};background:${on ? 'rgba(99,102,241,.1)' : 'var(--s2,#fff)'};color:var(--t1)">${t.icon} ${esc(t.label)}${c.nota !== null ? ` · ${inf.emoji} ${c.nota}%` : c.reprovadaCritica ? ' · ' + inf.emoji : ''}${(d[t.key] || {}).finalizada ? ' ✓' : ''}</button>`;
+      const valor = c.nota !== null ? `${inf.emoji} ${c.nota}%` : c.reprovadaCritica ? inf.emoji : '—';
+      return `<button type="button" class="vck-secao${on ? ' on' : ''}" onclick="GNVck._padraoTipo('${t.key}')" style="min-width:0;text-align:left;padding:8px 10px;border-radius:10px;font-family:inherit;cursor:pointer;border:${on ? '2px' : '1px'} solid ${on ? inf.cor : 'var(--b2,rgba(0,0,0,.12))'};background:${on ? inf.cor + '18' : 'var(--s2,#fff)'};color:var(--t1)">
+        <div style="font-size:11px;font-weight:800;line-height:1.3;overflow-wrap:anywhere">${t.icon} ${esc(t.label)}</div>
+        <div style="font-size:12px;font-weight:900;margin-top:3px;color:${c.nota !== null || c.reprovadaCritica ? inf.cor : 'var(--t4)'}">${valor}${(d[t.key] || {}).finalizada ? ' <span style="font-size:10px;color:var(--t3);font-weight:700">✓</span>' : ''}</div></button>`;
     }).join('')}</div>`;
     const banco = AUDP_TIPOS.find(t => t.key === _padraoTipo);
     const aud = d[_padraoTipo] || { itens: {} };
     const calc = calcPadrao(d, _padraoTipo), inf = infoPadrao(calc.status);
     const travado = R.somenteLeitura || !!aud.finalizada;
     const banner = `<div style="background:${inf.cor}14;border:1px solid ${inf.cor}55;border-radius:12px;padding:11px 13px;margin-bottom:10px">
-      <div style="display:flex;justify-content:space-between;gap:10px;align-items:center"><div><div style="font-size:10.5px;color:var(--t3);font-weight:800;text-transform:uppercase;letter-spacing:.5px">${banco.icon} ${esc(banco.label)}</div>
-      <div style="font-size:13px;font-weight:800;color:${inf.cor};margin-top:2px">${inf.emoji} ${esc(inf.label)}</div></div>${calc.nota !== null ? `<div style="font-size:22px;font-weight:900;color:${inf.cor}">${calc.nota}%</div>` : ''}</div>
+      <div style="display:flex;justify-content:space-between;gap:10px;align-items:center"><div style="min-width:0;overflow-wrap:anywhere"><div style="font-size:10.5px;color:var(--t3);font-weight:800;text-transform:uppercase;letter-spacing:.5px">${banco.icon} ${esc(banco.label)}</div>
+      <div style="font-size:13px;font-weight:800;color:${inf.cor};margin-top:2px">${inf.emoji} ${esc(inf.label)}</div></div>${calc.nota !== null ? `<div style="font-size:22px;font-weight:900;color:${inf.cor};flex-shrink:0">${calc.nota}%</div>` : ''}</div>
       <div style="font-size:10.5px;color:var(--t3);margin-top:5px">${calc.avaliados}/${calc.total} itens avaliados${aud.finalizada ? ' · ✅ finalizada' : ''}</div></div>`;
     const itens = banco.itens.map((it, idx) => {
       const r = ((aud.itens || {})[idx] || {}).resp, foto = ((aud.itens || {})[idx] || {}).foto;
@@ -978,7 +996,10 @@
       return `<div data-vck-item="${attr(it.label.toLowerCase())}" style="background:${r === 'NAO' ? 'rgba(220,38,38,.06)' : 'var(--s1,#fafafa)'};border:1px solid ${r === 'NAO' ? 'rgba(220,38,38,.25)' : 'var(--b1,rgba(0,0,0,.08))'};border-radius:11px;padding:10px 12px;margin-bottom:7px">
         <div style="font-size:10.5px;font-weight:800;color:var(--t2);margin-bottom:3px">${pl}</div>
         <div style="font-size:12.5px;font-weight:600;color:var(--t1);line-height:1.4;margin-bottom:8px">${esc(it.label)}</div>
-        <div style="display:flex;gap:5px">${b('SIM', '✓ SIM', '#16a34a')}${b('NAO', '✕ NÃO', '#dc2626')}${b('NA', 'N/A', '#64748b')}</div>
+        ${R.somenteLeitura
+          ? (() => { const m = { SIM: ['✓ Conforme', '#16a34a'], NAO: ['✕ Não conforme', '#dc2626'], NA: ['N/A — não se aplica', '#64748b'] }[r] || ['Sem resposta', '#94a3b8'];
+              return `<div class="vck-resp" style="display:inline-block;padding:5px 11px;border-radius:999px;font-size:12px;font-weight:800;border:1px solid ${m[1]};background:${m[1]}1f;color:${m[1]}">${m[0]}</div>`; })()
+          : `<div style="display:flex;gap:5px">${b('SIM', '✓ SIM', '#16a34a')}${b('NAO', '✕ NÃO', '#dc2626')}${b('NA', 'N/A', '#64748b')}</div>`}
         ${r === 'NAO' ? (travado && !foto ? '' : (travado ? `<a href="${attr(foto)}" target="_blank" rel="noopener"><img src="${attr(foto)}" style="width:52px;height:52px;object-fit:cover;border-radius:8px;margin-top:8px"></a>` : _fotoHtml([_padraoTipo, 'itens', String(idx), 'foto'], foto, 'Foto de evidência (opcional)'))) : ''}
       </div>`;
     }).join('');
@@ -998,10 +1019,13 @@
           <div style="font-size:10.5px;color:var(--t3)">Ação corretiva</div>${campo('acaoCorretiva', 'O que será feito?')}
           <div style="font-size:10.5px;color:var(--t3);margin-top:5px">Responsável</div>${campo('responsavel', 'Quem vai fazer?')}
           <div style="font-size:10.5px;color:var(--t3);margin-top:5px">Prazo (máx. ${esc(String(p.prazoMax || '').split('-').reverse().join('/'))})</div>
-          <input ${R.somenteLeitura ? 'readonly' : ''} type="date" value="${attr(p.prazo || '')}" max="${attr(p.prazoMax || '')}" onchange="GNVck._texto(this, ${attr(JSON.stringify([_padraoTipo, 'planoAcao', String(i), 'prazo']))})" style="${inputCss}">
+          ${_ro() ? _textoLeituraHtml(p.prazo ? String(p.prazo).split('-').reverse().join('/') : '') : `<input type="date" value="${attr(p.prazo || '')}" max="${attr(p.prazoMax || '')}" onchange="GNVck._texto(this, ${attr(JSON.stringify([_padraoTipo, 'planoAcao', String(i), 'prazo']))})" style="${inputCss}">`}
           <div style="font-size:10.5px;color:var(--t3);margin-top:5px">Ação preventiva</div>${campo('acaoPreventiva', 'Como evitar que se repita?')}</div>`;
       }).join('')}`, 'margin-top:10px') : '';
-    return pills + banner + _filtroHtml() + itens + acao + plano + '<div style="height:10px"></div>' + _relBotoesHtml() + '<div style="height:24px"></div>';
+    const ix = AUDP_TIPOS.findIndex(t => t.key === _padraoTipo);
+    const ir = (t, rot) => t ? `<button type="button" onclick="GNVck._padraoTipo('${t.key}');document.getElementById('_vck-modal').scrollTop=0" style="flex:1;min-width:0;padding:10px 8px;border-radius:10px;border:1px solid var(--b2,rgba(0,0,0,.12));background:var(--s2,#fff);color:var(--t1);font-size:12px;font-weight:800;font-family:inherit;cursor:pointer;overflow-wrap:anywhere">${rot}</button>` : '<div style="flex:1"></div>';
+    const nav = `<div class="vck-nav-secao" style="display:flex;gap:8px;margin-top:12px">${ir(AUDP_TIPOS[ix - 1], '‹ Seção anterior')}${ir(AUDP_TIPOS[ix + 1], 'Próxima seção ›')}</div>`;
+    return pills + banner + _filtroHtml() + itens + acao + plano + nav + '<div style="height:10px"></div>' + _relBotoesHtml() + '<div style="height:24px"></div>';
   }
 
   function pintar() {
