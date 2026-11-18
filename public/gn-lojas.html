@@ -2405,6 +2405,120 @@ function _removerItemBarrisSemanal(tipo, idx) {
   _renderTravaBarrisSemanal();
 }
 
+// ── Conferência semanal dos barris em acompanhamento (18/11/2026) ──────────────────
+// "Gerar um alerta pra isso não ficar acontecendo — a cada virada de semana pedir a
+// confirmação." Caso real: Nova América com 6 barris de vinho ATIVOS na aba Barris e só 2
+// com chopp na contagem de segunda — barril que acaba e ninguém toca "Finalizar" fica pra
+// sempre em acompanhamento, e o Painel conta estoque que não existe.
+// Depois da contagem semanal, se o app tem MAIS barris ativos (recebidos até a contagem) do
+// que a loja contou com chopp (cheio ou na linha), abre a lista pra marcar os que acabaram.
+// "Conferir depois" deixa um aviso na aba Barris até a diferença sumir.
+function _tipoBarrilLoja(b) {
+  const cfg = BARRIS_VALIDADE_CONFIG[b.catalogo_id];
+  return /vinho/i.test((cfg && cfg.label) || b.produto || '') ? 'VINHO' : 'CLARO';
+}
+function _barrisContadosComChopp(itens) {
+  const out = { CLARO: [], VINHO: [] };
+  ['CLARO', 'VINHO'].forEach(function(t) {
+    (itens[t] || []).forEach(function(i) { if (i.status !== 'VAZIO') out[t].push(i.validade || ''); });
+  });
+  return out;
+}
+function _barrisConfChave(slug, monday) { return 'gn_barris_conf_' + slug + '_' + monday; }
+function _barrisConfSalvarLocal(slug, monday, contados) {
+  try { localStorage.setItem(_barrisConfChave(slug, monday), JSON.stringify({ contados: contados, em: new Date().toISOString() })); } catch (e) {}
+}
+let _barrisConfContagemBanco = null;
+function _barrisConfLerLocal() {
+  if (_barrisConfContagemBanco) return _barrisConfContagemBanco;
+  try {
+    const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+    return JSON.parse(localStorage.getItem(_barrisConfChave(slug, wkKey(getMonday(new Date())))) || 'null');
+  } catch (e) { return null; }
+}
+// Por tipo: os ativos recebidos até a contagem, quantos a loja contou, quantos sobram e
+// quais sugerir (os que não batem com nenhuma validade contada, do mais antigo pro novo).
+function _barrisConfDiferencas(conf) {
+  if (!conf || !conf.contados) return [];
+  const ate = new Date(conf.em).getTime();
+  const res = [];
+  ['CLARO', 'VINHO'].forEach(function(t) {
+    const ativos = barrisAtivos.filter(function(b) { return _tipoBarrilLoja(b) === t && (!b.criado_em || new Date(b.criado_em).getTime() <= ate); });
+    const contados = (conf.contados[t] || []).slice();
+    const sobra = ativos.length - contados.length;
+    if (sobra <= 0) return;
+    const porIdade = ativos.slice().sort(function(a, b) { return String(a.criado_em || '').localeCompare(String(b.criado_em || '')); });
+    // Casa validade por validade (mais novo primeiro): o que sobra sem par é o candidato.
+    const livres = contados.slice(); const casados = new Set();
+    porIdade.slice().reverse().forEach(function(b) { const i = livres.indexOf(b.validade); if (i >= 0) { livres.splice(i, 1); casados.add(b.id); } });
+    const sugeridos = porIdade.filter(function(b) { return !casados.has(b.id); }).concat(porIdade.filter(function(b) { return casados.has(b.id); })).slice(0, sobra).map(function(b) { return b.id; });
+    res.push({ tipo: t, ativos: porIdade, contados: contados.length, sobra: sobra, sugeridos: sugeridos });
+  });
+  return res;
+}
+async function _barrisConferirComContagem(viaAviso) {
+  try { await carregarBarris(true); } catch (e) {}
+  const difs = _barrisConfDiferencas(_barrisConfLerLocal());
+  if (!difs.length) { if (viaAviso) showToast('✅ Os barris em acompanhamento batem com a contagem.'); return; }
+  const fmtD = function(iso) { return iso ? new Date(String(iso).slice(0, 10) + 'T12:00:00').toLocaleDateString('pt-BR').slice(0, 5) : '—'; };
+  const lbl = { CLARO: '🍺 Chopp Claro', VINHO: '🍷 Chopp de Vinho' };
+  const existing = document.getElementById('modalConfBarris'); if (existing) existing.remove();
+  const modal = document.createElement('div');
+  modal.id = 'modalConfBarris';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:10000;display:flex;align-items:flex-end;justify-content:center';
+  modal.innerHTML =
+    '<div style="background:var(--s2);border-radius:20px 20px 0 0;width:100%;max-width:480px;display:flex;flex-direction:column;max-height:90vh;padding-bottom:env(safe-area-inset-bottom,0px)">'
+    + '<div style="padding:16px 16px 10px;border-bottom:1px solid rgba(0,0,0,.08)">'
+    + '<div style="font-size:15px;font-weight:800;color:var(--t1);text-align:center">🔎 Conferência dos barris</div>'
+    + '<div style="font-size:11.5px;color:var(--t3);text-align:center;margin-top:4px;line-height:1.45">A contagem tem <b>menos</b> barris com chopp do que o app tem em acompanhamento. Marque os que <b>já acabaram</b> — eles saem da aba Barris.</div>'
+    + '</div><div style="overflow-y:auto;padding:12px 16px">'
+    + difs.map(function(d) {
+        return '<div class="conf-barris-tipo" data-tipo="' + d.tipo + '" style="border:1px solid rgba(0,0,0,.08);border-radius:12px;padding:10px 12px;margin-bottom:10px">'
+          + '<div style="font-weight:800;font-size:13px;color:var(--t1)">' + lbl[d.tipo] + '</div>'
+          + '<div style="font-size:11px;color:var(--txt-red);font-weight:700;margin:3px 0 8px">Contados com chopp: ' + d.contados + ' · no app: ' + d.ativos.length + ' → ' + d.sobra + ' a mais</div>'
+          + d.ativos.map(function(b) {
+              return '<label style="display:flex;align-items:center;gap:9px;padding:6px 0;font-size:12px;color:var(--t1);cursor:pointer;border-top:1px solid rgba(0,0,0,.05)">'
+                + '<input type="checkbox" class="conf-barril-chk" value="' + b.id + '"' + (d.sugeridos.indexOf(b.id) >= 0 ? ' checked' : '') + ' style="width:17px;height:17px;flex-shrink:0"/>'
+                + '<span style="flex:1">Validade <b>' + fmtD(b.validade) + '</b> · recebido ' + fmtD(b.criado_em) + '</span></label>';
+            }).join('')
+          + '</div>';
+      }).join('')
+    + '<div style="font-size:10.5px;color:var(--t3);line-height:1.4">Já deixamos marcados os que não batem com a contagem. Confira e ajuste antes de finalizar.</div>'
+    + '</div><div style="padding:12px 16px;display:grid;grid-template-columns:1fr 1.4fr;gap:10px;border-top:1px solid rgba(0,0,0,.08)">'
+    + '<button onclick="document.getElementById(\'modalConfBarris\').remove();render()" style="background:var(--fill-sutil2);border:none;border-radius:13px;padding:13px;color:var(--t2);font-weight:700;font-size:13px">Conferir depois</button>'
+    + '<button onclick="_barrisConfFinalizarMarcados()" style="background:linear-gradient(135deg,#DC2626,#991B1B);border:none;border-radius:13px;padding:13px;color:#fff;font-weight:900;font-size:13px">Finalizar marcados</button>'
+    + '</div></div>';
+  document.body.appendChild(modal);
+}
+async function _barrisConfFinalizarMarcados() {
+  const ids = Array.from(document.querySelectorAll('#modalConfBarris .conf-barril-chk:checked')).map(function(i) { return i.value; });
+  if (!ids.length) { showToast('Marque os barris que já acabaram (ou toque em "Conferir depois").'); return; }
+  if (!confirm('Finalizar ' + ids.length + ' barril(is)? Use só para os que o chopp já acabou de verdade.')) return;
+  const quem = ((usuarioAtual && usuarioAtual.nome) || loja) + ' (conferência semanal)';
+  let ok = 0;
+  for (const id of ids) {
+    const b = barrisAtivos.find(function(x) { return x.id === id; });
+    if (!b) continue;
+    try {
+      await sbRequest('gn_barris_validade?id=eq.' + id + '&status=eq.ATIVO', { method: 'PATCH', headers: { 'Prefer': 'return=minimal' },
+        body: JSON.stringify({ status: 'FINALIZADO', finalizado_por: quem, finalizado_em: new Date().toISOString() }) });
+      await _ajustarBarrisVaziosAuto(b.catalogo_id, 1, 'sistema (barril finalizado)');
+      ok++;
+    } catch (e) {}
+  }
+  document.getElementById('modalConfBarris')?.remove();
+  showToast(ok === ids.length ? '✅ ' + ok + ' barril(is) finalizado(s).' : '⚠️ ' + ok + ' de ' + ids.length + ' finalizados — tente de novo os que faltaram.');
+  await carregarBarris(false);
+}
+function _barrisConfAvisoHtml() {
+  const difs = _barrisConfDiferencas(_barrisConfLerLocal());
+  if (!difs.length) return '';
+  const txt = difs.map(function(d) { return d.sobra + ' de ' + (d.tipo === 'VINHO' ? 'vinho' : 'claro'); }).join(' e ');
+  return '<div class="conf-barris-aviso" style="background:rgba(220,38,38,.07);border:1px solid rgba(220,38,38,.28);border-left:3px solid #DC2626;border-radius:10px;padding:10px 12px;margin-top:10px;font-size:12px;color:#991B1B;line-height:1.45">'
+    + '🔎 <b>Conferência pendente:</b> a contagem desta semana tem ' + txt + ' a menos do que os barris abaixo. Os que já acabaram precisam ser finalizados.'
+    + '<button onclick="_barrisConferirComContagem(true)" style="display:block;width:100%;margin-top:8px;background:#DC2626;border:none;border-radius:8px;color:#fff;padding:9px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">Conferir agora</button></div>';
+}
+
 async function _confirmarContagemBarrisSemanal() {
   if (_barrisSemSalvando) return;
   const total = _barrisSemItens.CLARO.length + _barrisSemItens.VINHO.length;
@@ -2449,10 +2563,15 @@ async function _confirmarContagemBarrisSemanal() {
     // Só aqui, depois do POST voltar OK: é o que evita re-travar a loja que já fez a contagem
     // se a rede cair antes do próximo reload (a checagem passou a ser fail-closed).
     _barrisSemMarcarOkLocal(slug, monday);
+    const _contados = _barrisContadosComChopp(_barrisSemItens);
     _barrisSemItens = { CLARO: [], VINHO: [] };
     _barrisSemComparativo = null;
     _barrisSemSemVazios = false;
     showToast('✅ Contagem de barris confirmada!');
+    _barrisConfSalvarLocal(slug, monday, _contados);
+    // Conferência: o que ficou "em acompanhamento" no app tem que bater com o que a loja
+    // acabou de contar. Não trava o fluxo — se falhar, só não abre agora.
+    setTimeout(function() { _barrisConferirComContagem(false); }, 0);
   } catch (e) {
     showToast('⚠️ Erro ao salvar: ' + (e.message || e));
   } finally {
@@ -11862,6 +11981,7 @@ function render() {
         <button onclick="carregarBarris(false)" style="background:var(--fill-sutil2);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:5px 10px;color:var(--t2);font-size:11px">↻ Atualizar</button>
       </div>
       <div style="font-size:11px;color:var(--t3);margin-top:6px;line-height:1.4">Validade lançada ao confirmar a entrega na aba Entrega. Toque em "Finalizar" quando o barril acabar no tirador.</div>
+      ${_barrisConfAvisoHtml()}
       ${_barrisOrdenados.length === 0
         ? `<div class="card" style="padding:16px;text-align:center;color:var(--t2);font-size:12px;margin-top:10px">Nenhum barril em acompanhamento no momento.</div>`
         : `<div class="card" style="margin-top:10px;padding:0">
@@ -13083,6 +13203,17 @@ async function carregarBarris(silent) {
     // Painel de Gestão), então não precisa mais buscar gn_barris_vazios nesta tela.
     const rows = await sbRequest('gn_barris_validade?loja_slug=eq.' + slug + '&status=eq.ATIVO&select=*&order=validade', { method: 'GET' });
     barrisAtivos = rows || [];
+    // Contagem semanal desta semana (do banco, vale pra qualquer aparelho da loja) — base da
+    // conferência dos barris em acompanhamento. Best-effort: sem ela, só não há aviso.
+    try {
+      const cont = await sbRequest('gn_barris_semanal_contagem?loja_slug=eq.' + slug + '&semana_inicio=eq.' + wkKey(getMonday(new Date())) + '&select=tipo,status,validade,criado_em', { method: 'GET' });
+      if (Array.isArray(cont) && cont.length) {
+        const porTipo = { CLARO: [], VINHO: [] };
+        cont.forEach(function(r) { if (porTipo[r.tipo]) porTipo[r.tipo].push(r); });
+        const em = cont.reduce(function(m, r) { return r.criado_em > m ? r.criado_em : m; }, '');
+        _barrisConfContagemBanco = { contados: _barrisContadosComChopp(porTipo), em: em };
+      } else _barrisConfContagemBanco = null;
+    } catch (e) {}
     const dot = document.getElementById('dot-barris');
     if (dot) dot.classList.toggle('hidden', !_temBarrilCritico());
     mostrarAvisoBarrisSeNecessario();
