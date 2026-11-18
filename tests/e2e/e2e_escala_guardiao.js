@@ -18,7 +18,9 @@ const DIA = (hoje.getDay() + 6) % 7;
 const dias = st => { const d = Array(7).fill(P); d[DIA] = st; return d; };
 const SEMANA = { funcs: [
   { id: 0, nome: 'Renata ALVES - gerente', setor: 'Gerente', ferias_ini: '', ferias_fim: '', dias: dias('FOLGA') },
-  { id: 1, nome: 'Marcos ALVES - gerente', setor: 'Gerente', ferias_ini: '', ferias_fim: '', dias: dias(P) },
+  // Trabalha hoje, com a folga num OUTRO dia da semana — sem nenhuma folga na semana a trava
+  // 'sem folga' (e2e_escala_sem_folga) pegaria, e este caso é o de quem trabalha normal.
+  { id: 1, nome: 'Marcos ALVES - gerente', setor: 'Gerente', ferias_ini: '', ferias_fim: '', dias: dias(P).map((x, i) => i === (DIA + 3) % 7 ? 'FOLGA' : x) },
 ]};
 
 const APPS = [

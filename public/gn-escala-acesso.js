@@ -44,6 +44,27 @@
   // foi férias e folga. (O período da aba Dados é outra história — ver _periodoDados.)
   var DIA_BLOQUEIA = { 'FOLGA': 'folga', 'FÉRIAS': 'ferias' };
 
+  // ── Escala sem nenhuma folga na semana (18/11/2026) ────────────────────────
+  // "Tem uns que, pra driblar a obrigatoriedade, não estão marcando nenhuma folga. Tem que
+  // ter ao menos um dia de folga marcado. Quem tiver sem, bloquear desde já."
+  // Vale pra gerência e sub-gerência (quem o pedido citou), só nas 11 lojas (Maglia fora,
+  // regra do projeto). Semana com férias/afastamento/atestado não conta: ali a pessoa pode
+  // legitimamente não ter folga marcada. Só FOLGA conta como folga — "banco de horas" é
+  // compensação, e aceitar daria o mesmo drible com outro nome.
+  var SEM_FOLGA_CARGOS = ['gerente', 'sub_gerente'];
+  var SEM_FOLGA_LOJAS_FORA = ['MAGLIA'];
+  var SEM_FOLGA_SEMANA_ATIPICA = ['FÉRIAS', 'FERIAS', 'AFASTAMENTO', 'ATESTADO', 'SUSPENSÃO', 'SUSPENSAO'];
+  function _semFolga(func, sess, comKey) {
+    if (SEM_FOLGA_CARGOS.indexOf(String(sess.cargo || '').toLowerCase()) < 0) return false;
+    if (SEM_FOLGA_LOJAS_FORA.indexOf(comKey) >= 0) return false;
+    var dias = Array.isArray(func.dias) ? func.dias : null;
+    if (!dias || dias.length !== 7) return false;                  // escala incompleta: na dúvida, libera
+    var st = dias.map(function (x) { return String(x || 'PRESENTE').trim().toUpperCase(); });
+    if (st.some(function (x) { return x === 'FOLGA'; })) return false;
+    if (st.some(function (x) { return SEM_FOLGA_SEMANA_ATIPICA.indexOf(x) >= 0; })) return false;
+    return true;
+  }
+
   var CACHE_MS = 5 * 60 * 1000;   // só o resultado LIBERADO é cacheado (ver _cacheLer)
   var LIB_KEY = 'gn_escala_liberacao';
   var CACHE_KEY = 'gn_escala_cache';
@@ -224,6 +245,9 @@
         if (!func) return vazio;
 
         var res = _avaliar(func, dia, hojeISO, vinculo);
+        if (!res.bloqueado && _semFolga(func, sess, comKey)) {
+          res = { bloqueado: true, motivo: 'sem_folga', vinculo: vinculo, origem: 'escala' };
+        }
         _cacheGravar(chave, res);
         return res;
       }).catch(function (e) { _log('escalaAcesso:verificar', e); return vazio; });
@@ -332,6 +356,14 @@
   var _overlay = null;
 
   function _texto(res) {
+    if (res.motivo === 'sem_folga') {
+      return {
+        icone: '📅', titulo: 'Sua escala está sem folga nesta semana',
+        corpo: 'A escala desta semana não tem <b>nenhum dia de folga</b> marcado pra você — e toda ' +
+               'escala precisa de <b>pelo menos 1 folga</b> na semana. O acesso ao app fica fechado ' +
+               'até a folga ser marcada no Check-list, aba Escala. Marcou? Toque em verificar de novo.'
+      };
+    }
     if (res.motivo === 'folga') {
       return {
         icone: '🌴', titulo: 'Hoje é seu dia de folga',
@@ -374,6 +406,11 @@
         '<div style="font-size:13px;line-height:1.6;color:rgba(232,234,237,.82)">' + t.corpo + '</div>' +
 
         '<div id="gn-eb-acoes" style="margin-top:20px;display:flex;flex-direction:column;gap:8px">' +
+          (res.motivo === 'sem_folga'
+            ? '<button id="gn-eb-marcar" style="width:100%;background:#22c55e;border:none;border-radius:11px;' +
+                'padding:12px;font-size:13px;font-weight:800;color:#06240f;cursor:pointer;font-family:inherit">' +
+                '📅 Marcar a folga agora (aba Escala)</button>'
+            : '') +
           '<button id="gn-eb-abrir" style="width:100%;background:#facc15;border:none;border-radius:11px;' +
             'padding:12px;font-size:13px;font-weight:800;color:#1a1d23;cursor:pointer;font-family:inherit">' +
             '🔑 Liberar com senha de supervisão</button>' +
@@ -426,6 +463,9 @@
       location.reload();
     };
 
+    var btnMarcar = el.querySelector('#gn-eb-marcar');
+    if (btnMarcar) btnMarcar.onclick = function () { _irMarcarFolga(sess); };
+
     el.querySelector('#gn-eb-retry').onclick = function () {
       var b = el.querySelector('#gn-eb-retry');
       b.textContent = 'Verificando...'; b.disabled = true;
@@ -451,6 +491,37 @@
     el.querySelector('#gn-eb-senha').onkeydown = function (ev) {
       if (ev.key === 'Enter') btnOk.click();
     };
+  }
+
+  // ── Marcar a folga sem ficar trancado fora da própria escala ───────────────
+  // Quem conserta a escala é a própria gerência, no Check-list. Trancar o Check-list
+  // inteiro seria um beco sem saída. Então: no Check-list, o botão abre a aba Escala e
+  // só ela — sair dela sem marcar a folga traz a tela de volta (checagem a cada 4s). Nos
+  // outros apps, o botão leva pro Check-list já pedindo a aba Escala.
+  var _modoMarcar = null;
+  function _ehChecklist() {
+    return typeof switchTab === 'function' && !!document.getElementById('tab-btn-escala');
+  }
+  function _abaAtual() {
+    try { return typeof _activeTab !== 'undefined' ? _activeTab : null; } catch (_) { return null; }
+  }
+  function _irMarcarFolga(sess) {
+    if (!_ehChecklist()) {
+      var base = location.href.replace(/[^\/]*([?#].*)?$/, '');
+      location.href = base + 'gn-checklist.html#marcar-folga';
+      return;
+    }
+    fechar();
+    try { switchTab('escala', document.getElementById('tab-btn-escala')); } catch (e) { _log('escalaAcesso:marcar', e); }
+    if (_modoMarcar) return;
+    _modoMarcar = setInterval(function () {
+      if (_overlay) return;
+      if (_abaAtual() === 'escala') return;
+      verificar(sess, { semCache: true }).then(function (r) {
+        if (r.bloqueado) mostrar(sess, r);
+        else { clearInterval(_modoMarcar); _modoMarcar = null; }
+      });
+    }, 4000);
   }
 
   function mostrar(sess, res) {
@@ -552,7 +623,10 @@
     var sess = _lerSessao();
     if (!sess) { fechar(); return; }
     verificar(sess).then(function (res) {
-      if (res.bloqueado) mostrar(sess, res);
+      if (res.bloqueado && res.motivo === 'sem_folga' && _ehChecklist() && /marcar-folga/.test(location.hash)) {
+        _irMarcarFolga(sess); return;
+      }
+      if (res.bloqueado) { if (!_modoMarcar || _abaAtual() !== 'escala') mostrar(sess, res); }
       else fechar();
     });
   }
@@ -580,6 +654,7 @@
     _semIdx: _semIdx,
     _diaIdx: _diaIdx,
     _avaliar: _avaliar,
+    _semFolga: _semFolga,
     _primeiroNome: _primeiroNome
   };
 })();

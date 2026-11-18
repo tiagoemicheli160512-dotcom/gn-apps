@@ -21,7 +21,7 @@ const P = 'PRESENTE';
 const SEMANA = {
   funcs: [
     func('Renata ALVES - gerente',  [P, 'FOLGA', P, P, 'FOLGA', P, P]),       // folga na sexta
-    func('Marcos ALVES - gerente',[P, P, P, P, P, P, P]),                    // trabalhando
+    func('Marcos ALVES - gerente',[P, P, P, P, P, P, 'FOLGA']),              // trabalhando hoje (folga no domingo — sem nenhuma folga na semana a trava 'sem folga' pega, ver e2e_escala_sem_folga)
     func('Jandy ALVES - estoque',    [P, P, P, P, P, P, P],
          { ferias_ini: '2026-09-28', ferias_fim: '2026-10-20' }),               // férias pela aba Dados
     func('Kelven ALVES- garçom',     [P, P, P, P, 'FÉRIAS', P, P]),             // férias pela escala
