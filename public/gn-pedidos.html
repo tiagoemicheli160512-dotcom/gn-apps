@@ -2408,6 +2408,37 @@ function _toggleTodosFornConfirm(btn) {
   btn.textContent = marcado ? 'Marcar todos' : 'Desmarcar todos';
 }
 
+// Fornecedores que ora entregam na semana seguinte ao pedido, ora na mesma semana: na
+// confirmação, se a previsão cair na semana que vem sem 📅/⚡, o app pergunta. Os demais
+// seguem a regra normal (próximo dia de entrega), sem pergunta — decisão do dono, 18/11/2026.
+const FORN_PERGUNTA_ENTREGA_SEMANA = ['CIACARNE'];
+function _fornPerguntaEntregaSemana(nome) {
+  const n = String(nome || '').toUpperCase();
+  return FORN_PERGUNTA_ENTREGA_SEMANA.some(f => n.includes(f));
+}
+// provs: provisões (ainda não gravadas) desses fornecedores sem 📅/⚡. Devolve 'manter'
+// (segue a data calculada), 'hoje' (vira a data de hoje, como o 📅) ou 'cancelar'.
+// OK no 1º diálogo = manter: é o caso mais comum e o toque automático não pode mudar a data.
+function _perguntarEntregaSemana(provs) {
+  const hoje = new Date(); hoje.setHours(0, 0, 0, 0);
+  const domingo = new Date(hoje); domingo.setDate(hoje.getDate() + (7 - hoje.getDay()) % 7);
+  const iso = dt => dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
+  const lim = iso(domingo);
+  const fora = (provs || []).filter(p => p.data_entrega && p.data_entrega > lim);
+  if (!fora.length) return 'manter';
+  const NOMES = ['domingo','segunda','terça','quarta','quinta','sexta','sábado'];
+  const fmt = s => { const [y, m, d] = s.split('-').map(Number); const dt = new Date(y, m - 1, d); return NOMES[dt.getDay()] + ' ' + String(d).padStart(2,'0') + '/' + String(m).padStart(2,'0'); };
+  const forns = [...new Set(fora.map(p => p.fornecedor))].join(', ');
+  const datas = [...new Set(fora.map(p => p.data_entrega))].sort().map(fmt).join(', ');
+  const lojas = new Set(fora.map(p => p.loja_slug)).size;
+  if (confirm(`📅 ${forns}: a previsão vai sair para ${datas.toUpperCase()} — SEMANA QUE VEM (${fora.length} item(ns) em ${lojas} loja(s)).\n\n`
+    + `OK = está certo, entrega semana que vem.\nCancelar = não, a entrega é ESSA semana.`)) return 'manter';
+  const hj = fmt(iso(hoje));
+  if (confirm(`Lançar a entrega de ${forns} com a data de HOJE (${hj}), igual ao 📅 "entrega essa semana"?\n\n`
+    + `OK = sim, data de hoje.\nCancelar = não confirmar agora (dá pra marcar 📅 item por item e confirmar de novo).`)) return 'hoje';
+  return 'cancelar';
+}
+
 async function _confirmarFornecedoresSelecionados() {
   let selecionados = [...document.querySelectorAll('.confirmForn-chk:checked')].map(chk => chk.value);
   if (selecionados.length === 0) {
@@ -2493,7 +2524,8 @@ async function _confirmarFornecedoresSelecionados() {
     const puladas = [];
 
     // 2. Gerar provisões — uma por produto×loja com qtd > 0, só dos fornecedores selecionados
-    const provisoes = [];
+    const provisoes = [], semanaQueVem = [];
+    const isoDate = dt => dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
     S.catalogo.forEach(prod => {
       if (!fornsSet.has(prod.fornecedor)) return;
       const itensLoja = S.pedidoItens[prod.id];
@@ -2510,7 +2542,6 @@ async function _confirmarFornecedoresSelecionados() {
 
         const forn = S.fornecedores.find(f => f.nome === prod.fornecedor);
         const diasForn = forn?.dias_entrega || [];
-        const isoDate = dt => dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
 
         // Item marcado com ⚡ urgência (giro rápido, fora do cronograma normal do
         // fornecedor) OU 📅 "entrega essa semana" (item.entregaSemana — mesmo efeito na
@@ -2522,9 +2553,9 @@ async function _confirmarFornecedoresSelecionados() {
         // mesmo dia, deixando a Saída da Produção "atrasada" até alguém editar a mão.
         // Sem nenhum dos dois: data (ou janela) de entrega do fornecedor — prazo em dias
         // após o pedido tem prioridade sobre o cálculo por dia da semana, quando cadastrado.
-        let dataEntrega = null, dataEntregaFim = null;
+        let dataEntrega = null, dataEntregaFim = null, forcadoHoje = false;
         if (_pedidoItemUrgente(prod, loja.slug_pedido) || item.entregaSemana) {
-          dataEntrega = isoDate(new Date());
+          dataEntrega = isoDate(new Date()); forcadoHoje = true;
         } else if (forn?.prazo_dias_min != null) {
           const ref = new Date();
           const dMin = new Date(ref); dMin.setDate(ref.getDate() + forn.prazo_dias_min);
@@ -2560,8 +2591,18 @@ async function _confirmarFornecedoresSelecionados() {
           valor_previsto:  item.qtd * (prod.custo ?? item.custo ?? 0),
           status:          'AGUARDANDO'
         });
+        if (!forcadoHoje && _fornPerguntaEntregaSemana(prod.fornecedor)) semanaQueVem.push(provisoes[provisoes.length - 1]);
       });
     });
+
+    // 2a. Fornecedor que ora entrega na semana seguinte, ora na mesma semana (lista
+    // FORN_PERGUNTA_ENTREGA_SEMANA): se a data calculada caiu na semana que vem e ninguém
+    // marcou 📅/⚡, pergunta antes de gravar. Em 17/11/2026 a Ciacarne foi confirmada na
+    // terça cedo, entregou na quarta 18 e a previsão saiu pra segunda 23 — as lojas não
+    // viam a entrega do dia.
+    const _resp = _perguntarEntregaSemana(semanaQueVem);
+    if (_resp === 'cancelar') { renderPedido(); return; }
+    if (_resp === 'hoje') { const h = isoDate(new Date()); semanaQueVem.forEach(p => { p.data_entrega = h; p.data_entrega_fim = null; }); }
 
     // 2b. Avisa o que foi pulado ANTES de gravar, com os itens na tela: a pessoa acabou de
     // reverter justamente pra refazer o pedido, então ela precisa ver quais linhas o app
