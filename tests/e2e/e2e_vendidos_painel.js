@@ -186,6 +186,39 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   check('semana em andamento: "fecha na segunda, com a contagem"', /fecha na segunda/.test(e.vigente), e.vigente);
   check('a tabela da Coca não estoura 360 px', e.largos === 0, e.largos);
 
+  // ── 5. Aviso de gramatura muito baixa (caso real: Picanha de Sol Executivo com 0,15 g) ──
+  const g = await page.evaluate(async () => {
+    session = { id: 1, nome: 'Tiago', cargo: 'mestre', loja: 'GERAL', permissoes: { master: true } };
+    _vendGerData.cadastro = [{ id: 'pe', grupo: 'prato', nome: 'PICANHA DE SOL EXECUTIVO', gramas: { picanha: 0.15 }, ativo: true, codigo_pdv: '100013' },
+                             { id: 'p2', grupo: 'prato', nome: 'PICANHA DE SOL P2', gramas: { picanha: 400 }, ativo: true }];
+    _vendCadAberto = true; renderDashboard();
+    const cadEl = document.querySelector('.vend-cadastro');
+    const out = { cab: cadEl.innerText.replace(/\s+/g, ' '), marcas: [...document.querySelectorAll('.vc-item')].map(x => x.dataset.id + ':' + !!x.querySelector('.vc-susp')) };
+    const msgs = []; const conf0 = window.confirm;
+    window.confirm = m => { msgs.push(m); return false; };
+    const nPost = window.__posts0 = 0;
+    await _vendCadSalvar(document.querySelector('.vc-item[data-id="pe"] button'));
+    out.recusou = msgs[0] || '';
+    // Corrigindo pra 150 g salva sem perguntar.
+    msgs.length = 0;
+    document.querySelector('.vc-item[data-id="pe"] .vc-g[data-carne="picanha"]').value = '150';
+    await _vendCadSalvar(document.querySelector('.vc-item[data-id="pe"] button'));
+    out.semPergunta = msgs.length === 0;
+    // Importar das fichas com 0,15 g também pergunta.
+    _vendSugestoes = { lista: [{ cod: '100013', nome: 'PICANHA DE SOL EXECUTIVO', gramas: { picanha: 0.15 }, obs: [], conferir: true }] };
+    renderDashboard();
+    document.querySelector('.vc-sug input').checked = true;
+    await _vendSugAdicionar();
+    out.sug = msgs[0] || '';
+    window.confirm = conf0;
+    return out;
+  });
+  const postsPe = posts.filter(x => (x.b || []).some(i => i.id === 'pe' || i.id === 'prato_100013'));
+  check('cadastro marca o prato com 0,15 g ("gramatura muito baixa") e o cabeçalho conta 1', /⚠ 1 com gramatura muito baixa/.test(g.cab) && g.marcas.join() === 'pe:true,p2:false', g);
+  check('salvar com 0,15 g pede confirmação explicando o erro provável; recusando, não grava', /Gramatura muito baixa em "PICANHA DE SOL EXECUTIVO": Picanha 0,15 g/.test(g.recusou) && /0,15 em vez de 150/.test(g.recusou), g.recusou);
+  check('com 150 g salva direto (1 gravação, com 150 g)', g.semPergunta && postsPe.length === 1 && postsPe[0].b[0].gramas.picanha === 150, postsPe.map(x => x.b));
+  check('importar das fichas com 0,15 g também pede confirmação', /PICANHA DE SOL EXECUTIVO: Picanha 0,15 g/.test(g.sug), g.sug);
+
   check('nenhum erro de JavaScript', erros.length === 0, erros);
   console.log(`\n${ok} OK, ${falhou} falhou`);
   await browser.close();
