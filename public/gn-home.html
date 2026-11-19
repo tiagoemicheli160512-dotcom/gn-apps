@@ -451,6 +451,7 @@
 <script src="gn-lojas-config.js"></script>
 <script src="gn-escala-acesso.js"></script>
 <script src="gn-desperdicio-acesso.js"></script>
+<script src="gn-vendidos.js"></script>
 <script src="gn-validade-acesso.js"></script>
 <script src="gn-avaliacoes-pesos.js"></script>
 <script src="gn-comissoes-calendario.js"></script>
@@ -15588,7 +15589,7 @@ async function _loadCarnesGerencia() {
   // A venda da semana vem junto porque a saída de carne só diz algo comparada com ela:
   // 80 kg numa loja que vendeu 100 mil e 150 kg em outra que vendeu os mesmos 100 mil são
   // dois casos diferentes, e é esse segundo que precisa de olho.
-  const [rows, fatRows, rodRows] = await Promise.all([
+  const [rows, fatRows, rodRows, vendRows] = await Promise.all([
     window.gnFetchJson(
       `${SB_URL}/rest/v1/checklist_carnes?semana_inicio=gte.${iniISO}&semana_inicio=lte.${fimISO}` +
       `&select=loja,semana_inicio,carnes,updated_at&order=updated_at.desc`,
@@ -15603,6 +15604,12 @@ async function _loadCarnesGerencia() {
       `${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${iniISO}&data=lte.${fimISO}` +
       `&select=loja,data,rodizio_inteira,rodizio_meia`,
       H, 'carnesGerencia:rodizio', null),
+    // Vendidos do dia (gn-vendidos.js): pratos × gramatura, lançados pela gerência. É o
+    // "quanto DEVIA ter saído" que faltava ao lado do "quanto saiu" da contagem.
+    window.gnFetchJson(
+      `${SB_URL}/rest/v1/gn_vendidos_diario?data=gte.${iniISO}&data=lte.${fimISO}` +
+      `&select=loja,data,totais,atrasado,lancado_por`,
+      H, 'carnesGerencia:vendidos', null),
   ]);
   if (!rows) { _carnesGerLoaded = true; _carnesGerData = { erro: true, iniISO, fimISO }; renderDashboard(); return; }
   // Faturamento é complemento, não requisito: se só ele falhar a aba continua mostrando os
@@ -15610,6 +15617,8 @@ async function _loadCarnesGerencia() {
   const fatFalhou = !fatRows;
   // Rodízio também é complemento: sem ele os kg continuam na tela.
   const rodFalhou = !rodRows;
+  // Vendidos também: sem eles a aba fica como era antes.
+  const vendFalhou = !vendRows;
 
   const porLoja = {};
   // Maglia não tem aba Carnes no Check-list (CLAUDE.md / ABAS_FORA_MAGLIA), então ela
@@ -15617,7 +15626,8 @@ async function _loadCarnesGerencia() {
   LOJAS_LISTA.filter(k => k !== 'MAGLIA')
     .forEach(k => { porLoja[k] = { k, carnes: null, semana_inicio: null, updated_at: null, fat: 0,
                                    fatDia: [null, null, null, null, null, null, null],
-                                   rodizios: 0, rodizioLancado: false, foraDoBuffet: (window.GN_BUFFET_FORA || []).includes(k) }; });
+                                   rodizios: 0, rodizioLancado: false, foraDoBuffet: (window.GN_BUFFET_FORA || []).includes(k),
+                                   vendDia: [null, null, null, null, null, null, null] }; });
   (rodRows || []).forEach(r => {
     const k = _normLoja(r.loja);
     if (!porLoja[k] || porLoja[k].foraDoBuffet) return;
@@ -15648,6 +15658,12 @@ async function _loadCarnesGerencia() {
     // são lançamento que faltou — nenhum é loja que vendeu nada.
     if (i >= 0 && v > 0) porLoja[k].fatDia[i] = v;
   });
+  (vendRows || []).forEach(r => {
+    const k = _normLoja(r.loja);
+    if (!porLoja[k]) return;
+    const i = diasISO.indexOf(String(r.data || '').slice(0, 10));
+    if (i >= 0) porLoja[k].vendDia[i] = r.totais || {};
+  });
   (rows || []).forEach(r => {
     const k = _normLoja(r.loja);
     if (!porLoja[k] || !r.carnes) return;
@@ -15657,7 +15673,7 @@ async function _loadCarnesGerencia() {
       || (r.semana_inicio === iniISO && atual.semana_inicio !== iniISO);
     if (melhor) { atual.carnes = r.carnes; atual.semana_inicio = r.semana_inicio; atual.updated_at = r.updated_at; }
   });
-  _carnesGerData = { porLoja, iniISO, fimISO, fatFalhou, rodFalhou };
+  _carnesGerData = { porLoja, iniISO, fimISO, fatFalhou, rodFalhou, vendFalhou };
   _carnesGerLoaded = true;
   renderDashboard();
 }
@@ -15683,6 +15699,53 @@ function _carnesDoCorte(carnes, key) {
 function _carnesRazao(venda, fat) {
   if (!(fat > 0) || venda === null || venda === undefined) return null;
   return venda / fat * 1000;
+}
+
+// "Quanto devia ter saído" de um corte na semana, pelos vendidos lançados (pratos × gramas)
+// — e, na carne de sol, mais os rodízios a 250 g, que não são prato do cadastro. Contra a
+// saída real (início + compras − contagem) dá a diferença que interessa: carne que saiu sem
+// venda que a explique (porção acima da ficha, perda, desvio).
+//
+// Só compara com a semana inteira lançada. Com dia faltando, o "devia" fica menor que o
+// real por falta de lançamento, não por perda — e a diferença acusaria a loja errado. Nesse
+// caso mostra o parcial e diz quantos dias faltam, sem diferença.
+function _carnesVendidos(d, key, saidaReal) {
+  const dias = (d && d.vendDia) || [];
+  const nDias = dias.filter(Boolean).length;
+  if (!nDias) return null;
+  const pratos = dias.reduce((a, t) => a + (t ? (Number(t[key]) || 0) : 0), 0);
+  let rodizio = 0;
+  if (key === 'carne_sol' && d.rodizioLancado && !d.foraDoBuffet) rodizio = d.rodizios * CARNE_SOL_POR_RODIZIO_KG;
+  const devia = pratos + rodizio;
+  const completo = nDias === 7;
+  const temReal = saidaReal !== null && saidaReal !== undefined;
+  const diff = completo && temReal ? saidaReal - devia : null;
+  const pct = diff !== null && devia > 0 ? diff / devia * 100 : null;
+  return { nDias, pratos, rodizio, devia, completo, diff, pct };
+}
+
+function _carnesVendidosLinhaHtml(d, key, saidaReal) {
+  const v = _carnesVendidos(d, key, saidaReal);
+  if (!v) return '';
+  const kg = x => (Math.round(x * 10) / 10).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  const comp = v.rodizio > 0 ? ` (pratos ${kg(v.pratos)} + rodízio ${kg(v.rodizio)})` : '';
+  let diffHtml = '';
+  if (!v.completo) {
+    diffHtml = `<div style="font-size:9.5px;color:var(--t4)">${v.nDias}/7 dias lançados — a diferença pra saída real só sai com a semana inteira.</div>`;
+  } else if (v.diff !== null) {
+    // Até 5% (ou 1 kg) é ruído de pesagem/porção; acima disso, a mais é o alerta (vermelho),
+    // a menos é contagem ou lançamento a conferir (âmbar).
+    const leve = Math.abs(v.diff) <= Math.max(1, v.devia * 0.05);
+    const cor = leve ? 'var(--txt-green)' : v.diff > 0 ? 'var(--txt-red)' : 'var(--txt-amber)';
+    const txt = leve ? 'bate com os vendidos'
+      : v.diff > 0 ? `saíram ${kg(v.diff)} kg a mais que os vendidos explicam`
+      : `saíram ${kg(-v.diff)} kg a menos que os vendidos — conferir contagem ou lançamento`;
+    diffHtml = `<div class="carnes-vend-diff" style="font-size:9.5px;font-weight:800;color:${cor}">${leve ? '✓' : '⚠'} ${txt}${v.pct === null ? '' : ` (${v.pct > 0 ? '+' : ''}${v.pct.toFixed(0)}%)`}</div>`;
+  }
+  return `<div class="carnes-vend" data-corte="${key}" style="margin-top:2px">
+    <div style="font-size:9.5px;color:#1d4ed8;font-weight:700;font-variant-numeric:tabular-nums">🧾 pelos vendidos: ${kg(v.devia)} kg${comp}</div>
+    ${diffHtml}
+  </div>`;
 }
 
 const DIAS_LABEL_HOME = ['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
@@ -15852,8 +15915,8 @@ function _buildCarnesPanel() {
     const cortesHtml = CARNES_DEF_HOME.map(c => {
       const r = _carnesDoCorte(d.carnes, c.key);
       if (r.contagem === null) {
-        return `<div style="display:flex;justify-content:space-between;gap:8px;font-size:10.5px;color:var(--t4);padding:3px 0;border-top:1px dashed rgba(0,0,0,.08)">
-          <span>${c.icon} ${c.label}</span><span>sem contagem</span></div>`;
+        return `<div style="padding:3px 0;border-top:1px dashed rgba(0,0,0,.08)"><div style="display:flex;justify-content:space-between;gap:8px;font-size:10.5px;color:var(--t4)">
+          <span>${c.icon} ${c.label}</span><span>sem contagem</span></div>${_carnesVendidosLinhaHtml(d, c.key, null)}</div>`;
       }
       const avisoIni = r.temInicial ? '' : ` <span style="color:var(--txt-amber);font-weight:700" title="Sem estoque inicial, a venda estimada é só a contagem invertida">⚠ sem inicial</span>`;
       // Saída negativa não é um número pequeno, é uma conta que não fecha: contaram mais
@@ -15872,6 +15935,7 @@ function _buildCarnesPanel() {
           ${razaoHtml}
         </div>
         ${neg ? `<div style="font-size:9.5px;color:var(--txt-amber);font-weight:700">⚠ saída negativa: contagem maior que o disponível</div>` : ''}
+        ${_carnesVendidosLinhaHtml(d, c.key, r.venda)}
       </div>`;
     }).join('');
     // Rodízios × 250 g contra a saída real de carne de sol.
@@ -15907,7 +15971,7 @@ function _buildCarnesPanel() {
     // Grade dia a dia: uma linha por corte, uma coluna por dia. É o acompanhamento que o
     // Painel não tinha — antes só dava pra ver o fechamento, depois da semana acabar.
     const gradeHtml = `<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,.10);padding-top:7px">
-      <div style="font-size:9.5px;color:var(--t3);font-weight:700;margin-bottom:4px">CONTAGEM DIA A DIA · <span style="color:var(--t4);font-weight:400">segunda é o estoque inicial; <span style="color:#047857;font-weight:700">+N</span> é o que entrou; <span style="color:var(--t2);font-weight:700">💰</span> é a venda daquele dia</span></div>
+      <div style="font-size:9.5px;color:var(--t3);font-weight:700;margin-bottom:4px">CONTAGEM DIA A DIA · <span style="color:var(--t4);font-weight:400">segunda é o estoque inicial; <span style="color:#047857;font-weight:700">+N</span> é o que entrou; <span style="color:#1d4ed8;font-weight:700">🧾N</span> é o que os pratos vendidos levaram; <span style="color:var(--t2);font-weight:700">💰</span> é a venda daquele dia</span></div>
       <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:9.5px;width:100%;min-width:430px">
         <tr><th style="text-align:left;padding:2px 4px;color:var(--t3);font-weight:700;position:sticky;left:0;z-index:1;background:var(--s2);box-shadow:1px 0 0 var(--b3)">Corte</th>
           ${DIAS_LABEL_HOME.map((l,i)=>`<th style="padding:2px 3px;text-align:center;color:${i===0?'var(--t4)':'var(--t3)'};font-weight:700">${l}</th>`).join('')}</tr>
@@ -15916,9 +15980,10 @@ function _buildCarnesPanel() {
           const grade = _carnesGradeDia(d.carnes, c.key);
           return `<tr>
             <td style="padding:2px 4px;color:var(--t2);font-weight:700;white-space:nowrap;border-top:1px dashed rgba(0,0,0,.07);position:sticky;left:0;z-index:1;background:var(--s2);box-shadow:1px 0 0 var(--b3)">${c.label}</td>
-            ${grade.map(g => `<td style="padding:2px 3px;text-align:center;font-variant-numeric:tabular-nums;border-top:1px dashed rgba(0,0,0,.07);color:${g.inicialNaSegunda?'var(--t4)':'var(--t1)'}">
+            ${grade.map((g, gi) => `<td style="padding:2px 3px;text-align:center;font-variant-numeric:tabular-nums;border-top:1px dashed rgba(0,0,0,.07);color:${g.inicialNaSegunda?'var(--t4)':'var(--t1)'}">
               ${g.contagem === null ? '<span style="color:var(--t4)">—</span>' : kg(g.contagem)}
               ${g.entrada ? `<div style="font-size:8.5px;font-weight:700;color:#047857;line-height:1.2">+${kg(g.entrada)}</div>` : ''}
+              ${(d.vendDia || [])[gi] && Number(d.vendDia[gi][c.key]) > 0 ? `<div class="carnes-vend-dia" style="font-size:8.5px;font-weight:700;color:#1d4ed8;line-height:1.2">🧾${kg(Number(d.vendDia[gi][c.key]))}</div>` : ''}
             </td>`).join('')}
           </tr>`;
         }).join('')}
@@ -15941,8 +16006,9 @@ function _buildCarnesPanel() {
       Contagem de carnes da semana fechada — lançada na segunda pela loja, na aba Contagem do app Lojas.<br>
       A venda estimada é <b>início + compras − contagem</b>; sem contagem lançada ela não existe.<br>
       <b>kg por R$ mil</b> é o que compara duas lojas de tamanhos diferentes: quem vende o dobro sai com mais carne sem estar gastando mais.<br>
-      <b>🍖 Rodízios × ${CARNE_SOL_POR_RODIZIO_KG * 1000} g</b> diz quanto da carne de sol saiu pelo rodízio e quanto saiu pelo resto do cardápio — na rede o rodízio fica por volta de 6%, então o que chama atenção é a loja fora dessa faixa.</div>
-    ${avisoFatHtml}${avisoRodHtml}${avisoHtml}${linhas}`;
+      <b>🍖 Rodízios × ${CARNE_SOL_POR_RODIZIO_KG * 1000} g</b> diz quanto da carne de sol saiu pelo rodízio e quanto saiu pelo resto do cardápio — na rede o rodízio fica por volta de 6%, então o que chama atenção é a loja fora dessa faixa.<br>
+      <b>🧾 Pelos vendidos</b> é quanto <i>devia</i> ter saído: pratos lançados pela gerência × gramatura do cadastro (mais os rodízios, na carne de sol). A diferença pra saída real é carne que saiu sem venda que explique.</div>
+    ${avisoFatHtml}${avisoRodHtml}${_carnesGerData.vendFalhou ? `<div style="background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.3);border-radius:12px;padding:10px 14px;margin-bottom:10px;font-size:11px;color:var(--t2)">⚠ Não deu pra carregar os vendidos da semana — a comparação "pelos vendidos" fica de fora.</div>` : ''}${avisoHtml}${linhas}`;
 }
 
 // ── Relatórios da aba 🥩 Carnes (mesmo padrão de gerarWpp/gerarPDF/enviarPDF...Wpp) ───
@@ -15975,6 +16041,8 @@ function _carnesRelatorioTexto(wpp) {
       const razao = _carnesRazao(r.venda, d.fat);
       msg += `  ${c.label}: ${kg(r.venda)} kg vendidos${razao === null ? '' : ' (' + razao.toFixed(2).replace('.', ',') + ' kg por R$ mil)'}\n`;
       msg += `    início ${kg(r.inicial)} + compras ${kg(r.entradas)} - contagem ${kg(r.contagem)}${r.temInicial ? '' : '  (sem inicial)'}\n`;
+      const vR = _carnesVendidos(d, c.key, r.venda);
+      if (vR) msg += `    pelos vendidos: ${kg(vR.devia)} kg` + (!vR.completo ? ` (${vR.nDias}/7 dias lançados)` : vR.diff === null ? '' : ` · diferença ${vR.diff > 0 ? '+' : ''}${kg(vR.diff)} kg${vR.pct === null ? '' : ' (' + (vR.pct > 0 ? '+' : '') + vR.pct.toFixed(0) + '%)'}`) + `\n`;
       if (r.venda < 0) msg += `    ⚠ saída negativa: contagem maior que o disponível\n`;
     });
   });
@@ -16132,6 +16200,347 @@ function gerarPDFCarnes() {
 async function enviarPDFCarnesWpp() {
   await _pdfWppComo(gerarPDFCarnes);
 }
+
+// ── 🧾 VENDIDOS — Coca-Cola, chopp e o lançamento diário da gerência ──────────────────
+// Pedido do dono (19/11/2026): "controlar Coca-Cola e chopp em vendas, a quantidade vendida
+// por dia, lançada pelo gerente ou sub até 11h do dia seguinte; no Painel a visão geral".
+// O lançamento é o gn-vendidos.js (aba 🧾 Vendidos do Check-list + cobrança nos apps); aqui:
+//   · quem lançou e quem não lançou (com atraso marcado);
+//   · Coca e chopp por dia, por loja e na rede;
+//   · o chopp em litros contra os barris FINALIZADOS na semana (50 L cada) — referência, não
+//     conta exata: o barril é finalizado quando acaba, não no dia em que o chopp foi tirado;
+//   · o cadastro de pratos (com gramatura), Coca e chopp — mestre edita.
+// As carnes (pratos × gramas) aparecem na aba 🥩 Carnes, ao lado da saída real.
+// Maglia fora (CLAUDE.md: só entra quando citada).
+let _vendGerData = null, _vendGerLoaded = false, _vendGerOff = 1, _vendCadAberto = false, _vendSugestoes = null;
+const VEND_BARRIL_L = 50;
+
+async function _loadVendidosGerencia() {
+  _vendGerLoaded = false; _vendGerData = null;
+  const ini = _carnesSemanaIni(_vendGerOff);
+  const fim = new Date(ini.getTime() + 6 * 864e5);
+  const iniISO = _carnesISO(ini), fimISO = _carnesISO(fim);
+  const depoisFim = _carnesISO(new Date(fim.getFullYear(), fim.getMonth(), fim.getDate() + 1));
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const [rows, barris, cad] = await Promise.all([
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_vendidos_diario?data=gte.${iniISO}&data=lte.${fimISO}&select=loja,data,totais,itens,atrasado,lancado_por,liberado_por,atualizado_em`, H, 'vendidos:diario', null),
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_barris_validade?status=eq.FINALIZADO&finalizado_em=gte.${iniISO}T00:00:00&finalizado_em=lt.${depoisFim}T00:00:00&select=loja_slug,produto,finalizado_em`, H, 'vendidos:barris', null),
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_vendidos_itens?select=*&order=grupo.asc,ordem.asc,nome.asc`, H, 'vendidos:cadastro', null),
+  ]);
+  if (!rows) { _vendGerLoaded = true; _vendGerData = { erro: true, iniISO, fimISO }; renderDashboard(); return; }
+  const diasISO = Array.from({ length: 7 }, (_, i) => { const d = new Date(ini); d.setDate(d.getDate() + i); return _carnesISO(d); });
+  const porLoja = {};
+  LOJAS_LISTA.filter(k => k !== 'MAGLIA').forEach(k => { porLoja[k] = { k, dias: [null, null, null, null, null, null, null], barris: { CLARO: 0, VINHO: 0 }, barrisL: { CLARO: 0, VINHO: 0 } }; });
+  rows.forEach(r => {
+    const k = _normLoja(r.loja); if (!porLoja[k]) return;
+    const i = diasISO.indexOf(String(r.data).slice(0, 10)); if (i >= 0) porLoja[k].dias[i] = r;
+  });
+  (barris || []).forEach(b => {
+    const info = window.gnLojaPorChave ? window.gnLojaPorChave(b.loja_slug) : null;
+    const k = info ? _normLoja(info.userKey) : null; if (!k || !porLoja[k]) return;
+    const tipo = /VINHO/i.test(b.produto || '') ? 'VINHO' : 'CLARO';
+    const l = parseFloat(((b.produto || '').match(/(\d+)\s*l/i) || [])[1]) || VEND_BARRIL_L;
+    porLoja[k].barris[tipo] += 1; porLoja[k].barrisL[tipo] += l;
+  });
+  _vendGerData = { porLoja, iniISO, fimISO, diasISO, cadastro: cad || [], cadFalhou: !cad, barrisFalhou: !barris };
+  _vendGerLoaded = true;
+  renderDashboard();
+}
+function _vendNavSemana(dir) {
+  const novo = _vendGerOff + dir;
+  if (novo > 1) return;
+  _vendGerOff = novo; _loadVendidosGerencia(); renderDashboard();
+}
+// Dias da semana que já deviam estar lançados agora: do início da cobrança até ontem; o de
+// ontem só depois das 11h de hoje (antes disso ainda está no prazo, não é falta).
+function _vendDiasDevidos(diasISO, agora) {
+  agora = agora || new Date();
+  const G = window.gnVendidos; if (!G) return [];
+  return diasISO.filter(d => d >= G.INICIO && agora >= G.prazoDe(d));
+}
+function _vendNum(v, c) { return Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: c || 0, maximumFractionDigits: c || 0 }); }
+
+function _buildVendidosPanel() {
+  const reportBtns = _reportBtnsRowHtml('Vendidos');
+  if (!_vendGerLoaded || !_vendGerData) return reportBtns + _skelPanel(4);
+  if (_vendGerData.erro) return reportBtns + `<div style="font-size:12px;color:var(--t3);padding:14px">Não deu pra carregar os vendidos agora. Troque de aba e volte.</div>`;
+  const { porLoja, iniISO, fimISO, diasISO, barrisFalhou } = _vendGerData;
+  const G = window.gnVendidos || { INICIO: '2026-11-23', PRAZO_H: 11 };
+  const chaves = Object.keys(porLoja).sort((a, b) => (LOJA_DISPLAY[a] || a).localeCompare(LOJA_DISPLAY[b] || b));
+  const devidos = _vendDiasDevidos(diasISO);
+  const agora = new Date(), hojeISO = _carnesISO(agora);
+  const ontemISO = _carnesISO(new Date(agora.getFullYear(), agora.getMonth(), agora.getDate() - 1));
+  const ontemIdx = diasISO.indexOf(ontemISO);
+
+  const navHtml = `<div style="display:flex;align-items:center;justify-content:center;gap:12px;background:var(--s2);border:1px solid var(--b1);border-radius:12px;padding:8px 10px;margin-bottom:10px">
+    <button onclick="_vendNavSemana(-1)" style="background:none;border:1px solid rgba(0,0,0,.15);border-radius:8px;color:var(--t2);font-size:14px;padding:2px 10px;cursor:pointer;font-family:inherit">‹</button>
+    <div style="text-align:center"><div style="font-size:11px;font-weight:800;color:var(--t1);letter-spacing:.5px">${_carnesDM(iniISO)} – ${_carnesDM(fimISO)}</div>
+      <div style="font-size:9.5px;color:var(--t4)">${_vendGerOff === 1 ? 'semana vigente — em andamento' : _vendGerOff === 0 ? 'semana passada' : 'semana fechada'}</div></div>
+    <button onclick="_vendNavSemana(1)" ${_vendGerOff >= 1 ? 'disabled style="opacity:.3;' : 'style="'}background:none;border:1px solid rgba(0,0,0,.15);border-radius:8px;color:var(--t2);font-size:14px;padding:2px 10px;cursor:pointer;font-family:inherit">›</button>
+  </div>`;
+
+  // Ontem: quem ainda não lançou (no prazo até 11h ou já em atraso).
+  let avisoHtml = '';
+  if (ontemIdx >= 0 && ontemISO >= G.INICIO) {
+    const falta = chaves.filter(k => !porLoja[k].dias[ontemIdx]);
+    const noPrazo = window.gnVendidos ? window.gnVendidos.dentroDoPrazo(ontemISO, agora) : true;
+    avisoHtml = falta.length
+      ? `<div class="vend-aviso" style="background:${noPrazo ? 'rgba(245,158,11,.10)' : 'rgba(239,68,68,.08)'};border:1px solid ${noPrazo ? 'rgba(245,158,11,.3)' : 'rgba(239,68,68,.25)'};border-radius:12px;padding:11px 14px;margin-bottom:10px">
+          <div style="font-size:12px;font-weight:800;color:${noPrazo ? 'var(--txt-amber)' : 'var(--txt-red)'};margin-bottom:3px">${noPrazo ? '⏳' : '🔒'} ${falta.length} de ${chaves.length} lojas sem os vendidos de ontem (${_carnesDM(ontemISO)})${noPrazo ? ` — prazo hoje às ${G.PRAZO_H}h` : ' — em atraso, apps da gerência travados'}</div>
+          <div style="font-size:10.5px;color:var(--t2);line-height:1.5">${falta.map(k => LOJA_DISPLAY[k] || k).join(' · ')}</div></div>`
+      : `<div class="vend-aviso" style="background:rgba(22,163,74,.08);border:1px solid rgba(22,163,74,.25);border-radius:12px;padding:10px 14px;margin-bottom:10px;font-size:11.5px;color:var(--txt-green);font-weight:700">✅ As ${chaves.length} lojas lançaram os vendidos de ontem (${_carnesDM(ontemISO)}).</div>`;
+  } else if (hojeISO < G.INICIO || fimISO < G.INICIO) {
+    avisoHtml = `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:12px;padding:10px 14px;margin-bottom:10px;font-size:11px;color:var(--t2)">A cobrança começa com as vendas de ${_carnesDM(G.INICIO)} (lançadas até ${G.PRAZO_H}h do dia seguinte).</div>`;
+  }
+
+  // Rede
+  const rede = { coca: 0, cl: 0, vi: 0, bCl: 0, bVi: 0, lCl: 0, lVi: 0 };
+  chaves.forEach(k => {
+    const d = porLoja[k];
+    d.dias.forEach(r => { const t = (r && r.totais) || {}; rede.coca += +t.coca_un || 0; rede.cl += +t.chopp_l_claro || 0; rede.vi += +t.chopp_l_vinho || 0; });
+    rede.bCl += d.barris.CLARO; rede.bVi += d.barris.VINHO; rede.lCl += d.barrisL.CLARO; rede.lVi += d.barrisL.VINHO;
+  });
+  const redeHtml = `<div class="vend-rede" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-bottom:10px">
+    ${[['🥤 Coca-Cola', _vendNum(rede.coca) + ' un', ''], ['🍺 Chopp claro', _vendNum(rede.cl, 1) + ' L', `${rede.bCl} ${rede.bCl === 1 ? 'barril finalizado' : 'barris finalizados'}`], ['🍷 Chopp vinho', _vendNum(rede.vi, 1) + ' L', `${rede.bVi} ${rede.bVi === 1 ? 'barril finalizado' : 'barris finalizados'}`]]
+      .map(([t, v, s]) => `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:12px;padding:9px 10px;min-width:0"><div style="font-size:9.5px;color:var(--t3);font-weight:700">${t}</div><div style="font-size:14px;font-weight:800;color:var(--t1);font-variant-numeric:tabular-nums">${v}</div>${s ? `<div style="font-size:9px;color:var(--t4)">${s}</div>` : ''}</div>`).join('')}
+  </div>`;
+
+  const linhas = chaves.map(k => {
+    const d = porLoja[k], cor = COR_LOJA[k] || '#b81a1a';
+    const lancados = devidos.filter(x => d.dias[diasISO.indexOf(x)]).length;
+    const atrasados = d.dias.filter(r => r && r.atrasado).length;
+    const t = d.dias.map(r => (r && r.totais) || null);
+    const soma = key => t.reduce((a, x) => a + (x ? (+x[key] || 0) : 0), 0);
+    const coca = soma('coca_un'), cl = soma('chopp_l_claro'), vi = soma('chopp_l_vinho');
+    const linhaT = (rot, key, casas) => `<tr><td style="padding:3px 4px;color:var(--t2);font-weight:700;white-space:nowrap;position:sticky;left:0;background:var(--s2);box-shadow:1px 0 0 var(--b3)">${rot}</td>${t.map((x, i) => {
+      const devido = devidos.includes(diasISO[i]);
+      return `<td style="padding:3px 3px;text-align:center;font-variant-numeric:tabular-nums;border-top:1px dashed rgba(0,0,0,.07);color:${x ? 'var(--t1)' : devido ? 'var(--txt-red)' : 'var(--t4)'}">${x ? _vendNum(x[key], casas) : devido ? '✕' : '—'}</td>`; }).join('')}</tr>`;
+    // Chopp × barris: só referência — o barril é finalizado quando acaba.
+    const chopp = tipo => {
+      const vend = tipo === 'CLARO' ? cl : vi, bl = d.barrisL[tipo], nb = d.barris[tipo];
+      if (!vend && !nb) return '';
+      const pct = bl > 0 ? vend / bl * 100 : null;
+      return `<div style="font-size:10px;color:var(--t2);font-variant-numeric:tabular-nums">${tipo === 'CLARO' ? '🍺 Claro' : '🍷 Vinho'}: vendidos <b>${_vendNum(vend, 1)} L</b> · barris finalizados ${nb} (${_vendNum(bl)} L)${pct === null ? '' : ` · <b>${pct.toFixed(0)}%</b> do volume dos barris`}</div>`;
+    };
+    const choppHtml = chopp('CLARO') + chopp('VINHO');
+    return `<div class="vend-loja" data-loja="${k}" style="background:var(--s2);border:1px solid rgba(0,0,0,.08);border-left:3px solid ${cor};border-radius:12px;padding:11px 14px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:4px">
+        <div style="font-size:12px;font-weight:800;color:var(--t1)">${LOJA_DISPLAY[k] || k}</div>
+        <div style="font-size:10px;font-weight:700;color:${devidos.length && lancados < devidos.length ? 'var(--txt-red)' : 'var(--txt-green)'}">${devidos.length ? `${lancados}/${devidos.length} dias lançados` : 'nada devido ainda'}${atrasados ? ` · <span style="color:var(--txt-amber)">${atrasados} com atraso</span>` : ''}</div>
+      </div>
+      <div style="font-size:10.5px;color:var(--t2);font-weight:700;margin-bottom:4px">🥤 ${_vendNum(coca)} Coca · 🍺 ${_vendNum(cl, 1)} L claro · 🍷 ${_vendNum(vi, 1)} L vinho</div>
+      <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:9.5px;width:100%;min-width:400px">
+        <tr><th style="text-align:left;padding:2px 4px;color:var(--t3);position:sticky;left:0;background:var(--s2);box-shadow:1px 0 0 var(--b3)">Item</th>${DIAS_LABEL_HOME.map(l => `<th style="padding:2px 3px;text-align:center;color:var(--t3)">${l}</th>`).join('')}</tr>
+        ${linhaT('🥤 Coca (un)', 'coca_un', 0)}${linhaT('🍺 Claro (L)', 'chopp_l_claro', 1)}${linhaT('🍷 Vinho (L)', 'chopp_l_vinho', 1)}
+      </table></div>
+      ${choppHtml ? `<div style="margin-top:6px;border-top:1px solid rgba(0,0,0,.08);padding-top:5px">${choppHtml}</div>` : ''}
+    </div>`;
+  }).join('');
+
+  return reportBtns + navHtml + `<div style="font-size:11px;color:var(--t4);margin-bottom:10px;line-height:1.5">
+      Vendidos lançados pela gerência (aba 🧾 Vendidos do Check-list) até ${G.PRAZO_H}h do dia seguinte. <span style="color:var(--txt-red);font-weight:700">✕</span> é dia que já devia estar lançado e não está.<br>
+      As carnes (pratos × gramatura) estão na aba 🥩 Carnes, ao lado da saída real.<br>
+      <b>Chopp × barris</b> é referência: o barril é finalizado quando acaba, não no dia em que o chopp saiu — olhe a tendência de algumas semanas, não uma semana sozinha.</div>
+    ${barrisFalhou ? `<div style="font-size:11px;color:var(--txt-amber);margin-bottom:8px">⚠ Não deu pra carregar os barris — a comparação do chopp fica de fora.</div>` : ''}
+    ${avisoHtml}${redeHtml}${linhas}${_vendCadastroHtml()}`;
+}
+
+// ── Cadastro (mestre) ─────────────────────────────────────────────────────────
+function _vendPodeEditar() { return typeof _dreRedeMestreLogado === 'function' && _dreRedeMestreLogado(); }
+function _vendCadastroHtml() {
+  const cad = (_vendGerData && _vendGerData.cadastro) || [];
+  const pode = _vendPodeEditar();
+  const esc = x => window.escapeHtml ? window.escapeHtml(String(x == null ? '' : x)) : String(x == null ? '' : x);
+  const CAR = (window.gnVendidos && window.gnVendidos.CARNES) || [];
+  const GR = (window.gnVendidos && window.gnVendidos.GRUPOS) || [];
+  const inp = 'box-sizing:border-box;border:1px solid rgba(0,0,0,.15);border-radius:7px;padding:6px 7px;font-size:11.5px;font-family:inherit;background:var(--s1);color:var(--t1)';
+  const desc = c => c.grupo === 'prato'
+    ? (CAR.filter(x => +(c.gramas || {})[x.key] > 0).map(x => _vendNum(c.gramas[x.key]) + ' g ' + x.label.toLowerCase()).join(' + ') || '<span style="color:var(--txt-red)">sem gramatura</span>')
+    : c.grupo === 'chopp' ? `${_vendNum(c.ml)} ml · barril ${String(c.chopp_tipo || 'CLARO').toLowerCase()}` : 'unidade';
+  const linha = c => {
+    if (!pode) return `<div style="display:flex;justify-content:space-between;gap:8px;font-size:11px;padding:4px 0;border-top:1px dashed rgba(0,0,0,.08);${c.ativo ? '' : 'opacity:.45'}"><span style="color:var(--t1);font-weight:700">${esc(c.nome)}</span><span style="color:var(--t3);text-align:right">${desc(c)}</span></div>`;
+    const campos = c.grupo === 'prato'
+      ? `<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;margin-top:4px">${CAR.map(x => `<label style="font-size:9px;color:var(--t3);min-width:0">${x.label} (g)<input class="vc-g" data-carne="${x.key}" inputmode="numeric" value="${+(c.gramas || {})[x.key] || ''}" placeholder="0" style="${inp};width:100%"></label>`).join('')}</div>`
+      : c.grupo === 'chopp'
+        ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:4px"><label style="font-size:9px;color:var(--t3)">ml por unidade<input class="vc-ml" inputmode="numeric" value="${c.ml || ''}" style="${inp};width:100%"></label><label style="font-size:9px;color:var(--t3)">Barril<select class="vc-tipo" style="${inp};width:100%"><option value="CLARO"${c.chopp_tipo !== 'VINHO' ? ' selected' : ''}>Claro</option><option value="VINHO"${c.chopp_tipo === 'VINHO' ? ' selected' : ''}>Vinho</option></select></label></div>`
+        : '';
+    return `<div class="vc-item" data-id="${esc(c.id)}" data-grupo="${c.grupo}" style="border-top:1px dashed rgba(0,0,0,.1);padding:7px 0;${c.ativo ? '' : 'opacity:.55'}">
+      <div style="display:flex;gap:6px;align-items:center"><input class="vc-nome" value="${esc(c.nome)}" style="${inp};flex:1;min-width:0;font-weight:700">
+        <label style="font-size:10px;color:var(--t2);white-space:nowrap"><input type="checkbox" class="vc-ativo"${c.ativo ? ' checked' : ''}> ativo</label></div>
+      ${campos}
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:5px;gap:6px"><span style="font-size:9.5px;color:var(--t4)">${c.atualizado_por ? 'alterado por ' + esc(c.atualizado_por) : ''}${c.codigo_pdv ? ' · cód. ' + esc(c.codigo_pdv) : ''}</span>
+        <button onclick="_vendCadSalvar(this)" style="border:none;background:var(--cor);color:#1A1D23;border-radius:7px;padding:5px 12px;font-size:11px;font-weight:800;cursor:pointer;font-family:inherit">Salvar</button></div>
+    </div>`;
+  };
+  const grupos = GR.map(g => {
+    const arr = cad.filter(c => c.grupo === g.key);
+    return `<div style="margin-top:10px"><div style="font-size:10.5px;font-weight:800;color:var(--t2)">${g.label} (${arr.filter(c => c.ativo).length})</div>${arr.map(linha).join('') || '<div style="font-size:10.5px;color:var(--t4);padding:4px 0">Nenhum item.</div>'}</div>`;
+  }).join('');
+  const novo = pode ? `<div style="margin-top:12px;border-top:1px solid rgba(0,0,0,.12);padding-top:9px">
+      <div style="font-size:10.5px;font-weight:800;color:var(--t2);margin-bottom:5px">+ Novo item</div>
+      <div style="display:flex;gap:6px"><select id="vc-novo-grupo" style="${inp}">${GR.map(g => `<option value="${g.key}">${g.label.split(' ').slice(1).join(' ').replace(' com carne ou camarão', '')}</option>`).join('')}</select>
+        <input id="vc-novo-nome" placeholder="Nome (como no caixa)" style="${inp};flex:1;min-width:0">
+        <button onclick="_vendCadNovo()" style="border:none;background:var(--cor);color:#1A1D23;border-radius:7px;padding:5px 12px;font-size:11px;font-weight:800;cursor:pointer;font-family:inherit">Criar</button></div>
+      <button onclick="_vendSugerirFichas()" style="margin-top:8px;width:100%;border:1px dashed rgba(0,0,0,.25);background:none;border-radius:9px;padding:8px;font-size:11.5px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--t1)">📋 Sugerir pratos pelas fichas técnicas</button>
+      <div id="vc-sugestoes">${_vendSugestoesHtml()}</div>
+    </div>` : `<div style="font-size:10px;color:var(--t4);margin-top:8px">Só o mestre altera o cadastro.</div>`;
+  return `<div class="vend-cadastro" style="background:var(--s2);border:1px solid var(--b1);border-radius:12px;margin-top:14px">
+    <div onclick="_vendCadAberto=!_vendCadAberto;renderDashboard()" style="padding:12px 14px;cursor:pointer;display:flex;justify-content:space-between;align-items:center">
+      <div><div style="font-size:12px;font-weight:800;color:var(--t1)">⚙️ Cadastro dos itens vendidos</div>
+      <div style="font-size:10px;color:var(--t3)">${cad.filter(c => c.ativo && c.grupo === 'prato').length} pratos · ${cad.filter(c => c.ativo && c.grupo === 'coca').length} Coca · ${cad.filter(c => c.ativo && c.grupo === 'chopp').length} chopp — vale pras 11 lojas</div></div>
+      <div style="font-size:13px;color:var(--t4)">${_vendCadAberto ? '▲' : '▼'}</div></div>
+    ${_vendCadAberto ? `<div style="padding:0 14px 14px">
+      <div style="font-size:10px;color:var(--t3);line-height:1.5">A gramatura é o peso <b>do estoque como é contado</b> (o mesmo da contagem de carnes) que sai em uma unidade vendida. Mudar a gramatura vale daqui pra frente — o que já foi lançado guarda a gramatura do dia. Item que sai do cardápio: desmarque "ativo" (não apaga o histórico).</div>
+      ${grupos}${novo}</div>` : ''}
+  </div>`;
+}
+function _vendItemDoForm(el) {
+  const box = el.closest('.vc-item'); const grupo = box.dataset.grupo;
+  const c = (_vendGerData.cadastro || []).find(x => x.id === box.dataset.id) || {};
+  const n = v => { const x = parseFloat(String(v || '').replace(',', '.')); return isFinite(x) && x > 0 ? x : 0; };
+  const out = { id: box.dataset.id, grupo, nome: box.querySelector('.vc-nome').value.trim(), ativo: box.querySelector('.vc-ativo').checked,
+    codigo_pdv: c.codigo_pdv || null, ordem: c.ordem || 0, gramas: {}, ml: null, chopp_tipo: null };
+  if (grupo === 'prato') box.querySelectorAll('.vc-g').forEach(i => { const g = n(i.value); if (g) out.gramas[i.dataset.carne] = g; });
+  if (grupo === 'chopp') { out.ml = n(box.querySelector('.vc-ml').value) || null; out.chopp_tipo = box.querySelector('.vc-tipo').value; }
+  return out;
+}
+async function _vendCadGravar(lista) {
+  const corpo = lista.map(x => Object.assign({}, x, { atualizado_por: (session && session.nome) || null, atualizado_em: new Date().toISOString() }));
+  const r = await fetch(`${SB_URL}/rest/v1/gn_vendidos_itens?on_conflict=id`, { method: 'POST',
+    headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal,resolution=merge-duplicates' },
+    body: JSON.stringify(corpo) });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  corpo.forEach(x => { const cad = _vendGerData.cadastro; const i = cad.findIndex(c => c.id === x.id); if (i >= 0) cad[i] = Object.assign({}, cad[i], x); else cad.push(x); });
+}
+async function _vendCadSalvar(btn) {
+  if (!_vendPodeEditar()) return;
+  const it = _vendItemDoForm(btn);
+  if (!it.nome) { alert('O item precisa de nome.'); return; }
+  if (it.grupo === 'prato' && it.ativo && !Object.keys(it.gramas).length) { alert('Prato ativo precisa da gramatura de pelo menos uma carne.'); return; }
+  if (it.grupo === 'chopp' && !it.ml) { alert('Chopp precisa dos ml por unidade.'); return; }
+  btn.disabled = true; btn.textContent = 'Salvando…';
+  try { await _vendCadGravar([it]); renderDashboard(); }
+  catch (e) { (window.gnLogError || (() => {}))('vendidos:cadastro', e); alert('Não deu pra salvar agora. Tente de novo.'); btn.disabled = false; btn.textContent = 'Salvar'; }
+}
+async function _vendCadNovo() {
+  if (!_vendPodeEditar()) return;
+  const grupo = document.getElementById('vc-novo-grupo').value, nome = document.getElementById('vc-novo-nome').value.trim();
+  if (!nome) { alert('Digite o nome do item.'); return; }
+  const id = grupo + '_' + Date.now().toString(36);
+  // Nasce INATIVO quando ainda falta dado (gramatura/ml): não entra no formulário das lojas
+  // até alguém completar e marcar ativo — senão a loja lançaria prato que não pesa nada.
+  const it = { id, grupo, nome, ativo: grupo === 'coca', gramas: {}, ml: grupo === 'chopp' ? null : null, chopp_tipo: grupo === 'chopp' ? 'CLARO' : null, ordem: 99, codigo_pdv: null };
+  try { await _vendCadGravar([it]); _vendCadAberto = true; renderDashboard(); }
+  catch (e) { alert('Não deu pra criar agora. Tente de novo.'); }
+}
+
+// Sugestão a partir das fichas técnicas (as mesmas da aba 📋 Fichas do Check-list:
+// fichas-seed.js + MASTER_CONFIG.fichasCustom/fichasRemoved). Só sugere — quem decide é o
+// mestre, marcando o que entra.
+const VEND_FICHA_CARNE = [
+  { key: 'picanha', re: /PICANHA/, exc: /SU[IÍ]NA/ },
+  { key: 'carne_sol', re: /CARNE\s*DE\s*SOL/, exc: null },
+  { key: 'carne_seca', re: /CARNE\s*SECA/, exc: /PA[CÇ]OCA/ },
+  { key: 'camarao', re: /CAMAR[AÃ]O/, exc: null },
+];
+function _vendSugestoesDasFichas(fichas, jaCadastrados) {
+  const ja = new Set((jaCadastrados || []).map(c => String(c.codigo_pdv || '')).filter(Boolean));
+  const out = [];
+  Object.entries(fichas || {}).forEach(([cod, f]) => {
+    if (!f || !Array.isArray(f.insumos) || ja.has(String(cod))) return;
+    const nome = String(f.nome || '').toUpperCase();
+    if (/\bPROD\b|^RECHEIO/.test(nome)) return;           // preparo da cozinha, não prato vendido
+    const gramas = {}, obs = [];
+    f.insumos.forEach(i => {
+      const n = String(i.insumo || '').toUpperCase();
+      const c = VEND_FICHA_CARNE.find(x => x.re.test(n) && !(x.exc && x.exc.test(n)));
+      if (!c) return;
+      const u = String(i.unidade || '').toUpperCase(), q = Number(i.qtd) || 0;
+      const g = u === 'KG' ? q * 1000 : u === 'GR' || u === 'G' ? q : 0;
+      if (!g) { obs.push(i.insumo + ' em ' + (i.unidade || '?')); return; }
+      gramas[c.key] = (gramas[c.key] || 0) + g;
+      if (g < 10) obs.push(i.insumo + ' ' + q + ' ' + u + ' (valor estranho)');
+      if (/PROD|RECHEIO|EMP/.test(n)) obs.push(i.insumo + ' é preparo — peso pode não ser o do estoque');
+    });
+    if (Object.keys(gramas).length) out.push({ cod: String(cod), nome: f.nome, gramas, obs, conferir: obs.length > 0 });
+  });
+  return out.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+}
+function _vendCarregarScript(src) {
+  return new Promise((res, rej) => { if (typeof FICHAS_SEED_ORIG !== 'undefined') return res(); const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
+}
+async function _vendSugerirFichas() {
+  _vendSugestoes = { carregando: true }; renderDashboard();
+  try {
+    await _vendCarregarScript('fichas-seed.js');
+    const fichas = Object.assign({}, typeof FICHAS_SEED_ORIG !== 'undefined' ? FICHAS_SEED_ORIG : {});
+    try {
+      const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+      const mc = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.MASTER_CONFIG&select=all_data`, H, 'vendidos:fichasCustom', []);
+      const all = (mc && mc[0] && mc[0].all_data) || {};
+      (all.fichasRemoved || []).forEach(c => { delete fichas[c]; });
+      Object.entries(all.fichasCustom || {}).forEach(([c, f]) => { fichas[c] = f; });
+    } catch (e) {}
+    _vendSugestoes = { lista: _vendSugestoesDasFichas(fichas, _vendGerData.cadastro) };
+  } catch (e) { _vendSugestoes = { erro: true }; }
+  renderDashboard();
+}
+function _vendSugestoesHtml() {
+  const s = _vendSugestoes; if (!s) return '';
+  if (s.carregando) return '<div style="font-size:11px;color:var(--t3);padding:8px 0">Lendo as fichas técnicas…</div>';
+  if (s.erro) return '<div style="font-size:11px;color:var(--txt-red);padding:8px 0">Não deu pra ler as fichas agora.</div>';
+  if (!s.lista.length) return '<div style="font-size:11px;color:var(--t3);padding:8px 0">Nenhum prato novo com carne ou camarão nas fichas.</div>';
+  const esc = x => window.escapeHtml ? window.escapeHtml(String(x)) : String(x);
+  const CAR = (window.gnVendidos && window.gnVendidos.CARNES) || [];
+  return `<div style="font-size:10px;color:var(--t3);margin:8px 0 4px">${s.lista.length} pratos nas fichas levam carne ou camarão. Os marcados com ⚠ têm algo a conferir (vêm desmarcados). Confira a gramatura depois de adicionar.</div>
+    ${s.lista.map((x, i) => `<label class="vc-sug" style="display:flex;gap:7px;align-items:flex-start;font-size:11px;padding:4px 0;border-top:1px dashed rgba(0,0,0,.08)">
+      <input type="checkbox" data-i="${i}"${x.conferir ? '' : ' checked'} style="margin-top:2px">
+      <span style="min-width:0"><b style="color:var(--t1)">${esc(x.nome)}</b> <span style="color:var(--t4)">cód. ${esc(x.cod)}</span><br>
+      <span style="color:var(--t2)">${CAR.filter(c => x.gramas[c.key]).map(c => _vendNum(x.gramas[c.key]) + ' g ' + c.label.toLowerCase()).join(' + ')}</span>
+      ${x.obs.length ? `<br><span style="color:var(--txt-amber)">⚠ ${esc(x.obs.join('; '))}</span>` : ''}</span></label>`).join('')}
+    <button onclick="_vendSugAdicionar()" style="margin-top:8px;width:100%;border:none;background:var(--cor);color:#1A1D23;border-radius:9px;padding:9px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit">Adicionar marcados ao cadastro</button>`;
+}
+async function _vendSugAdicionar() {
+  if (!_vendPodeEditar() || !_vendSugestoes || !_vendSugestoes.lista) return;
+  const marc = [...document.querySelectorAll('.vc-sug input:checked')].map(i => _vendSugestoes.lista[+i.dataset.i]);
+  if (!marc.length) { alert('Marque pelo menos um prato.'); return; }
+  const itens = marc.map((x, k) => ({ id: 'prato_' + x.cod, grupo: 'prato', nome: x.nome, codigo_pdv: x.cod, gramas: x.gramas, ativo: true, ordem: k + 1, ml: null, chopp_tipo: null }));
+  try { await _vendCadGravar(itens); _vendSugestoes = null; _vendCadAberto = true; renderDashboard(); }
+  catch (e) { alert('Não deu pra adicionar agora. Tente de novo.'); }
+}
+
+// ── Relatórios da aba 🧾 Vendidos ─────────────────────────────────────────────
+function _vendRelatorioTexto(wpp) {
+  if (!_vendGerLoaded || !_vendGerData || _vendGerData.erro) return null;
+  const { porLoja, iniISO, fimISO, diasISO } = _vendGerData;
+  const b = s => wpp ? '*' + s + '*' : s;
+  const devidos = _vendDiasDevidos(diasISO);
+  let msg = `${wpp ? '🧾 ' : ''}${b('VENDIDOS — COCA-COLA E CHOPP')}\nSemana ${_carnesDM(iniISO)} a ${_carnesDM(fimISO)}\n`;
+  const faltou = [];
+  Object.keys(porLoja).sort((a, c) => (LOJA_DISPLAY[a] || a).localeCompare(LOJA_DISPLAY[c] || c)).forEach(k => {
+    const d = porLoja[k];
+    const soma = key => d.dias.reduce((a, r) => a + (r && r.totais ? (+r.totais[key] || 0) : 0), 0);
+    const lanc = devidos.filter(x => d.dias[diasISO.indexOf(x)]).length;
+    msg += `\n${wpp ? '🏪 ' : ''}${b(LOJA_DISPLAY[k] || k)} — ${devidos.length ? lanc + '/' + devidos.length + ' dias lançados' : 'nada devido ainda'}\n`;
+    msg += `  Coca: ${_vendNum(soma('coca_un'))} un · Chopp claro ${_vendNum(soma('chopp_l_claro'), 1)} L · vinho ${_vendNum(soma('chopp_l_vinho'), 1)} L\n`;
+    if (d.barris.CLARO || d.barris.VINHO) msg += `  Barris finalizados: ${d.barris.CLARO} claro · ${d.barris.VINHO} vinho\n`;
+    if (devidos.length && lanc < devidos.length) faltou.push(LOJA_DISPLAY[k] || k);
+  });
+  if (faltou.length) msg += `\n${b('Com dia sem lançar')}: ${faltou.join(', ')}\n`;
+  return { msg, titulo: 'Vendidos — Coca-Cola e Chopp' };
+}
+function gerarWppVendidos() {
+  const r = _vendRelatorioTexto(true);
+  if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  window.open('https://wa.me/?text=' + encodeURIComponent(r.msg), '_blank');
+}
+function gerarPDFVendidos() {
+  const r = _vendRelatorioTexto(false);
+  if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  const esc = x => window.escapeHtml ? window.escapeHtml(String(x)) : String(x);
+  window.gnRelatorioPDF({ titulo: r.titulo, html: '<pre style="font-family:inherit;white-space:pre-wrap;font-size:12px">' + esc(r.msg) + '</pre>', rodape: 'GN Operações · ' + r.titulo });
+}
+async function enviarPDFVendidosWpp() { await _pdfWppComo(gerarPDFVendidos); }
 
 // ── 🎵 TRIOS — cachê, couvert e saldo por fim de semana ou por mês ────────────────────
 // O trio toca no fim de semana: na base inteira são 199 apresentações no sábado, 193 no
@@ -19841,6 +20250,9 @@ function renderDashboard() {
   } else if (_dashTab==='carnes') {
     content = _buildCarnesPanel();
 
+  } else if (_dashTab==='vendidos') {
+    content = _buildVendidosPanel();
+
   } else if (_dashTab==='trios') {
     content = _buildTriosVistaToggle() + (_triosVista === 'agenda' ? _buildTriosAgendaPanel() : _buildTriosPanel());
 
@@ -19897,7 +20309,7 @@ function renderDashboard() {
       </div>
       <button type="button" class="dash-tabs-seta dir off" id="dash-tabs-dir" aria-label="Mais abas" onclick="_dashTabsRolar(1)"><span>›</span></button>
       </div>
-      ${(_dashTab!=='metas'&&_dashTab!=='folgas'&&_dashTab!=='semlanc'&&_dashTab!=='utensent'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris'&&_dashTab!=='carnes'&&_dashTab!=='trios'&&_dashTab!=='banco'&&_dashTab!=='extra'&&_dashTab!=='dre')?periodRow:''}
+      ${(_dashTab!=='metas'&&_dashTab!=='folgas'&&_dashTab!=='semlanc'&&_dashTab!=='utensent'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris'&&_dashTab!=='carnes'&&_dashTab!=='vendidos'&&_dashTab!=='trios'&&_dashTab!=='banco'&&_dashTab!=='extra'&&_dashTab!=='dre')?periodRow:''}
       ${content}
     </div>`;
   _dashTabsDepoisDeDesenhar();
@@ -20022,7 +20434,7 @@ const DASH_GRUPOS = [
   { g: 'vendas',   rot: '📈 Vendas',   abas: [['fat', '↓ Faturamento'], ['att', '⚠ Atenção'], ['bi', '📊 BI'], ['metas', '⚙ Metas']] },
   { g: 'caixa',    rot: '🧾 Caixa',    abas: [['cancel', '🧾 Cancel. e transf.'], ['sem10', '💸 Sem 10%']] },
   { g: 'equipe',   rot: '👥 Equipe',   abas: [['presenca', '👤 Presença'], ['folgas', '📅 Folgas'], ['ocorr', '⚠ Ocorrências'], ['ferias', '🏖 Férias'], ['xadrez', '🔀 Xadrez'], ['banco', '⏱ Banco'], ['extra', '👷 Extra']] },
-  { g: 'operacao', rot: '🛠 Operação', abas: [['barris', '🍺 Barris'], ['carnes', '🥩 Carnes'], ['trios', '🎵 Trios'], ['semlanc', '✅ Validações'], ['utensent', '🍴 Utensílios']] },
+  { g: 'operacao', rot: '🛠 Operação', abas: [['barris', '🍺 Barris'], ['carnes', '🥩 Carnes'], ['vendidos', '🧾 Vendidos'], ['trios', '🎵 Trios'], ['semlanc', '✅ Validações'], ['utensent', '🍴 Utensílios']] },
   { g: 'dre',      rot: '💰 DRE',      abas: [['dre', '💰 DRE']] },
 ];
 const _dashGrupoUltima = {};
@@ -20047,6 +20459,7 @@ function _setDashTab(t){
   if(t==='xadrez'&&!_xadrezMovsLoaded) _loadXadrezPendente();
   if(t==='barris'&&!_barrisSemGerenciaLoaded) _loadBarrisSemanalGerencia();
   if(t==='carnes'&&!_carnesGerLoaded) _loadCarnesGerencia();
+  if(t==='vendidos'&&!_vendGerLoaded) _loadVendidosGerencia();
   if(t==='trios'&&!_triosGerLoaded) _loadTriosGerencia();
   if(t==='trios'&&_triosVista==='agenda'&&_triosAgRows===null) _loadTriosAgenda();
   if(t==='banco'&&!_bancoGerLoaded) _loadBancoGerencia();
