@@ -187,19 +187,15 @@ const txtOverlay = p => p.evaluate(() => { const o = document.getElementById('gn
     LOJA = 'Bangu';
     switchTab('vendas', document.getElementById('tab-btn-vendas'));
     await new Promise(r => setTimeout(r, 900));
-    const el = document.getElementById('vendidos-aba'), b = document.getElementById('btn-wpp');
-    const out = { txt: el.innerText.replace(/\s+/g, ' '), wppVendas: getComputedStyle(b).display };
-    switchTab('carnes', document.getElementById('tab-btn-carnes'));
-    const r = b.getBoundingClientRect();
-    out.wppCarnes = getComputedStyle(b).display; out.w = Math.round(r.width); out.txtVisivel = getComputedStyle(b.querySelector('.btn-wpp-txt')).display;
-    switchTab('guia', null);
-    out.wppGuia = getComputedStyle(b).display;
+    const el = document.getElementById('vendidos-aba');
+    const out = { txt: el.innerText.replace(/\s+/g, ' '), wpp: !!document.getElementById('btn-wpp'),
+      rel: [...document.querySelectorAll('button')].filter(x => /openRelModal\('carnes'\)/.test(x.getAttribute('onclick') || '')).length };
     return out;
   });
   check('antes do início a aba diz quando começa e o primeiro prazo (vendas de segunda 23/11, até 24/11 às 11h)', /Começa com as vendas de segunda 23\/11/.test(pre.txt) && /até 24\/11 às 11h/.test(pre.txt), pre.txt);
   check('…e já mostra o que vai ser pedido: pratos, Coca e chopp, com os nomes', /Pratos com carne ou camarão \(3\)/.test(pre.txt) && /Carne de sol GIG P2/.test(pre.txt) && /Coca-Cola \(1\)/.test(pre.txt) && /Chopp \(2\)/.test(pre.txt), pre.txt);
-  check('o botão verde do WhatsApp some na aba Vendidos e no Guia (não têm relatório)', pre.wppVendas === 'none' && pre.wppGuia === 'none', pre);
-  check('…e nas abas com relatório (Carnes) aparece só o ícone, redondo, no celular', pre.wppCarnes !== 'none' && pre.w === 46 && pre.txtVisivel === 'none', pre);
+  check('o botão verde flutuante do WhatsApp não existe mais ("não uso, só atrapalha")', pre.wpp === false, pre);
+  check('…e o relatório de cada aba continua no próprio botão 📄 (ex.: Carnes)', pre.rel >= 1, pre);
   todosErros.push(...h.erros); await h.ctx.close();
 
   check('nenhum erro de JavaScript', todosErros.length === 0, todosErros);
