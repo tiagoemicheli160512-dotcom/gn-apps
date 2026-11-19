@@ -3246,7 +3246,7 @@ function _mesAnteriorOperacaoHtml(d) {
     grupo = l.grupo;
     if (!l.rot) return cab + `<div style="font-size:10px;color:${cores[l.cor]};padding:0 4px">${l.nota}</div>`;
     return cab + `<div class="mes-ant-op" style="display:flex;justify-content:space-between;align-items:center;gap:10px;background:var(--s2);border-radius:10px;padding:9px 12px">
-      <span style="min-width:0"><span style="font-size:11px;color:var(--t2)">${l.rot}</span>${l.nota ? `<span style="display:block;font-size:9.5px;color:var(--t4);margin-top:1px">${l.nota}</span>` : ''}</span>
+      <span style="min-width:0"><span style="font-size:11px;color:var(--t2)">${l.rot}</span>${l.nota ? `<span style="display:block;font-size:9.5px;color:var(--t3);margin-top:1px">${l.nota}</span>` : ''}</span>
       <span style="font-size:13.5px;font-weight:900;color:${cores[l.cor] || 'var(--t1)'};white-space:nowrap;font-variant-numeric:tabular-nums">${l.val}</span></div>`;
   }).join('');
 }
@@ -3353,6 +3353,115 @@ function _relatorioMesAnteriorPDF() {
   });
 }
 
+/* Os números do mês fechado de UMA loja — a mesma conta do card "Resultado do mês" da Home
+   da loja e do dashboard da aba BI do Painel (19/11/2026: "com as informações da mini DRE,
+   por loja, e a opção de unir todas"). Uma fonte só: o BI soma o que esta função devolve.
+   opts.semanasDoMes: lê da escala (gn_comissoes) só as semanas do mês, em vez do histórico
+   inteiro — no BI são 11 lojas de uma vez (o histórico todo passa de 8 MB). */
+async function _mesDadosComissoes(comKey, iniISO, fimISO, opts, H) {
+  if (!(opts && opts.semanasDoMes) || typeof COMISSOES_CAL === 'undefined') {
+    return window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'mesAnt:comissoes', []);
+  }
+  const idxs = [];
+  COMISSOES_CAL.forEach((sem, i) => {
+    const toca = (sem.days || []).some(d => { const x = d.y + '-' + String(d.m).padStart(2, '0') + '-' + String(d.d).padStart(2, '0'); return x >= iniISO && x <= fimISO; });
+    if (toca) idxs.push(i);
+  });
+  if (!idxs.length) return [];
+  const sel = idxs.map(i => `s${i}:all_data->"${i}"`).join(',');
+  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(comKey)}&select=${encodeURIComponent(sel)}`, H, 'bi:comissoes', []);
+  const r0 = (rows || [])[0] || {};
+  const all_data = {};
+  idxs.forEach(i => { if (r0['s' + i]) all_data[String(i)] = r0['s' + i]; });
+  return [{ loja: comKey, all_data }];
+}
+async function _mesDadosDaLoja(loja, iniMesAnterior, opts) {
+  const comKey = LOJA_COM_KEY[loja] || loja;
+  const chkKey = LOJA_DB_KEY[loja] || loja;
+  const fimMesAnterior = new Date(iniMesAnterior.getFullYear(), iniMesAnterior.getMonth() + 1, 0);
+  const iso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const iniISO = iso(iniMesAnterior), fimISO = iso(fimMesAnterior);
+  const MESES_PT_RESUMO = ['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+  const mesNome = MESES_PT_RESUMO[iniMesAnterior.getMonth()];
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  // Mês retrasado, pro comparativo: agosto contra setembro. Sem ele o faturamento é um
+  // número solto — não dá pra saber se foi bom ou ruim.
+  const fimMesRetrasado = new Date(iniMesAnterior.getFullYear(), iniMesAnterior.getMonth(), 0);
+  const iniMesRetrasado = new Date(fimMesRetrasado.getFullYear(), fimMesRetrasado.getMonth(), 1);
+  const iniAntISO = iso(iniMesRetrasado), fimAntISO = iso(fimMesRetrasado);
+  const mesAnteriorNome = MESES_PT_RESUMO[iniMesRetrasado.getMonth()];
+
+  const [vendaRows, lojaRows, vendaAntRows, comissoesRows, caixaRowsLidos, bancoRows, triosRows] = await Promise.all([
+    window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${iniISO}&data_operacao=lte.${fimISO}&select=venda_salao,venda_delivery`, H, 'mesAnt:venda', []),
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'mesAnt:lojas', []),
+    window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${iniAntISO}&data_operacao=lte.${fimAntISO}&select=venda_salao,venda_delivery`, H, 'mesAnt:vendaAnt', []),
+    _mesDadosComissoes(comKey, iniISO, fimISO, opts, H),
+    // Funcionário extra sai da despesa do Caixa; a data está no fechamento, não na despesa,
+    // por isso vem aninhada a partir dele.
+    // Cancelamento, transferência e nota sem 10% moram no mesmo fechamento: vêm juntos.
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?loja=eq.${encodeURIComponent(loja)}&data=gte.${iniISO}&data=lte.${fimISO}&select=data,gn_caixa_despesa(categoria,valor,nome,justificativa),gn_caixa_cancelamento(valor),gn_caixa_transferencia(id),gn_caixa_gorjeta(valor)`, H, 'mesAnt:extra', null),
+    // Banco de horas: o lançamento DO MÊS (decisão do dono — não o saldo do ciclo) e a
+    // CONFIG, que tem o salário por setor (é ele que dá o R$).
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_banco_horas?loja=eq.${encodeURIComponent(chkKey)}&mes=in.(CONFIG,${iniISO.slice(0, 7)})&select=mes,registros`, H, 'mesAnt:banco', null),
+    // Couvert do trio no mês: só a loja (aqui não tem posição na rede).
+    ((window.GN_LOJAS || []).find(l => l.userKey === loja) || {}).trioSlug && loja !== 'MAGLIA'
+      ? window.gnFetchJson(`${SB_URL}/rest/v1/gn_trios_agenda?loja=eq.${encodeURIComponent(window.GN_LOJAS.find(l => l.userKey === loja).trioSlug)}&data=gte.${iniISO}&data=lte.${fimISO}` +
+          `&select=data,loja,artista,cache,couver_qtd,couver_valor,couver_lancado_em,presenca_confirmada,banda_nao_veio,banda_nao_veio_motivo,horario_inicio`, H, 'mesAnt:trios', null)
+      : Promise.resolve([]),
+  ]);
+  const caixaRows = caixaRowsLidos || [];
+  const somaVenda = rows => (rows || []).reduce((s, r) => s + (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0), 0);
+  const faturamento = somaVenda(vendaRows);
+  const faturamentoAnt = somaVenda(vendaAntRows);
+  const diff = faturamento - faturamentoAnt;
+  const pct = faturamentoAnt > 0 ? (diff / faturamentoAnt) * 100 : null;
+
+  // Ocorrências do mês: faltas, atestados e suspensões saem do status de cada DIA na
+  // escala; advertência não é status, é documento anexado por semana (mesma leitura que o
+  // app RH faz), então conta uma vez por semana que toca o mês.
+  const ocor = { FALTA: 0, ATESTADO: 0, 'SUSPENSÃO': 0, ADVERTENCIA: 0 };
+  const allCom = (comissoesRows[0] && comissoesRows[0].all_data) || {};
+  const CAL = (typeof COMISSOES_CAL !== 'undefined') ? COMISSOES_CAL : [];
+  const noMes = dia => {
+    const d = dia.y + '-' + String(dia.m).padStart(2, '0') + '-' + String(dia.d).padStart(2, '0');
+    return d >= iniISO && d <= fimISO;
+  };
+  CAL.forEach((semana, idx) => {
+    const diasNoMes = (semana.days || []).map((dia, i) => noMes(dia) ? i : -1).filter(i => i >= 0);
+    if (!diasNoMes.length) return;
+    const funcs = (allCom[idx] && Array.isArray(allCom[idx].funcs)) ? allCom[idx].funcs : [];
+    funcs.forEach(f => {
+      diasNoMes.forEach(i => {
+        const st = (f.dias || [])[i];
+        if (ocor[st] !== undefined && st !== 'ADVERTENCIA') ocor[st]++;
+      });
+      if (f.docs && f.docs.ADVERTENCIA) ocor.ADVERTENCIA++;
+    });
+  });
+
+  let extraValor = 0, extraQtd = 0;
+  (caixaRows || []).forEach(fech => {
+    const desps = Array.isArray(fech.gn_caixa_despesa) ? fech.gn_caixa_despesa : (fech.gn_caixa_despesa ? [fech.gn_caixa_despesa] : []);
+    desps.forEach(d => {
+      // Mesma regra da aba 👷 Extra (ver _extraEhExtra): a Guarulhos lança extra como
+      // "Outros", e duas telas da mesma casa contando diferente é pior que as duas
+      // contando pouco. O nome e a justificativa vêm na consulta só pra isto.
+      if (!_extraEhExtra(d)) return;
+      extraValor += parseFloat(d.valor) || 0; extraQtd++;
+    });
+  });
+  const avariasLoja = ((lojaRows[0] && lojaRows[0].all_data && lojaRows[0].all_data.avariasAll) || {})[comKey] || [];
+  const avariasMes = avariasLoja.filter(a => a.status !== 'cancelado' && a.tipo !== 'transferencia_dinheiro' && a.tipo !== 'saida_terceiro'
+    && a.ts && a.ts.slice(0, 10) >= iniISO && a.ts.slice(0, 10) <= fimISO);
+  const avariasValor = avariasMes.reduce((s, a) => s + (parseFloat(a.valorTotal) || 0), 0);
+  const fR = v => v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const oper = _mesAnteriorOperacao(loja, caixaRowsLidos, faturamento);
+  const banco = _mesAnteriorBanco(loja, bancoRows, comissoesRows, iniISO.slice(0, 7));
+  const couvert = _mesAnteriorCouvert(loja, triosRows, iniISO);
+
+  return { loja, comKey, mesNome, iniISO, fimISO, fimMesRetrasado, iniMesRetrasado, iniAntISO, fimAntISO, mesAnteriorNome, vendaRows, lojaRows, vendaAntRows, comissoesRows, caixaRowsLidos, bancoRows, triosRows, caixaRows, faturamento, faturamentoAnt, diff, pct, ocor, allCom, extraValor, extraQtd, avariasLoja, avariasMes, avariasValor, fR, oper, banco, couvert };
+}
+
 async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
   const el = document.getElementById('mes-anterior-home-card');
   if (!el) return;
@@ -3373,80 +3482,7 @@ async function _renderMesAnteriorHome(mostrar, sess, isMasterAtivo) {
   const mesNome = MESES_PT_RESUMO[iniMesAnterior.getMonth()];
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
   try {
-    // Mês retrasado, pro comparativo: agosto contra setembro. Sem ele o faturamento é um
-    // número solto — não dá pra saber se foi bom ou ruim.
-    const fimMesRetrasado = new Date(iniMesAnterior.getFullYear(), iniMesAnterior.getMonth(), 0);
-    const iniMesRetrasado = new Date(fimMesRetrasado.getFullYear(), fimMesRetrasado.getMonth(), 1);
-    const iniAntISO = iso(iniMesRetrasado), fimAntISO = iso(fimMesRetrasado);
-    const mesAnteriorNome = MESES_PT_RESUMO[iniMesRetrasado.getMonth()];
-
-    const [vendaRows, lojaRows, vendaAntRows, comissoesRows, caixaRowsLidos, bancoRows, triosRows] = await Promise.all([
-      window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${iniISO}&data_operacao=lte.${fimISO}&select=venda_salao,venda_delivery`, H, 'mesAnt:venda', []),
-      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'mesAnt:lojas', []),
-      window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${iniAntISO}&data_operacao=lte.${fimAntISO}&select=venda_salao,venda_delivery`, H, 'mesAnt:vendaAnt', []),
-      window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'mesAnt:comissoes', []),
-      // Funcionário extra sai da despesa do Caixa; a data está no fechamento, não na despesa,
-      // por isso vem aninhada a partir dele.
-      // Cancelamento, transferência e nota sem 10% moram no mesmo fechamento: vêm juntos.
-      window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?loja=eq.${encodeURIComponent(loja)}&data=gte.${iniISO}&data=lte.${fimISO}&select=data,gn_caixa_despesa(categoria,valor,nome,justificativa),gn_caixa_cancelamento(valor),gn_caixa_transferencia(id),gn_caixa_gorjeta(valor)`, H, 'mesAnt:extra', null),
-      // Banco de horas: o lançamento DO MÊS (decisão do dono — não o saldo do ciclo) e a
-      // CONFIG, que tem o salário por setor (é ele que dá o R$).
-      window.gnFetchJson(`${SB_URL}/rest/v1/gn_banco_horas?loja=eq.${encodeURIComponent(chkKey)}&mes=in.(CONFIG,${iniISO.slice(0, 7)})&select=mes,registros`, H, 'mesAnt:banco', null),
-      // Couvert do trio no mês: só a loja (aqui não tem posição na rede).
-      ((window.GN_LOJAS || []).find(l => l.userKey === loja) || {}).trioSlug && loja !== 'MAGLIA'
-        ? window.gnFetchJson(`${SB_URL}/rest/v1/gn_trios_agenda?loja=eq.${encodeURIComponent(window.GN_LOJAS.find(l => l.userKey === loja).trioSlug)}&data=gte.${iniISO}&data=lte.${fimISO}` +
-            `&select=data,loja,artista,cache,couver_qtd,couver_valor,couver_lancado_em,presenca_confirmada,banda_nao_veio,banda_nao_veio_motivo,horario_inicio`, H, 'mesAnt:trios', null)
-        : Promise.resolve([]),
-    ]);
-    const caixaRows = caixaRowsLidos || [];
-    const somaVenda = rows => (rows || []).reduce((s, r) => s + (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0), 0);
-    const faturamento = somaVenda(vendaRows);
-    const faturamentoAnt = somaVenda(vendaAntRows);
-    const diff = faturamento - faturamentoAnt;
-    const pct = faturamentoAnt > 0 ? (diff / faturamentoAnt) * 100 : null;
-
-    // Ocorrências do mês: faltas, atestados e suspensões saem do status de cada DIA na
-    // escala; advertência não é status, é documento anexado por semana (mesma leitura que o
-    // app RH faz), então conta uma vez por semana que toca o mês.
-    const ocor = { FALTA: 0, ATESTADO: 0, 'SUSPENSÃO': 0, ADVERTENCIA: 0 };
-    const allCom = (comissoesRows[0] && comissoesRows[0].all_data) || {};
-    const CAL = (typeof COMISSOES_CAL !== 'undefined') ? COMISSOES_CAL : [];
-    const noMes = dia => {
-      const d = dia.y + '-' + String(dia.m).padStart(2, '0') + '-' + String(dia.d).padStart(2, '0');
-      return d >= iniISO && d <= fimISO;
-    };
-    CAL.forEach((semana, idx) => {
-      const diasNoMes = (semana.days || []).map((dia, i) => noMes(dia) ? i : -1).filter(i => i >= 0);
-      if (!diasNoMes.length) return;
-      const funcs = (allCom[idx] && Array.isArray(allCom[idx].funcs)) ? allCom[idx].funcs : [];
-      funcs.forEach(f => {
-        diasNoMes.forEach(i => {
-          const st = (f.dias || [])[i];
-          if (ocor[st] !== undefined && st !== 'ADVERTENCIA') ocor[st]++;
-        });
-        if (f.docs && f.docs.ADVERTENCIA) ocor.ADVERTENCIA++;
-      });
-    });
-
-    let extraValor = 0, extraQtd = 0;
-    (caixaRows || []).forEach(fech => {
-      const desps = Array.isArray(fech.gn_caixa_despesa) ? fech.gn_caixa_despesa : (fech.gn_caixa_despesa ? [fech.gn_caixa_despesa] : []);
-      desps.forEach(d => {
-        // Mesma regra da aba 👷 Extra (ver _extraEhExtra): a Guarulhos lança extra como
-        // "Outros", e duas telas da mesma casa contando diferente é pior que as duas
-        // contando pouco. O nome e a justificativa vêm na consulta só pra isto.
-        if (!_extraEhExtra(d)) return;
-        extraValor += parseFloat(d.valor) || 0; extraQtd++;
-      });
-    });
-    const avariasLoja = ((lojaRows[0] && lojaRows[0].all_data && lojaRows[0].all_data.avariasAll) || {})[comKey] || [];
-    const avariasMes = avariasLoja.filter(a => a.status !== 'cancelado' && a.tipo !== 'transferencia_dinheiro' && a.tipo !== 'saida_terceiro'
-      && a.ts && a.ts.slice(0, 10) >= iniISO && a.ts.slice(0, 10) <= fimISO);
-    const avariasValor = avariasMes.reduce((s, a) => s + (parseFloat(a.valorTotal) || 0), 0);
-    const fR = v => v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const oper = _mesAnteriorOperacao(loja, caixaRowsLidos, faturamento);
-    const banco = _mesAnteriorBanco(loja, bancoRows, comissoesRows, iniISO.slice(0, 7));
-    const couvert = _mesAnteriorCouvert(loja, triosRows, iniISO);
+    const { fimMesRetrasado, iniMesRetrasado, iniAntISO, fimAntISO, mesAnteriorNome, vendaRows, lojaRows, vendaAntRows, comissoesRows, caixaRowsLidos, bancoRows, triosRows, caixaRows, faturamento, faturamentoAnt, diff, pct, ocor, allCom, extraValor, extraQtd, avariasLoja, avariasMes, avariasValor, fR, oper, banco, couvert } = await _mesDadosDaLoja(loja, iniMesAnterior);
     _mesAnteriorHomeData = { loja, mesNome, mesAnteriorNome, faturamento, faturamentoAnt, diff, pct,
                              avariasQtd: avariasMes.length, avariasValor, ocor, extraValor, extraQtd,
                              oper, banco, couvert, iniISO, fimISO };
@@ -9645,8 +9681,9 @@ const GUIA_SECOES = [
       + _guiaCallout('tip','🧹','"Limpar simulação" descarta os movimentos sem aplicar nada.')
   },
   { id:'bi', num:'09', titulo:'Aba BI', roles:['gestao'],
-    resumo:'Ranking de todas as lojas por índice de saúde, num só lugar — não busca dado novo, só reorganiza o que já carregou nas outras abas.',
-    corpo: _guiaCallout('info','ℹ️','Boa aba pra ver rápido quem está pior colocado no geral, sem entrar card por card.')
+    resumo:'Dashboard do mês: faturamento, Mini DRE (ideal × real), cancelamentos, avarias, extra, banco de horas, couvert e ocorrências — por loja ou da rede inteira somada. Embaixo, o índice de saúde de hoje.',
+    corpo: _guiaSteps(['Escolha o mês (o atual aparece como parcial).','Escolha "Rede — todas as lojas" pra ver a soma, ou uma loja. Na rede, toque numa loja do comparativo pra abrir só ela.','📲 WhatsApp e 📄 PDF saem com o mesmo recorte.'])
+      + _guiaCallout('info','ℹ️','Os números são os mesmos do card "Resultado do mês" da Home de cada loja. A DRE real vem do que foi lançado na DRE da rede.')
   },
   { id:'metas', num:'10', titulo:'Aba Metas', roles:['gestao'],
     resumo:'Cadastro da meta de faturamento (R$) de cada loja, usada nos cards, no % Média Meta e no índice de saúde.',
@@ -13349,6 +13386,226 @@ function _buildTendenciaChart() {
   </div>`;
 }
 
+/* ── BI: dashboard do mês por loja e da rede (19/11/2026) ────────────────────────────────
+   "Na aba BI, um dashboard das lojas com as informações da nossa mini DRE, todas as
+   informações por loja, e a opção de unir todas pra ter visão geral — hoje a aba é muito
+   superficial." Os números de cada loja saem de _mesDadosDaLoja — a MESMA função do card
+   "Resultado do mês" da Home da loja —, e a visão da rede é a soma deles:
+   - faturamento, cancelamentos, notas sem 10%, avarias, extra, banco, couvert: soma;
+   - DRE: o R$ real soma; a % da rede = R$ real ÷ faturamento das lojas que LANÇARAM aquela
+     conta (loja sem lançamento não entra nem no numerador nem no denominador); a % ideal é
+     a média das ideais de cada loja ponderada pelo faturamento delas.
+   Maglia fora da rede (consolidado) e da lista, como na DRE da rede (_dreRedeLojas). O
+   índice de saúde que a aba tinha continua, embaixo. */
+let _biComp = null, _biEscopo = 'REDE', _biDados = {}, _biCarregando = false, _biErro = false;
+function _biLojas() { return _dreRedeLojas(); }
+function _biOpcoesMes() {
+  const d = new Date(); d.setDate(1);
+  const out = [_dreCompetencia(d)];
+  for (let i = 1; i <= 12; i++) out.push(_dreCompetencia(new Date(d.getFullYear(), d.getMonth() - i, 1)));
+  return out;
+}
+function _biCompAtual() { return _dreCompetencia(new Date(new Date().getFullYear(), new Date().getMonth(), 1)); }
+async function _biCarregar(force) {
+  if (_biCarregando) return;
+  if (!_biComp) _biComp = _dreRedeCompPadrao();
+  const comp = _biComp;
+  if (_biDados[comp] && !force) return;
+  _biCarregando = true; _biErro = false;
+  try {
+    await _dreCarregar(force);
+    const ini = new Date(+comp.slice(0, 4), +comp.slice(5, 7) - 1, 1);
+    const lojas = _biLojas();
+    const res = await Promise.all(lojas.map(l => _mesDadosDaLoja(l, ini, { semanasDoMes: true }).catch(e => { window.gnLogError && window.gnLogError('bi:loja', e); return null; })));
+    const porLoja = {};
+    lojas.forEach((l, i) => { if (res[i]) porLoja[l] = res[i]; });
+    _biDados[comp] = porLoja;
+  } catch (e) {
+    _biErro = true; window.gnLogError && window.gnLogError('bi:carregar', e);
+  } finally {
+    _biCarregando = false;
+    if (_dashTab === 'bi') renderDashboard();
+  }
+}
+function _biTrocarMes(c) { _biComp = c; _biCarregar(false); renderDashboard(); }
+function _biTrocarEscopo(e) { _biEscopo = e; renderDashboard(); }
+
+// DRE de uma loja ou da rede: [{conta, ideal, real:{pct,rs}|null, lancadas, total}]
+function _biDre(porLoja, lojas, comp) {
+  return DRE_CONTAS.map(c => {
+    let rs = 0, fatL = 0, fatTot = 0, idealPond = 0, lancadas = 0;
+    lojas.forEach(l => {
+      const d = porLoja[l]; if (!d) return;
+      const fat = d.faturamento || 0;
+      fatTot += fat; idealPond += fat * _drePct(l, c.k);
+      const r = _dreRealConta(_dreRealizado(l, comp), c, fat);
+      if (r && r.rs != null) { rs += r.rs; fatL += fat; lancadas++; }
+    });
+    const ideal = lojas.length === 1 ? _drePct(lojas[0], c.k) : (fatTot ? idealPond / fatTot : _drePct('REDE', c.k));
+    return { c, ideal, real: lancadas ? { rs, pct: fatL ? rs / fatL * 100 : null } : null, fatL, lancadas, total: lojas.length };
+  });
+}
+// Soma dos números de várias lojas no formato de _mesDadosDaLoja (pro bloco de operação).
+function _biSomar(porLoja, lojas) {
+  const z = { faturamento: 0, faturamentoAnt: 0, avariasQtd: 0, avariasValor: 0, extraQtd: 0, extraValor: 0,
+    ocor: { FALTA: 0, ATESTADO: 0, 'SUSPENSÃO': 0, ADVERTENCIA: 0 },
+    oper: { cancQtd: 0, cancValor: 0, transfQtd: 0, s10Qtd: 0, s10Valor: 0, s10Dez: 0, temCancel: false, temSem10: false, _fatCancel: 0 },
+    banco: { pos: 0, neg: 0, valorPos: 0, valorNeg: 0, pessoasPos: 0, pessoasNeg: 0, semSalario: 0, _lojas: 0 },
+    couvert: { couver: 0, cache: 0, saldo: 0, diasSemCouver: [], fecha: true, _lojas: 0 }, faltando: [] };
+  lojas.forEach(l => {
+    const d = porLoja[l]; if (!d) { z.faltando.push(l); return; }
+    z.faturamento += d.faturamento || 0; z.faturamentoAnt += d.faturamentoAnt || 0;
+    z.avariasQtd += (d.avariasMes || []).length; z.avariasValor += d.avariasValor || 0;
+    z.extraQtd += d.extraQtd || 0; z.extraValor += d.extraValor || 0;
+    Object.keys(z.ocor).forEach(k => { z.ocor[k] += (d.ocor || {})[k] || 0; });
+    const o = d.oper || {};
+    if (!o.erro) {
+      ['cancQtd', 'cancValor', 'transfQtd', 's10Qtd', 's10Valor', 's10Dez'].forEach(k => { z.oper[k] += o[k] || 0; });
+      if (o.temCancel) { z.oper.temCancel = true; z.oper._fatCancel += d.faturamento || 0; }
+      if (o.temSem10) z.oper.temSem10 = true;
+    }
+    const b = d.banco || {};
+    if (!b.fora && !b.erro && !b.semLancamento) {
+      ['pos', 'neg', 'valorPos', 'valorNeg', 'pessoasPos', 'pessoasNeg', 'semSalario'].forEach(k => { z.banco[k] += b[k] || 0; });
+      z.banco._lojas++;
+    }
+    const c = d.couvert || {};
+    if (!c.erro && !c.semTrio) {
+      z.couvert.couver += c.couver || 0; z.couvert.cache += c.cache || 0; z.couvert.saldo += c.saldo || 0; z.couvert._lojas++;
+      if (!c.fecha) z.couvert.fecha = false;
+    }
+  });
+  z.oper.cancPct = z.oper._fatCancel > 0 ? z.oper.cancValor / z.oper._fatCancel * 100 : null;
+  if (!z.banco._lojas) z.banco.semLancamento = true;
+  if (!z.couvert._lojas) z.couvert.semTrio = true;
+  z.diff = z.faturamento - z.faturamentoAnt;
+  z.pct = z.faturamentoAnt > 0 ? z.diff / z.faturamentoAnt * 100 : null;
+  return z;
+}
+
+function _buildBiDashboard() {
+  if (!_biComp) _biComp = _dreRedeCompPadrao();
+  const comp = _biComp, dados = _biDados[comp];
+  if (!dados && !_biCarregando) _biCarregar(false);
+  const lojas = _biLojas();
+  const escopoLojas = _biEscopo === 'REDE' ? lojas : [_biEscopo];
+  const nomeEsc = _biEscopo === 'REDE' ? 'Rede — ' + lojas.length + ' lojas' : (LOJA_DISPLAY[_biEscopo] || _biEscopo);
+  const parcial = comp === _biCompAtual();
+  const fR = v => 'R$ ' + _dreFmtR(v), fP = _dreFmtP;
+  const opMes = _biOpcoesMes().map(c => `<option value="${c}"${c === comp ? ' selected' : ''}>${_dreCompLabel(c)}${c === _biCompAtual() ? ' (parcial)' : ''}</option>`).join('');
+  const opEsc = `<option value="REDE"${_biEscopo === 'REDE' ? ' selected' : ''}>🌐 Rede — todas as lojas</option>` +
+    lojas.map(l => `<option value="${l}"${_biEscopo === l ? ' selected' : ''}>${escapeHtml(LOJA_DISPLAY[l] || l)}</option>`).join('');
+  const SEL = 'flex:1;min-width:140px;background:var(--s2);border:1px solid rgba(0,0,0,.12);border-radius:9px;padding:8px 10px;font-size:12px;font-weight:700;color:var(--t1);font-family:inherit';
+  const topo = `<div class="bi-controles" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      <select onchange="_biTrocarMes(this.value)" style="${SEL}">${opMes}</select>
+      <select onchange="_biTrocarEscopo(this.value)" style="${SEL}">${opEsc}</select>
+    </div>`;
+  if (!dados) return topo + (_biErro ? `<div class="empty-texto" style="padding:14px">Não consegui carregar agora. <button onclick="_biCarregar(true)">Tentar de novo</button></div>` : _skelPanel(4));
+
+  const z = _biSomar(dados, escopoLojas);
+  const dre = _biDre(dados, escopoLojas, comp);
+  const corDesv = (real, ideal) => real == null ? 'var(--t3)' : real - ideal > 0.1 ? '#dc2626' : real - ideal < -0.1 ? '#16a34a' : 'var(--t1)';
+  const kpi = (lbl, val, sub, cor) => `<div class="bi-kpi" style="background:var(--s2);border:1px solid rgba(0,0,0,.07);border-radius:12px;padding:10px 11px;min-width:0">
+      <div style="font-size:9.5px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:.3px">${lbl}</div>
+      <div style="font-size:16px;font-weight:900;color:${cor || 'var(--t1)'};margin-top:2px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${val}</div>
+      ${sub ? `<div style="font-size:9.5px;color:var(--t3);margin-top:1px;line-height:1.3">${sub}</div>` : ''}</div>`;
+  const varTxt = z.pct == null ? 'sem mês anterior pra comparar' : `<b style="color:${z.diff >= 0 ? '#15803d' : '#dc2626'}">${z.diff >= 0 ? '▲' : '▼'} ${Math.abs(z.pct).toFixed(1).replace('.', ',')}%</b> vs ${fR(z.faturamentoAnt)}`;
+  const kd = k => dre.find(x => x.c.k === k);
+  const kDre = (k, lbl) => { const x = kd(k); return kpi(lbl, x.real && x.real.pct != null ? fP(x.real.pct) : '—',
+      `ideal ${fP(x.ideal)}${_biEscopo === 'REDE' ? ` · ${x.lancadas}/${x.total} lançadas` : ''}`, corDesv(x.real && x.real.pct, x.ideal)); };
+  const kpis = `<div class="bi-kpis" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:12px">
+      <div style="grid-column:1/-1">${kpi('Faturamento' + (parcial ? ' (mês em andamento)' : ''), fR(z.faturamento), varTxt)}</div>
+      ${kDre('cmv', 'CMV')}${kDre('folha', 'Folha (DP)')}${kDre('utilidades', 'Água, gás e luz')}
+      ${kpi('Cancelamentos', z.oper.cancPct == null ? '—' : z.oper.cancPct.toFixed(2).replace('.', ',') + '%', `${z.oper.cancQtd} · ${fR(z.oper.cancValor)}`, z.oper.cancQtd ? '#dc2626' : undefined)}
+      ${kpi('Avarias/Desperdício', fR(z.avariasValor), `${z.avariasQtd} registro${z.avariasQtd === 1 ? '' : 's'}`)}
+      ${kpi('Funcionário extra', fR(z.extraValor), `${z.extraQtd} lançamento${z.extraQtd === 1 ? '' : 's'}`)}
+    </div>`;
+
+  const tabDre = `<div class="bi-sec" style="font-size:10px;font-weight:800;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;margin:4px 0 6px">Mini DRE — ideal × real · ${escapeHtml(nomeEsc)}</div>
+    <div class="bi-dre" style="background:var(--s2);border:1px solid rgba(0,0,0,.07);border-radius:12px;padding:4px 10px;margin-bottom:12px">
+      <div style="display:grid;grid-template-columns:1.3fr 1fr 1fr 1fr;gap:6px;font-size:9px;font-weight:800;color:var(--t3);text-transform:uppercase;padding:6px 0;border-bottom:1px solid rgba(0,0,0,.07)">
+        <span>Conta</span><span style="text-align:right">Ideal</span><span style="text-align:right">Real</span><span style="text-align:right">Desvio</span></div>
+      ${dre.map(x => {
+        const fatBase = x.real ? x.fatL : z.faturamento;
+        const dv = x.real && x.real.pct != null ? x.real.pct - x.ideal : null;
+        const dvRs = dv != null ? x.real.rs - x.fatL * x.ideal / 100 : null;
+        return `<div class="bi-dre-linha" data-conta="${x.c.k}" style="display:grid;grid-template-columns:1.3fr 1fr 1fr 1fr;gap:6px;align-items:start;padding:7px 0;border-bottom:1px solid rgba(0,0,0,.05);font-size:11.5px;font-variant-numeric:tabular-nums">
+          <span style="font-weight:700;color:var(--t1);min-width:0">${escapeHtml(x.c.label)}${_biEscopo === 'REDE' ? `<span style="display:block;font-size:9px;color:var(--t3);font-weight:600">${x.lancadas}/${x.total} lojas lançaram</span>` : ''}</span>
+          <span style="text-align:right">${fP(x.ideal)}<span style="display:block;font-size:9px;color:var(--t3)">${fR(fatBase * x.ideal / 100)}</span></span>
+          <span style="text-align:right;font-weight:800;color:${corDesv(x.real && x.real.pct, x.ideal)}">${x.real && x.real.pct != null ? fP(x.real.pct) : '—'}<span style="display:block;font-size:9px;color:var(--t3);font-weight:600">${x.real ? fR(x.real.rs) : 'não lançado'}</span></span>
+          <span style="text-align:right;font-weight:800;color:${dv == null ? 'var(--t3)' : corDesv(x.real.pct, x.ideal)}">${dv == null ? '—' : (dv > 0 ? '+' : dv < 0 ? '−' : '') + fP(Math.abs(dv)).replace('%', ' pp')}<span style="display:block;font-size:9px;color:var(--t3);font-weight:600">${dvRs == null ? '' : (dvRs > 0 ? '+' : dvRs < 0 ? '−' : '') + fR(Math.abs(dvRs))}</span></span>
+        </div>`;
+      }).join('')}
+      <div style="font-size:9.5px;color:var(--t3);padding:6px 0;line-height:1.35">${_biEscopo === 'REDE' ? 'Na rede, a % real é o R$ das lojas que lançaram ÷ o faturamento delas; a ideal é a média das lojas ponderada pelo faturamento. ' : ''}O realizado vem do relatório da empresa (lançado na DRE da rede).</div>
+    </div>`;
+
+  const dOp = { mesNome: _dreCompLabel(comp), oper: z.oper, banco: z.banco, couvert: z.couvert };
+  const pessoas = `<div style="font-size:10px;font-weight:800;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;margin:12px 0 6px">Pessoas — ${escapeHtml(_dreCompLabel(comp))}</div>
+    <div class="bi-pessoas" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px">
+      ${[['📄', 'Atestados', z.ocor.ATESTADO], ['🚫', 'Faltas', z.ocor.FALTA], ['⛔', 'Suspensões', z.ocor['SUSPENSÃO']], ['📝', 'Advert.', z.ocor.ADVERTENCIA]].map(([i, l, v]) =>
+        `<div style="background:var(--s2);border-radius:10px;padding:8px 4px;text-align:center"><div style="font-size:15px;font-weight:900;color:${v ? '#dc2626' : 'var(--t1)'}">${v}</div><div style="font-size:9px;color:var(--t3)">${i} ${l}</div></div>`).join('')}
+    </div>`;
+
+  let comparativo = '';
+  if (_biEscopo === 'REDE') {
+    const linhas = lojas.map(l => {
+      const d = dados[l];
+      if (!d) return { l, fat: -1, html: `<div class="bi-loja" data-loja="${l}" style="background:var(--s2);border-radius:11px;padding:9px 11px;margin-bottom:6px;font-size:11.5px;color:var(--t3)"><b>${escapeHtml(LOJA_DISPLAY[l] || l)}</b> — não carregou</div>` };
+      const dd = _biDre(dados, [l], comp);
+      const chip = (lbl, x) => { const pct = x.real && x.real.pct; return `<span style="display:inline-block;background:var(--fill-sutil);border-radius:999px;padding:2px 7px;font-size:9.5px;font-weight:700;color:${corDesv(pct, x.ideal)};white-space:nowrap">${lbl} ${pct == null ? '—' : fP(pct)}</span>`; };
+      const cancP = d.oper && d.oper.cancPct != null && d.oper.temCancel ? `<span style="display:inline-block;background:var(--fill-sutil);border-radius:999px;padding:2px 7px;font-size:9.5px;font-weight:700;color:${d.oper.cancQtd ? '#dc2626' : 'var(--t2)'};white-space:nowrap">Cancel. ${d.oper.cancPct.toFixed(2).replace('.', ',')}%</span>` : '';
+      const pctV = d.pct == null ? '' : `<span style="font-size:10px;font-weight:800;color:${d.diff >= 0 ? '#15803d' : '#dc2626'};white-space:nowrap">${d.diff >= 0 ? '▲' : '▼'}${Math.abs(d.pct).toFixed(1).replace('.', ',')}%</span>`;
+      return { l, fat: d.faturamento || 0, html: `<div class="bi-loja" data-loja="${l}" onclick="_biTrocarEscopo('${l}')" style="cursor:pointer;background:var(--s2);border:1px solid rgba(0,0,0,.07);border-left:3px solid ${COR_LOJA[l] || '#888'};border-radius:11px;padding:9px 11px;margin-bottom:6px">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
+            <b style="font-size:12px;color:var(--t1);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(LOJA_DISPLAY[l] || l)}</b>
+            <span style="font-size:12px;font-weight:800;color:var(--t1);white-space:nowrap;font-variant-numeric:tabular-nums">${fR(d.faturamento || 0)} ${pctV}</span></div>
+          <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px">${dd.map(x => chip(x.c.k === 'folha' ? 'DP' : x.c.k === 'utilidades' ? 'Util.' : 'CMV', x)).join('')}${cancP}
+            ${d.avariasValor ? `<span style="display:inline-block;background:var(--fill-sutil);border-radius:999px;padding:2px 7px;font-size:9.5px;font-weight:700;color:var(--t2);white-space:nowrap">Avarias ${fR(d.avariasValor)}</span>` : ''}</div>
+        </div>` };
+    }).sort((a, b) => b.fat - a.fat);
+    comparativo = `<div style="font-size:10px;font-weight:800;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 6px">Comparativo por loja · toque pra abrir</div>${linhas.map(x => x.html).join('')}`;
+  }
+  const faltou = z.faltando.length ? `<div style="font-size:10.5px;color:#B45309;margin-bottom:8px">⚠️ Não carregou: ${z.faltando.map(l => escapeHtml(LOJA_DISPLAY[l] || l)).join(', ')} — fora da soma.</div>` : '';
+  const voltar = _biEscopo !== 'REDE' ? `<button onclick="_biTrocarEscopo('REDE')" style="background:none;border:none;color:#4f46e5;font-size:11px;font-weight:800;padding:0 0 8px;cursor:pointer">‹ Voltar pra rede</button>` : '';
+  const rel = `<div style="display:flex;gap:6px;flex-wrap:wrap;margin:14px 0 4px">
+      <button onclick="_biRelWpp()" style="background:rgba(37,211,102,.12);border:1px solid rgba(37,211,102,.3);border-radius:8px;padding:6px 11px;font-size:11px;font-weight:700;color:var(--t1);cursor:pointer">📲 WhatsApp</button>
+      <button onclick="_biRelPDF()" style="background:rgba(192,57,43,.12);border:1px solid rgba(192,57,43,.3);border-radius:8px;padding:6px 11px;font-size:11px;font-weight:700;color:var(--t1);cursor:pointer">📄 PDF</button></div>`;
+  return topo + voltar + faltou + kpis + tabDre + `<div class="bi-op">${_mesAnteriorOperacaoHtml(dOp)}</div>` + pessoas + comparativo + rel;
+}
+
+function _biRelatorioTexto() {
+  const comp = _biComp, dados = _biDados[comp] || {};
+  const lojas = _biLojas(), escopoLojas = _biEscopo === 'REDE' ? lojas : [_biEscopo];
+  const nome = _biEscopo === 'REDE' ? 'REDE (' + lojas.length + ' lojas)' : (LOJA_DISPLAY[_biEscopo] || _biEscopo).toUpperCase();
+  const z = _biSomar(dados, escopoLojas), dre = _biDre(dados, escopoLojas, comp);
+  const fR = v => 'R$ ' + _dreFmtR(v), fP = _dreFmtP;
+  let m = `📊 *BI — ${nome}*\n📅 ${_dreCompLabel(comp)}${comp === _biCompAtual() ? ' (parcial)' : ''}\n━━━━━━━━━━━━━━━━━━\n`;
+  m += `💰 Faturamento: *${fR(z.faturamento)}*${z.pct == null ? '' : ` (${z.diff >= 0 ? '▲' : '▼'} ${Math.abs(z.pct).toFixed(1).replace('.', ',')}% vs ${fR(z.faturamentoAnt)})`}\n`;
+  m += `\n📉 *Mini DRE — ideal × real*\n`;
+  dre.forEach(x => { m += `• ${x.c.label}: ideal ${fP(x.ideal)} · real ${x.real && x.real.pct != null ? fP(x.real.pct) + ' (' + fR(x.real.rs) + ')' : 'não lançado'}${_biEscopo === 'REDE' ? ` · ${x.lancadas}/${x.total} lojas` : ''}\n`; });
+  m += `\n🧾 Cancelamentos: ${z.oper.cancQtd} · ${fR(z.oper.cancValor)}${z.oper.cancPct == null ? '' : ' (' + z.oper.cancPct.toFixed(2).replace('.', ',') + '%)'}\n`;
+  m += `🔀 Transferências: ${z.oper.transfQtd}\n💸 Notas sem 10%: ${z.oper.s10Qtd} · ${fR(z.oper.s10Valor)}\n`;
+  m += `⚠️ Avarias/Desperdício: ${z.avariasQtd} · ${fR(z.avariasValor)}\n👷 Funcionário extra: ${z.extraQtd} · ${fR(z.extraValor)}\n`;
+  if (!z.banco.semLancamento) m += `⏱ Banco de horas: +${_raioxHoras(z.banco.pos)} / -${_raioxHoras(z.banco.neg)}\n`;
+  if (!z.couvert.semTrio) m += `🎵 Couvert − cachê: ${z.couvert.saldo < 0 ? '−' : '+'}${fR(Math.abs(z.couvert.saldo))}\n`;
+  m += `👥 Atestados ${z.ocor.ATESTADO} · Faltas ${z.ocor.FALTA} · Suspensões ${z.ocor['SUSPENSÃO']} · Advertências ${z.ocor.ADVERTENCIA}\n`;
+  if (_biEscopo === 'REDE') {
+    m += `\n🏬 *Por loja*\n`;
+    lojas.map(l => ({ l, d: dados[l] })).filter(x => x.d).sort((a, b) => (b.d.faturamento || 0) - (a.d.faturamento || 0)).forEach(({ l, d }) => {
+      const dd = _biDre(dados, [l], comp).map(x => (x.c.k === 'folha' ? 'DP' : x.c.k === 'utilidades' ? 'Util' : 'CMV') + ' ' + (x.real && x.real.pct != null ? fP(x.real.pct) : '—')).join(' · ');
+      m += `• ${LOJA_DISPLAY[l] || l}: ${fR(d.faturamento || 0)} · ${dd}\n`;
+    });
+  }
+  return { msg: m, titulo: `BI ${_dreCompLabel(comp)} — ${_biEscopo === 'REDE' ? 'Rede' : (LOJA_DISPLAY[_biEscopo] || _biEscopo)}` };
+}
+function _biRelWpp() { const r = _biRelatorioTexto(); window.open('https://wa.me/?text=' + encodeURIComponent(r.msg)); }
+function _biRelPDF() {
+  const r = _biRelatorioTexto();
+  const esc = s => window.escapeHtml ? window.escapeHtml(String(s)) : String(s);
+  const html = '<div style="font-size:10pt;line-height:1.5;white-space:pre-wrap">' + esc(r.msg.replace(/\*/g, '')) + '</div>';
+  window.gnRelatorioPDF({ titulo: r.titulo, tituloDoc: r.titulo, subtitulo: 'gerado em ' + (window.gnPdfAgora ? window.gnPdfAgora() : new Date().toLocaleString('pt-BR')), html, rodape: 'GN Operações · BI' });
+}
+
 // Índice de saúde de uma loja (0-100) — extraído do card de ranking (aba
 // Faturamento) pra ser reaproveitado também na Central de BI, sem duplicar a
 // fórmula. Mesmo cálculo de antes: 50pts faturamento vs meta (ou vs a loja
@@ -13364,7 +13621,7 @@ function _calcIndiceSaude(v, meta, maxVal, chkOk, manut) {
 // alertas) numa tela só, em vez de espalhados pelas outras abas. Não busca
 // nada novo no Supabase — só rearranja o que _loadDashAll() já trouxe.
 function _buildBiTab(fat, maxVal, loading) {
-  if (loading) return _skelPanel(4);
+  if (loading) return _buildBiDashboard() + _skelPanel(2);
   const lojasConsolidado = _lojasFatConsolidado();
   const totalFat = lojasConsolidado.reduce((s,k)=>s+(fat[k]||0),0);
   const totalManut = _dashManut ? Object.values(_dashManut).reduce((s,n)=>s+n,0) : 0;
@@ -13399,7 +13656,9 @@ function _buildBiTab(fat, maxVal, loading) {
     </div>`;
   }).join('');
 
-  return `
+  return _buildBiDashboard() + `
+    <details class="bi-saude" style="margin-top:16px">
+    <summary style="cursor:pointer;font-size:11px;font-weight:800;color:var(--t2);padding:8px 0">🩺 Hoje — índice de saúde das lojas</summary>
     <div class="cons-card" style="margin-bottom:12px">
       <div class="cons-ttl">VISÃO GERAL · REDE</div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:8px">
@@ -13413,6 +13672,7 @@ function _buildBiTab(fat, maxVal, loading) {
     </div>
     <div style="font-size:10px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Comparativo por loja · ordenado por saúde</div>
     ${linhasHtml}
+    </details>
   `;
 }
 
