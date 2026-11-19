@@ -179,6 +179,29 @@ const txtOverlay = p => p.evaluate(() => { const o = document.getElementById('gn
   check('Maglia não vê a aba Vendidos', mag === 'none', mag);
   todosErros.push(...f.erros); await f.ctx.close();
 
+  // ── 7. Antes do início (hoje, 19/11): a aba não fica vazia; botão do WhatsApp ──
+  // Print do dono (19/11): "cliquei na aba, não apareceu nada" e "esse retângulo do
+  // WhatsApp para relatórios... não faz sentido".
+  const h = await abrir(browser, '2026-11-19T19:52:00');
+  const pre = await h.page.evaluate(async () => {
+    LOJA = 'Bangu';
+    switchTab('vendas', document.getElementById('tab-btn-vendas'));
+    await new Promise(r => setTimeout(r, 900));
+    const el = document.getElementById('vendidos-aba'), b = document.getElementById('btn-wpp');
+    const out = { txt: el.innerText.replace(/\s+/g, ' '), wppVendas: getComputedStyle(b).display };
+    switchTab('carnes', document.getElementById('tab-btn-carnes'));
+    const r = b.getBoundingClientRect();
+    out.wppCarnes = getComputedStyle(b).display; out.w = Math.round(r.width); out.txtVisivel = getComputedStyle(b.querySelector('.btn-wpp-txt')).display;
+    switchTab('guia', null);
+    out.wppGuia = getComputedStyle(b).display;
+    return out;
+  });
+  check('antes do início a aba diz quando começa e o primeiro prazo (vendas de segunda 23/11, até 24/11 às 11h)', /Começa com as vendas de segunda 23\/11/.test(pre.txt) && /até 24\/11 às 11h/.test(pre.txt), pre.txt);
+  check('…e já mostra o que vai ser pedido: pratos, Coca e chopp, com os nomes', /Pratos com carne ou camarão \(3\)/.test(pre.txt) && /Carne de sol GIG P2/.test(pre.txt) && /Coca-Cola \(1\)/.test(pre.txt) && /Chopp \(2\)/.test(pre.txt), pre.txt);
+  check('o botão verde do WhatsApp some na aba Vendidos e no Guia (não têm relatório)', pre.wppVendas === 'none' && pre.wppGuia === 'none', pre);
+  check('…e nas abas com relatório (Carnes) aparece só o ícone, redondo, no celular', pre.wppCarnes !== 'none' && pre.w === 46 && pre.txtVisivel === 'none', pre);
+  todosErros.push(...h.erros); await h.ctx.close();
+
   check('nenhum erro de JavaScript', todosErros.length === 0, todosErros);
   console.log(`\n${ok} OK, ${falhou} falhou`);
   await browser.close();

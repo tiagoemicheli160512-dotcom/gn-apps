@@ -435,10 +435,22 @@
         '<div style="font-size:11px;color:var(--t2);line-height:1.5;margin-bottom:12px">Quantidade vendida de cada prato com carne ou camarão, de Coca-Cola e de chopp — do relatório do caixa. ' +
           'Gerente ou sub lança <b>até ' + PRAZO_H + 'h do dia seguinte</b>; depois trava e só a supervisão libera. A gramatura de cada prato vem do cadastro do Painel de Gestão.</div>' +
         (pend.length ? '<div style="font-size:11.5px;font-weight:800;color:var(--txt-amber,#b45309);margin-bottom:8px">' + pend.length + ' dia' + (pend.length > 1 ? 's' : '') + ' sem lançamento</div>' : '') +
-        (dias.length ? dias.map(linha).join('') : '<div style="font-size:12px;color:var(--t2)">A cobrança começa com as vendas de ' + _brDia(INICIO) + '.</div>');
+        (dias.length ? dias.map(linha).join('') : '<div class="gv-aba-inicio" style="background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.3);border-radius:12px;padding:10px 12px;font-size:12px;color:var(--t1);line-height:1.5;margin-bottom:10px">⏳ Começa com as vendas de <b>' + _brDia(INICIO) + '</b> — o primeiro lançamento é até <b>' + _br(_addDias(INICIO, 1)) + ' às ' + PRAZO_H + 'h</b>. Abaixo, o que vai ser pedido.</div><div class="gv-aba-itens" style="font-size:12px;color:var(--t2)">Carregando os itens…</div>');
       el.querySelectorAll('.gv-aba-btn').forEach(function (b) {
         b.onclick = function () { abrirLancamento(lojaKey, b.dataset.d, sess, function () { renderAba(el, lojaKey, sess); }); };
       });
+      // Antes do início, a aba ficava só com o texto e parecia quebrada (print do dono,
+      // 19/11). Mostra o que a gerência vai lançar, pra ela já conhecer o formulário.
+      var boxItens = el.querySelector('.gv-aba-itens');
+      if (boxItens) buscarCadastro(false).then(function (cad) {
+        var porG = {}; (cad || []).forEach(function (c) { (porG[c.grupo] = porG[c.grupo] || []).push(c); });
+        boxItens.innerHTML = GRUPOS.map(function (g) {
+          var arr = porG[g.key] || []; if (!arr.length) return '';
+          return '<div style="background:var(--s2,#fff);border:1px solid rgba(0,0,0,.08);border-radius:12px;padding:9px 12px;margin-bottom:8px">' +
+            '<div style="font-size:11.5px;font-weight:800;color:var(--t1);margin-bottom:4px">' + g.label + ' (' + arr.length + ')</div>' +
+            '<div style="font-size:11px;color:var(--t2);line-height:1.6">' + arr.map(function (c) { return _esc(c.nome); }).join(' · ') + '</div></div>';
+        }).join('') || 'Nenhum item cadastrado ainda.';
+      }).catch(function () { boxItens.textContent = 'Não deu pra carregar os itens agora.'; });
     }).catch(function (e) {
       _log('vendidos:aba', e);
       el.innerHTML = '<div style="padding:20px;font-size:12px;color:var(--t2)">Não deu pra carregar os lançamentos agora. Troque de aba e volte.</div>';
