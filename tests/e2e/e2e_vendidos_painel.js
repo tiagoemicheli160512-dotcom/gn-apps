@@ -219,6 +219,20 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   check('com 150 g salva direto (1 gravação, com 150 g)', g.semPergunta && postsPe.length === 1 && postsPe[0].b[0].gramas.picanha === 150, postsPe.map(x => x.b));
   check('importar das fichas com 0,15 g também pede confirmação', /PICANHA DE SOL EXECUTIVO: Picanha 0,15 g/.test(g.sug), g.sug);
 
+  // ── 6. Pratos do cardápio sem gramatura: entram inativos, com aviso pra completar ──
+  const pend = await page.evaluate(() => {
+    _vendGerData.cadastro = [
+      { id: 'card_pastel_camarao', grupo: 'prato', nome: 'PASTEL DE CAMARÃO', gramas: {}, ativo: false, atualizado_por: 'cardápio — falta gramatura' },
+      { id: 'card_cabra_bao', grupo: 'prato', nome: 'CABRA BÃO (blend 120 g carne de sol)', gramas: { carne_sol: 120 }, ativo: false, atualizado_por: 'cardápio — conferir se o blend é 100% carne de sol' },
+      { id: 'p2', grupo: 'prato', nome: 'PICANHA DE SOL P2', gramas: { picanha: 400 }, ativo: true },
+    ];
+    _vendCadAberto = true; renderDashboard();
+    const it = id => { const x = document.querySelector(`.vc-item[data-id="${id}"] .vc-pend`); return x ? x.innerText : ''; };
+    return { cab: (document.querySelector('.vc-pend-n') || {}).innerText || '', pastel: it('card_pastel_camarao'), cabra: it('card_cabra_bao'), pic: it('p2') };
+  });
+  check('cabeçalho do cadastro conta "⏳ 2 aguardando gramatura"', /2 aguardando gramatura/.test(pend.cab), pend);
+  check('prato sem gramatura mostra "Falta a gramatura — preencha as gramas, marque ativo e salve"; o do blend pede pra conferir; o ativo nada', /Falta a gramatura/.test(pend.pastel) && /conferir se o blend é 100% carne de sol — confira/.test(pend.cabra) && pend.pic === '', pend);
+
   check('nenhum erro de JavaScript', erros.length === 0, erros);
   console.log(`\n${ok} OK, ${falhou} falhou`);
   await browser.close();
