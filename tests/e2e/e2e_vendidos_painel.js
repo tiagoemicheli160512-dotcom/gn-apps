@@ -225,13 +225,16 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
       { id: 'card_pastel_camarao', grupo: 'prato', nome: 'PASTEL DE CAMARÃO', gramas: {}, ativo: false, atualizado_por: 'cardápio — falta gramatura' },
       { id: 'card_cabra_bao', grupo: 'prato', nome: 'CABRA BÃO (blend 120 g carne de sol)', gramas: { carne_sol: 120 }, ativo: false, atualizado_por: 'cardápio — conferir se o blend é 100% carne de sol' },
       { id: 'p2', grupo: 'prato', nome: 'PICANHA DE SOL P2', gramas: { picanha: 400 }, ativo: true },
+      // Decisão tomada: o dono salvou zerado e inativo (blend não é carne de sol) — não é pendência.
+      { id: 'card_rei_cangaco', grupo: 'prato', nome: 'REI DO CANGAÇO', gramas: {}, ativo: false, atualizado_por: 'Tiago' },
     ];
     _vendCadAberto = true; renderDashboard();
     const it = id => { const x = document.querySelector(`.vc-item[data-id="${id}"] .vc-pend`); return x ? x.innerText : ''; };
-    return { cab: (document.querySelector('.vc-pend-n') || {}).innerText || '', pastel: it('card_pastel_camarao'), cabra: it('card_cabra_bao'), pic: it('p2') };
+    return { cab: (document.querySelector('.vc-pend-n') || {}).innerText || '', pastel: it('card_pastel_camarao'), cabra: it('card_cabra_bao'), pic: it('p2'), rei: it('card_rei_cangaco') };
   });
   check('cabeçalho do cadastro conta "⏳ 2 aguardando gramatura"', /2 aguardando gramatura/.test(pend.cab), pend);
   check('prato sem gramatura mostra "Falta a gramatura — preencha as gramas, marque ativo e salve"; o do blend pede pra conferir; o ativo nada', /Falta a gramatura/.test(pend.pastel) && /conferir se o blend é 100% carne de sol — confira/.test(pend.cabra) && pend.pic === '', pend);
+  check('prato que o dono já salvou zerado e inativo (decisão tomada) não conta como pendente nem mostra aviso', pend.rei === '' && /^⏳ 2 aguardando/.test(pend.cab.trim()), pend);
 
   check('nenhum erro de JavaScript', erros.length === 0, erros);
   console.log(`\n${ok} OK, ${falhou} falhou`);
