@@ -1178,6 +1178,30 @@ function _mergeArrPorId(local, cloud, deletedIds) {
   return [...localArr, ...soDaNuvem];
 }
 
+// Avarias / Saída pra Terceiros / empréstimo pago em dinheiro: o status só avança
+// (pendente → loja_confirmou → finalizado) e quem avança são OUTROS apps — o Compras
+// (app Estoque e Pedido, aba Terceiros) confirma o valor e o Financeiro (RH) finaliza. Este
+// aparelho guarda a cópia local do registro ainda 'pendente' até o próximo pull; com
+// _mergeArrPorId, a cópia local vencia e o autosave seguinte devolvia o registro pra
+// 'pendente', apagando o valor que o Compras tinha acabado de confirmar. Caso real: carne
+// seca da Boulevard, R$ 655,40 confirmados em 19/10 e de novo em 18/11 — voltou nas duas.
+// Aqui, se a nuvem está mais adiante, o status e os campos de confirmação vêm dela.
+const AVARIA_STATUS_ORDEM = { pendente: 0, loja_confirmou: 1, finalizado: 2 };
+const AVARIA_CAMPOS_CONFIRMACAO = ['status', 'custoUnit', 'valorTotal', 'loja_conf_por', 'loja_conf_ts', 'rh_conf_por', 'rh_conf_ts'];
+function _mergeAvariasPorId(local, cloud, deletedIds) {
+  const unidos = _mergeArrPorId(local, cloud, deletedIds);
+  const daNuvem = new Map((Array.isArray(cloud) ? cloud : []).filter(x => x && x.id).map(x => [x.id, x]));
+  return unidos.map(rec => {
+    const c = rec && daNuvem.get(rec.id);
+    if (!c || c === rec) return rec;
+    const rl = AVARIA_STATUS_ORDEM[rec.status], rc = AVARIA_STATUS_ORDEM[c.status];
+    if (rc === undefined || rl === undefined || rc <= rl) return rec;
+    const m = { ...rec };
+    AVARIA_CAMPOS_CONFIRMACAO.forEach(k => { if (k in c) m[k] = c[k]; });
+    return m;
+  });
+}
+
 // Campos de confirmação de empréstimo que só avançam (nunca voltam a false depois de
 // setados) — usados pelo merge abaixo pra nunca deixar o push desatualizado de uma loja
 // apagar a confirmação que a OUTRA loja já tinha feito do lado dela.
@@ -1422,7 +1446,7 @@ async function sbPush() {
       minAll: { [loja]: { ...((baseAllData.minAll||{})[loja]), ...(minAll[loja] || {}) } },
       fatoresConversao, mapeamentoPedido,
       pedidoCustom, pedidoRemovidos, pedidoRestaurados, pedidoConfs: filterByLoja(pedidoConfs, loja),
-      avariasAll: { [loja]: _mergeArrPorId(avariasAll[loja], (baseAllData.avariasAll||{})[loja], _pendingDelIds.avariasAll) },
+      avariasAll: { [loja]: (avariasAll[loja] = _mergeAvariasPorId(avariasAll[loja], (baseAllData.avariasAll||{})[loja], _pendingDelIds.avariasAll)) },
       devolucoesAll: { [loja]: _mergeArrPorId(devolucoesAll[loja], (baseAllData.devolucoesAll||{})[loja], _pendingDelIds.devolucoesAll) },
       // urgenciaTemplate NÃO entra aqui de propósito — é só espelho do que o app Estoque e
       // Pedido marca, direto na mesma linha (gn_lojas.all_data.urgenciaTemplate). Se o
@@ -1485,7 +1509,7 @@ async function sbPushLoja(lojaAlvo) {
     // sessão atual recebe o registro de avaria (pagamento pro Financeiro validar), ele só
     // existe em memória local — sem isso aqui, sbPushLoja nunca levava esse registro pro
     // Supabase e o Financeiro nunca via a pendência.
-    avariasAll: { [lojaAlvo]: _mergeArrPorId(avariasAll[lojaAlvo], (baseAllData.avariasAll||{})[lojaAlvo], _pendingDelIds.avariasAll) },
+    avariasAll: { [lojaAlvo]: (avariasAll[lojaAlvo] = _mergeAvariasPorId(avariasAll[lojaAlvo], (baseAllData.avariasAll||{})[lojaAlvo], _pendingDelIds.avariasAll)) },
   };
   const mergedAllData = { ...baseAllData, ...payload };
   await sbRequest("gn_lojas?loja=eq." + encodeURIComponent(lojaAlvo), {
