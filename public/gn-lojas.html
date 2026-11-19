@@ -813,7 +813,26 @@ const BARRIS_SEMANAL_STATUS_LABEL = Object.fromEntries(BARRIS_SEMANAL_STATUS.map
 // 60 é folga larga e ao mesmo tempo pega dedo escorregado (digitar 160 em vez de 16).
 const BARRIS_SEMANAL_QTD_MAX = 60;
 let _barrisSemPendente = false;
-let _barrisSemSemanaIni = null; // wkKey (YYYY-MM-DD) da segunda-feira da semana atual
+let _barrisSemSemanaIni = null; // wkKey (YYYY-MM-DD) da segunda-feira da semana atual — ou da QUINTA, na rodada de quinta
+// Contagem de QUINTA (19/11/2026, pedido do dono): "além de segunda, a mesma informação na
+// quinta, pois nos preparamos pro fim de semana". De quinta a domingo vale a rodada 'QUI'
+// (chave = a própria quinta); de segunda a quarta, a de sempre ('SEG', chave = a segunda).
+// Os cilindros de CO2 do chopp entram na mesma contagem (cheios e vazios).
+let _barrisSemRodada = 'SEG';
+let _barrisSemCo2 = { cheio: '', vazio: '' };
+// Primeira quinta cobrada. Antes dela, de quinta a domingo continua valendo só a de segunda —
+// sem isso, publicar numa quinta trancaria todas as lojas no meio do serviço, sem aviso.
+let BARRIS_QUINTA_INICIO = '2026-11-26';
+function _barrisRodadaDe(d) {
+  const seg = getMonday(d), dow = d.getDay();
+  const qui = wkKey(addDays(seg, 3));
+  if ((dow === 0 || dow >= 4) && qui >= BARRIS_QUINTA_INICIO) return { rodada: 'QUI', key: qui, seg: wkKey(seg) };
+  return { rodada: 'SEG', key: wkKey(seg), seg: wkKey(seg) };
+}
+function _barrisCo2Ok() {
+  const ok = v => String(v).trim() !== '' && isFinite(parseInt(v, 10)) && parseInt(v, 10) >= 0;
+  return ok(_barrisSemCo2.cheio) && ok(_barrisSemCo2.vazio);
+}
 let _barrisSemItens = { CLARO: [], VINHO: [] }; // {status, validade} adicionados nesta sessão, ainda não confirmados
 let _barrisSemComparativo = null; // {CLARO:n, VINHO:n} da semana passada, ou null se ainda não carregou
 let _barrisSemSalvando = false;
@@ -2326,7 +2345,10 @@ function _barrisSemMarcarOkLocal(slug, semana) {
 // a rede — está coberto pelo lembrete local acima, e a tela mostra o aviso + "Tentar de novo"
 // em vez de só aparecer sem explicação.
 async function _checarBarrisSemanalPendencia() {
-  _barrisSemSemanaIni = wkKey(getMonday(new Date()));
+  const _rod = _barrisRodadaDe(new Date());
+  if (_barrisSemRodada !== _rod.rodada || _barrisSemSemanaIni !== _rod.key) _barrisSemComparativo = null;
+  _barrisSemRodada = _rod.rodada;
+  _barrisSemSemanaIni = _rod.key;
   const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
   if (!_cargoContaBarris() || loja === 'Maglia') { _barrisSemPendente = false; _renderTravaBarrisSemanal(); return; }
   if (_barrisSemOkLocal(slug, _barrisSemSemanaIni)) { _barrisSemPendente = false; _renderTravaBarrisSemanal(); return; }
@@ -2356,13 +2378,22 @@ async function _checarBarrisSemanalPendencia() {
 async function _carregarComparativoBarrisSemanal() {
   try {
     const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
-    const semanaAnteriorISO = wkKey(addDays(new Date(_barrisSemSemanaIni + 'T12:00:00'), -7));
+    // Compara com a contagem ANTERIOR: na quinta, a segunda da mesma semana; na segunda, a
+    // quinta da semana passada (se houve) ou, sem ela, a segunda passada.
+    const base = new Date(_barrisSemSemanaIni + 'T12:00:00');
+    const cands = _barrisSemRodada === 'QUI'
+      ? [wkKey(addDays(base, -3))]
+      : [wkKey(addDays(base, -4)), wkKey(addDays(base, -7))];
     const rows = await sbRequest(
-      'gn_barris_semanal_contagem?loja_slug=eq.' + slug + '&semana_inicio=eq.' + semanaAnteriorISO + '&select=tipo',
+      'gn_barris_semanal_contagem?loja_slug=eq.' + slug + '&semana_inicio=in.(' + cands.join(',') + ')&select=tipo,status,semana_inicio',
       { method: 'GET' }
     );
-    const cont = { CLARO: 0, VINHO: 0 };
-    (rows || []).forEach(function(r) { if (cont[r.tipo] != null) cont[r.tipo]++; });
+    const usada = cands.find(function(c) { return (rows || []).some(function(r) { return r.semana_inicio === c; }); }) || cands[cands.length - 1];
+    const cont = { CLARO: 0, VINHO: 0, CO2_CHEIO: 0, CO2_VAZIO: 0, data: usada };
+    (rows || []).filter(function(r) { return r.semana_inicio === usada; }).forEach(function(r) {
+      if (r.tipo === 'CO2') { if (r.status === 'VAZIO') cont.CO2_VAZIO++; else cont.CO2_CHEIO++; }
+      else if (cont[r.tipo] != null) cont[r.tipo]++;
+    });
     _barrisSemComparativo = cont;
   } catch (e) { _barrisSemComparativo = null; }
   _renderTravaBarrisSemanal();
@@ -2559,8 +2590,11 @@ async function _confirmarContagemBarrisSemanal() {
     showToast('🛢️ Lance os cascos vazios — ou marque "Não tenho nenhum casco vazio" se a loja realmente estiver sem nenhum.');
     return;
   }
-  const msg = 'Confirmar a contagem desta semana com ' + total + ' barril' + (total === 1 ? '' : 'is') +
-    (vazios > 0 ? ', sendo ' + vazios + ' vazio(s)' : ' e NENHUM casco vazio na loja') + '?';
+  if (!_barrisCo2Ok()) { showToast('🧯 Informe os cilindros de CO2: quantos cheios e quantos vazios (pode ser 0).'); return; }
+  const co2C = parseInt(_barrisSemCo2.cheio, 10), co2V = parseInt(_barrisSemCo2.vazio, 10);
+  const msg = 'Confirmar a contagem ' + (_barrisSemRodada === 'QUI' ? 'de QUINTA' : 'desta semana') + ' com ' + total + ' barril' + (total === 1 ? '' : 'is') +
+    (vazios > 0 ? ', sendo ' + vazios + ' vazio(s)' : ' e NENHUM casco vazio na loja') +
+    ', e ' + co2C + ' cilindro(s) de CO2 cheio(s) e ' + co2V + ' vazio(s)?';
   if (!confirm(msg)) return;
   _barrisSemSalvando = true;
   _renderTravaBarrisSemanal();
@@ -2571,16 +2605,19 @@ async function _confirmarContagemBarrisSemanal() {
     const linhas = [];
     BARRIS_SEMANAL_TIPOS.forEach(function(t) {
       _barrisSemItens[t.val].forEach(function(item) {
-        linhas.push({ loja: loja, loja_slug: slug, semana_inicio: monday, tipo: t.val, status: item.status, validade: item.validade, criado_por: criadoPor });
+        linhas.push({ loja: loja, loja_slug: slug, semana_inicio: monday, rodada: _barrisSemRodada, tipo: t.val, status: item.status, validade: item.validade, criado_por: criadoPor });
       });
     });
+    // Cilindros de CO2: uma linha por cilindro, tipo 'CO2', CHEIO ou VAZIO (sem validade).
+    for (let i = 0; i < co2C; i++) linhas.push({ loja: loja, loja_slug: slug, semana_inicio: monday, rodada: _barrisSemRodada, tipo: 'CO2', status: 'CHEIO', validade: null, criado_por: criadoPor });
+    for (let i = 0; i < co2V; i++) linhas.push({ loja: loja, loja_slug: slug, semana_inicio: monday, rodada: _barrisSemRodada, tipo: 'CO2', status: 'VAZIO', validade: null, criado_por: criadoPor });
     if (linhas.length) {
       await sbRequest('gn_barris_semanal_contagem', { method: 'POST', headers: { 'Prefer': 'return=minimal' }, body: JSON.stringify(linhas) });
     }
     await sbRequest('gn_barris_semanal_confirmacao?on_conflict=loja_slug,semana_inicio', {
       method: 'POST',
       headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
-      body: JSON.stringify({ loja_slug: slug, semana_inicio: monday, loja: loja, confirmado_por: criadoPor,
+      body: JSON.stringify({ loja_slug: slug, semana_inicio: monday, rodada: _barrisSemRodada, loja: loja, confirmado_por: criadoPor,
                              sem_vazios: _barrisSemVaziosLancados() === 0 })
     });
     _barrisSemPendente = false;
@@ -2592,6 +2629,7 @@ async function _confirmarContagemBarrisSemanal() {
     _barrisSemItens = { CLARO: [], VINHO: [] };
     _barrisSemComparativo = null;
     _barrisSemSemVazios = false;
+    _barrisSemCo2 = { cheio: '', vazio: '' };
     showToast('✅ Contagem de barris confirmada!');
     _barrisConfSalvarLocal(slug, monday, _contados);
     // Conferência: o que ficou "em acompanhamento" no app tem que bater com o que a loja
@@ -2622,7 +2660,7 @@ function _renderTravaBarrisSemanal() {
   const semanaLbl = _barrisSemSemanaIni ? fmt(_barrisSemSemanaIni) : '';
   const comp = _barrisSemComparativo;
   const compHtml = comp
-    ? '<div style="background:var(--fill-sutil);border-radius:10px;padding:8px 10px;margin-bottom:12px;font-size:11px;color:var(--t2)"><b>Semana passada:</b> 🍺 Claro: ' + comp.CLARO + ' · 🍷 Vinho: ' + comp.VINHO + '</div>'
+    ? '<div style="background:var(--fill-sutil);border-radius:10px;padding:8px 10px;margin-bottom:12px;font-size:11px;color:var(--t2)"><b>Contagem anterior' + (comp.data ? ' (' + fmt(comp.data) + ')' : '') + ':</b> 🍺 Claro: ' + comp.CLARO + ' · 🍷 Vinho: ' + comp.VINHO + ' · 🧯 CO2: ' + comp.CO2_CHEIO + ' cheio(s), ' + comp.CO2_VAZIO + ' vazio(s)</div>'
     : '';
   const secaoTipo = function(t) {
     const itens = _barrisSemItens[t.val];
@@ -2632,7 +2670,7 @@ function _renderTravaBarrisSemanal() {
       const d = total - comp[t.val];
       const cor = d > 0 ? '#16a34a' : d < 0 ? '#dc2626' : '#64748b';
       const sinal = d > 0 ? '+' : '';
-      deltaHtml = '<span style="color:' + cor + ';font-weight:800">(' + sinal + d + ' vs sem. passada)</span>';
+      deltaHtml = '<span style="color:' + cor + ';font-weight:800">(' + sinal + d + ' vs anterior)</span>';
     }
     const listaHtml = itens.length ? _agruparItensBarris(itens).map(function(g) {
       const dias = g.validade ? _diasParaVencerBarril(g.validade) : null;
@@ -2654,7 +2692,7 @@ function _renderTravaBarrisSemanal() {
     return '<div style="border:1px solid rgba(0,0,0,.08);border-radius:12px;padding:12px;margin-bottom:12px">' +
       '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
       '<div style="font-weight:800;font-size:13px;color:var(--t1)">' + t.emoji + ' ' + t.label + '</div>' +
-      '<div style="font-size:11px;color:var(--t3)">' + total + ' nesta semana ' + deltaHtml + '</div>' +
+      '<div style="font-size:11px;color:var(--t3)">' + total + (_barrisSemRodada === 'QUI' ? ' nesta contagem ' : ' nesta semana ') + deltaHtml + '</div>' +
       '</div>' +
       '<div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">' +
       '<select id="bsem-status-' + t.val + '" onchange="_toggleBsemValidade(\'' + t.val + '\')" style="flex:1;min-width:150px;background:var(--s1);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:7px 8px;font-size:12px;font-family:inherit">' +
@@ -2668,7 +2706,8 @@ function _renderTravaBarrisSemanal() {
   const totalGeral = _barrisSemItens.CLARO.length + _barrisSemItens.VINHO.length;
   const totalVazios = _barrisSemVaziosLancados();
   const faltamVazios = totalVazios === 0 && !_barrisSemSemVazios;
-  const btnDesabilitado = _barrisSemSalvando || totalGeral === 0 || faltamVazios;
+  const faltaCo2 = !_barrisCo2Ok();
+  const btnDesabilitado = _barrisSemSalvando || totalGeral === 0 || faltamVazios || faltaCo2;
   // Checagem no banco não respondeu: a trava fica de pé (fail-closed), mas dizendo o motivo
   // e com um botão de tentar de novo — senão a loja só vê uma tela que não deveria estar ali.
   const redeHtml = _barrisSemCheckFalhou
@@ -2693,18 +2732,46 @@ function _renderTravaBarrisSemanal() {
   el.innerHTML =
     '<div style="background:var(--s2);border-radius:18px;padding:22px 20px;width:100%;max-width:440px;margin:auto">' +
     '<div style="text-align:center;margin-bottom:6px;font-size:34px">🍺</div>' +
-    '<div style="text-align:center;font-size:16px;font-weight:800;color:var(--t1);margin-bottom:4px">Contagem semanal de barris</div>' +
-    '<div style="text-align:center;font-size:11px;color:var(--t3);margin-bottom:14px">Semana de ' + semanaLbl + ' · registre a situação de cada barril de chopp (os vazios são obrigatórios) pra liberar o app</div>' +
+    '<div style="text-align:center;font-size:16px;font-weight:800;color:var(--t1);margin-bottom:4px">' + (_barrisSemRodada === 'QUI' ? 'Contagem de barris de quinta' : 'Contagem semanal de barris') + '</div>' +
+    '<div style="text-align:center;font-size:11px;color:var(--t3);margin-bottom:14px">' + (_barrisSemRodada === 'QUI' ? 'Quinta ' + semanaLbl + ' · preparação do fim de semana — ' : 'Semana de ' + semanaLbl + ' · ') + 'registre a situação de cada barril de chopp (os vazios são obrigatórios) e os cilindros de CO2 pra liberar o app</div>' +
     redeHtml +
     compHtml +
     BARRIS_SEMANAL_TIPOS.map(secaoTipo).join('') +
+    _barrisCo2SecaoHtml() +
     vaziosHtml +
     '<button ' + (btnDesabilitado ? 'disabled' : '') + ' onclick="_confirmarContagemBarrisSemanal()" style="display:block;width:100%;background:' + (btnDesabilitado ? 'rgba(5,150,105,.5)' : '#059669') + ';border:none;border-radius:10px;color:#fff;padding:13px;font-size:14px;font-weight:800;cursor:' + (btnDesabilitado ? 'default' : 'pointer') + ';font-family:inherit">' +
     (_barrisSemSalvando ? 'Salvando…'
       : totalGeral === 0 ? 'Adicione ao menos 1 barril'
       : faltamVazios ? 'Falta lançar os cascos vazios'
+      : faltaCo2 ? 'Falta informar os cilindros de CO2'
       : '✅ Confirmar contagem (' + totalGeral + ')') +
     '</button></div>';
+}
+
+// Cilindros de CO2 do chopp: dois números (cheios e vazios), obrigatórios — 0 vale, em branco
+// não. Redesenhar o overlay perde o foco, então o oninput só guarda o valor e atualiza o botão.
+function _barrisCo2SecaoHtml() {
+  const inp = (k, lbl) => '<label style="flex:1;min-width:0"><span style="display:block;font-size:10px;font-weight:700;color:var(--t3);margin-bottom:3px">' + lbl + '</span>' +
+    '<input type="number" inputmode="numeric" min="0" id="bsem-co2-' + k + '" value="' + _barrisSemCo2[k] + '" placeholder="0" oninput="_barrisCo2Set(\'' + k + '\', this.value)" ' +
+    'style="width:100%;box-sizing:border-box;background:var(--s1);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:8px;font-size:14px;font-weight:800;text-align:center;font-family:inherit"/></label>';
+  return '<div class="bsem-co2" style="border:1px solid rgba(0,0,0,.08);border-radius:12px;padding:12px;margin-bottom:12px">' +
+    '<div style="font-weight:800;font-size:13px;color:var(--t1);margin-bottom:8px">🧯 Cilindros de CO2 do chopp</div>' +
+    '<div style="display:flex;gap:8px">' + inp('cheio', 'Cheios') + inp('vazio', 'Vazios') + '</div>' +
+    '<div style="font-size:10px;color:var(--t3);margin-top:6px">Obrigatório — se não tiver nenhum, coloque 0.</div></div>';
+}
+function _barrisCo2Set(k, v) {
+  _barrisSemCo2[k] = v;
+  const el = document.getElementById('barris-semanal-trava-overlay');
+  const btn = el && el.querySelector('button[onclick="_confirmarContagemBarrisSemanal()"]');
+  if (btn && !_barrisSemSalvando) {
+    const total = _barrisSemItens.CLARO.length + _barrisSemItens.VINHO.length;
+    const falta = total === 0 || (_barrisSemVaziosLancados() === 0 && !_barrisSemSemVazios) || !_barrisCo2Ok();
+    btn.disabled = falta;
+    btn.style.background = falta ? 'rgba(5,150,105,.5)' : '#059669';
+    btn.style.cursor = falta ? 'default' : 'pointer';
+    btn.textContent = total === 0 ? 'Adicione ao menos 1 barril' : (_barrisSemVaziosLancados() === 0 && !_barrisSemSemVazios) ? 'Falta lançar os cascos vazios'
+      : !_barrisCo2Ok() ? 'Falta informar os cilindros de CO2' : '✅ Confirmar contagem (' + total + ')';
+  }
 }
 
 function _barrisSemVaziosLancados() {
@@ -13304,7 +13371,11 @@ async function carregarBarris(silent) {
     // Contagem semanal desta semana (do banco, vale pra qualquer aparelho da loja) — base da
     // conferência dos barris em acompanhamento. Best-effort: sem ela, só não há aviso.
     try {
-      const cont = await sbRequest('gn_barris_semanal_contagem?loja_slug=eq.' + slug + '&semana_inicio=eq.' + wkKey(getMonday(new Date())) + '&select=tipo,status,validade,criado_em', { method: 'GET' });
+      // A contagem mais recente da semana: a de quinta, quando já houve; senão a de segunda.
+      const _seg = getMonday(new Date()), _qui = wkKey(addDays(_seg, 3));
+      const todas = await sbRequest('gn_barris_semanal_contagem?loja_slug=eq.' + slug + '&semana_inicio=in.(' + wkKey(_seg) + ',' + _qui + ')&select=tipo,status,validade,criado_em,semana_inicio', { method: 'GET' });
+      const temQui = Array.isArray(todas) && todas.some(r => r.semana_inicio === _qui);
+      const cont = Array.isArray(todas) ? todas.filter(r => r.semana_inicio === (temQui ? _qui : wkKey(_seg))) : todas;
       if (Array.isArray(cont) && cont.length) {
         const porTipo = { CLARO: [], VINHO: [] };
         cont.forEach(function(r) { if (porTipo[r.tipo]) porTipo[r.tipo].push(r); });

@@ -24,13 +24,13 @@ const ATIVOS = [
   ...Array.from({ length: 7 }, (_, i) => v('cla-' + i, CLARO, '2026-11-25', '2026-11-17T15:09:13Z')),                         // depois da contagem
 ];
 const CONTAGEM = [
-  { tipo: 'VINHO', status: 'NA_LINHA_METADE', validade: '2026-11-28', criado_em: '2026-11-16T11:51:45Z' },
-  { tipo: 'VINHO', status: 'CHEIO', validade: '2026-12-03', criado_em: '2026-11-16T11:51:45Z' },
-  { tipo: 'VINHO', status: 'VAZIO', validade: null, criado_em: '2026-11-16T11:51:45Z' },
-  { tipo: 'CLARO', status: 'CHEIO', validade: '2026-11-18', criado_em: '2026-11-16T11:51:45Z' },
-  { tipo: 'CLARO', status: 'NA_LINHA_METADE', validade: '2026-11-18', criado_em: '2026-11-16T11:51:45Z' },
-  { tipo: 'CLARO', status: 'NA_LINHA_METADE', validade: '2026-11-18', criado_em: '2026-11-16T11:51:45Z' },
-  { tipo: 'CLARO', status: 'VAZIO', validade: null, criado_em: '2026-11-16T11:51:45Z' },
+  { tipo: 'VINHO', status: 'NA_LINHA_METADE', validade: '2026-11-28', criado_em: '2026-11-16T11:51:45Z', semana_inicio: '2026-11-16' },
+  { tipo: 'VINHO', status: 'CHEIO', validade: '2026-12-03', criado_em: '2026-11-16T11:51:45Z', semana_inicio: '2026-11-16' },
+  { tipo: 'VINHO', status: 'VAZIO', validade: null, criado_em: '2026-11-16T11:51:45Z', semana_inicio: '2026-11-16' },
+  { tipo: 'CLARO', status: 'CHEIO', validade: '2026-11-18', criado_em: '2026-11-16T11:51:45Z', semana_inicio: '2026-11-16' },
+  { tipo: 'CLARO', status: 'NA_LINHA_METADE', validade: '2026-11-18', criado_em: '2026-11-16T11:51:45Z', semana_inicio: '2026-11-16' },
+  { tipo: 'CLARO', status: 'NA_LINHA_METADE', validade: '2026-11-18', criado_em: '2026-11-16T11:51:45Z', semana_inicio: '2026-11-16' },
+  { tipo: 'CLARO', status: 'VAZIO', validade: null, criado_em: '2026-11-16T11:51:45Z', semana_inicio: '2026-11-16' },
 ];
 
 (async () => {

@@ -15257,9 +15257,14 @@ async function _loadBarrisSemanalGerencia(){
   const slugs = lojas.map(k => LOJA_SLUG_HOME[k]).filter(Boolean);
   const semanaAtualIni = _weekRange(0).dates[0];
   const semanaAnteriorIni = _weekRange(-1).dates[0];
+  // Contagem de QUINTA (19/11/2026): gravada com semana_inicio = a própria quinta (rodada 'QUI').
+  // As contas de sempre (segunda × segunda passada, entregas depois da contagem) seguem por
+  // cima da contagem de segunda; a de quinta aparece à parte, com os cilindros de CO2.
+  const quintaIni = _weekRange(0).dates[3];
+  const quintaJa = new Date().getDay() === 0 || new Date().getDay() >= 4;
   const [contagens, confirmacoes, entregas] = await Promise.all([
-    window.gnFetchJson(`${SB_URL}/rest/v1/gn_barris_semanal_contagem?loja_slug=in.(${slugs.join(',')})&semana_inicio=in.(${semanaAtualIni},${semanaAnteriorIni})&select=id,loja_slug,semana_inicio,tipo,status,validade,criado_em`, H, 'barrisSem:contagens', []),
-    window.gnFetchJson(`${SB_URL}/rest/v1/gn_barris_semanal_confirmacao?loja_slug=in.(${slugs.join(',')})&semana_inicio=eq.${semanaAtualIni}&select=loja_slug,confirmado_por,confirmado_em`, H, 'barrisSem:confirmacoes', []),
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_barris_semanal_contagem?loja_slug=in.(${slugs.join(',')})&semana_inicio=in.(${semanaAtualIni},${semanaAnteriorIni},${quintaIni})&select=id,loja_slug,semana_inicio,tipo,status,validade,criado_em`, H, 'barrisSem:contagens', []),
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_barris_semanal_confirmacao?loja_slug=in.(${slugs.join(',')})&semana_inicio=in.(${semanaAtualIni},${quintaIni})&select=loja_slug,semana_inicio,confirmado_por,confirmado_em`, H, 'barrisSem:confirmacoes', []),
     // Entradas de chopp com validade lançadas na aba 🍺 Barris do app Lojas (o estoquista
     // informa a validade na hora de receber a entrega). Só as ATIVAS: um barril já
     // finalizado chegou e acabou, e nesse caso a troca se desfaz sozinha (voltou a ser um
@@ -15274,7 +15279,20 @@ async function _loadBarrisSemanalGerencia(){
     itensEfetivos: {CLARO:[], VINHO:[]},   // itensAtual + entregas novas − vazios trocados (é o que aparece na tela)
     entregas: {CLARO:[], VINHO:[]}, vaziosTrocados: {CLARO:0, VINHO:0},
     contagemEm: null, confirmado: null,
+    co2Seg: null, co2Qui: null, quinta: null, quintaConf: null,
   }; });
+  (contagens || []).forEach(r => {
+    const k = slugToLoja[r.loja_slug];
+    if (!k || !porLoja[k]) return;
+    const d = porLoja[k];
+    if (r.semana_inicio === quintaIni) {
+      if (!d.quinta) d.quinta = { CLARO: 0, VINHO: 0 };
+      if (r.tipo === 'CO2') { d.co2Qui = d.co2Qui || { cheio: 0, vazio: 0 }; d.co2Qui[r.status === 'VAZIO' ? 'vazio' : 'cheio']++; }
+      else if (d.quinta[r.tipo] != null && r.status !== 'VAZIO') d.quinta[r.tipo]++;
+    } else if (r.semana_inicio === semanaAtualIni && r.tipo === 'CO2') {
+      d.co2Seg = d.co2Seg || { cheio: 0, vazio: 0 }; d.co2Seg[r.status === 'VAZIO' ? 'vazio' : 'cheio']++;
+    }
+  });
   (contagens || []).forEach(r => {
     const k = slugToLoja[r.loja_slug];
     if (!k || !porLoja[k]) return;
@@ -15287,7 +15305,11 @@ async function _loadBarrisSemanalGerencia(){
       if (!porLoja[k].contagemEm || r.criado_em > porLoja[k].contagemEm) porLoja[k].contagemEm = r.criado_em;
     }
   });
-  (confirmacoes || []).forEach(r => {
+  (confirmacoes || []).filter(r => r.semana_inicio === quintaIni).forEach(r => {
+    const k = slugToLoja[r.loja_slug];
+    if (k && porLoja[k]) porLoja[k].quintaConf = { por: r.confirmado_por, em: r.confirmado_em };
+  });
+  (confirmacoes || []).filter(r => !r.semana_inicio || r.semana_inicio === semanaAtualIni).forEach(r => {
     const k = slugToLoja[r.loja_slug];
     if (k && porLoja[k]) porLoja[k].confirmado = { por: r.confirmado_por, em: r.confirmado_em };
   });
@@ -15320,7 +15342,7 @@ async function _loadBarrisSemanalGerencia(){
       d.atual[tipo] = efetivos.length;
     });
   });
-  _barrisSemGerenciaData = { porLoja, semanaAtualIni, semanaAnteriorIni };
+  _barrisSemGerenciaData = { porLoja, semanaAtualIni, semanaAnteriorIni, quintaIni, quintaJa };
   _barrisSemGerenciaLoaded = true;
   renderDashboard();
 }
@@ -15400,6 +15422,24 @@ function _barrisSemLojasDoRelatorio(porLoja){
   const validas = _barrisSemRelatorioLojasFiltro.filter(k => todas.includes(k));
   return validas.length ? validas : todas;
 }
+// Linhas da contagem de quinta e dos cilindros de CO2 no card da loja (Painel › Barris).
+function _barrisCo2Txt(c) { return c ? `${c.cheio} cheio${c.cheio === 1 ? '' : 's'} · ${c.vazio} vazio${c.vazio === 1 ? '' : 's'}` : null; }
+function _barrisQuintaCo2Html(d, g) {
+  const fmt = iso => iso.split('-').reverse().slice(0, 2).join('/');
+  const q = g && g.quintaIni ? fmt(g.quintaIni) : '';
+  let h = '';
+  if (d.quinta || d.quintaConf) {
+    h += `<div class="barris-quinta" style="margin-top:6px;padding:5px 8px;background:rgba(79,70,229,.07);border-radius:6px;font-size:10.5px;color:var(--t2)">
+      📋 <b>Contagem de quinta (${q})</b>: 🍺 ${(d.quinta || {}).CLARO || 0} · 🍷 ${(d.quinta || {}).VINHO || 0} com chopp
+      ${d.quintaConf ? `<span style="color:#16a34a;font-weight:700">· ✅ ${escapeHtml(d.quintaConf.por || 'confirmado')}</span>` : ''}</div>`;
+  } else if (g && g.quintaJa) {
+    h += `<div class="barris-quinta" style="margin-top:6px;font-size:10.5px;color:#dc2626;font-weight:700">⚠ Contagem de quinta (${q}) pendente</div>`;
+  }
+  const co2 = d.co2Qui || d.co2Seg;
+  h += `<div class="barris-co2" style="margin-top:5px;font-size:10.5px;color:var(--t2)">🧯 CO2: ${co2 ? '<b>' + _barrisCo2Txt(co2) + '</b> <span style="color:var(--t3)">(contagem de ' + (d.co2Qui ? 'quinta' : 'segunda') + ')</span>' : '<span style="color:var(--t3)">não informado nesta semana</span>'}</div>`;
+  return h;
+}
+
 function _buildBarrisSemanalPanel(){
   const reportBtns = _reportBtnsRowHtml('Barris');
   if (!_barrisSemGerenciaLoaded || !_barrisSemGerenciaData) return reportBtns + _skelPanel(4);
@@ -15459,6 +15499,7 @@ function _buildBarrisSemanalPanel(){
       </div>
       ${todosItens && !editando ? `<div style="margin-top:6px;padding-top:6px;border-top:1px dashed rgba(0,0,0,.1)">${todosItens}</div>` : ''}
       ${editando ? '' : entregasHtml}
+      ${editando ? '' : _barrisQuintaCo2Html(d, _barrisSemGerenciaData)}
       ${painelEdicao}
     </div>`;
   }).join('');
@@ -17800,6 +17841,11 @@ function _barrisSemRelatorioTexto(){
     const entregas = _barrisEntregasResumo(d);
     if (entregas.length) msg += `  Entrada de chopp nesta semana: ${entregas.map(e => `${e.label} ${_barrisEntregaTxt(e)}`).join(' | ')}\n`;
     msg += d.confirmado ? `  Confirmado por ${d.confirmado.por || '—'}\n` : `  Pendente — ainda não contou essa semana\n`;
+    const g = _barrisSemGerenciaData;
+    if (d.quinta || d.quintaConf) msg += `  Contagem de quinta: Claro ${(d.quinta || {}).CLARO || 0} · Vinho ${(d.quinta || {}).VINHO || 0} com chopp${d.quintaConf ? ' (' + (d.quintaConf.por || 'confirmado') + ')' : ''}\n`;
+    else if (g.quintaJa) msg += `  Contagem de quinta: PENDENTE\n`;
+    const co2 = d.co2Qui || d.co2Seg;
+    msg += `  CO2: ${co2 ? _barrisCo2Txt(co2) : 'não informado'}\n`;
   });
   return { msg, titulo: 'Contagem Semanal de Barris' + tituloFiltro };
 }
@@ -17833,6 +17879,9 @@ function gerarWppBarris(){
     const entregas = _barrisEntregasResumo(d);
     if (entregas.length) msg += `  📦 Entrada de chopp nesta semana: ${entregas.map(e => `${e.emoji} ${_barrisEntregaTxt(e)}`).join(' | ')}\n`;
     msg += d.confirmado ? `  ✅ Confirmado por ${d.confirmado.por || '—'}\n` : `  ⚠ Pendente — ainda não contou essa semana\n`;
+    if (d.quinta || d.quintaConf) msg += `  📋 Quinta: 🍺 ${(d.quinta || {}).CLARO || 0} · 🍷 ${(d.quinta || {}).VINHO || 0} com chopp${d.quintaConf ? ' ✅ ' + (d.quintaConf.por || '') : ''}\n`;
+    else if (_barrisSemGerenciaData.quintaJa) msg += `  ⚠ Contagem de quinta pendente\n`;
+    msg += `  🧯 CO2: ${(d.co2Qui || d.co2Seg) ? _barrisCo2Txt(d.co2Qui || d.co2Seg) : 'não informado'}\n`;
   });
   window.open('https://wa.me/?text='+encodeURIComponent(msg),'_blank');
 }

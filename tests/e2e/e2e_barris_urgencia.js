@@ -72,7 +72,8 @@ const check = (n, c) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ? ok++ :
 
   // Mas quem já confirmou não é re-travado quando a rede cai depois
   const jaFez = await page.evaluate(async () => {
-    try { localStorage.setItem('gn_barris_semanal_ok', JSON.stringify({ ['bangu|' + wkKey(getMonday(new Date()))]: true })); } catch (e) {}
+    // A chave é a da rodada de hoje (segunda, ou a quinta de quinta a domingo — 19/11/2026).
+    try { localStorage.setItem('gn_barris_semanal_ok', JSON.stringify({ ['bangu|' + _barrisRodadaDe(new Date()).key]: true })); } catch (e) {}
     const real = window.sbRequest;
     window.sbRequest = () => Promise.reject(new Error('Failed to fetch'));
     await _checarBarrisSemanalPendencia();
@@ -148,6 +149,7 @@ const check = (n, c) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ? ok++ :
   // Loja que de fato não tem vazio nenhum: declara, e fica gravado
   const declarado = await page.evaluate(async () => {
     _barrisSemSemVazios = true;
+    _barrisSemCo2 = { cheio: '2', vazio: '1' };   // CO2 é obrigatório desde 19/11/2026 (e2e_barris_quinta_co2)
     _renderTravaBarrisSemanal();
     const btn = [...document.querySelectorAll('#barris-semanal-trava-overlay button')]
       .find(b => /Confirmar contagem/.test(b.textContent));
