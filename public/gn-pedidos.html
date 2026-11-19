@@ -598,6 +598,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 <script src="gn-armazenamento.js"></script>
 <script src="gn-lojas-config.js"></script>
 <script src="gn-escala-acesso.js"></script>
+<script src="gn-desperdicio-acesso.js"></script>
 <script src="gn-validade-acesso.js"></script>
 <script src="gn-deploy-update.js"></script>
 <script src="gn-comissoes-calendario.js"></script>
@@ -9022,6 +9023,85 @@ function _fmtDataHoraBR(iso) {
 function _ehAvariaComum(a) { return !a.tipo; }
 function _itensDaAba(itens, modo) { return (itens || []).filter(a => modo === 'avarias' ? _ehAvariaComum(a) : !_ehAvariaComum(a)); }
 
+// Desperdício do rodízio e do buffet de feijoada (19/11/2026) — gn_desperdicio_buffet,
+// declarado pela gerência (gn-desperdicio-acesso.js). Só controle: aqui é visão por dia e
+// loja, separada em Rodízio e Buffet, com quem assinou e os dias sem informação.
+const DESP_DIAS_VISAO = 7;
+async function _fetchDesperdicioBuffet() {
+  const G = window.gnDesperdicio;
+  if (!G) return null;
+  const hoje = G.diaOperacional(new Date());
+  const d0 = new Date(hoje + 'T12:00:00'); d0.setDate(d0.getDate() - (DESP_DIAS_VISAO - 1));
+  const desde = d0.toISOString().slice(0, 10) < G.INICIO ? G.INICIO : d0.toISOString().slice(0, 10);
+  let rows = [];
+  try { rows = hoje < G.INICIO ? [] : await G.buscarDeclarados(null, desde, hoje); } catch (e) { return { erro: true }; }
+  return { hoje, desde, rows };
+}
+// Monta, por tipo, a lista de dias (mais recente primeiro) com o status de cada loja.
+function _despBuffetGrade(dados, tipo) {
+  const G = window.gnDesperdicio;
+  if (!G || !dados || dados.erro) return [];
+  const porChave = {};
+  (dados.rows || []).forEach(r => { porChave[r.loja + '|' + r.data + '|' + r.tipo] = r; });
+  const lojas = (window.GN_LOJAS || []).filter(l => l.userKey !== 'MAGLIA');
+  const dias = [];
+  for (let d = new Date(dados.hoje + 'T12:00:00'); d.toISOString().slice(0, 10) >= dados.desde; d.setDate(d.getDate() - 1)) {
+    const iso = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    const linhas = lojas.filter(l => G.esperados(l.userKey, iso).includes(tipo)).map(l => {
+      const r = porChave[l.userKey + '|' + iso + '|' + tipo];
+      return { loja: l.display, r, st: r ? (r.teve ? 'teve' : 'nao') : (iso < dados.hoje ? 'faltou' : 'aguardando') };
+    });
+    if (linhas.length) dias.push({ data: iso, linhas });
+  }
+  return dias;
+}
+function _despBuffetSecaoHtml(dados, tipo) {
+  const G = window.gnDesperdicio;
+  const titulo = tipo === 'rodizio' ? '🍖 Rodízio — desperdício' : '🍲 Buffet de feijoada — desperdício';
+  if (!G) return '';
+  if (dados && dados.erro) return `<div class="sec-titulo" style="font-size:13px;margin:20px 0 8px">${titulo}</div><div class="empty-texto">Não consegui carregar agora.</div>`;
+  const dias = _despBuffetGrade(dados, tipo);
+  const faltas = dias.reduce((n, d) => n + d.linhas.filter(x => x.st === 'faltou').length, 0);
+  const DOW = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
+  const fmtQ = q => String(q).replace('.', ',');
+  const corpo = !dias.length
+    ? `<div class="empty" style="padding:12px 0"><div class="empty-texto">${dados && dados.hoje < G.INICIO ? 'Começa a ser cobrado em ' + G.INICIO.split('-').reverse().slice(0, 2).join('/') + '.' : 'Nenhum dia nesse período.'}</div></div>`
+    : dias.map(d => `<div class="desp-dia" data-tipo="${tipo}" data-data="${d.data}" style="margin-bottom:10px">
+        <div style="font-size:11px;font-weight:800;color:var(--muted);margin-bottom:4px">${DOW[new Date(d.data + 'T12:00:00').getDay()]} ${d.data.split('-').reverse().slice(0, 2).join('/')}</div>
+        ${d.linhas.map(x => {
+          const cor = x.st === 'teve' ? '#d97706' : x.st === 'nao' ? '#16a34a' : x.st === 'faltou' ? '#dc2626' : 'var(--muted)';
+          const txt = x.st === 'teve' ? '⚠️ ' + x.r.itens.map(i => escapeHtml(i.insumo) + ' ' + fmtQ(i.qtd) + ' ' + escapeHtml(i.unidade || '')).join(' · ')
+                    : x.st === 'nao' ? '✅ Não teve' : x.st === 'faltou' ? '❌ Não informado' : '⏳ Aguardando (prazo 02h)';
+          return `<div class="prov-item desp-linha" style="padding:7px 10px;margin-bottom:4px;border-left:3px solid ${cor}">
+            <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px"><b>${escapeHtml(x.loja)}</b><span style="color:${cor};font-weight:700;text-align:right">${txt}</span></div>
+            ${x.r ? `<div style="font-size:10px;color:var(--muted)">✍️ ${escapeHtml(x.r.assinado_por)}${x.r.obs ? ' · ' + escapeHtml(x.r.obs) : ''}</div>` : ''}
+          </div>`;
+        }).join('')}
+      </div>`).join('');
+  return `<div class="sec-titulo desp-secao" data-tipo="${tipo}" style="font-size:13px;margin:22px 0 8px">${titulo}${faltas ? ` <span class="badge badge-r">${faltas} sem informação</span>` : ''}</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Últimos ${DESP_DIAS_VISAO} dias. Informado pela gerência${tipo === 'rodizio' ? ' a partir das 22h' : ' a partir das 18h (sex/sáb)'}, prazo até 02h. Só controle — não passa por valor.</div>
+    ${corpo}`;
+}
+function _despBuffetRelatorio(dados) {
+  const G = window.gnDesperdicio;
+  if (!G || !dados || dados.erro) return '';
+  let msg = '';
+  ['rodizio', 'feijoada'].forEach(tipo => {
+    const dias = _despBuffetGrade(dados, tipo);
+    msg += `\n${tipo === 'rodizio' ? '🍖 RODÍZIO' : '🍲 BUFFET DE FEIJOADA'} — DESPERDÍCIO\n`;
+    if (!dias.length) { msg += '  Nada no período.\n'; return; }
+    dias.forEach(d => {
+      msg += `  ${d.data.split('-').reverse().slice(0, 2).join('/')}\n`;
+      d.linhas.forEach(x => {
+        const t = x.st === 'teve' ? x.r.itens.map(i => i.insumo + ' ' + String(i.qtd).replace('.', ',') + ' ' + (i.unidade || '')).join(', ')
+                : x.st === 'nao' ? 'não teve' : x.st === 'faltou' ? 'NÃO INFORMADO' : 'aguardando';
+        msg += `    • ${x.loja}: ${t}${x.r ? ' (' + x.r.assinado_por + ')' : ''}\n`;
+      });
+    });
+  });
+  return msg;
+}
+
 async function renderTerceiros(modo) {
   modo = modo === 'avarias' ? 'avarias' : 'terceiros';
   S._terceirosModo = modo;
@@ -9030,6 +9110,7 @@ async function renderTerceiros(modo) {
   let todos = [], emprestimos = [];
   try {
     [todos, emprestimos] = await Promise.all([_fetchSaidasTerceiros(), modo === 'terceiros' ? _fetchEmprestimosAbertos() : Promise.resolve([])]);
+    if (modo === 'avarias') S._despBuffet = await _fetchDesperdicioBuffet();
   } catch (e) {
     $('content').innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-texto">Erro ao carregar ${modo === 'avarias' ? 'Avarias' : 'Saídas para Terceiros'}</div></div>`;
     return;
@@ -9142,6 +9223,7 @@ async function renderTerceiros(modo) {
         <div class="sec-titulo" style="font-size:13px;margin-bottom:8px">Finalizados <span class="badge" style="background:rgba(34,197,94,.15);color:#1A1D23;font-size:10px">${finalizados.length}</span></div>
         ${finalizados.slice(0,20).map(a=>cardHistorico(a,'#4ade80','✓ '+(a.rh_conf_por||'—'), _fmtDataHoraBR(a.rh_conf_ts))).join('')}
       </div>` : ''}
+    ${modo === 'avarias' ? _despBuffetSecaoHtml(S._despBuffet, 'rodizio') + _despBuffetSecaoHtml(S._despBuffet, 'feijoada') : ''}
   `;
 }
 
@@ -9193,6 +9275,7 @@ function _terceirosRelatorioTexto() {
     });
   }
 
+  if (ehAv) msg += _despBuffetRelatorio(S._despBuffet);
   return { msg, titulo: ehAv ? 'Avarias / Desperdício' : 'Terceiros — Empréstimos e Saídas' };
 }
 function gerarWppTerceiros() {
