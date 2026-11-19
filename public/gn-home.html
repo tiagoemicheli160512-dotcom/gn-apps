@@ -16242,9 +16242,124 @@ async function _loadVendidosGerencia() {
     const l = parseFloat(((b.produto || '').match(/(\d+)\s*l/i) || [])[1]) || VEND_BARRIL_L;
     porLoja[k].barris[tipo] += 1; porLoja[k].barrisL[tipo] += l;
   });
-  _vendGerData = { porLoja, iniISO, fimISO, diasISO, cadastro: cad || [], cadFalhou: !cad, barrisFalhou: !barris };
+  const est = await _vendEstoqueSemana(ini, cad || [], rows, diasISO);
+  Object.keys(est.porLoja || {}).forEach(k => { if (porLoja[k]) porLoja[k].estoque = est.porLoja[k]; });
+  _vendGerData = { porLoja, iniISO, fimISO, diasISO, cadastro: cad || [], cadFalhou: !cad, barrisFalhou: !barris, estoqueFalhou: !!est.falhou };
   _vendGerLoaded = true;
   renderDashboard();
+}
+
+// ── Vendido × estoque (Coca) ──────────────────────────────────────────────────
+// A saída real de cada item na semana = contagem de segunda (app Lojas › Contagem, em
+// unidades) + o que foi RECEBIDO entre essa contagem e a da segunda seguinte (gn_recebimentos:
+// quantidade confirmada no recebimento, em caixas × unidades por caixa, pelo horário em que
+// foi confirmada) − a contagem da segunda seguinte. Contra o vendido lançado pela gerência.
+//
+// Por horário e não por dia: a entrega que chega na segunda depois da contagem é da semana
+// nova; a que chega antes já está dentro da contagem. Com o horário das duas pontas não tem
+// como contar a mesma caixa duas vezes.
+//
+// O item do vendido aponta pro item do estoque por gn_vendidos_itens.item_estoque (item_id
+// do catálogo RJ); as lojas de SP usam o catálogo SP, ligado por origem_item_id.
+async function _vendEstoqueSemana(ini, cad, vendRows, diasISO) {
+  const bases = [...new Set(cad.filter(c => c.item_estoque).map(c => +c.item_estoque))];
+  if (!bases.length) return { porLoja: {} };
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const iso = d => _carnesISO(d);
+  const dia = n => { const d = new Date(ini); d.setDate(d.getDate() + n); return d; };
+  const lista = bases.join(',');
+  const catRows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_catalogo?or=(item_id.in.(${lista}),origem_item_id.in.(${lista}))&select=id,item_id,origem_item_id,und_por_caixa`, H, 'vendidos:estoqueCat', null);
+  if (!catRows) return { falhou: true, porLoja: {} };
+  const cat = {}; catRows.forEach(c => { cat[c.id] = { base: +(c.origem_item_id || c.item_id), upc: parseFloat(c.und_por_caixa) || 1 }; });
+  const ids = Object.keys(cat);
+  if (!ids.length) return { porLoja: {} };
+  const [cont, rec, pend] = await Promise.all([
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_contagens_pedido?catalogo_id=in.(${ids.join(',')})&data_contagem=gte.${iso(ini)}&data_contagem=lte.${iso(dia(8))}&select=loja_slug,catalogo_id,atual,data_contagem,criado_em`, H, 'vendidos:estoqueCont', null),
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_recebimentos?select=qtd_recebida,validado_em,gn_provisoes!inner(loja_slug,catalogo_id)&gn_provisoes.catalogo_id=in.(${ids.join(',')})&validado_em=gte.${iso(dia(-1))}T00:00:00&validado_em=lt.${iso(dia(10))}T00:00:00`, H, 'vendidos:estoqueRec', null),
+    // Pedido da semana que ainda está "aguardando" no recebimento do app Lojas: é a causa
+    // mais comum de saída negativa (a Coca chegou, ninguém confirmou) — medido em 19/11:
+    // Campo Grande sem confirmar desde meados de outubro; Itaquera e Guarulhos nunca.
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_provisoes?status=eq.AGUARDANDO&catalogo_id=in.(${ids.join(',')})&data_entrega=gte.${iso(dia(0))}&data_entrega=lte.${iso(dia(6))}&select=loja_slug,catalogo_id,qtd_prevista`, H, 'vendidos:estoquePend', []),
+  ]);
+  if (!cont || !rec) return { falhou: true, porLoja: {} };
+  const lojaDe = slug => { const i = window.gnLojaPorChave ? window.gnLojaPorChave(slug) : null; return i ? _normLoja(i.userKey) : null; };
+  // Contagem da ponta: a da segunda (ou terça, quando a segunda foi feriado); no mesmo dia,
+  // a última gravada.
+  const ponta = (rows, de, ate) => {
+    const m = {};
+    rows.filter(r => r.data_contagem >= de && r.data_contagem <= ate).forEach(r => {
+      const k = lojaDe(r.loja_slug), c = cat[r.catalogo_id]; if (!k || !c) return;
+      const key = k + '|' + c.base, a = m[key];
+      if (!a || r.data_contagem < a.data_contagem || (r.data_contagem === a.data_contagem && r.criado_em > a.criado_em)) m[key] = r;
+    });
+    return m;
+  };
+  const c0 = ponta(cont, iso(dia(0)), iso(dia(1))), c1 = ponta(cont, iso(dia(7)), iso(dia(8)));
+  // Vendido por loja × item do estoque, só dos dias da semana.
+  const baseDoVend = {}; cad.forEach(c => { if (c.item_estoque) baseDoVend[c.id] = +c.item_estoque; });
+  const vend = {}, diasVend = {};
+  (vendRows || []).forEach(r => {
+    const k = _normLoja(r.loja); if (!diasISO.includes(String(r.data).slice(0, 10))) return;
+    diasVend[k] = (diasVend[k] || 0) + 1;
+    Object.entries(r.itens || {}).forEach(([id, it]) => { const b = baseDoVend[id]; if (!b) return; vend[k + '|' + b] = (vend[k + '|' + b] || 0) + (+((it || {}).q) || 0); });
+  });
+  const porLoja = {};
+  const chaves = new Set([...Object.keys(c0), ...Object.keys(c1)]);
+  chaves.forEach(key => {
+    const [k, b] = key.split('|'), a = c0[key], z = c1[key];
+    const ent = a && z ? rec.filter(r => { const p = r.gn_provisoes || {}, c = cat[p.catalogo_id];
+      return c && c.base === +b && lojaDe(p.loja_slug) === k && r.validado_em > a.criado_em && r.validado_em <= z.criado_em; })
+      .reduce((s2, r) => s2 + (parseFloat(r.qtd_recebida) || 0) * cat[r.gn_provisoes.catalogo_id].upc, 0) : null;
+    const ini0 = a ? parseFloat(a.atual) : null, fim = z ? parseFloat(z.atual) : null;
+    const saida = a && z ? ini0 + ent - fim : null;
+    const pendCx = (pend || []).filter(r => { const c = cat[r.catalogo_id]; return c && c.base === +b && lojaDe(r.loja_slug) === k; })
+      .reduce((s2, r) => s2 + (parseFloat(r.qtd_prevista) || 0), 0);
+    (porLoja[k] = porLoja[k] || {})[b] = { ini: ini0, ent, fim, saida, vendido: vend[key] == null ? null : vend[key], diasVend: diasVend[k] || 0,
+      repetida: a && z && ini0 === fim && ini0 > 0, pendCx };
+  });
+  return { porLoja };
+}
+// Nome curto do item do estoque, pelo cadastro do vendido.
+function _vendNomeEstoque(base) {
+  const c = ((_vendGerData && _vendGerData.cadastro) || []).find(x => +x.item_estoque === +base);
+  return c ? c.nome.replace(/^Coca-Cola\s*/i, '') : 'item ' + base;
+}
+function _vendEstoqueHtml(d, fechada) {
+  const e = d.estoque; if (!e || !Object.keys(e).length) return '';
+  const bases = Object.keys(e).sort((a, b) => a - b);
+  if (!fechada) return `<div class="vend-estoque" style="margin-top:6px;border-top:1px solid rgba(0,0,0,.08);padding-top:5px;font-size:10px;color:var(--t4)">🥤 Coca × estoque: fecha na segunda, com a contagem — veja a semana passada (‹).</div>`;
+  const linhas = bases.map(b => {
+    const x = e[b];
+    if (x.saida === null) return `<tr><td style="padding:2px 4px;color:var(--t2);font-weight:700;white-space:nowrap">${_vendNomeEstoque(b)}</td><td colspan="6" style="padding:2px 4px;color:var(--t4)">${x.ini === null ? 'sem a contagem de segunda' : 'sem a contagem da segunda seguinte'}</td></tr>`;
+    const completo = x.diasVend >= 7 && x.vendido !== null;
+    const dif = completo ? x.saida - x.vendido : null;
+    const leve = dif !== null && Math.abs(dif) <= Math.max(6, x.vendido * 0.05);
+    const cor = dif === null ? 'var(--t4)' : leve ? 'var(--txt-green)' : dif > 0 ? 'var(--txt-red)' : 'var(--txt-amber)';
+    return `<tr>
+      <td style="padding:2px 4px;color:var(--t2);font-weight:700;white-space:nowrap">${_vendNomeEstoque(b)}</td>
+      <td style="padding:2px 3px;text-align:right">${_vendNum(x.ini)}</td>
+      <td style="padding:2px 3px;text-align:right;color:#047857">+${_vendNum(x.ent)}</td>
+      <td style="padding:2px 3px;text-align:right">−${_vendNum(x.fim)}</td>
+      <td style="padding:2px 3px;text-align:right;font-weight:800;color:${x.saida < 0 ? 'var(--txt-amber)' : 'var(--t1)'}">${_vendNum(x.saida)}</td>
+      <td style="padding:2px 3px;text-align:right">${x.vendido === null ? '—' : _vendNum(x.vendido) + (completo ? '' : `<span style="color:var(--t4)"> (${x.diasVend}/7)</span>`)}</td>
+      <td class="vend-est-dif" style="padding:2px 3px;text-align:right;font-weight:800;color:${cor}">${dif === null ? '—' : (dif > 0 ? '+' : '') + _vendNum(dif)}</td>
+    </tr>`;
+  }).join('');
+  const avisos = [];
+  bases.forEach(b => { const x = e[b];
+    if (x.saida !== null && x.saida < 0) avisos.push(`${_vendNomeEstoque(b)}: o estoque subiu sem recebimento confirmado no app — ` + (x.pendCx > 0
+      ? `${_vendNum(x.pendCx)} cx pedidas pra esta semana estão "aguardando" no recebimento do app Lojas: a Coca chegou e ninguém confirmou.`
+      : `entrou Coca sem passar pelo recebimento, ou a contagem está errada.`));
+    else if (x.pendCx > 0) avisos.push(`${_vendNomeEstoque(b)}: ${_vendNum(x.pendCx)} cx pedidas pra esta semana ainda "aguardando" no recebimento — se chegaram, a saída está menor do que foi.`);
+    if (x.repetida) avisos.push(`${_vendNomeEstoque(b)}: contagem igual à da segunda anterior (${_vendNum(x.ini)}) — conferir se foi contado de novo.`); });
+  return `<div class="vend-estoque" style="margin-top:6px;border-top:1px solid rgba(0,0,0,.08);padding-top:5px">
+    <div style="font-size:9.5px;color:var(--t3);font-weight:700;margin-bottom:3px">🥤 COCA × ESTOQUE (unidades) · <span style="font-weight:400;color:var(--t4)">contagem + recebido − contagem seguinte = saída; contra o vendido</span></div>
+    <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:9.5px;width:100%;min-width:330px;font-variant-numeric:tabular-nums">
+      <tr style="color:var(--t3)"><th style="text-align:left;padding:2px 4px">Item</th><th style="padding:2px 3px;text-align:right">Seg</th><th style="padding:2px 3px;text-align:right">Receb.</th><th style="padding:2px 3px;text-align:right">Seg seg.</th><th style="padding:2px 3px;text-align:right">Saída</th><th style="padding:2px 3px;text-align:right">Vendido</th><th style="padding:2px 3px;text-align:right">Dif.</th></tr>
+      ${linhas}
+    </table></div>
+    ${avisos.map(a => `<div class="vend-est-aviso" style="font-size:9.5px;color:var(--txt-amber);font-weight:700;margin-top:3px">⚠ ${a}</div>`).join('')}
+  </div>`;
 }
 function _vendNavSemana(dir) {
   const novo = _vendGerOff + dir;
@@ -16334,13 +16449,16 @@ function _buildVendidosPanel() {
         ${linhaT('🥤 Coca (un)', 'coca_un', 0)}${linhaT('🍺 Claro (L)', 'chopp_l_claro', 1)}${linhaT('🍷 Vinho (L)', 'chopp_l_vinho', 1)}
       </table></div>
       ${choppHtml ? `<div style="margin-top:6px;border-top:1px solid rgba(0,0,0,.08);padding-top:5px">${choppHtml}</div>` : ''}
+      ${_vendEstoqueHtml(d, _vendGerOff <= 0)}
     </div>`;
   }).join('');
 
   return reportBtns + navHtml + `<div style="font-size:11px;color:var(--t4);margin-bottom:10px;line-height:1.5">
       Vendidos lançados pela gerência (aba 🧾 Vendidos do Check-list) até ${G.PRAZO_H}h do dia seguinte. <span style="color:var(--txt-red);font-weight:700">✕</span> é dia que já devia estar lançado e não está.<br>
       As carnes (pratos × gramatura) estão na aba 🥩 Carnes, ao lado da saída real.<br>
+      <b>🥤 Coca × estoque</b> (semana fechada): contagem de segunda + recebido no app − contagem da segunda seguinte = saída; <b>Dif.</b> positiva é Coca que saiu sem venda lançada.<br>
       <b>Chopp × barris</b> é referência: o barril é finalizado quando acaba, não no dia em que o chopp saiu — olhe a tendência de algumas semanas, não uma semana sozinha.</div>
+    ${_vendGerData.estoqueFalhou ? `<div style="font-size:11px;color:var(--txt-amber);margin-bottom:8px">⚠ Não deu pra carregar contagem/recebimentos — a Coca × estoque fica de fora.</div>` : ''}
     ${barrisFalhou ? `<div style="font-size:11px;color:var(--txt-amber);margin-bottom:8px">⚠ Não deu pra carregar os barris — a comparação do chopp fica de fora.</div>` : ''}
     ${avisoHtml}${redeHtml}${linhas}${_vendCadastroHtml()}`;
 }
@@ -16524,6 +16642,10 @@ function _vendRelatorioTexto(wpp) {
     msg += `\n${wpp ? '🏪 ' : ''}${b(LOJA_DISPLAY[k] || k)} — ${devidos.length ? lanc + '/' + devidos.length + ' dias lançados' : 'nada devido ainda'}\n`;
     msg += `  Coca: ${_vendNum(soma('coca_un'))} un · Chopp claro ${_vendNum(soma('chopp_l_claro'), 1)} L · vinho ${_vendNum(soma('chopp_l_vinho'), 1)} L\n`;
     if (d.barris.CLARO || d.barris.VINHO) msg += `  Barris finalizados: ${d.barris.CLARO} claro · ${d.barris.VINHO} vinho\n`;
+    if (_vendGerOff <= 0 && d.estoque) Object.keys(d.estoque).sort((a, c) => a - c).forEach(bb => { const x = d.estoque[bb]; if (x.saida === null) return;
+      const comp = x.diasVend >= 7 && x.vendido !== null;
+      msg += `  ${_vendNomeEstoque(bb)}: saída ${_vendNum(x.saida)} (${_vendNum(x.ini)} + ${_vendNum(x.ent)} − ${_vendNum(x.fim)})` + (x.vendido === null ? '' : ` · vendido ${_vendNum(x.vendido)}` + (comp ? ` · dif. ${x.saida - x.vendido > 0 ? '+' : ''}${_vendNum(x.saida - x.vendido)}` : ` (${x.diasVend}/7 dias)`)) + `\n`;
+      if (x.saida < 0) msg += `    ⚠ subiu sem recebimento confirmado\n`; });
     if (devidos.length && lanc < devidos.length) faltou.push(LOJA_DISPLAY[k] || k);
   });
   if (faltou.length) msg += `\n${b('Com dia sem lançar')}: ${faltou.join(', ')}\n`;

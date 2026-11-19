@@ -134,6 +134,58 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   check('fichas: Picanha de sol P2 = 400 g picanha', sug.picanha && sug.picanha.gramas.picanha === 400, sug.picanha);
   check('fichas: preparo da cozinha (CAPITAO BAIAO PROD) e paçoca (farofa de cuscuz) ficam fora; xique-xique em UN vai pra conferir sem gramatura', !sug.capitao && !sug.farofa && !sug.xique, sug);
 
+  // ── 4. Coca × estoque (semana passada 16–22/11, fechada pela contagem de 23/11) ──
+  const e = await page.evaluate(async () => {
+    const CAT = { lata: 'cat-lata', ks: 'cat-ks', lataSP: 'cat-lata-sp' };
+    const dias = ['16', '17', '18', '19', '20', '21', '22'];
+    const vendLata = (loja, qtds) => qtds.map((q, i) => ({ loja, data: '2026-11-' + dias[i], totais: { coca_un: q }, itens: { coca_lata: { q, grupo: 'coca' }, coca_ks: { q: 0, grupo: 'coca' } }, lancado_por: 'X' }));
+    window.gnFetchJson = async (url, h, nome, fb) => {
+      if (nome === 'vendidos:diario') return [...vendLata('BANGU', [20, 20, 20, 20, 20, 15, 15]), ...vendLata('ITAQUERA', [5, 5, 5, 5, 5, 5, 5]), ...vendLata('CAXIAS', [9, 9, 9]), ...vendLata('CAMPO GRANDE', [1, 1, 1, 1, 1, 1, 1])];
+      if (nome === 'vendidos:barris') return [];
+      if (nome === 'vendidos:cadastro') return [{ id: 'coca_lata', grupo: 'coca', nome: 'Coca-Cola lata 350 ml', ativo: true, item_estoque: 37 }, { id: 'coca_ks', grupo: 'coca', nome: 'Coca-Cola KS 290 ml', ativo: true, item_estoque: 36 }];
+      if (nome === 'vendidos:estoqueCat') return [{ id: CAT.lata, item_id: 37, origem_item_id: null, und_por_caixa: 12 }, { id: CAT.ks, item_id: 36, origem_item_id: null, und_por_caixa: 24 }, { id: CAT.lataSP, item_id: 1037, origem_item_id: 37, und_por_caixa: 12 }];
+      if (nome === 'vendidos:estoqueCont') return [
+        { loja_slug: 'bangu', catalogo_id: CAT.lata, atual: 126, data_contagem: '2026-11-16', criado_em: '2026-11-16T13:00:00Z' },
+        { loja_slug: 'bangu', catalogo_id: CAT.lata, atual: 53, data_contagem: '2026-11-23', criado_em: '2026-11-23T13:00:00Z' },
+        { loja_slug: 'bangu', catalogo_id: CAT.ks, atual: 156, data_contagem: '2026-11-16', criado_em: '2026-11-16T13:00:00Z' },
+        { loja_slug: 'bangu', catalogo_id: CAT.ks, atual: 156, data_contagem: '2026-11-23', criado_em: '2026-11-23T13:00:00Z' },
+        { loja_slug: 'campo_grande', catalogo_id: CAT.lata, atual: 28, data_contagem: '2026-11-16', criado_em: '2026-11-16T13:00:00Z' },
+        { loja_slug: 'campo_grande', catalogo_id: CAT.lata, atual: 50, data_contagem: '2026-11-23', criado_em: '2026-11-23T13:00:00Z' },
+        { loja_slug: 'caxias', catalogo_id: CAT.lata, atual: 60, data_contagem: '2026-11-17', criado_em: '2026-11-17T13:00:00Z' },   // terça (segunda foi feriado)
+        { loja_slug: 'caxias', catalogo_id: CAT.lata, atual: 30, data_contagem: '2026-11-23', criado_em: '2026-11-23T13:00:00Z' },
+        { loja_slug: 'itaquera', catalogo_id: CAT.lataSP, atual: 40, data_contagem: '2026-11-16', criado_em: '2026-11-16T13:00:00Z' },
+        { loja_slug: 'itaquera', catalogo_id: CAT.lataSP, atual: 29, data_contagem: '2026-11-23', criado_em: '2026-11-23T13:00:00Z' },
+      ];
+      if (nome === 'vendidos:estoquePend') return [{ loja_slug: 'campo_grande', catalogo_id: CAT.lata, qtd_prevista: 2 }];
+      if (nome === 'vendidos:estoqueRec') return [
+        { qtd_recebida: 5, validado_em: '2026-11-18T12:32:59Z', gn_provisoes: { loja_slug: 'bangu', catalogo_id: CAT.lata } },
+        { qtd_recebida: 2, validado_em: '2026-11-16T10:00:00Z', gn_provisoes: { loja_slug: 'bangu', catalogo_id: CAT.lata } },   // antes da contagem: já está nela
+        { qtd_recebida: 1, validado_em: '2026-11-23T15:00:00Z', gn_provisoes: { loja_slug: 'bangu', catalogo_id: CAT.lata } },   // depois da contagem seguinte: é da semana nova
+        { qtd_recebida: 5, validado_em: '2026-11-18T12:47:07Z', gn_provisoes: { loja_slug: 'bangu', catalogo_id: CAT.ks } },
+        { qtd_recebida: 3, validado_em: '2026-11-19T12:00:00Z', gn_provisoes: { loja_slug: 'itaquera', catalogo_id: CAT.lataSP } },
+      ];
+      return fb === undefined ? [] : fb;
+    };
+    _vendGerOff = 0; await _loadVendidosGerencia();
+    const el = document.getElementById('dash-section'); el.innerHTML = _buildVendidosPanel();
+    const box = k => { const x = el.querySelector(`.vend-loja[data-loja="${k}"] .vend-estoque`); return x ? x.innerText.replace(/\s+/g, ' ') : ''; };
+    const est = k => (_vendGerData.porLoja[k] || {}).estoque || {};
+    const out = { b: est('BANGU'), cg: est('CAMPO GRANDE'), cx: est('CAXIAS'), it: est('ITAQUERA'), bTxt: box('BANGU'), cgTxt: box('CAMPO GRANDE'), cxTxt: box('CAXIAS'), rel: _vendRelatorioTexto(false).msg,
+      largos: [...el.querySelectorAll('*')].filter(x => { const r = x.getBoundingClientRect(); return r.width && r.right > window.innerWidth + 1 && !x.closest('[style*="overflow-x:auto"]'); }).length };
+    _vendGerOff = 1; await _loadVendidosGerencia(); el.innerHTML = _buildVendidosPanel();
+    out.vigente = box('BANGU');
+    return out;
+  });
+  check('Bangu lata: 126 + 5 cx×12 (60) − 53 = 133 de saída; recebimento antes da contagem e depois da seguinte ficam fora', e.b[37] && e.b[37].ent === 60 && e.b[37].saida === 133, e.b);
+  check('…vendido 130 nos 7 dias → diferença +3, dentro da margem (verde)', e.b[37] && e.b[37].vendido === 130 && /lata 350 ml 126 \+60 −53 133 130 \+3/.test(e.bTxt), e.bTxt);
+  check('Bangu KS: contagem igual nas duas segundas (156) → aviso "conferir se foi contado de novo"', e.b[36] && e.b[36].repetida && /KS 290 ml: contagem igual à da segunda anterior \(156\)/.test(e.bTxt), e.bTxt);
+  check('Campo Grande: estoque subiu 28→50 sem recebimento → saída −22 e o aviso de Coca sem recebimento', e.cg[37] && e.cg[37].saida === -22 && /subiu sem recebimento confirmado/.test(e.cgTxt) && /2 cx pedidas pra esta semana estão "aguardando" no recebimento do app Lojas/.test(e.cgTxt), e.cgTxt);
+  check('Caxias: contagem de terça vale como a da semana (feriado); vendido de 3/7 dias não dá diferença', e.cx[37] && e.cx[37].saida === 30 && /\(3\/7\)/.test(e.cxTxt) && /30 27 \(3\/7\) —/.test(e.cxTxt), e.cxTxt);
+  check('Itaquera (SP, catálogo próprio ligado pelo item de origem): 40 + 36 − 29 = 47; vendido 35 → +12', e.it[37] && e.it[37].saida === 47 && e.it[37].vendido === 35, e.it);
+  check('relatório leva a Coca × estoque com a conta e a diferença', /lata 350 ml: saída 133 \(126 \+ 60 − 53\) · vendido 130 · dif\. \+3/.test(e.rel) && /subiu sem recebimento confirmado/.test(e.rel), e.rel);
+  check('semana em andamento: "fecha na segunda, com a contagem"', /fecha na segunda/.test(e.vigente), e.vigente);
+  check('a tabela da Coca não estoura 360 px', e.largos === 0, e.largos);
+
   check('nenhum erro de JavaScript', erros.length === 0, erros);
   console.log(`\n${ok} OK, ${falhou} falhou`);
   await browser.close();
