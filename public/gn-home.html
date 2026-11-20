@@ -16714,6 +16714,181 @@ function gerarPDFVendidos() {
 }
 async function enviarPDFVendidosWpp() { await _pdfWppComo(gerarPDFVendidos); }
 
+// ── ⚠️ AVARIAS — por loja, no período do Painel ───────────────────────────────────────
+// Pedido do dono (20/11/2026): "trazer as informações de avarias que ficam no app Pedido
+// para o Painel de Gestão, por loja, com relatório individual e geral, e aba que expande
+// pra ver os itens."
+// Mesma fonte da aba ⚠️ Avarias do app Pedidos e do app Lojas (gn_lojas.all_data.avariasAll
+// da loja — já vem no _dashLojasAll, sem requisição a mais) + o desperdício do rodízio e do
+// buffet de feijoada (gn_desperdicio_buffet). Diferenças de propósito em relação ao Pedidos:
+//   · aqui é o PERÍODO do Painel (semana, mês…), com todos os status — lá é só o que ainda
+//     não foi finalizado, porque lá é fila de trabalho do Compras;
+//   · só avaria comum (sem `tipo`): saída pra terceiro e pagamento de empréstimo não são
+//     perda (mesmo filtro do raio-x da loja), e cancelado não aconteceu.
+// O valor só existe depois que o Compras confirma (status pendente = R$ 0); por isso o
+// total diz quantas ainda estão sem valor, em vez de parecer menor do que é.
+// Maglia fora (CLAUDE.md).
+let _avPainelDesp = null, _avPainelDespChave = '', _avRelatorioLojasFiltro = [];
+const AV_STATUS = {
+  pendente:       { txt: 'aguardando valor (Compras)', cor: 'var(--txt-amber)' },
+  loja_confirmou: { txt: 'valor confirmado · aguardando Financeiro', cor: '#3b82f6' },
+  finalizado:     { txt: 'finalizada', cor: 'var(--txt-green)' },
+};
+function _avLojasDaRegra() { return LOJAS_LISTA.filter(k => k !== 'MAGLIA'); }
+function _avComKey(k) { const l = (window.GN_LOJAS || []).find(x => x.userKey === k); return l ? l.comKey : k; }
+function _avDiaLocal(ts) { const d = new Date(ts); return isNaN(d) ? '' : `${d.getFullYear()}-${_p2(d.getMonth() + 1)}-${_p2(d.getDate())}`; }
+
+// Desperdício do período: busca quando a aba abre ou o período muda.
+async function _avCarregarDesp(from, to) {
+  const chave = from + '|' + to;
+  if (_avPainelDespChave === chave) return;
+  _avPainelDespChave = chave; _avPainelDesp = null;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_desperdicio_buffet?data=gte.${from}&data=lte.${to}&select=loja,data,tipo,teve,itens,assinado_por&order=data.asc`, H, 'avariasPainel:desp', null);
+  if (_avPainelDespChave !== chave) return;
+  _avPainelDesp = rows ? rows : { erro: true };
+  if (_dashTab === 'avarias') renderDashboard();
+}
+
+function _avMacroDados() {
+  const R = _dashRangeOf(_dashOff()), de = R.from, ate = R.to;
+  const desp = Array.isArray(_avPainelDesp) ? _avPainelDesp : [];
+  const lojas = _avLojasDaRegra().map(k => {
+    const ck = _avComKey(k);
+    const row = (_dashLojasAll || []).find(x => x.loja === ck || x.loja === k);
+    const todos = Object.values(((row && row.all_data) || {}).avariasAll || {}).flatMap(v => Array.isArray(v) ? v : []);
+    const vistos = new Set();
+    const itens = todos.filter(a => {
+      if (!a || a.tipo || a.status === 'cancelado' || !a.ts) return false;
+      if (a.id && vistos.has(a.id)) return false; if (a.id) vistos.add(a.id);
+      const dia = _avDiaLocal(a.ts); return dia >= de && dia <= ate;
+    }).map(a => ({ id: a.id, dia: _avDiaLocal(a.ts), insumo: a.insumo || '—', qtd: a.qtdOriginal != null ? a.qtdOriginal : a.qtd, unidade: a.unidade || '',
+      valor: parseFloat(a.valorTotal) || 0, status: a.status || 'pendente', por: a.registrado_por || '', motivo: a.motivo || '' }))
+      .sort((a, b) => b.dia.localeCompare(a.dia) || b.valor - a.valor);
+    const despL = desp.filter(r => _normLoja(r.loja) === k);
+    return { k, nome: LOJA_DISPLAY[k] || k, itens, valor: itens.reduce((s, a) => s + a.valor, 0),
+      semValor: itens.filter(a => a.status === 'pendente').length,
+      desp: despL.filter(r => r.teve), despNaoTeve: despL.filter(r => !r.teve).length };
+  });
+  const com = lojas.filter(l => l.itens.length || l.desp.length).sort((a, b) => b.valor - a.valor || b.itens.length - a.itens.length);
+  return { de, ate, label: R.label, lojas: com, semNada: lojas.filter(l => !l.itens.length && !l.desp.length),
+    valor: com.reduce((s, l) => s + l.valor, 0), qtd: com.reduce((s, l) => s + l.itens.length, 0),
+    semValor: com.reduce((s, l) => s + l.semValor, 0), nDesp: com.reduce((s, l) => s + l.desp.length, 0), despErro: !!(_avPainelDesp && _avPainelDesp.erro) };
+}
+
+function _avQtdTxt(a) { const q = Number(a.qtd); return (isFinite(q) ? q.toLocaleString('pt-BR', { maximumFractionDigits: 3 }) : (a.qtd || '')) + (a.unidade ? ' ' + a.unidade : ''); }
+function _avDespItensTxt(r) { return (r.itens || []).map(x => `${x.insumo} ${String(x.qtd).replace('.', ',')} ${x.unidade || ''}`.trim()).join(' · ') || '—'; }
+const _AV_DESP_ROT = { rodizio: '🍖 Rodízio', feijoada: '🍲 Buffet de feijoada' };
+
+function _buildAvariasPanel() {
+  if (!_dashLojasAll) return _skelPanel(3);
+  const R = _dashRangeOf(_dashOff());
+  _avCarregarDesp(R.from, R.to);
+  const d = _avMacroDados();
+  const esc = s => window.escapeHtml(String(s == null ? '' : s));
+  const dm = iso => String(iso || '').slice(8, 10) + '/' + String(iso || '').slice(5, 7);
+  const kpis = `<div class="kpi-row">
+    <div class="kpi-tile" style="border-left-color:var(--txt-red)">
+      <div class="kpi-tile-lbl">Avarias no período</div>
+      <div class="kpi-tile-val" style="color:var(--txt-red)">${_fmtBRL(d.valor)}</div>
+      <div class="kpi-tile-sub">${d.qtd} ite${d.qtd === 1 ? 'm' : 'ns'} · ${d.lojas.length} loja${d.lojas.length === 1 ? '' : 's'}${d.semValor ? ` · <b style="color:var(--txt-amber)">${d.semValor} ainda sem valor</b>` : ''}</div>
+    </div>
+    <div class="kpi-tile" style="border-left-color:var(--t3)">
+      <div class="kpi-tile-lbl">Desperdício rodízio/buffet</div>
+      <div class="kpi-tile-val">${_avPainelDesp === null ? '…' : d.nDesp}</div>
+      <div class="kpi-tile-sub">${_avPainelDesp === null ? 'carregando' : d.despErro ? 'não deu pra carregar' : 'dia' + (d.nDesp === 1 ? '' : 's') + ' com desperdício declarado'}</div>
+    </div>
+  </div>`;
+  const aviso = d.semValor ? `<div style="font-size:10.5px;color:var(--t3);margin:-4px 0 10px;line-height:1.5">O valor da avaria só existe depois que o Compras confirma no app Pedidos — ${d.semValor === 1 ? 'a que está sem valor conta' : `as ${d.semValor} sem valor contam`} como R$ 0 no total até lá.</div>` : '';
+  if (!d.lojas.length) {
+    return _reportBtnsRowHtml('Avarias') + _avLojaFiltroHtml() + kpis + `<div class="att-item"><div><div class="att-nm">Nenhuma avaria em ${esc(d.label)}</div>
+      <div class="att-rs">Nenhuma das ${_avLojasDaRegra().length} lojas registrou avaria ou desperdício neste período.</div></div></div>`;
+  }
+  const pior = Math.max(...d.lojas.map(l => l.valor)) || 1;
+  const ranking = d.lojas.length < 2 ? '' : `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:12px 14px;margin-bottom:10px">
+    <div style="font-size:10px;font-weight:800;color:var(--t3);letter-spacing:.5px;margin-bottom:2px">LOJAS — DE QUEM MAIS PERDEU PRA QUEM MENOS</div>
+    <div style="font-size:9.5px;color:var(--t4);margin-bottom:8px">valor das avarias no período · toque numa loja pra ver os itens</div>
+    ${d.lojas.map((l, i) => `<div class="pl-rank" role="button" tabindex="0" onclick="_plIrLoja('avarias','${esc(l.k)}')" style="display:flex;align-items:center;gap:8px;margin-bottom:5px;cursor:pointer">
+      <span style="font-size:10px;color:var(--t4);width:16px;flex-shrink:0;text-align:right">${i + 1}º</span>
+      <span style="font-size:11px;font-weight:700;color:var(--t2);width:96px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.nome)}</span>
+      <span style="flex:1;height:7px;border-radius:4px;background:var(--fill-sutil);overflow:hidden"><span style="display:block;height:100%;width:${l.valor ? Math.max(2, Math.round(l.valor / pior * 100)) : 0}%;background:var(--txt-red)"></span></span>
+      <span style="font-size:10.5px;font-weight:800;color:var(--t1);font-variant-numeric:tabular-nums;width:86px;text-align:right;flex-shrink:0">${_fmtBRL(l.valor)}<span style="display:block;font-size:9px;font-weight:600;color:var(--t4)">${l.itens.length} ite${l.itens.length === 1 ? 'm' : 'ns'}${l.semValor ? ` · ${l.semValor} s/ valor` : ''}</span></span>
+    </div>`).join('')}
+  </div>`;
+  const blocos = _plTodasHtml('avarias', d.lojas) + d.lojas.map(l => { const aberta = _plAbertas.avarias.has(l.k); return `
+    <div class="pl-loja${aberta ? ' aberta' : ''}" data-painel="avarias" data-loja="${esc(l.k)}" style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid var(--txt-red);border-radius:14px;padding:12px 14px;margin-bottom:10px">
+      <div class="pl-cab" role="button" tabindex="0" aria-expanded="${aberta}" onclick="_plToggle('avarias','${esc(l.k)}')" style="cursor:pointer">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:2px">
+          <div style="font-size:13px;font-weight:800;color:var(--t1);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.nome)}</div>
+          <div style="font-size:13px;font-weight:800;color:var(--txt-red);white-space:nowrap;font-variant-numeric:tabular-nums">${_fmtBRL(l.valor)} ${_plSeta('avarias', l.k)}</div>
+        </div>
+        <div style="font-size:10px;color:var(--t3);margin-bottom:4px">${l.itens.length} ite${l.itens.length === 1 ? 'm' : 'ns'}${l.semValor ? ` · <span style="color:var(--txt-amber)">${l.semValor} sem valor</span>` : ''}${l.desp.length ? ` · ${l.desp.length} dia${l.desp.length === 1 ? '' : 's'} com desperdício no rodízio/buffet` : ''}</div>
+      </div>
+      <div class="pl-notas" style="display:${aberta ? 'block' : 'none'}">
+        ${l.itens.map(a => { const st = AV_STATUS[a.status] || { txt: a.status, cor: 'var(--t3)' }; return `<div class="av-item" style="display:flex;gap:9px;align-items:baseline;padding:6px 0;border-top:1px solid var(--b1)">
+          <div style="font-size:9.5px;color:var(--t3);min-width:34px;font-variant-numeric:tabular-nums">${dm(a.dia)}</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:11.5px;font-weight:700;color:var(--t1);overflow-wrap:anywhere">${esc(a.insumo)} <span style="font-weight:600;color:var(--t3)">· ${esc(_avQtdTxt(a))}</span></div>
+            <div style="font-size:9.5px;color:${st.cor}">${esc(st.txt)}${a.por ? ` <span style="color:var(--t4)">· registrado por ${esc(a.por)}</span>` : ''}</div>
+            ${a.motivo ? `<div style="font-size:9.5px;color:var(--t3);overflow-wrap:anywhere">${esc(a.motivo)}</div>` : ''}
+          </div>
+          <div style="font-size:12px;font-weight:800;color:${a.status === 'pendente' ? 'var(--t4)' : 'var(--t1)'};font-variant-numeric:tabular-nums;white-space:nowrap">${a.status === 'pendente' ? 's/ valor' : _fmtBRL(a.valor)}</div>
+        </div>`; }).join('')}
+        ${l.desp.length ? `<div style="font-size:9px;font-weight:800;color:var(--t4);letter-spacing:1px;text-transform:uppercase;margin:10px 0 2px">Desperdício rodízio / buffet</div>
+          ${l.desp.map(r => `<div class="av-desp" style="display:flex;gap:9px;align-items:baseline;padding:5px 0;border-top:1px dashed var(--b1)">
+            <div style="font-size:9.5px;color:var(--t3);min-width:34px">${dm(r.data)}</div>
+            <div style="flex:1;min-width:0;font-size:11px;color:var(--t1)"><b>${_AV_DESP_ROT[r.tipo] || esc(r.tipo)}</b>: ${esc(_avDespItensTxt(r))}${r.assinado_por ? ` <span style="font-size:9.5px;color:var(--t4)">· ${esc(r.assinado_por)}</span>` : ''}</div>
+          </div>`).join('')}` : ''}
+      </div>
+    </div>`; }).join('');
+  const semNada = d.semNada.length ? `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:11px 14px;margin-bottom:10px">
+      <div style="font-size:9px;font-weight:800;color:var(--t4);letter-spacing:1.2px;text-transform:uppercase;margin-bottom:5px">Sem avaria no período · ${d.semNada.length} loja${d.semNada.length === 1 ? '' : 's'}</div>
+      <div style="font-size:10.5px;color:var(--t2);line-height:1.6">${d.semNada.map(l => esc(l.nome)).join(' · ')}</div></div>` : '';
+  return _reportBtnsRowHtml('Avarias') + _avLojaFiltroHtml() + kpis + aviso + ranking + blocos + semNada;
+}
+
+// Relatório individual (lojas marcadas) ou geral (nenhuma marcada) — mesmo padrão da Sem 10%.
+function _avFiltroLojaToggle(key, marcado) {
+  _avRelatorioLojasFiltro = marcado ? [..._avRelatorioLojasFiltro.filter(k => k !== key), key] : _avRelatorioLojasFiltro.filter(k => k !== key);
+}
+function _avLojaFiltroHtml() {
+  const chaves = _avLojasDaRegra().slice().sort((a, b) => (LOJA_DISPLAY[a] || a).localeCompare(LOJA_DISPLAY[b] || b));
+  const checks = chaves.map(k => `<label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--t2);cursor:pointer">
+      <input type="checkbox" class="av-rel-loja" value="${window.escapeHtml(k)}" ${_avRelatorioLojasFiltro.includes(k) ? 'checked' : ''} onchange="_avFiltroLojaToggle(this.value,this.checked)">
+      ${window.escapeHtml(LOJA_DISPLAY[k] || k)}</label>`).join('');
+  return `<div class="av-rel-filtro" style="margin:-6px 0 12px">
+    <label style="font-size:10px;color:var(--t3);font-weight:700;display:block;margin-bottom:4px">Relatório de (marque 1+ lojas pro individual; nenhuma marcada = geral):</label>
+    <div style="display:flex;flex-wrap:wrap;gap:6px 14px;padding:8px 10px;background:var(--s1);border:1px solid rgba(0,0,0,.08);border-radius:8px">${checks}</div></div>`;
+}
+function _avRelatorioTexto(wpp) {
+  if (!_dashLojasAll) return null;
+  const d = _avMacroDados();
+  const f = _avRelatorioLojasFiltro.filter(k => _avLojasDaRegra().includes(k));
+  const b = s => wpp ? '*' + s + '*' : s;
+  const dm = iso => String(iso || '').slice(8, 10) + '/' + String(iso || '').slice(5, 7);
+  const lojas = f.length ? d.lojas.filter(l => f.includes(l.k)) : d.lojas;
+  const nomes = f.length ? f.map(k => LOJA_DISPLAY[k] || k).sort((a, c) => a.localeCompare(c, 'pt-BR')).join(', ') : '';
+  const valor = lojas.reduce((s, l) => s + l.valor, 0), qtd = lojas.reduce((s, l) => s + l.itens.length, 0), semValor = lojas.reduce((s, l) => s + l.semValor, 0);
+  let msg = `${wpp ? '⚠️ ' : ''}${b('AVARIAS' + (f.length ? ' — ' + nomes.toUpperCase() : ' — REDE'))}\n${d.label}\n`;
+  msg += `\nTotal: ${_fmtBRL(valor)} · ${qtd} ite${qtd === 1 ? 'm' : 'ns'}${semValor ? ` (${semValor} ainda sem valor do Compras)` : ''}\n`;
+  if (f.length && d.lojas.length >= 2) {
+    msg += `\n${b('Posição na rede')} (de quem mais perdeu pra quem menos)\n`;
+    f.forEach(k => { const ix = d.lojas.findIndex(l => l.k === k);
+      msg += ix < 0 ? `   ${LOJA_DISPLAY[k] || k}: sem avaria no período\n` : `   ${LOJA_DISPLAY[k] || k}: ${ix + 1}º de ${d.lojas.length} · ${_fmtBRL(d.lojas[ix].valor)}\n`; });
+  }
+  lojas.forEach(l => {
+    msg += `\n${wpp ? '🏪 ' : ''}${b(l.nome)} — ${_fmtBRL(l.valor)} (${l.itens.length} ite${l.itens.length === 1 ? 'm' : 'ns'})\n`;
+    l.itens.forEach(a => { msg += `  ${dm(a.dia)} ${a.insumo} · ${_avQtdTxt(a)} — ${a.status === 'pendente' ? 'sem valor (aguardando Compras)' : _fmtBRL(a.valor)}${a.por ? ' · ' + a.por : ''}\n`; });
+    l.desp.forEach(r => { msg += `  ${dm(r.data)} ${r.tipo === 'feijoada' ? 'Buffet de feijoada' : 'Rodízio'}: ${_avDespItensTxt(r)}\n`; });
+  });
+  if (!f.length && d.semNada.length) msg += `\n${b('Sem avaria no período')}: ${d.semNada.map(l => l.nome).join(', ')}\n`;
+  if (f.length) f.filter(k => !lojas.some(l => l.k === k)).forEach(k => { msg += `\n${b(LOJA_DISPLAY[k] || k)}: sem avaria no período\n`; });
+  return { msg, titulo: 'Avarias' + (f.length ? ' — ' + nomes : ' — Rede') };
+}
+function gerarWppAvarias() { const r = _avRelatorioTexto(true); if (!r) { alert('Aguarde os dados carregarem.'); return; } window.open('https://wa.me/?text=' + encodeURIComponent(r.msg), '_blank'); }
+function gerarPDFAvarias() { const r = _avRelatorioTexto(false); if (!r) { alert('Aguarde os dados carregarem.'); return; } window.gnRelatorioPDFTexto(r.msg, r.titulo); }
+async function enviarPDFAvariasWpp() { await _pdfWppComo(gerarPDFAvarias); }
+
 // ── 🎵 TRIOS — cachê, couvert e saldo por fim de semana ou por mês ────────────────────
 // O trio toca no fim de semana: na base inteira são 199 apresentações no sábado, 193 no
 // domingo e 8 na sexta. Todas caem na MESMA semana segunda→domingo, então agrupar pela
@@ -19224,7 +19399,7 @@ function _buildSem10Panel() {
 // "O relatório fica aberto total; pra ir até uma loja fica ruim" (dono, 20/11/2026): cada
 // loja vem fechada e abre ao tocar. Abrir/fechar mexe só no DOM — sem redesenhar o Painel,
 // o que faria a tela pular — e o Set guarda o que está aberto pro próximo redesenho.
-const _plAbertas = { sem10: new Set(), cancel: new Set(), transf: new Set() };
+const _plAbertas = { sem10: new Set(), cancel: new Set(), transf: new Set(), avarias: new Set() };
 const _sem10Abertas = _plAbertas.sem10;
 function _plBox(p, k) { return [...document.querySelectorAll('.pl-loja')].find(x => x.dataset.painel === p && x.dataset.loja === k) || null; }
 function _plAplicar(p, k) {
@@ -20498,6 +20673,9 @@ function renderDashboard() {
   } else if (_dashTab==='vendidos') {
     content = _buildVendidosPanel();
 
+  } else if (_dashTab==='avarias') {
+    content = _buildAvariasPanel();
+
   } else if (_dashTab==='trios') {
     content = _buildTriosVistaToggle() + (_triosVista === 'agenda' ? _buildTriosAgendaPanel() : _buildTriosPanel());
 
@@ -20679,7 +20857,7 @@ const DASH_GRUPOS = [
   { g: 'vendas',   rot: '📈 Vendas',   abas: [['fat', '↓ Faturamento'], ['att', '⚠ Atenção'], ['bi', '📊 BI'], ['metas', '⚙ Metas']] },
   { g: 'caixa',    rot: '🧾 Caixa',    abas: [['cancel', '🧾 Cancel. e transf.'], ['sem10', '💸 Sem 10%']] },
   { g: 'equipe',   rot: '👥 Equipe',   abas: [['presenca', '👤 Presença'], ['folgas', '📅 Folgas'], ['ocorr', '⚠ Ocorrências'], ['ferias', '🏖 Férias'], ['xadrez', '🔀 Xadrez'], ['banco', '⏱ Banco'], ['extra', '👷 Extra']] },
-  { g: 'operacao', rot: '🛠 Operação', abas: [['barris', '🍺 Barris'], ['carnes', '🥩 Carnes'], ['vendidos', '🧾 Vendidos'], ['trios', '🎵 Trios'], ['semlanc', '✅ Validações'], ['utensent', '🍴 Utensílios']] },
+  { g: 'operacao', rot: '🛠 Operação', abas: [['barris', '🍺 Barris'], ['carnes', '🥩 Carnes'], ['vendidos', '🧾 Vendidos'], ['avarias', '⚠️ Avarias'], ['trios', '🎵 Trios'], ['semlanc', '✅ Validações'], ['utensent', '🍴 Utensílios']] },
   { g: 'dre',      rot: '💰 DRE',      abas: [['dre', '💰 DRE']] },
 ];
 const _dashGrupoUltima = {};
