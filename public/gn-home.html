@@ -13707,11 +13707,22 @@ async function _biGCarregar() {
   const chave = de + '|' + R.ate;
   if (_biGDados[chave] || _biGCarregando === chave) return;
   _biGCarregando = chave;
-  const [vendas, caixa] = await Promise.all([
+  // Operação (mesmas fontes da mini-DRE do BI de indicadores, numa leitura só pra rede):
+  // cancelamento, transferência, nota sem 10% (gorjeta) e funcionário extra vêm do fechamento
+  // do Caixa; faltas/atestados/suspensões/advertências, da escala semanal (gn_comissoes, só
+  // as semanas da janela); avarias, do avariasAll de cada loja.
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const CAL = (typeof COMISSOES_CAL !== 'undefined') ? COMISSOES_CAL : [];
+  const isoDia = x => x.y + '-' + _p2(x.m) + '-' + _p2(x.d);
+  const semanas = []; CAL.forEach((sem, i) => { if ((sem.days || []).some(x => { const d = isoDia(x); return d >= de && d <= R.ate; })) semanas.push(i); });
+  const comKeys = _biLojas().map(l => LOJA_COM_KEY[l] || l);
+  const [vendas, caixa, coms, avs] = await Promise.all([
     _biGPaginado(`${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${de}&data_operacao=lte.${R.ate}&select=loja,data_operacao,venda_salao,venda_delivery&order=data_operacao.asc`, 'biGraf:vendas'),
-    _biGPaginado(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${de}&data=lte.${R.ate}&select=loja,data,gn_caixa_comprovante(bandeira,valor)&order=data.asc`, 'biGraf:caixa'),
+    _biGPaginado(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${de}&data=lte.${R.ate}&select=loja,data,gn_caixa_comprovante(bandeira,valor),gn_caixa_cancelamento(valor),gn_caixa_transferencia(id),gn_caixa_gorjeta(valor),gn_caixa_despesa(categoria,valor,nome,justificativa)&order=data.asc`, 'biGraf:caixa'),
+    semanas.length ? window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=in.(${comKeys.map(encodeURIComponent).join(',')})&select=loja,${semanas.map(i => `s${i}:all_data->"${i}"`).join(',')}`, H, 'biGraf:comissoes', null) : Promise.resolve([]),
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=in.(${comKeys.map(encodeURIComponent).join(',')})&select=loja,av:all_data->avariasAll`, H, 'biGraf:avarias', null),
   ]);
-  _biGDados[chave] = { vendas: vendas || [], caixa: caixa || [], erro: !vendas, erroPag: !caixa };
+  _biGDados[chave] = { vendas: vendas || [], caixa: caixa || [], coms: coms || [], avs: avs || [], erro: !vendas, erroPag: !caixa, erroCom: !coms, erroAv: !avs };
   _biGCarregando = '';
   if (_dashTab === 'bi' && _biVista === 'graf') renderDashboard();
 }
@@ -13749,8 +13760,46 @@ function _biGCalc(D, R, lojasEsc, lojasTodas) {
       if (p) pag[p.k] += v; else pagOutros += v;
     });
   });
+  // Operação por loja (todas — o escopo filtra só na hora de somar).
+  const zOp = () => ({ cancQtd: 0, cancValor: 0, transf: 0, s10Qtd: 0, s10Dez: 0, avQtd: 0, avValor: 0, extraQtd: 0, extraValor: 0, FALTA: 0, ATESTADO: 0, 'SUSPENSÃO': 0, ADVERTENCIA: 0 });
+  const op = {}; lojasTodas.forEach(l => { op[l] = zOp(); });
+  const arr = x => Array.isArray(x) ? x : (x ? [x] : []);
+  D.caixa.forEach(f => {
+    const k = _normLoja(f.loja); if (!op[k]) return;
+    const d = String(f.data).slice(0, 10); if (!dentro(d, R.de, R.ate)) return;
+    arr(f.gn_caixa_cancelamento).forEach(x => { op[k].cancQtd++; op[k].cancValor += parseFloat(x.valor) || 0; });
+    op[k].transf += arr(f.gn_caixa_transferencia).length;
+    arr(f.gn_caixa_gorjeta).forEach(x => { op[k].s10Qtd++; op[k].s10Dez += (parseFloat(x.valor) || 0) * 0.10; });
+    arr(f.gn_caixa_despesa).forEach(x => { if (_extraEhExtra(x)) { op[k].extraQtd++; op[k].extraValor += parseFloat(x.valor) || 0; } });
+  });
+  const CAL = (typeof COMISSOES_CAL !== 'undefined') ? COMISSOES_CAL : [];
+  const isoDia = x => x.y + '-' + _p2(x.m) + '-' + _p2(x.d);
+  const porCom = {}; Object.keys(LOJA_COM_KEY).forEach(u => { porCom[LOJA_COM_KEY[u]] = u; });
+  (D.coms || []).forEach(row => {
+    const k = porCom[row.loja] || _normLoja(row.loja); if (!op[k]) return;
+    Object.keys(row).forEach(col => {
+      const m = /^s(\d+)$/.exec(col); if (!m || !row[col]) return;
+      const sem = CAL[+m[1]]; if (!sem) return;
+      const idxs = (sem.days || []).map((x, i) => dentro(isoDia(x), R.de, R.ate) ? i : -1).filter(i => i >= 0);
+      if (!idxs.length) return;
+      (row[col].funcs || []).forEach(fu => {
+        idxs.forEach(i => { const st = (fu.dias || [])[i]; if (st === 'FALTA' || st === 'ATESTADO' || st === 'SUSPENSÃO') op[k][st]++; });
+        if (fu.docs && fu.docs.ADVERTENCIA) op[k].ADVERTENCIA++;
+      });
+    });
+  });
+  (D.avs || []).forEach(row => {
+    const k = porCom[row.loja] || _normLoja(row.loja); if (!op[k]) return;
+    const vistos = new Set();
+    Object.values(row.av || {}).flatMap(v => Array.isArray(v) ? v : []).forEach(a => {
+      if (!a || a.tipo || a.status === 'cancelado' || !a.ts || (a.id && vistos.has(a.id))) return; if (a.id) vistos.add(a.id);
+      if (!dentro(_avDiaLocal(a.ts), R.de, R.ate)) return;
+      op[k].avQtd++; op[k].avValor += parseFloat(a.valorTotal) || 0;
+    });
+  });
+  const opEsc = zOp(); lojasEsc.forEach(l => { Object.keys(opEsc).forEach(c2 => { opEsc[c2] += op[l][c2]; }); });
   return { total, prev, salao, deliv, dias: diasCom.size, porLoja, meses,
-    dowMedia: dow.map((v, i) => dowDias[i].size ? v / dowDias[i].size : null), pag, pagOutros };
+    dowMedia: dow.map((v, i) => dowDias[i].size ? v / dowDias[i].size : null), pag, pagOutros, op, opEsc };
 }
 
 function _biGBtn(on, onclick, txt, cls) {
@@ -13876,8 +13925,82 @@ function _buildBiGraficos() {
         <span style="width:70%;height:${v ? Math.max(2, v / maxW * 78) : 0}px;background:var(--vz-1);border-radius:4px 4px 0 0;opacity:${i === melhorDia ? 1 : .7}"></span>
         <span style="font-size:9.5px;color:var(--t3);margin-top:3px">${DOW[i]}</span></div>`).join('')}</div>`, 'bi-g-dowc');
 
-  return topo + kpis + g1 + g2 + g3 + g4 + `<div style="font-size:9.5px;color:var(--t3);line-height:1.5;margin-bottom:10px">Faturamento = venda do salão + delivery lançada no Check-list (o mesmo do Painel). Dados desde 10/07/2026. Toque/passe o dedo nas barras pra ver o valor.</div>`;
+  // 5. Operação — os números da mini-DRE do BI de indicadores, no período escolhido.
+  const o = c.opEsc;
+  const nInt = v => Number(v || 0).toLocaleString('pt-BR');
+  const tiles = BI_OP_MET.map(m => { const v = m.val(o, c.total); return `<div class="bi-g-op" data-met="${m.k}" style="background:var(--s1);border:1px solid var(--b1);border-radius:10px;padding:8px 9px;min-width:0">
+      <div style="font-size:9px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:.3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${m.ico} ${m.rot}</div>
+      <div style="font-size:14px;font-weight:900;color:var(--t1);font-variant-numeric:tabular-nums;white-space:nowrap">${v == null ? '—' : m.fmt(v)}</div>
+      ${m.sub ? `<div style="font-size:9px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${m.sub(o)}</div>` : ''}</div>`; }).join('');
+  const g5 = card('Operação', `${_biEscopo === 'REDE' ? 'Rede' : esc(LOJA_DISPLAY[_biEscopo] || _biEscopo)} · ${esc(R.rot)} · os mesmos números da mini-DRE`,
+    `<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px">${tiles}</div>${D.erroCom || D.erroAv ? `<div style="font-size:9.5px;color:var(--txt-amber);margin-top:6px">⚠ ${D.erroCom ? 'faltas/atestados' : ''}${D.erroCom && D.erroAv ? ' e ' : ''}${D.erroAv ? 'avarias' : ''} não carregaram agora.</div>` : ''}`, 'bi-g-oper');
+  // 6. Comparar as lojas num indicador (escolhido nas fichas).
+  const met = BI_OP_MET.find(m => m.k === _biGMet) || BI_OP_MET[0];
+  const vals = lojasTodas.map(k => ({ k, v: met.val(c.op[k], c.porLoja[k]) })).sort((a, b) => (b.v || 0) - (a.v || 0));
+  const maxV = Math.max(...vals.map(x => x.v || 0)) || 1;
+  const g6 = card('Comparar lojas', `${met.ico} ${met.rot} · ${esc(R.rot)} · de quem tem mais pra quem tem menos`,
+    `<div class="bi-g-mets" style="display:flex;gap:5px;overflow-x:auto;padding-bottom:6px;margin-bottom:6px">${BI_OP_MET.map(m => `<button type="button" class="bi-g-met${m.k === met.k ? ' on' : ''}" data-met="${m.k}" onclick="_biGTrocarMet('${m.k}')" style="flex-shrink:0;border:1px solid ${m.k === met.k ? 'var(--cor)' : 'var(--b2)'};background:${m.k === met.k ? 'var(--cor)' : 'transparent'};color:${m.k === met.k ? '#1A1D23' : 'var(--t2)'};border-radius:999px;padding:4px 9px;font-size:10.5px;font-weight:700;font-family:inherit;cursor:pointer">${m.ico} ${m.rot}</button>`).join('')}</div>
+    ${vals.map(x => { const dest = _biEscopo === 'REDE' || _biEscopo === x.k; return `<div class="bi-g-cmp" data-loja="${esc(x.k)}" title="${esc(LOJA_DISPLAY[x.k] || x.k)}: ${x.v == null ? '—' : met.fmt(x.v)}" style="display:flex;align-items:center;gap:8px;margin-bottom:5px">
+      <span style="font-size:11px;font-weight:700;color:${dest ? 'var(--t1)' : 'var(--t3)'};width:96px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(LOJA_DISPLAY[x.k] || x.k)}</span>
+      <span style="flex:1;height:10px;border-radius:0 4px 4px 0;background:var(--fill-sutil);overflow:hidden"><span style="display:block;height:100%;width:${x.v ? Math.max(1.5, x.v / maxV * 100) : 0}%;background:var(--vz-2);opacity:${dest ? 1 : .35};border-radius:0 4px 4px 0"></span></span>
+      <span style="font-size:10.5px;font-weight:800;color:var(--t1);font-variant-numeric:tabular-nums;width:74px;text-align:right;flex-shrink:0">${x.v == null ? '—' : met.fmt(x.v)}</span></div>`; }).join('')}`, 'bi-g-comparar');
+  const nota = `<div style="font-size:9.5px;color:var(--t3);line-height:1.5;margin-bottom:10px">Faturamento = venda do salão + delivery lançada no Check-list (o mesmo do Painel). Cancelamento, nota sem 10%, transferência e extra vêm do fechamento do Caixa; faltas e atestados, da escala; avarias, do app Lojas. Dados desde 10/07/2026. Toque/passe o dedo nas barras pra ver o valor.</div>`;
+  // Guardado pro PDF (o que está na tela, com a tabela por loja embaixo).
+  _biGPdfPartes = { R, c, escopo: _biEscopo, varTxt: varPct === null ? '' : `${varPct >= 0 ? '▲' : '▼'} ${Math.abs(varPct).toFixed(1).replace('.', ',')}% vs período anterior`, graficos: g1 + g2 + g3 + g4 + g5 + g6 };
+  const pdfBtns = `<div class="bi-g-pdf" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      <button type="button" onclick="gerarPDFBiGraficos()" style="background:rgba(192,57,43,.12);border:1px solid rgba(192,57,43,.3);border-radius:6px;padding:5px 10px;color:var(--txt-red);font-size:11px;font-weight:700;cursor:pointer">📄 PDF com gráficos</button>
+      <button type="button" onclick="enviarPDFBiGraficosWpp()" style="background:rgba(37,211,102,.12);border:1px solid rgba(37,211,102,.3);border-radius:6px;padding:5px 10px;color:var(--txt-green);font-size:11px;font-weight:700;cursor:pointer">📄📲 PDF no Whats</button></div>`;
+  return topo + pdfBtns + kpis + g1 + g2 + g3 + g4 + g5 + g6 + nota;
 }
+
+// Indicadores de operação (mesmos da mini-DRE). val(o, fat) devolve o número do indicador.
+const BI_OP_MET = [
+  { k: 'canc', ico: '🧾', rot: 'Cancelamentos', val: (o, fat) => fat > 0 ? o.cancValor / fat * 100 : (o.cancQtd ? null : 0), fmt: v => v.toFixed(2).replace('.', ',') + '%', sub: o => `${o.cancQtd} · ${_fmtBRL(o.cancValor)}` },
+  { k: 's10', ico: '💸', rot: 'Sem 10%', val: o => o.s10Dez, fmt: v => _fmtBRL(v), sub: o => `${o.s10Qtd} nota${o.s10Qtd === 1 ? '' : 's'} · 10% não cobrado` },
+  { k: 'transf', ico: '🔀', rot: 'Transferências', val: o => o.transf, fmt: v => Number(v).toLocaleString('pt-BR'), sub: () => 'de mesa' },
+  { k: 'av', ico: '⚠️', rot: 'Avarias', val: o => o.avValor, fmt: v => _fmtBRL(v), sub: o => `${o.avQtd} ite${o.avQtd === 1 ? 'm' : 'ns'}` },
+  { k: 'extra', ico: '👷', rot: 'Func. extra', val: o => o.extraValor, fmt: v => _fmtBRL(v), sub: o => `${o.extraQtd} lançamento${o.extraQtd === 1 ? '' : 's'}` },
+  { k: 'falta', ico: '🚫', rot: 'Faltas', val: o => o.FALTA, fmt: v => Number(v).toLocaleString('pt-BR'), sub: o => o.FALTA === 1 ? 'dia' : 'dias' },
+  { k: 'atest', ico: '📄', rot: 'Atestados', val: o => o.ATESTADO, fmt: v => Number(v).toLocaleString('pt-BR'), sub: o => o.ATESTADO === 1 ? 'dia' : 'dias' },
+  { k: 'susp', ico: '⛔', rot: 'Suspensões', val: o => o['SUSPENSÃO'], fmt: v => Number(v).toLocaleString('pt-BR'), sub: o => o['SUSPENSÃO'] === 1 ? 'dia' : 'dias' },
+  { k: 'adv', ico: '📝', rot: 'Advertências', val: o => o.ADVERTENCIA, fmt: v => Number(v).toLocaleString('pt-BR'), sub: o => o.ADVERTENCIA === 1 ? 'documento' : 'documentos' },
+];
+let _biGMet = 'canc', _biGPdfPartes = null;
+function _biGTrocarMet(k) { _biGMet = k; renderDashboard(); }
+
+// ── PDF com os gráficos ─────────────────────────────────────────────────────────────
+// O PDF do app é montado em HTML (gnRelatorioHtml → janela de impressão, ou html2canvas +
+// jsPDF no "PDF no Whats"); os gráficos são SVG/HTML, então entram como imagem de verdade.
+// O documento do PDF não tem as variáveis de cor da tela: troca cada var(--x) pela cor do
+// tema claro (papel é branco).
+const BI_PDF_CORES = { '--vz-1': '#2a78d6', '--vz-2': '#eb6834', '--vz-3': '#1baf7a', '--vz-4': '#eda100', '--vz-5': '#e87ba4', '--vz-6': '#008300',
+  '--t1': '#1A1D23', '--t2': '#3F4652', '--t3': '#6B7280', '--t4': '#949DAC', '--b1': 'rgba(0,0,0,.08)', '--b2': 'rgba(0,0,0,.12)', '--b3': 'rgba(0,0,0,.16)',
+  '--s1': '#F5F6F8', '--s2': '#FFFFFF', '--fill-sutil': 'rgba(0,0,0,.05)', '--txt-green': '#15803D', '--txt-red': '#B91C1C', '--txt-amber': '#B45309', '--cor': '#FACC15' };
+function _biPdfCores(html) { return String(html).replace(/var\((--[a-z0-9-]+)\)/gi, (m, v) => BI_PDF_CORES[v] || '#6B7280'); }
+function _biGPdfOpts() {
+  const P = _biGPdfPartes; if (!P) return null;
+  const nome = P.escopo === 'REDE' ? 'Rede' : (LOJA_DISPLAY[P.escopo] || P.escopo);
+  const lojas = _biLojas();
+  const linhas = lojas.map(k => ({ k, fat: P.c.porLoja[k] || 0, o: P.c.op[k] })).sort((a, b) => b.fat - a.fat);
+  const td = (v, b) => `<td style="text-align:right;font-variant-numeric:tabular-nums${b ? ';font-weight:700' : ''}">${v}</td>`;
+  const tabela = `<h2 style="font-size:11pt;margin:14px 0 6px">Por loja — ${window.escapeHtml(P.R.rot)}</h2>
+    <table style="font-size:8pt"><thead><tr><th>Loja</th><th>Faturamento</th><th>Cancel.</th><th>Sem 10%</th><th>Transf.</th><th>Avarias</th><th>Extra</th><th>Faltas</th><th>Atest.</th></tr></thead><tbody>
+    ${linhas.map(l => `<tr${P.escopo !== 'REDE' && P.escopo === l.k ? ' style="background:#FEF9C3"' : ''}><td>${window.escapeHtml(LOJA_DISPLAY[l.k] || l.k)}</td>${td(_fmtBRLs(l.fat), true)}${td(l.fat > 0 ? (l.o.cancValor / l.fat * 100).toFixed(2).replace('.', ',') + '%' : '—')}${td(_fmtBRLs(l.o.s10Dez))}${td(l.o.transf)}${td(_fmtBRLs(l.o.avValor))}${td(_fmtBRLs(l.o.extraValor))}${td(l.o.FALTA)}${td(l.o.ATESTADO)}</tr>`).join('')}
+    </tbody></table>`;
+  // Fichas do "Comparar lojas" não fazem sentido no papel: some a linha de botões.
+  const graf = P.graficos.replace(/<div class="bi-g-mets"[\s\S]*?<\/div>/, '');
+  return {
+    titulo: `BI — ${nome}`, tituloDoc: `GN BI — ${nome} — ${P.R.rot}`,
+    subtitulo: `${P.R.rot}${P.R.parcial ? ' (em andamento)' : ''} · gerado em ${window.gnPdfAgora ? window.gnPdfAgora() : new Date().toLocaleString('pt-BR')}`,
+    kpis: [{ label: 'Faturamento', valor: _fmtBRL(P.c.total), sub: P.varTxt }, { label: 'Média por dia', valor: P.c.dias ? _fmtBRLs(P.c.total / P.c.dias) : '—', sub: P.c.dias + ' dias com venda' },
+           { label: 'Cancelamentos', valor: P.c.total > 0 ? (P.c.opEsc.cancValor / P.c.total * 100).toFixed(2).replace('.', ',') + '%' : '—', sub: P.c.opEsc.cancQtd + ' · ' + _fmtBRL(P.c.opEsc.cancValor) }],
+    // No A4 o SVG da evolução esticaria pra largura da folha e ficaria gigante.
+    html: `<style>.bi-pdf .bi-g-evo svg{max-width:440px;margin:0 auto}.bi-pdf .bi-g-card{page-break-inside:avoid}</style><div class="bi-pdf">${_biPdfCores(graf + tabela)}</div>`,
+    rodape: `GN Operações · BI ${nome} · ${P.R.rot}`,
+  };
+}
+function gerarPDFBiGraficos() { const o = _biGPdfOpts(); if (!o) { alert('Abra a vista 📈 Gráficos e espere carregar.'); return; } window.gnRelatorioPDF(o); }
+async function enviarPDFBiGraficosWpp() { await _pdfWppComo(gerarPDFBiGraficos); }
 
 function _buildBiTab(fat, maxVal, loading) {
   if (loading) return _buildBiDashboard() + _skelPanel(2);
