@@ -142,9 +142,9 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   check('Bangu: queda de faturamento com a ação', /Faturamento -20,0% vs período anterior: entender a queda/.test(bloco('Bangu')), bloco('Bangu'));
   check('Bangu: sem 10% subiu de 5,0% para 10,0% → cobrar os garçons', /Sem 10% subiu de 5,0% para 10,0% das vendas: cobrar os garçons/.test(bloco('Bangu')));
   check('Bangu: 8 faltas (100% da rede) → plano de presença', /8 faltas \(100% da rede\): plano de presença/.test(bloco('Bangu')));
-  check('Caxias: cancelamento acima da rede e avarias sem lançamento', /Cancelamento em 2,67% das vendas \(rede 1,64%\): rever motivos/.test(bloco('Caxias')) && /Nenhuma avaria lançada: cobrar o lançamento/.test(bloco('Caxias')), bloco('Caxias'));
+  check('Caxias: cancelamento acima da rede', /Cancelamento em 2,67% das vendas \(rede 1,64%\): rever motivos/.test(bloco('Caxias')), bloco('Caxias'));
+  check('avaria sem lançamento NÃO entra na lista por loja (fica só nos passos da rede)', !/avaria/i.test(porLoja) && /Cobrar o lançamento de avarias em Caxias/.test(passos), porLoja);
   check('Caxias não leva "sem 10%" (começou agora, e 4% está abaixo da rede)', !/Sem 10%/.test(bloco('Caxias')));
-  check('Bangu não leva "avaria" (lançou)', !/avaria/.test(bloco('Bangu')));
   check('sem rolagem de lado em 390 px', r.largura <= 390, r.largura);
   check('nenhum erro de JavaScript', erros.length === 0, erros);
 
