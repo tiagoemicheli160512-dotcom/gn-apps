@@ -40,6 +40,8 @@
       --chrome-btn: rgba(255,255,255,.7);
       --hero-mix: #FFFFFF;   /* com o que o gradiente do hero se mistura */
       --hero-mix2: #F8FAFC;
+      /* Paleta categórica dos gráficos (BI › Gráficos), ordem fixa, validada (dataviz). */
+      --vz-1:#2a78d6; --vz-2:#eb6834; --vz-3:#1baf7a; --vz-4:#eda100; --vz-5:#e87ba4; --vz-6:#008300;
     }
     :root[data-tema="escuro"] {
       --s0:#0E1014; --s1:#14171C; --s2:#1B1F26; --s3:#212630; --s4:#272D38; --s5:#323948;
@@ -53,6 +55,7 @@
       --chrome-btn: rgba(255,255,255,.08);
       --hero-mix: #1B1F26;
       --hero-mix2: #212630;
+      --vz-1:#3987e5; --vz-2:#d95926; --vz-3:#199e70; --vz-4:#c98500; --vz-5:#d55181; --vz-6:#0ca30c;
     }
     *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
     body{background:var(--s1);color:var(--t1);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh;overflow-x:hidden}
@@ -13495,6 +13498,7 @@ function _biSomar(porLoja, lojas) {
 }
 
 function _buildBiDashboard() {
+  if (_biVista === 'graf') return _biVistaHtml() + _buildBiGraficos();
   if (!_biComp) _biComp = _dreRedeCompPadrao();
   const comp = _biComp, dados = _biDados[comp];
   if (!dados && !_biCarregando) _biCarregar(false);
@@ -13507,7 +13511,7 @@ function _buildBiDashboard() {
   const opEsc = `<option value="REDE"${_biEscopo === 'REDE' ? ' selected' : ''}>🌐 Rede — todas as lojas</option>` +
     lojas.map(l => `<option value="${l}"${_biEscopo === l ? ' selected' : ''}>${escapeHtml(LOJA_DISPLAY[l] || l)}</option>`).join('');
   const SEL = 'flex:1;min-width:140px;background:var(--s2);border:1px solid rgba(0,0,0,.12);border-radius:9px;padding:8px 10px;font-size:12px;font-weight:700;color:var(--t1);font-family:inherit';
-  const topo = `<div class="bi-controles" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+  const topo = _biVistaHtml() + `<div class="bi-controles" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
       <select onchange="_biTrocarMes(this.value)" style="${SEL}">${opMes}</select>
       <select onchange="_biTrocarEscopo(this.value)" style="${SEL}">${opEsc}</select>
     </div>
@@ -13632,6 +13636,249 @@ function _calcIndiceSaude(v, meta, maxVal, chkOk, manut) {
 // carrega (faturamento, meta, checklist, manutenção, contratos vencendo,
 // alertas) numa tela só, em vez de espalhados pelas outras abas. Não busca
 // nada novo no Supabase — só rearranja o que _loadDashAll() já trouxe.
+// ── BI › 📈 Gráficos ─────────────────────────────────────────────────────────────────
+// Pedido do dono (20/11/2026), com a foto de um dashboard de faturamento: "é possível ter
+// um dashboard assim também — podem escolher um ou outro". Escolhidos por ele: faturamento
+// por loja, evolução mês a mês, formas de pagamento, salão × delivery + dia da semana; e o
+// período Mês / Trimestre / Ano fica AQUI (o BI de indicadores segue mensal: a mini-DRE é
+// lançada por mês, e montá-lo por trimestre custaria ~200 consultas).
+// Duas consultas leves, paginadas (o PostgREST corta em 1.000 linhas):
+//   · checklist_diario (venda_salao + venda_delivery) — o mesmo faturamento do Painel;
+//   · gn_caixa_fechamento + gn_caixa_comprovante (bandeira, valor) — formas de pagamento.
+// Os dados começam em 10/07/2026: antes disso não há o que mostrar, e a tela diz isso em vez
+// de desenhar meses vazios. Maglia fora (rede = _biLojas()). Cores: paleta categórica
+// validada (dataviz, claro e escuro), ordem fixa; texto sempre nas cores de texto.
+let _biVista = 'ind', _biGPer = 'mes', _biGOff = 0, _biGDados = {}, _biGCarregando = '';
+const BI_G_DESDE = '2026-07-01';
+// Primeiro dia com venda lançada na base. Período anterior que começa antes disso está
+// incompleto — comparar com ele inventava crescimento (o 4º tri de 2026 aparecia "▲ 114%"
+// contra um 3º tri que só tem dados a partir de 10/07).
+const BI_G_PRIMEIRO_DADO = '2026-07-10';
+const BI_PAG = [
+  { k: 'credito', rot: 'Crédito', re: /CR[EÉ]DITO|AMEX/i },
+  { k: 'debito', rot: 'Débito', re: /D[EÉ]BITO/i },
+  { k: 'pix', rot: 'Pix', re: /PIX/i },
+  { k: 'dinheiro', rot: 'Dinheiro', re: /DINHEIRO/i },
+  { k: 'vale', rot: 'Vale-refeição', re: /TICKET|ALELO|SODEXO|VALE|VR\b|REFEI/i },
+  { k: 'app', rot: 'iFood / Online', re: /IFOOD|ONLINE/i },
+];
+function _biGIso(d) { return d.getFullYear() + '-' + _p2(d.getMonth() + 1) + '-' + _p2(d.getDate()); }
+const _BI_MES_ABR = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+// Período escolhido: {de, ate, rot, prev:{de,ate}} — 'ate' nunca passa de hoje.
+function _biGRange(per, off) {
+  const h = new Date(), hoje = _biGIso(h);
+  let ini, fim, prevIni, prevFim, rot;
+  if (per === 'ano') {
+    const y = h.getFullYear() + off;
+    ini = new Date(y, 0, 1); fim = new Date(y, 11, 31); prevIni = new Date(y - 1, 0, 1); prevFim = new Date(y - 1, 11, 31); rot = String(y);
+  } else if (per === 'tri') {
+    const q0 = Math.floor(h.getMonth() / 3) + off, y = h.getFullYear() + Math.floor(q0 / 4), q = ((q0 % 4) + 4) % 4;
+    ini = new Date(y, q * 3, 1); fim = new Date(y, q * 3 + 3, 0); prevIni = new Date(y, q * 3 - 3, 1); prevFim = new Date(y, q * 3, 0);
+    rot = `${q + 1}º tri ${y} (${_BI_MES_ABR[q * 3]}–${_BI_MES_ABR[q * 3 + 2]})`;
+  } else {
+    ini = new Date(h.getFullYear(), h.getMonth() + off, 1); fim = new Date(h.getFullYear(), h.getMonth() + off + 1, 0);
+    prevIni = new Date(ini.getFullYear(), ini.getMonth() - 1, 1); prevFim = new Date(ini.getFullYear(), ini.getMonth(), 0);
+    rot = _BI_MES_ABR[ini.getMonth()] + '/' + ini.getFullYear();
+  }
+  const de = _biGIso(ini), ate = _biGIso(fim) > hoje ? hoje : _biGIso(fim);
+  // Período anterior do MESMO tamanho já decorrido (mês em andamento × mesmos dias do mês passado).
+  const dias = Math.round((new Date(ate + 'T12:00:00') - new Date(de + 'T12:00:00')) / 864e5);
+  const pAte = new Date(prevIni); pAte.setDate(pAte.getDate() + dias);
+  const prevAte = _biGIso(pAte) > _biGIso(prevFim) ? _biGIso(prevFim) : _biGIso(pAte);
+  return { de, ate, rot, parcial: _biGIso(fim) > hoje, prev: { de: _biGIso(prevIni), ate: prevAte } };
+}
+async function _biGPaginado(url, nome) {
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const out = [];
+  for (let off = 0; off < 50000; off += 1000) {
+    const rows = await window.gnFetchJson(`${url}&limit=1000&offset=${off}`, H, nome, null);
+    if (!rows) return null;
+    out.push(...rows);
+    if (rows.length < 1000) break;
+  }
+  return out;
+}
+async function _biGCarregar() {
+  const R = _biGRange(_biGPer, _biGOff);
+  // Uma janela cobre o período, o anterior e os 12 meses da evolução.
+  const fimD = new Date(R.ate + 'T12:00:00');
+  const evoIni = _biGIso(new Date(fimD.getFullYear(), fimD.getMonth() - 11, 1));
+  let de = [R.de, R.prev.de, evoIni].sort()[0]; if (de < BI_G_DESDE) de = BI_G_DESDE;
+  const chave = de + '|' + R.ate;
+  if (_biGDados[chave] || _biGCarregando === chave) return;
+  _biGCarregando = chave;
+  const [vendas, caixa] = await Promise.all([
+    _biGPaginado(`${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${de}&data_operacao=lte.${R.ate}&select=loja,data_operacao,venda_salao,venda_delivery&order=data_operacao.asc`, 'biGraf:vendas'),
+    _biGPaginado(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${de}&data=lte.${R.ate}&select=loja,data,gn_caixa_comprovante(bandeira,valor)&order=data.asc`, 'biGraf:caixa'),
+  ]);
+  _biGDados[chave] = { vendas: vendas || [], caixa: caixa || [], erro: !vendas, erroPag: !caixa };
+  _biGCarregando = '';
+  if (_dashTab === 'bi' && _biVista === 'graf') renderDashboard();
+}
+function _biGChave() {
+  const R = _biGRange(_biGPer, _biGOff), fimD = new Date(R.ate + 'T12:00:00');
+  let de = [R.de, R.prev.de, _biGIso(new Date(fimD.getFullYear(), fimD.getMonth() - 11, 1))].sort()[0]; if (de < BI_G_DESDE) de = BI_G_DESDE;
+  return de + '|' + R.ate;
+}
+// Números do período pro escopo (rede ou uma loja).
+function _biGCalc(D, R, lojasEsc, lojasTodas) {
+  const fat = r => (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0);
+  const dentro = (d, a, b) => d >= a && d <= b;
+  const porLoja = {}; lojasTodas.forEach(l => { porLoja[l] = 0; });
+  let total = 0, prev = 0, salao = 0, deliv = 0; const diasCom = new Set();
+  const dow = [0, 0, 0, 0, 0, 0, 0], dowDias = [new Set(), new Set(), new Set(), new Set(), new Set(), new Set(), new Set()];
+  const meses = {};
+  D.vendas.forEach(r => {
+    const k = _normLoja(r.loja); if (!lojasTodas.includes(k)) return;
+    const d = String(r.data_operacao).slice(0, 10), v = fat(r);
+    if (dentro(d, R.de, R.ate)) porLoja[k] += v;
+    if (!lojasEsc.includes(k)) return;
+    if (v > 0) meses[d.slice(0, 7)] = (meses[d.slice(0, 7)] || 0) + v;
+    if (dentro(d, R.prev.de, R.prev.ate)) prev += v;
+    if (!dentro(d, R.de, R.ate)) return;
+    total += v; salao += parseFloat(r.venda_salao) || 0; deliv += parseFloat(r.venda_delivery) || 0;
+    if (v > 0) { diasCom.add(d); const w = (new Date(d + 'T12:00:00').getDay() + 6) % 7; dow[w] += v; dowDias[w].add(d); }
+  });
+  const pag = {}; BI_PAG.forEach(p => { pag[p.k] = 0; }); let pagOutros = 0;
+  D.caixa.forEach(c => {
+    const k = _normLoja(c.loja); if (!lojasEsc.includes(k)) return;
+    const d = String(c.data).slice(0, 10); if (!dentro(d, R.de, R.ate)) return;
+    (c.gn_caixa_comprovante || []).forEach(x => {
+      const v = parseFloat(x.valor) || 0; if (!v) return;
+      const p = BI_PAG.find(p2 => p2.re.test(x.bandeira || ''));
+      if (p) pag[p.k] += v; else pagOutros += v;
+    });
+  });
+  return { total, prev, salao, deliv, dias: diasCom.size, porLoja, meses,
+    dowMedia: dow.map((v, i) => dowDias[i].size ? v / dowDias[i].size : null), pag, pagOutros };
+}
+
+function _biGBtn(on, onclick, txt, cls) {
+  return `<button type="button" class="${cls || ''}${on ? ' on' : ''}" onclick="${onclick}" style="flex:1;border:none;border-radius:8px;padding:6px 4px;font-size:11px;font-weight:800;font-family:inherit;cursor:pointer;background:${on ? 'var(--cor)' : 'transparent'};color:${on ? '#1A1D23' : 'var(--t2)'}">${txt}</button>`;
+}
+function _biVistaHtml() {
+  return `<div class="bi-vista" style="display:flex;gap:4px;background:var(--fill-sutil);border-radius:10px;padding:3px;margin-bottom:10px">
+    ${_biGBtn(_biVista === 'ind', "_biTrocarVista('ind')", '📊 Indicadores', 'bi-vista-ind')}${_biGBtn(_biVista === 'graf', "_biTrocarVista('graf')", '📈 Gráficos', 'bi-vista-graf')}</div>`;
+}
+function _biTrocarVista(v) { _biVista = v; renderDashboard(); }
+function _biGTrocarPer(p) { _biGPer = p; _biGOff = 0; renderDashboard(); }
+function _biGNav(d) { const n = _biGOff + d; if (n > 0) return; if (_biGRange(_biGPer, n).ate < BI_G_DESDE) return; _biGOff = n; renderDashboard(); }
+
+function _buildBiGraficos() {
+  const R = _biGRange(_biGPer, _biGOff);
+  const lojasTodas = _biLojas();
+  const lojasEsc = _biEscopo === 'REDE' ? lojasTodas : [_biEscopo];
+  const esc = s => window.escapeHtml(String(s == null ? '' : s));
+  const fR = v => _fmtBRL(v), fRs = v => _fmtBRLs(v);
+  const opEsc = `<option value="REDE"${_biEscopo === 'REDE' ? ' selected' : ''}>🌐 Rede — todas as lojas</option>` +
+    lojasTodas.map(l => `<option value="${l}"${_biEscopo === l ? ' selected' : ''}>${esc(LOJA_DISPLAY[l] || l)}</option>`).join('');
+  const podeVoltar = _biGRange(_biGPer, _biGOff - 1).ate >= BI_G_DESDE;
+  const topo = `<div class="bi-g-per" style="display:flex;gap:4px;background:var(--fill-sutil);border-radius:10px;padding:3px;margin-bottom:8px">
+      ${_biGBtn(_biGPer === 'mes', "_biGTrocarPer('mes')", 'Mês')}${_biGBtn(_biGPer === 'tri', "_biGTrocarPer('tri')", 'Trimestre')}${_biGBtn(_biGPer === 'ano', "_biGTrocarPer('ano')", 'Ano')}</div>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+      <button type="button" onclick="_biGNav(-1)" ${podeVoltar ? '' : 'disabled'} style="border:1px solid var(--b2);background:var(--s2);border-radius:8px;padding:6px 11px;color:var(--t2);font-family:inherit;cursor:pointer;${podeVoltar ? '' : 'opacity:.35'}">‹</button>
+      <div class="bi-g-rot" style="flex:1;text-align:center;font-size:12.5px;font-weight:800;color:var(--t1)">${esc(R.rot)}${R.parcial ? ' <span style="font-size:10px;color:var(--t3);font-weight:700">· em andamento</span>' : ''}</div>
+      <button type="button" onclick="_biGNav(1)" ${_biGOff < 0 ? '' : 'disabled'} style="border:1px solid var(--b2);background:var(--s2);border-radius:8px;padding:6px 11px;color:var(--t2);font-family:inherit;cursor:pointer;${_biGOff < 0 ? '' : 'opacity:.35'}">›</button>
+    </div>
+    <select onchange="_biTrocarEscopo(this.value)" style="width:100%;background:var(--s2);border:1px solid rgba(0,0,0,.12);border-radius:9px;padding:8px 10px;font-size:12px;font-weight:700;color:var(--t1);font-family:inherit;margin-bottom:12px">${opEsc}</select>`;
+  const D = _biGDados[_biGChave()];
+  if (!D) { _biGCarregar(); return topo + _skelPanel(4); }
+  if (D.erro) return topo + `<div class="empty-texto" style="padding:14px">Não consegui carregar as vendas agora. Troque de aba e volte.</div>`;
+  const c = _biGCalc(D, R, lojasEsc, lojasTodas);
+  const card = (titulo, sub, corpo, cls) => `<div class="bi-g-card ${cls || ''}" style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:12px 14px;margin-bottom:10px">
+      <div style="font-size:11px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;color:var(--t2)">${titulo}</div>
+      ${sub ? `<div style="font-size:9.5px;color:var(--t3);margin-bottom:8px">${sub}</div>` : '<div style="height:8px"></div>'}${corpo}</div>`;
+
+  // KPIs
+  const prevCompleto = R.prev.de >= BI_G_PRIMEIRO_DADO;
+  const varPct = prevCompleto && c.prev > 0 ? (c.total - c.prev) / c.prev * 100 : null;
+  const melhor = Object.entries(c.porLoja).filter(([k]) => _biEscopo === 'REDE').sort((a, b) => b[1] - a[1])[0];
+  const kpi = (lbl, val, sub) => `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:12px;padding:10px 11px;min-width:0">
+      <div style="font-size:9.5px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:.3px">${lbl}</div>
+      <div style="font-size:16px;font-weight:900;color:var(--t1);margin-top:2px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${val}</div>
+      ${sub ? `<div style="font-size:9.5px;color:var(--t3);margin-top:1px">${sub}</div>` : ''}</div>`;
+  const kpis = `<div class="bi-g-kpis" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:10px">
+    <div style="grid-column:1/-1">${kpi('Faturamento' + (R.parcial ? ' (até hoje)' : ''), fR(c.total), varPct === null ? (prevCompleto ? 'sem período anterior com dados pra comparar' : 'sem comparação: o período anterior começa antes de 10/07/2026, quando os dados começam') : `<b style="color:${varPct >= 0 ? 'var(--txt-green)' : 'var(--txt-red)'}">${varPct >= 0 ? '▲' : '▼'} ${Math.abs(varPct).toFixed(1).replace('.', ',')}%</b> vs ${fR(c.prev)} no período anterior${R.parcial ? ' (mesmos dias)' : ''}`)}</div>
+    ${kpi('Média por dia', c.dias ? fRs(c.total / c.dias) : '—', `${c.dias} dia${c.dias === 1 ? '' : 's'} com venda`)}
+    ${_biEscopo === 'REDE' ? kpi('Maior faturamento', melhor && melhor[1] > 0 ? esc(LOJA_DISPLAY[melhor[0]] || melhor[0]) : '—', melhor && melhor[1] > 0 ? fRs(melhor[1]) : '') : kpi('Na rede', (() => { const o = Object.entries(c.porLoja).sort((a, b) => b[1] - a[1]); const i = o.findIndex(x => x[0] === _biEscopo); return i >= 0 && o[i][1] > 0 ? (i + 1) + 'º de ' + o.length : '—'; })(), 'posição por faturamento')}
+  </div>`;
+  if (!c.total && !c.prev) return topo + kpis + `<div class="empty-texto" style="padding:14px;color:var(--t3)">Sem venda lançada neste período. Os dados começam em 10/07/2026.</div>`;
+
+  // 1. Faturamento por loja — barras horizontais, uma cor (a loja escolhida em destaque).
+  const lojasOrd = Object.entries(c.porLoja).sort((a, b) => b[1] - a[1]);
+  const maxL = Math.max(...lojasOrd.map(x => x[1])) || 1;
+  const g1 = card('Faturamento por loja', esc(R.rot) + ' · da maior pra menor', lojasOrd.map(([k, v]) => {
+    const dest = _biEscopo === 'REDE' || _biEscopo === k;
+    return `<div class="bi-g-loja" data-loja="${esc(k)}" title="${esc(LOJA_DISPLAY[k] || k)}: ${fR(v)}" style="display:flex;align-items:center;gap:8px;margin-bottom:5px">
+      <span style="font-size:11px;font-weight:700;color:${dest ? 'var(--t1)' : 'var(--t3)'};width:96px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(LOJA_DISPLAY[k] || k)}</span>
+      <span style="flex:1;height:10px;border-radius:0 4px 4px 0;background:var(--fill-sutil);overflow:hidden"><span style="display:block;height:100%;width:${v ? Math.max(1.5, v / maxL * 100) : 0}%;background:var(--vz-1);opacity:${dest ? 1 : .35};border-radius:0 4px 4px 0"></span></span>
+      <span style="font-size:10.5px;font-weight:800;color:var(--t1);font-variant-numeric:tabular-nums;width:74px;text-align:right;flex-shrink:0">${fRs(v)}</span></div>`;
+  }).join(''), 'bi-g-lojas');
+
+  // 2. Evolução mês a mês — 12 meses até o fim do período (sem os meses antes dos dados).
+  const fimD = new Date(R.ate + 'T12:00:00');
+  const mesesEvo = []; for (let i = 11; i >= 0; i--) { const d = new Date(fimD.getFullYear(), fimD.getMonth() - i, 1); const ym = d.getFullYear() + '-' + _p2(d.getMonth() + 1); if (ym >= BI_G_DESDE.slice(0, 7)) mesesEvo.push(ym); }
+  const mesAtual = _biGIso(new Date()).slice(0, 7);
+  const maxM = Math.max(...mesesEvo.map(m => c.meses[m] || 0)) || 1;
+  const W = 320, Hh = 130, bw = W / Math.max(mesesEvo.length, 1);
+  const noPer = m => m >= R.de.slice(0, 7) && m <= R.ate.slice(0, 7);
+  const barras = mesesEvo.map((m, i) => {
+    const v = c.meses[m] || 0, h = v / maxM * (Hh - 22), x = i * bw + bw * .18, w = bw * .64, y = Hh - 14 - h;
+    const parc = m === mesAtual;
+    return `<g class="bi-g-mes" data-mes="${m}"><title>${_BI_MES_ABR[+m.slice(5) - 1]}/${m.slice(0, 4)}: ${fR(v)}${parc ? ' (em andamento)' : ''}</title>
+      <path d="M${x},${Hh - 14} V${y + Math.min(4, h)} Q${x},${y} ${x + Math.min(4, w / 2)},${y} H${x + w - Math.min(4, w / 2)} Q${x + w},${y} ${x + w},${y + Math.min(4, h)} V${Hh - 14} Z" fill="var(--vz-1)" opacity="${noPer(m) ? (parc ? .55 : 1) : .35}"/>
+      <text x="${x + w / 2}" y="${Hh - 3}" text-anchor="middle" font-size="9" fill="var(--t3)">${_BI_MES_ABR[+m.slice(5) - 1]}</text>
+      ${v && (i === mesesEvo.length - 1 || v === maxM) ? `<text x="${x + w / 2}" y="${y - 3}" text-anchor="middle" font-size="8.5" font-weight="700" fill="var(--t2)">${fRs(v)}</text>` : ''}</g>`;
+  }).join('');
+  const g2 = card('Evolução mês a mês', `${_biEscopo === 'REDE' ? 'Rede' : esc(LOJA_DISPLAY[_biEscopo] || _biEscopo)} · em destaque o período escolhido${mesesEvo.includes(mesAtual) ? '; o mês atual (mais claro) está em andamento' : ''}`,
+    `<svg viewBox="0 0 ${W} ${Hh}" style="width:100%;height:auto;display:block" role="img" aria-label="Faturamento por mês"><line x1="0" y1="${Hh - 14}" x2="${W}" y2="${Hh - 14}" stroke="var(--b2)" stroke-width="1"/>${barras}</svg>`, 'bi-g-evo');
+
+  // 3. Formas de pagamento — rosca + legenda com % e R$ (texto nas cores de texto).
+  const pagTot = BI_PAG.reduce((s, p) => s + c.pag[p.k], 0) + c.pagOutros;
+  let g3;
+  if (!pagTot) g3 = card('Formas de pagamento', D.erroPag ? 'não deu pra carregar os comprovantes' : 'sem comprovante lançado no app Caixa neste período', '', 'bi-g-pag');
+  else {
+    const fatias = BI_PAG.map((p, i) => ({ ...p, v: c.pag[p.k], cor: `var(--vz-${i + 1})` })).concat(c.pagOutros ? [{ k: 'outros', rot: 'Outros', v: c.pagOutros, cor: 'var(--t4)' }] : []).filter(f => f.v > 0);
+    const R0 = 46, r0 = 28, cx = 56, cy = 56; let a = -Math.PI / 2;
+    const arcos = fatias.map(f => {
+      const ang = f.v / pagTot * Math.PI * 2, a2 = a + ang, gap = fatias.length > 1 ? .025 : 0;
+      const p = (rr, t) => [cx + rr * Math.cos(t), cy + rr * Math.sin(t)];
+      const [x1, y1] = p(R0, a + gap), [x2, y2] = p(R0, a2 - gap), [x3, y3] = p(r0, a2 - gap), [x4, y4] = p(r0, a + gap);
+      const larg = ang - 2 * gap > Math.PI ? 1 : 0;
+      const d = fatias.length === 1 ? `M${cx},${cy - R0} A${R0},${R0} 0 1 1 ${cx - .01},${cy - R0} Z M${cx},${cy - r0} A${r0},${r0} 0 1 0 ${cx + .01},${cy - r0} Z`
+        : `M${x1},${y1} A${R0},${R0} 0 ${larg} 1 ${x2},${y2} L${x3},${y3} A${r0},${r0} 0 ${larg} 0 ${x4},${y4} Z`;
+      a = a2;
+      return `<path d="${d}" fill="${f.cor}" fill-rule="evenodd"><title>${f.rot}: ${fR(f.v)} (${(f.v / pagTot * 100).toFixed(1).replace('.', ',')}%)</title></path>`;
+    }).join('');
+    g3 = card('Formas de pagamento', 'dos comprovantes lançados no app Caixa (valores cobrados, com os 10%)',
+      `<div style="display:flex;gap:12px;align-items:center"><svg viewBox="0 0 112 112" style="width:112px;height:112px;flex-shrink:0" role="img" aria-label="Formas de pagamento">${arcos}</svg>
+        <div style="flex:1;min-width:0">${fatias.map(f => `<div class="bi-g-pag-linha" style="display:flex;align-items:center;gap:6px;font-size:10.5px;padding:2px 0">
+          <span style="width:9px;height:9px;border-radius:2px;background:${f.cor};flex-shrink:0"></span>
+          <span style="flex:1;min-width:0;color:var(--t2);font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${f.rot}</span>
+          <span style="color:var(--t1);font-weight:800;font-variant-numeric:tabular-nums">${(f.v / pagTot * 100).toFixed(0)}%</span>
+          <span style="color:var(--t3);font-variant-numeric:tabular-nums;width:58px;text-align:right">${fRs(f.v)}</span></div>`).join('')}</div></div>`, 'bi-g-pag');
+  }
+
+  // 4. Salão × Delivery (barra 100%) + média por dia da semana.
+  const sd = c.salao + c.deliv;
+  const pS = sd ? c.salao / sd * 100 : 0;
+  const maxW = Math.max(...c.dowMedia.map(v => v || 0)) || 1;
+  const DOW = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
+  const melhorDia = c.dowMedia.indexOf(Math.max(...c.dowMedia.map(v => v || 0)));
+  const g4 = card('Salão × Delivery', esc(R.rot), sd ? `<div class="bi-g-canal" style="display:flex;height:14px;border-radius:4px;overflow:hidden;gap:2px;margin-bottom:6px">
+        <span title="Salão: ${fR(c.salao)}" style="width:${pS}%;background:var(--vz-1)"></span><span title="Delivery: ${fR(c.deliv)}" style="flex:1;background:var(--vz-2)"></span></div>
+      <div style="display:flex;justify-content:space-between;font-size:10.5px;color:var(--t2);font-weight:700">
+        <span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:var(--vz-1);margin-right:4px"></span>Salão ${pS.toFixed(0)}% · ${fRs(c.salao)}</span>
+        <span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:var(--vz-2);margin-right:4px"></span>Delivery ${(100 - pS).toFixed(0)}% · ${fRs(c.deliv)}</span></div>` : '<div style="font-size:11px;color:var(--t3)">Sem venda no período.</div>', 'bi-g-sd')
+    + card('Média por dia da semana', `quanto vende, em média, cada dia da semana · ${esc(R.rot)}${melhorDia >= 0 && c.dowMedia[melhorDia] ? ` · melhor: ${DOW[melhorDia]}` : ''}`,
+      `<div class="bi-g-dow" style="display:flex;align-items:flex-end;gap:6px;height:110px">${c.dowMedia.map((v, i) => `<div title="${DOW[i]}: ${v ? fR(v) + ' em média' : 'sem venda'}" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
+        <span style="font-size:8.5px;font-weight:700;color:var(--t2);margin-bottom:2px;white-space:nowrap">${v ? (v / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) + 'k' : ''}</span>
+        <span style="width:70%;height:${v ? Math.max(2, v / maxW * 78) : 0}px;background:var(--vz-1);border-radius:4px 4px 0 0;opacity:${i === melhorDia ? 1 : .7}"></span>
+        <span style="font-size:9.5px;color:var(--t3);margin-top:3px">${DOW[i]}</span></div>`).join('')}</div>`, 'bi-g-dowc');
+
+  return topo + kpis + g1 + g2 + g3 + g4 + `<div style="font-size:9.5px;color:var(--t3);line-height:1.5;margin-bottom:10px">Faturamento = venda do salão + delivery lançada no Check-list (o mesmo do Painel). Dados desde 10/07/2026. Toque/passe o dedo nas barras pra ver o valor.</div>`;
+}
+
 function _buildBiTab(fat, maxVal, loading) {
   if (loading) return _buildBiDashboard() + _skelPanel(2);
   const lojasConsolidado = _lojasFatConsolidado();
