@@ -23,7 +23,7 @@ const VISITAS = [
   { data: '2026-10-01', loja: 'Campo Grande', visitante: 'Tiago', hora_chegada: '08:41', hora_saida: '11:02', tipo_visita: 'remoto' },
   { data: '2026-10-02', loja: 'Bangu', visitante: 'Tiago', hora_chegada: '18:24', hora_saida: '20:10', tipo_visita: 'rotina', obs: 'Conferência de câmara <fria>' },
   { data: '2026-10-06', loja: 'FOLGA', visitante: 'Tiago', hora_chegada: '00:00', hora_saida: '00:00' },
-  { data: '2026-10-09', loja: 'Bangu', visitante: 'Tiago', hora_chegada: '13:08', hora_saida: '13:50', tipo_visita: 'rotina' },
+  { data: '2026-10-09', loja: 'Bangu', visitante: 'Tiago', hora_chegada: '13:08', hora_saida: '13:50', tipo_visita: 'rotina', foto_chegada: 'https://exemplo.test/chegada.jpg', foto_saida: 'https://exemplo.test/saida.jpg' },
   { data: '2026-10-09', loja: 'Caxias', visitante: 'Tiago', hora_chegada: '13:57', hora_saida: null, tipo_visita: 'rotina' },
   ...LOTE.map(l => ({ data: '2026-10-13', loja: l, visitante: 'Tiago', hora_chegada: '07:45', hora_saida: '17:51', tipo_visita: 'remoto' })),
   { data: '2026-10-14', loja: 'Boulevard', visitante: 'Tiago', hora_chegada: '09:15', hora_saida: '10:05', tipo_visita: 'rotina' },
@@ -143,6 +143,17 @@ const VISITAS = [
   check('sem tabela: o calendário continua igual', /<table class="cal">/.test(semTab.html) && /Outubro 2026/.test(semTab.html) && /💻 11 lojas/.test(semTab.html) && /18:24 → 20:10/.test(semTab.html));
   check('sem tabela: some a seção "Entradas e saídas" (e as durações)', !/Entradas e saídas/.test(semTab.html) && !/<table class="det-tab">/.test(semTab.html) && !/10h 6min/.test(semTab.html));
   check('sem tabela: KPIs e legenda continuam', /Visitas presenciais/.test(semTab.html) && /presencial · 💻 remoto/.test(semTab.html));
+  // "Pode fazer as fotos maiores também": sem a tabela, as fotos ganham o espaço.
+  check('com tabela: fotos no tamanho de sempre (duas por linha, até 330px)', /<div class="fotos">/.test(mes.html) && !/fotos grande/.test(mes.html) && (mes.html.match(/<img src="https:\/\/exemplo/g) || []).length === 2);
+  check('sem tabela (mês, paisagem): fotos grandes — duas por linha, até 150mm de altura', /<div class="fotos grande">/.test(semTab.html) && /\.fotos\.grande \.foto img\{max-height:150mm\}/.test(semTab.html) && !/grid-template-columns:1fr;/.test(semTab.html));
+  const diaSem = await gerar('diaria', '2026-10-09');
+  check('sem tabela (dia, retrato): fotos grandes lado a lado, até 110mm (cabem na 1ª folha, com o rodapé)', /<div class="fotos grande">/.test(diaSem.html) && /\.fotos\.grande \.foto img\{max-height:110mm\}/.test(diaSem.html) && (diaSem.html.match(/<img src="https:\/\/exemplo/g) || []).length === 2);
+  {
+    const imp3 = await ctx.newPage();
+    await imp3.setContent(diaSem.html.replace(/<script>window\.onload[\s\S]*?<\/script>/, ''));
+    await imp3.pdf({ path: path.join(CAMINHOS.TMP, 'visitas_pdf_dia_fotos.pdf'), preferCSSPageSize: true, printBackground: true });
+    await imp3.close();
+  }
   await page.evaluate(() => _visSupSetPdfDetalhe(true));
   const comTab = await gerar('mensal', '2026-10-15');
   check('voltando pra "Com entradas e saídas", a tabela volta', /Entradas e saídas/.test(comTab.html) && /<table class="det-tab">/.test(comTab.html));
