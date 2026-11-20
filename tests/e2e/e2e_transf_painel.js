@@ -95,6 +95,8 @@ const MOTIVO_LONGO = 'Desistiu por conta que não tinha mais o acompanhamento qu
     _dashDeclPer = {}; _dashTransfPer = {}; _dashDeclTransfPer = {};
     const host = document.createElement('div');
     host.style.cssText = 'width:390px';
+    // 20/11/2026: as lojas vêm fechadas — o motivo se lê com a loja aberta, como na tela.
+    if (typeof _plAbertas !== 'undefined') _plAbertas.cancel.add('CAMPO GRANDE');
     host.innerHTML = _buildCancelPanel();
     document.body.appendChild(host);
     const el = [...host.querySelectorAll('div')].find(d => d.textContent.trim() === m);
