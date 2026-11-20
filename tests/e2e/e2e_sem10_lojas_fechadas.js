@@ -74,6 +74,55 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   check('"Abrir todas" abre todas e vira "Fechar todas"; "Fechar todas" fecha', r.todas && r.nenhuma, r);
   check('as notas continuam no conteúdo (relatórios e contas não mudam)', r.textoTemNotas, r);
   check('nada passa da largura em 390 px', r.largos === 0, r.largos);
+  // ── Mesma coisa em Cancel. e transf. (cancelamentos + transferências de mesa) ──────
+  const c = await page.evaluate(async () => {
+    const canc = (k, nome, n) => ({ k, nome, valor: n * 50, semFoto: 0, itens: Array.from({ length: n }, (_, i) => ({ data: '2026-11-10', valor: 50, motivo: 'motivo ' + k + ' ' + i, motivo_categoria: 'Cliente desistiu', autor: 'Gerente', foto: null })) });
+    const tr = (k, nome, n) => ({ k, nome, semFoto: 0, itens: Array.from({ length: n }, (_, i) => ({ data: '2026-11-10', origem: i, destino: i + 1, motivo: 'troca ' + k + ' ' + i, autor: 'Gerente', foto: null })) });
+    const dc = { lojas: [canc('BANGU', 'Bangu', 30), canc('CAXIAS', 'Caxias', 25)], qtd: 55, semFoto: 0, nLojas: 11, semCancel: [{ k: 'PEDREIRA', nome: 'Pedreira', estado: 'declarado' }] };
+    dc.valor = 55 * 50;
+    const dt = { lojas: [tr('BANGU', 'Bangu', 12), tr('NORTE SHOPPING', 'Norte Shopping', 9)], qtd: 21, nLojas: 11, semTransf: [] };
+    _dashCancelPer = {}; _dashTransfPer = {}; _dashFat = { BANGU: 300000, CAXIAS: 200000, PEDREIRA: 150000 };
+    _cancelMacroDados = () => dc; _transfMacroDados = () => dt;
+    _cancelPorCategoriaHtml = () => ''; _cancelSemNadaHtml = () => ''; _transfSemNadaHtml = () => '';
+    const el = document.getElementById('dash-section');
+    const montar = () => { el.innerHTML = _buildCancelPanel(); };
+    montar();
+    const vis = (p, k) => { const b = [...el.querySelectorAll('.pl-loja')].find(x => x.dataset.painel === p && x.dataset.loja === k); const n = b && b.querySelector('.pl-notas'); return !!n && getComputedStyle(n).display !== 'none'; };
+    const out = { fechadas: !vis('cancel', 'BANGU') && !vis('cancel', 'CAXIAS') && !vis('transf', 'BANGU') && !vis('transf', 'NORTE SHOPPING'),
+      altura: Math.round(el.getBoundingClientRect().height), textoTem: /motivo BANGU 29/.test(el.textContent) && /troca NORTE SHOPPING 8/.test(el.textContent) };
+    [...el.querySelectorAll('.pl-loja')].find(x => x.dataset.painel === 'cancel' && x.dataset.loja === 'CAXIAS').querySelector('.pl-cab').click();
+    out.abriuCaxias = vis('cancel', 'CAXIAS') && !vis('cancel', 'BANGU') && !vis('transf', 'BANGU');
+    // O ranking de cancelamento leva até a loja; a loja "zerada" (Pedreira, declarou que não
+    // houve) não tem bloco e não é clicável.
+    window.scrollTo(0, 0);
+    const rkC = [...el.querySelectorAll('.pl-rank')].filter(x => x.getAttribute('onclick') && x.getAttribute('onclick').includes("'cancel'"));
+    out.pedreiraClicavel = rkC.some(x => x.getAttribute('onclick').includes('PEDREIRA'));
+    rkC.find(x => x.getAttribute('onclick').includes("'BANGU'")).click(); await new Promise(r => setTimeout(r, 900));
+    out.rankCancel = vis('cancel', 'BANGU');
+    const rkT = [...el.querySelectorAll('.pl-rank')].find(x => (x.getAttribute('onclick') || '').includes("'transf','NORTE SHOPPING'"));
+    rkT.click(); await new Promise(r => setTimeout(r, 900));
+    const hdr = document.querySelector('.app-hdr');
+    out.rankTransf = vis('transf', 'NORTE SHOPPING');
+    out.topTransf = Math.round([...el.querySelectorAll('.pl-loja')].find(x => x.dataset.painel === 'transf' && x.dataset.loja === 'NORTE SHOPPING').getBoundingClientRect().top);
+    out.hdrH = Math.round(hdr.getBoundingClientRect().height);
+    // Cada lista tem o seu "abrir todas"; abrir as de cancelamento não abre as de transferência.
+    // Fecha a Bangu (aberta pelo ranking): com uma fechada, o botão volta a ser "Abrir todas".
+    [...el.querySelectorAll('.pl-loja')].find(x => x.dataset.painel === 'cancel' && x.dataset.loja === 'BANGU').querySelector('.pl-cab').click();
+    const btnC = [...el.querySelectorAll('.pl-todas')].find(x => x.dataset.painel === 'cancel');
+    out.btnTxt = btnC.textContent.trim();
+    btnC.click();
+    out.todasCancel = vis('cancel', 'BANGU') && vis('cancel', 'CAXIAS') && !vis('transf', 'BANGU');
+    montar();
+    out.persistiu = vis('cancel', 'CAXIAS') && vis('transf', 'NORTE SHOPPING') && !vis('transf', 'BANGU');
+    return out;
+  });
+  check('Cancel. e transf.: cancelamentos e transferências vêm fechados por loja', c.fechadas && c.altura > 200, c);
+  check('…tocar abre só aquela loja daquela lista', c.abriuCaxias, c);
+  check('…o ranking de cancelamento leva até a loja; a loja zerada (sem bloco) não é clicável', c.rankCancel && !c.pedreiraClicavel, c);
+  check('…o ranking de transferências também, parando abaixo do cabeçalho fixo', c.rankTransf && c.topTransf >= c.hdrH && c.topTransf < c.hdrH + 60, c);
+  check('…"Abrir todas" de uma lista não abre a outra; e o aberto continua aberto no redesenho', c.btnTxt === '▼ Abrir todas' && c.todasCancel && c.persistiu, c);
+  check('…os motivos continuam no conteúdo (relatórios não mudam)', c.textoTem, c);
+
   console.log('medidas:', JSON.stringify({ altura: r.altura, hdrH: r.hdrH, rankTop: r.rankTop }));
   check('nenhum erro de JavaScript', erros.length === 0, erros);
   console.log(`\n${ok} OK, ${falhou} falhou`);
