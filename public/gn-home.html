@@ -16361,6 +16361,15 @@ function _vendEstoqueHtml(d, fechada) {
     ${avisos.map(a => `<div class="vend-est-aviso" style="font-size:9.5px;color:var(--txt-amber);font-weight:700;margin-top:3px">⚠ ${a}</div>`).join('')}
   </div>`;
 }
+// Lojas com a Coca aberta por tipo na tabela dia a dia (só DOM, sem redesenhar o Painel).
+const _vendCocaAbertas = new Set();
+function _vendToggleCoca(k) {
+  if (_vendCocaAbertas.has(k)) _vendCocaAbertas.delete(k); else _vendCocaAbertas.add(k);
+  const aberta = _vendCocaAbertas.has(k);
+  document.querySelectorAll('.vend-coca-tipo').forEach(tr => { if (tr.dataset.loja === k) tr.style.display = aberta ? 'table-row' : 'none'; });
+  const box = [...document.querySelectorAll('.vend-loja')].find(x => x.dataset.loja === k);
+  const seta = box && box.querySelector('.vend-coca-seta'); if (seta) seta.textContent = aberta ? '▲' : '▼';
+}
 function _vendNavSemana(dir) {
   const novo = _vendGerOff + dir;
   if (novo > 1) return;
@@ -16420,6 +16429,7 @@ function _buildVendidosPanel() {
       .map(([t, v, s]) => `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:12px;padding:9px 10px;min-width:0"><div style="font-size:9.5px;color:var(--t3);font-weight:700">${t}</div><div style="font-size:14px;font-weight:800;color:var(--t1);font-variant-numeric:tabular-nums">${v}</div>${s ? `<div style="font-size:9px;color:var(--t4)">${s}</div>` : ''}</div>`).join('')}
   </div>`;
 
+  const cocaCad = ((_vendGerData && _vendGerData.cadastro) || []).filter(c => c.grupo === 'coca' && c.ativo);
   const linhas = chaves.map(k => {
     const d = porLoja[k], cor = COR_LOJA[k] || '#b81a1a';
     const lancados = devidos.filter(x => d.dias[diasISO.indexOf(x)]).length;
@@ -16430,12 +16440,27 @@ function _buildVendidosPanel() {
     const linhaT = (rot, key, casas) => `<tr><td style="padding:3px 4px;color:var(--t2);font-weight:700;white-space:nowrap;position:sticky;left:0;background:var(--s2);box-shadow:1px 0 0 var(--b3)">${rot}</td>${t.map((x, i) => {
       const devido = devidos.includes(diasISO[i]);
       return `<td style="padding:3px 3px;text-align:center;font-variant-numeric:tabular-nums;border-top:1px dashed rgba(0,0,0,.07);color:${x ? 'var(--t1)' : devido ? 'var(--txt-red)' : 'var(--t4)'}">${x ? _vendNum(x[key], casas) : devido ? '✕' : '—'}</td>`; }).join('')}</tr>`;
-    // Chopp × barris: só referência — o barril é finalizado quando acaba.
+    // Coca por tipo, dia a dia: a linha "Coca (un)" é a soma; tocar nela abre uma linha por
+    // tipo (lata, KS, Zero…), que é como a gerência lança e como o estoque é contado.
+    const cocaTipos = cocaCad.map(c => ({ id: c.id, nome: c.nome.replace(/^Coca-Cola\s*/i, '') || c.nome,
+      dia: d.dias.map(r => (r && r.itens && r.itens[c.id]) ? (+r.itens[c.id].q || 0) : null) }));
+    const cocaAberta = _vendCocaAbertas.has(k);
+    const linhaCoca = `<tr class="vend-coca-total" role="button" tabindex="0" onclick="_vendToggleCoca('${k}')" style="cursor:pointer"><td style="padding:3px 4px;color:var(--t2);font-weight:700;white-space:nowrap;position:sticky;left:0;background:var(--s2);box-shadow:1px 0 0 var(--b3)">🥤 Coca (un) <span class="vend-coca-seta" style="color:var(--t4);font-size:9px">${cocaTipos.length ? (cocaAberta ? '▲' : '▼') : ''}</span></td>${t.map((x, i) => {
+      const devido = devidos.includes(diasISO[i]);
+      return `<td style="padding:3px 3px;text-align:center;font-variant-numeric:tabular-nums;border-top:1px dashed rgba(0,0,0,.07);color:${x ? 'var(--t1)' : devido ? 'var(--txt-red)' : 'var(--t4)'}">${x ? _vendNum(x.coca_un, 0) : devido ? '✕' : '—'}</td>`; }).join('')}</tr>` +
+      cocaTipos.map(c => `<tr class="vend-coca-tipo" data-loja="${k}" style="display:${cocaAberta ? 'table-row' : 'none'}"><td style="padding:2px 4px 2px 18px;color:var(--t3);white-space:nowrap;position:sticky;left:0;background:var(--s2);box-shadow:1px 0 0 var(--b3)">${window.escapeHtml(c.nome)}</td>${c.dia.map(q => `<td style="padding:2px 3px;text-align:center;font-variant-numeric:tabular-nums;color:${q === null ? 'var(--t4)' : 'var(--t2)'}">${q === null ? '—' : _vendNum(q, 0)}</td>`).join('')}</tr>`).join('');
+    // Chopp × barris: só referência — o barril é finalizado quando acaba. A % só aparece com
+    // a semana inteira lançada: com dia faltando (ou antes de os vendidos começarem) o
+    // "vendido" é parcial e a % sairia baixa por falta de lançamento, não por perda (print do
+    // dono, 20/11: "vendidos 0,0 L · barris 5 (250 L) · 0%" antes de começar).
+    const semanaLancada = devidos.length > 0 && lancados === devidos.length;
     const chopp = tipo => {
       const vend = tipo === 'CLARO' ? cl : vi, bl = d.barrisL[tipo], nb = d.barris[tipo];
       if (!vend && !nb) return '';
+      const rot = tipo === 'CLARO' ? '🍺 Claro' : '🍷 Vinho';
+      if (!semanaLancada) return `<div class="vend-chopp" style="font-size:10px;color:var(--t2);font-variant-numeric:tabular-nums">${rot}: barris finalizados ${nb} (${_vendNum(bl)} L)${vend ? ` · vendidos ${_vendNum(vend, 1)} L até agora` : ''} <span style="color:var(--t4)">— a comparação sai com a semana toda lançada</span></div>`;
       const pct = bl > 0 ? vend / bl * 100 : null;
-      return `<div style="font-size:10px;color:var(--t2);font-variant-numeric:tabular-nums">${tipo === 'CLARO' ? '🍺 Claro' : '🍷 Vinho'}: vendidos <b>${_vendNum(vend, 1)} L</b> · barris finalizados ${nb} (${_vendNum(bl)} L)${pct === null ? '' : ` · <b>${pct.toFixed(0)}%</b> do volume dos barris`}</div>`;
+      return `<div class="vend-chopp" style="font-size:10px;color:var(--t2);font-variant-numeric:tabular-nums">${rot}: vendidos <b>${_vendNum(vend, 1)} L</b> · barris finalizados ${nb} (${_vendNum(bl)} L)${pct === null ? '' : ` · <b>${pct.toFixed(0)}%</b> do volume dos barris`}</div>`;
     };
     const choppHtml = chopp('CLARO') + chopp('VINHO');
     return `<div class="vend-loja" data-loja="${k}" style="background:var(--s2);border:1px solid rgba(0,0,0,.08);border-left:3px solid ${cor};border-radius:12px;padding:11px 14px;margin-bottom:8px">
@@ -16446,7 +16471,7 @@ function _buildVendidosPanel() {
       <div style="font-size:10.5px;color:var(--t2);font-weight:700;margin-bottom:4px">🥤 ${_vendNum(coca)} Coca · 🍺 ${_vendNum(cl, 1)} L claro · 🍷 ${_vendNum(vi, 1)} L vinho</div>
       <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:9.5px;width:100%;min-width:400px">
         <tr><th style="text-align:left;padding:2px 4px;color:var(--t3);position:sticky;left:0;background:var(--s2);box-shadow:1px 0 0 var(--b3)">Item</th>${DIAS_LABEL_HOME.map(l => `<th style="padding:2px 3px;text-align:center;color:var(--t3)">${l}</th>`).join('')}</tr>
-        ${linhaT('🥤 Coca (un)', 'coca_un', 0)}${linhaT('🍺 Claro (L)', 'chopp_l_claro', 1)}${linhaT('🍷 Vinho (L)', 'chopp_l_vinho', 1)}
+        ${linhaCoca}${linhaT('🍺 Claro (L)', 'chopp_l_claro', 1)}${linhaT('🍷 Vinho (L)', 'chopp_l_vinho', 1)}
       </table></div>
       ${choppHtml ? `<div style="margin-top:6px;border-top:1px solid rgba(0,0,0,.08);padding-top:5px">${choppHtml}</div>` : ''}
       ${_vendEstoqueHtml(d, _vendGerOff <= 0)}

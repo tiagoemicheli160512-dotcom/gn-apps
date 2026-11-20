@@ -236,6 +236,49 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   check('prato sem gramatura mostra "Falta a gramatura — preencha as gramas, marque ativo e salve"; o do blend pede pra conferir; o ativo nada', /Falta a gramatura/.test(pend.pastel) && /conferir se o blend é 100% carne de sol — confira/.test(pend.cabra) && pend.pic === '', pend);
   check('prato que o dono já salvou zerado e inativo (decisão tomada) não conta como pendente nem mostra aviso', pend.rei === '' && /^⏳ 2 aguardando/.test(pend.cab.trim()), pend);
 
+  // ── 7. Print do dono (20/11): Coca por tipo e chopp × barris sem % com semana incompleta ──
+  const ct = await page.evaluate(async () => {
+    const it = (lata, ks, zl, zk, claro) => ({ coca_lata: { q: lata, grupo: 'coca' }, coca_ks: { q: ks, grupo: 'coca' }, coca_zero_lata: { q: zl, grupo: 'coca' }, coca_zero_ks: { q: zk, grupo: 'coca' }, chopp_claro_350: { q: claro, grupo: 'chopp', ml: 350, chopp_tipo: 'CLARO' } });
+    const tot = (lata, ks, zl, zk, claro) => ({ coca_un: lata + ks + zl + zk, chopp_l_claro: claro * 0.35, chopp_l_vinho: 0 });
+    window.gnFetchJson = async (url, h, nome, fb) => {
+      if (nome === 'vendidos:diario') return [
+        { loja: 'BANGU', data: '2026-11-23', itens: it(10, 5, 3, 2, 100), totais: tot(10, 5, 3, 2, 100), lancado_por: 'F' },
+        { loja: 'BANGU', data: '2026-11-24', itens: it(12, 6, 4, 1, 100), totais: tot(12, 6, 4, 1, 100), lancado_por: 'F' },
+        { loja: 'BANGU', data: '2026-11-25', itens: it(8, 4, 2, 0, 100), totais: tot(8, 4, 2, 0, 100), lancado_por: 'F' },
+        { loja: 'CAXIAS', data: '2026-11-23', itens: it(1, 1, 1, 1, 10), totais: tot(1, 1, 1, 1, 10), lancado_por: 'A' },
+      ];
+      if (nome === 'vendidos:barris') return [
+        { loja_slug: 'bangu', produto: 'Barril Chopp claro 50 litros', finalizado_em: '2026-11-24T20:00:00Z' },
+        { loja_slug: 'caxias', produto: 'Barril Chopp claro 50 litros', finalizado_em: '2026-11-24T20:00:00Z' },
+        { loja_slug: 'pedreira', produto: 'Barril Chopp claro 50 litros', finalizado_em: '2026-11-24T20:00:00Z' },
+      ];
+      if (nome === 'vendidos:cadastro') return [
+        { id: 'coca_ks', grupo: 'coca', nome: 'Coca-Cola KS 290 ml', ativo: true }, { id: 'coca_lata', grupo: 'coca', nome: 'Coca-Cola lata 350 ml', ativo: true },
+        { id: 'coca_zero_ks', grupo: 'coca', nome: 'Coca-Cola Zero KS 290 ml', ativo: true }, { id: 'coca_zero_lata', grupo: 'coca', nome: 'Coca-Cola Zero lata 350 ml', ativo: true }];
+      return fb === undefined ? [] : fb;
+    };
+    _vendGerOff = 1; await _loadVendidosGerencia();
+    const el = document.getElementById('dash-section'); el.innerHTML = _buildVendidosPanel();
+    const loja = k => el.querySelector(`.vend-loja[data-loja="${k}"]`);
+    const tipos = k => [...loja(k).querySelectorAll('.vend-coca-tipo')];
+    const out = { fechado: tipos('BANGU').every(tr => getComputedStyle(tr).display === 'none'), nTipos: tipos('BANGU').length,
+      total: [...loja('BANGU').querySelector('.vend-coca-total').cells].map(c => c.innerText.trim()).join(' ') };
+    loja('BANGU').querySelector('.vend-coca-total').click();
+    out.aberto = tipos('BANGU').every(tr => getComputedStyle(tr).display !== 'none') && tipos('CAXIAS').every(tr => getComputedStyle(tr).display === 'none');
+    out.linhas = tipos('BANGU').map(tr => [...tr.cells].map(c => c.innerText.trim()).join(' '));
+    el.innerHTML = _buildVendidosPanel();
+    out.persistiu = tipos('BANGU').every(tr => getComputedStyle(tr).display !== 'none');
+    const chopp = k => [...(loja(k) ? loja(k).querySelectorAll('.vend-chopp') : [])].map(x => x.innerText.replace(/\s+/g, ' ')).join(' | ');
+    out.cBangu = chopp('BANGU'); out.cCaxias = chopp('CAXIAS'); out.cPedreira = chopp('PEDREIRA');
+    return out;
+  });
+  check('Coca por dia: a linha é o total (Seg 20, Ter 23, Qua 14) e vem com ▼, os tipos fechados', ct.fechado && ct.nTipos === 4 && /Coca \(un\) ▼ 20 23 14/.test(ct.total), ct);
+  check('…tocar abre uma linha por tipo, com o que foi lançado de cada um (só naquela loja)', ct.aberto && ct.linhas.includes('lata 350 ml 10 12 8 — — — —') && ct.linhas.includes('Zero KS 290 ml 2 1 0 — — — —'), ct.linhas);
+  check('…e continua aberto quando o Painel redesenha', ct.persistiu, ct);
+  check('chopp × barris com a semana toda lançada: mostra a % (Bangu 105 L de 50 L = 210%)', /vendidos 105,0 L · barris finalizados 1 \(50 L\) · 210% do volume/.test(ct.cBangu), ct.cBangu);
+  check('…com dia faltando: sem %, só os barris e "a comparação sai com a semana toda lançada" (Caxias 1/3)', !/%/.test(ct.cCaxias) && /barris finalizados 1 \(50 L\) · vendidos 3,5 L até agora — a comparação sai com a semana toda lançada/.test(ct.cCaxias), ct.cCaxias);
+  check('…sem nenhum lançamento: nada de "0%" (Pedreira só com barril)', !/%/.test(ct.cPedreira) && /barris finalizados 1 \(50 L\)/.test(ct.cPedreira) && !/vendidos/.test(ct.cPedreira), ct.cPedreira);
+
   check('nenhum erro de JavaScript', erros.length === 0, erros);
   console.log(`\n${ok} OK, ${falhou} falhou`);
   await browser.close();
