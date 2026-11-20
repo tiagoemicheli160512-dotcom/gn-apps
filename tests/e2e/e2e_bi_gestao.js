@@ -132,7 +132,19 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   check('botão Whats abre o wa.me com o texto', r.wa.startsWith('https://wa.me/?text=') && decodeURIComponent(r.wa.split('text=')[1]).includes('Próximos passos'));
   check('botão PDF manda o texto com título do período', r.pdf && r.pdf[1] === 'Relatório de Gestão — nov/2026' && /Próximos passos/.test(r.pdf[0]), r.pdf && r.pdf[1]);
   check('trimestre: em dezembro (3º mês do 4º tri) sem atalho de trimestre fechado', r.bannerTri === false);
-  check('trimestre em andamento também gera o relatório (marcado como em andamento)', /4º tri 2026 \(out–dez\) \(em andamento, até 03\/12\)/.test(r.triTxt) && /andamento: os números ainda vão mudar/.test(r.triTxt), r.triTxt.slice(0, 200));
+  check('trimestre em andamento também gera o relatório (até ONTEM: o dia de hoje ainda não fechou)', /4º tri 2026 \(out–dez\) \(em andamento, até 02\/12 — hoje fica de fora, o dia ainda não fechou\)/.test(r.triTxt) && /andamento: os números ainda vão mudar/.test(r.triTxt), r.triTxt.slice(0, 200));
+
+  // "dá pra ter a sugestão por loja do que atuar?" — seção por loja, com o número e a ação.
+  const porLoja = (w.split('*🏪 Onde atuar em cada loja*')[1] || '');
+  const bloco = k => ((porLoja.split('• *' + k + '*')[1] || '').split('\n• ')[0]);
+  check('seção "Onde atuar em cada loja" depois dos próximos passos', porLoja.length > 0 && w.indexOf('Próximos passos') < w.indexOf('Onde atuar em cada loja'));
+  check('loja com mais pontos vem primeiro (Bangu: 3, Caxias: 2)', porLoja.indexOf('*Bangu*') > -1 && porLoja.indexOf('*Bangu*') < porLoja.indexOf('*Caxias*'), porLoja.slice(0, 300));
+  check('Bangu: queda de faturamento com a ação', /Faturamento -20,0% vs período anterior: entender a queda/.test(bloco('Bangu')), bloco('Bangu'));
+  check('Bangu: sem 10% subiu de 5,0% para 10,0% → cobrar os garçons', /Sem 10% subiu de 5,0% para 10,0% das vendas: cobrar os garçons/.test(bloco('Bangu')));
+  check('Bangu: 8 faltas (100% da rede) → plano de presença', /8 faltas \(100% da rede\): plano de presença/.test(bloco('Bangu')));
+  check('Caxias: cancelamento acima da rede e avarias sem lançamento', /Cancelamento em 2,67% das vendas \(rede 1,64%\): rever motivos/.test(bloco('Caxias')) && /Nenhuma avaria lançada: cobrar o lançamento/.test(bloco('Caxias')), bloco('Caxias'));
+  check('Caxias não leva "sem 10%" (começou agora, e 4% está abaixo da rede)', !/Sem 10%/.test(bloco('Caxias')));
+  check('Bangu não leva "avaria" (lançou)', !/avaria/.test(bloco('Bangu')));
   check('sem rolagem de lado em 390 px', r.largura <= 390, r.largura);
   check('nenhum erro de JavaScript', erros.length === 0, erros);
 

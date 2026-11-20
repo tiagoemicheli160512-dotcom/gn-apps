@@ -14046,8 +14046,21 @@ async function enviarPDFBiGraficosWpp() { await _pdfWppComo(gerarPDFBiGraficos);
 // agora não "piorou": passou a aparecer).
 const BI_GEST_META_S10 = 3;           // % das vendas em nota sem 10% — meta da rede
 function _biGestaoDados() {
-  const R = _biGRange(_biGPer, _biGOff);
+  let R = _biGRange(_biGPer, _biGOff);
   const D = _biGDados[_biGChave()]; if (!D || D.erro) return null;
+  // Período em andamento: o dia de hoje ainda não fechou (as lojas lançam a venda no fim do
+  // dia) — contá-lo deixava toda loja "em queda" contra o mesmo dia completo do período
+  // anterior. O relatório vai até ONTEM e compara com os mesmos dias de antes.
+  if (R.parcial && R.ate === _biGIso(new Date())) {
+    const ontem = new Date(R.ate + 'T12:00:00'); ontem.setDate(ontem.getDate() - 1);
+    const ate = _biGIso(ontem);
+    if (ate >= R.de) {
+      const dias = Math.round((new Date(ate + 'T12:00:00') - new Date(R.de + 'T12:00:00')) / 864e5);
+      const pa = new Date(R.prev.de + 'T12:00:00'); pa.setDate(pa.getDate() + dias);
+      const pAte = _biGIso(pa) < R.prev.ate ? _biGIso(pa) : R.prev.ate;
+      R = { ...R, ate, semHoje: true, prev: { de: R.prev.de, ate: pAte } };
+    }
+  }
   const lojas = _biLojas();
   const c = _biGCalc(D, R, lojas, lojas);
   const prevOk = R.prev.de >= BI_G_PRIMEIRO_DADO;
@@ -14084,7 +14097,7 @@ function _biGestaoTexto(wpp) {
   const hojeTxt = R.ate.slice(8, 10) + '/' + R.ate.slice(5, 7);
   const L = [];
   L.push(b('Relatório de Gestão – Rede Gigante Nordestino'));
-  L.push(it(`${R.rot}${R.parcial ? ` (em andamento, até ${hojeTxt})` : ''} – números do Painel de Gestão`));
+  L.push(it(`${R.rot}${R.parcial ? ` (em andamento, até ${hojeTxt}${R.semHoje ? ' — hoje fica de fora, o dia ainda não fechou' : ''})` : ''} – números do Painel de Gestão`));
   L.push('');
 
   // Faturamento
@@ -14186,6 +14199,34 @@ function _biGestaoTexto(wpp) {
   L.push(b('⚠️ Próximos passos'));
   if (P.length) P.forEach((t, i) => L.push(`${i + 1}. ${t}`));
   else L.push('Nenhum ponto fora do normal neste período.');
+
+  // Onde atuar em cada loja (pedido do dono, 20/11/2026: "dá pra ter a sugestão por loja do
+  // que atuar?"). Mesmas regras dos passos da rede, aplicadas loja a loja — cada linha diz o
+  // número e a ação. Loja sem nada fora do normal vai pra uma linha só no fim.
+  const PL = {};
+  const add = (k, t) => { (PL[k] = PL[k] || []).push(t); };
+  quedas.forEach(x => add(x.k, `Faturamento ${pc(x.v)} vs período anterior: entender a queda (movimento, cardápio, equipe)`));
+  cancAlto.forEach(x => add(x.k, `Cancelamento em ${pc(x.v, 2)} das vendas (rede ${pc(cancPct, 2)}): rever motivos e quem cancela`));
+  const pioraK = new Set(s10Pior.map(x => x.k));
+  s10Pior.forEach(x => add(x.k, `Sem 10% subiu de ${pc(x.p)} para ${pc(x.a)} das vendas: cobrar os garçons das notas`));
+  if (s10Rede != null) lojas.forEach(k => {
+    if (pioraK.has(k) || !(c.porLoja[k] > 0)) return;
+    const v = s10Pct(c.op[k], c.porLoja[k]);
+    if (v != null && v >= Math.max(s10Rede * 1.5, s10Rede + 2)) add(k, `Sem 10% em ${pc(v)} das vendas (rede ${pc(s10Rede)}): cobrar os garçons das notas`);
+  });
+  const pessoa = (campo, rot, acao) => { const tot = o[campo]; if (!tot) return;
+    lojas.forEach(k => { const v = c.op[k][campo]; if (v >= 5 && v / tot >= 0.15) add(k, `${v} ${rot} (${Math.round(v / tot * 100)}% da rede): ${acao}`); }); };
+  pessoa('FALTA', 'faltas', 'plano de presença com a gerência');
+  pessoa('ATESTADO', 'dias de atestado', 'olhar os atestados e a escala');
+  semAv.forEach(k => add(k, 'Nenhuma avaria lançada: cobrar o lançamento'));
+  const comPonto = lojas.filter(k => PL[k]).sort((a, z) => PL[z].length - PL[a].length || (c.porLoja[z] || 0) - (c.porLoja[a] || 0));
+  const semPonto = lojas.filter(k => !PL[k] && (c.porLoja[k] || 0) > 0);
+  if (comPonto.length) {
+    L.push('');
+    L.push(b('🏪 Onde atuar em cada loja'));
+    comPonto.forEach(k => { L.push(`• ${b(nome(k))}`); PL[k].forEach(t => L.push(`  – ${t}`)); });
+    if (semPonto.length) L.push(`• Sem ponto fora do normal: ${lista(semPonto.map(nome))}`);
+  }
   if (R.parcial) { L.push(''); L.push(it('Período em andamento: os números ainda vão mudar até o fechamento.')); }
   return { msg: L.join('\n'), titulo: `Relatório de Gestão — ${R.rot}` };
 }
