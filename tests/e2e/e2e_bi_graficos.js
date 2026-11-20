@@ -44,7 +44,10 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
       ['SÃO GONÇALO', 'NORTE SHOPPING', 'BOULEVARD', 'RANCHO', 'PEDREIRA', 'NOVA AMERICA', 'CAMPO GRANDE', 'ITAQUERA', 'GUARULHOS']
         .forEach(l => vendas.push({ loja: l, data_operacao: iso, venda_salao: 0, venda_delivery: 0 }));
     }
-    const caixa = [{ loja: 'BANGU', data: '2026-11-10', gn_caixa_comprovante: [{ bandeira: 'Mastercard Crédito', valor: 600 }, { bandeira: 'Pix', valor: 300 }, { bandeira: 'Ticket Restaurante', valor: 100 }] },
+    const caixa = [{ loja: 'BANGU', data: '2026-11-10', gn_caixa_comprovante: [{ bandeira: 'Mastercard Crédito', valor: 600 }, { bandeira: 'Pix', valor: 300 }, { bandeira: 'Ticket Restaurante', valor: 100 }],
+                     gn_caixa_cancelamento: [{ valor: 180 }, { valor: 0 }], gn_caixa_transferencia: [{ id: 1 }, { id: 2 }, { id: 3 }], gn_caixa_gorjeta: [{ valor: 250 }],
+                     gn_caixa_despesa: [{ categoria: 'funcionario_extra', valor: 120, nome: 'João', justificativa: 'cobriu folga do garçom' }, { categoria: 'limpeza', valor: 50 }] },
+                   { loja: 'BANGU', data: '2026-10-05', gn_caixa_cancelamento: [{ valor: 999 }] },   // fora de novembro
                    { loja: 'CAXIAS', data: '2026-11-11', gn_caixa_comprovante: [{ bandeira: 'Visa Débito', valor: 200 }, { bandeira: 'IFOOD', valor: 100 }, { bandeira: 'Bitcoin', valor: 10 }] },
                    { loja: 'MAGLIA', data: '2026-11-11', gn_caixa_comprovante: [{ bandeira: 'Pix', valor: 99999 }] }];
     window.__paginas = [];
@@ -54,6 +57,14 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
       const off = +((u.match(/offset=(\d+)/) || [])[1] || 0), lim = +((u.match(/limit=(\d+)/) || [])[1] || 1000);
       if (nome === 'biGraf:vendas') { window.__paginas.push(off); return vendas.filter(v => v.data_operacao >= de && v.data_operacao <= ate).slice(off, off + lim); }
       if (nome === 'biGraf:caixa') return off ? [] : caixa.filter(c => c.data >= de && c.data <= ate);
+      if (nome === 'biGraf:comissoes') {
+        // Semana de 16–22/11: 2 faltas, 1 atestado, suspensão na quinta (19) e no sábado (21 —
+        // ainda não chegou, fica fora), 1 advertência.
+        const idx = COMISSOES_CAL.findIndex(s => s.days.some(x => x.y === 2026 && x.m === 11 && x.d === 16));
+        window.__semIdx = idx;
+        return [{ loja: 'BANGU', ['s' + idx]: { funcs: [{ nome: 'A', dias: ['FALTA', 'FALTA', 'ATESTADO', 'SUSPENSÃO', 'PRESENTE', 'SUSPENSÃO', 'FOLGA'], docs: { ADVERTENCIA: 'x' } }] } }];
+      }
+      if (nome === 'biGraf:avarias') return [{ loja: 'BANGU', av: { BANGU: [{ id: 'a1', ts: '2026-11-12T15:00:00Z', valorTotal: 40, status: 'finalizado' }, { id: 'a2', ts: '2026-11-12T15:00:00Z', valorTotal: 99, tipo: 'saida_terceiro' }] } }];
       return fb === undefined ? [] : fb;
     };
     session = { id: 1, nome: 'Tiago', cargo: 'mestre', loja: 'GERAL', permissoes: { master: true } };
@@ -72,9 +83,23 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
     const ler = () => ({ txt: el.innerText.replace(/\s+/g, ' '), rot: (el.querySelector('.bi-g-rot') || {}).innerText,
       lojas: [...el.querySelectorAll('.bi-g-loja')].map(x => x.dataset.loja), meses: [...el.querySelectorAll('.bi-g-mes')].map(x => x.dataset.mes),
       pag: [...el.querySelectorAll('.bi-g-pag-linha')].map(x => x.innerText.replace(/\s+/g, ' ').trim()),
-      largos: [...el.querySelectorAll('*')].filter(e => e.getBoundingClientRect().right > window.innerWidth + 1).length });
+      // As fichas do "Comparar lojas" ficam numa faixa que rola de lado (overflow-x:auto) de
+      // propósito — o que importa é a PÁGINA não rolar de lado.
+      largos: [...el.querySelectorAll('*')].filter(e => e.getBoundingClientRect().right > window.innerWidth + 1 && !e.closest('.bi-g-mets')).length,
+      pagina: document.documentElement.scrollWidth <= window.innerWidth + 1 });
     // Mês (novembro, em andamento): 20 dias.
     out.mes = ler();
+    // Operação + comparar lojas + PDF (mês de novembro, rede).
+    out.op = [...el.querySelectorAll('.bi-g-op')].map(x => x.dataset.met + '=' + x.innerText.replace(/\s+/g, ' ').trim());
+    _biGTrocarMet('s10'); out.cmp = [...el.querySelectorAll('.bi-g-cmp')].slice(0, 2).map(x => x.innerText.replace(/\s+/g, ' ').trim());
+    out.metOn = (el.querySelector('.bi-g-met.on') || {}).dataset;
+    out.metOn = out.metOn && out.metOn.met;
+    let pdfOpts = null; const orig = window.gnRelatorioPDF; window.gnRelatorioPDF = o => { pdfOpts = o; };
+    gerarPDFBiGraficos(); window.gnRelatorioPDF = orig;
+    const doc = document.createElement('div'); doc.innerHTML = pdfOpts ? pdfOpts.html : '';
+    out.pdf = pdfOpts && { titulo: pdfOpts.titulo, kpis: pdfOpts.kpis.map(k => k.label + ':' + k.valor), temVar: /var\(--/.test(pdfOpts.html), svgs: doc.querySelectorAll('svg').length,
+      semFichas: !doc.querySelector('.bi-g-mets'), linhas: [...doc.querySelectorAll('tbody tr')].map(tr => [...tr.cells].map(c => c.textContent.trim()).join('|')),
+      corBarra: (doc.querySelector('.bi-g-loja span span') || {}).getAttribute && doc.querySelector('.bi-g-loja span span').getAttribute('style') };
     // Trimestre: out–dez, período anterior jul–set começa antes de 10/07 → sem comparação.
     _biGTrocarPer('tri'); await esperar(); out.tri = ler();
     // Mês de outubro (fechado): anterior setembro completo → compara.
@@ -103,9 +128,18 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   check('navegação para em jul/2026 (não vai pra junho, sem dados)', /jul\/2026/.test(r.jul) && /jul\/2026/.test(r.julDepois), [r.jul, r.julDepois]);
   check('Ano 2026: soma do ano todo (Bangu + Caxias desde 10/07)', /^2026/.test(r.ano.rot) && /FATURAMENTO \(ATÉ HOJE\) R\$ [\d.]+,\d\d/i.test(r.ano.txt), r.ano.txt.slice(0, 260));
   check('escopo Caxias: só ela no total (R$ 10.000), delivery 20%, e "Na rede: 2º de 11"', /R\$ 10\.000,00/.test(r.cx.txt) && /Delivery 20%/.test(r.cx.txt) && /2º de 11/.test(r.cx.txt), r.cx.txt.slice(0, 500));
+  const op = Object.fromEntries((r.op || []).map(x => x.split('=')));
+  check('Operação (nov, rede): cancelamentos 0,50% (R$ 180 de R$ 36.000, 2 lançados) — o de outubro fica fora', /0,50%/.test(op.canc) && /2 · R\$ 180,00/.test(op.canc), op.canc);
+  check('…sem 10%: R$ 25,00 de 10% não cobrado (1 nota de R$ 250); transferências 3; avarias R$ 40,00 (saída pra terceiro fora)', /R\$ 25,00/.test(op.s10) && /1 nota/.test(op.s10) && /3/.test(op.transf) && /R\$ 40,00 1 item/.test(op.av), op);
+  check('…funcionário extra R$ 120,00 (1 lançamento; limpeza não é extra)', /R\$ 120,00 1 lançamento/.test(op.extra), op.extra);
+  check('…faltas 2, atestados 1, suspensões 1, advertências 1 (da escala da semana)', /Faltas 2 dias/i.test(op.falta) && /Atestados 1 dia$/i.test(op.atest) && /Suspensões 1 dia$/i.test(op.susp) && /Advertências 1 documento$/i.test(op.adv), op);
+  check('comparar lojas: escolhendo "Sem 10%", a Bangu vem primeiro com R$ 25,00', r.metOn === 's10' && /^Bangu R\$ 25,00/.test(r.cmp[0] || ''), r.cmp);
+  check('PDF com gráficos: título, KPIs (faturamento, média, cancelamentos), os gráficos em SVG e a tabela por loja',
+    r.pdf && r.pdf.titulo === 'BI — Rede' && r.pdf.kpis[0] === 'Faturamento:R$ 36.000,00' && /^Cancelamentos:0,50%/.test(r.pdf.kpis[2]) && r.pdf.svgs >= 2 && r.pdf.linhas.length === 11 && /^Bangu\|R\$ 26,0k\|0,69%\|R\$ 25,00\|3\|R\$ 40,00\|R\$ 120,00\|2\|1$/.test(r.pdf.linhas.find(l => /^Bangu/.test(l)) || ''), r.pdf);
+  check('…no PDF as cores são reais (sem var(--…), que não existem no papel) e sem as fichas de escolha', r.pdf && !r.pdf.temVar && r.pdf.semFichas && /#2a78d6/.test(r.pdf.corBarra || ''), r.pdf && { temVar: r.pdf.temVar, semFichas: r.pdf.semFichas, cor: r.pdf.corBarra });
   check('a consulta de vendas é paginada (mais de 1.000 linhas → segunda página)', r.paginas.includes(1000), r.paginas);
   check('voltar pra 📊 Indicadores', r.voltou, r);
-  check('nada passa da largura em 390 px', r.mes.largos === 0 && r.tri.largos === 0, [r.mes.largos, r.tri.largos]);
+  check('nada passa da largura em 390 px (a página não rola de lado)', r.mes.largos === 0 && r.tri.largos === 0 && r.mes.pagina, [r.mes.largos, r.tri.largos, r.mes.pagina]);
   check('nenhum erro de JavaScript', erros.length === 0, erros);
   console.log(`\n${ok} OK, ${falhou} falhou`);
   await browser.close();
