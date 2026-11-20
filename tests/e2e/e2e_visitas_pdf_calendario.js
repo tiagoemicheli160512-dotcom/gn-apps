@@ -124,6 +124,29 @@ const VISITAS = [
   const nMeses = (tri.html.match(/class="mes"/g) || []).length;
   check('trimestre: uma grade por mês (3)', nMeses === 3, nMeses + ' ' + tri.de + '..' + tri.ate);
 
+  // ── Duas opções de PDF (20/11/2026): com ou sem a tabela de entradas e saídas ────────
+  // "manter só a lá de cima (o calendário), que fica show, e vai ter mais foco pras fotos".
+  const modo = await page.evaluate(() => {
+    if (typeof _visSupPdfModoHtml !== 'function') return null;
+    const box = document.createElement('div'); box.innerHTML = _visSupPdfModoHtml(); document.body.appendChild(box);
+    const btns = [...box.querySelectorAll('.vis-pdf-modo button')];
+    const r = { rotulos: btns.map(b => b.textContent.trim()), padraoCom: btns[0].classList.contains('on') && !btns[1].classList.contains('on') };
+    btns[1].click();
+    r.depoisSem = !_visSupPdfDetalhe && btns[1].classList.contains('on') && !btns[0].classList.contains('on');
+    try { r.lembrado = localStorage.getItem('gn_vis_pdf_detalhe'); } catch (e) { r.lembrado = 'sem-storage'; }
+    return r;
+  });
+  check('duas opções de PDF: "Com entradas e saídas" e "Calendário + fotos"', modo && modo.rotulos.join('|') === '🕒 Com entradas e saídas|📷 Calendário + fotos', modo && modo.rotulos);
+  check('…o padrão continua com a tabela (como era)', modo && modo.padraoCom);
+  check('…tocar em "Calendário + fotos" troca a escolha e ela fica lembrada', modo && modo.depoisSem && modo.lembrado === '0', JSON.stringify(modo));
+  const semTab = await gerar('mensal', '2026-10-15');
+  check('sem tabela: o calendário continua igual', /<table class="cal">/.test(semTab.html) && /Outubro 2026/.test(semTab.html) && /💻 11 lojas/.test(semTab.html) && /18:24 → 20:10/.test(semTab.html));
+  check('sem tabela: some a seção "Entradas e saídas" (e as durações)', !/Entradas e saídas/.test(semTab.html) && !/<table class="det-tab">/.test(semTab.html) && !/10h 6min/.test(semTab.html));
+  check('sem tabela: KPIs e legenda continuam', /Visitas presenciais/.test(semTab.html) && /presencial · 💻 remoto/.test(semTab.html));
+  await page.evaluate(() => _visSupSetPdfDetalhe(true));
+  const comTab = await gerar('mensal', '2026-10-15');
+  check('voltando pra "Com entradas e saídas", a tabela volta', /Entradas e saídas/.test(comTab.html) && /<table class="det-tab">/.test(comTab.html));
+
   // ── Os outros dois botões continuam como eram ────────────────────────────────────────
   const txtWpp = await page.evaluate(() => (_buildTextoVisitasSup(true) || {}).texto || '');
   check('o texto do WhatsApp continua igual (relatório em texto)', /RELATÓRIO DE VISITAS/.test(txtWpp));
