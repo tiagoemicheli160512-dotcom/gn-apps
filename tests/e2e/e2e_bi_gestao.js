@@ -88,6 +88,12 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
     out.cardTxt = (el.querySelector('.bi-gest-txt') || {}).textContent || '';
     const t = _biGestaoTexto(true); out.wpp = t && t.msg; out.titulo = t && t.titulo;
     out.plano = (_biGestaoTexto(false) || {}).msg || '';
+    // Loja escolhida no BI → relatório da loja (e o rótulo dos botões diz qual).
+    _biEscopo = 'BANGU'; renderDashboard();
+    out.rotLoja = ((el.querySelector('.bi-gest-btns span') || {}).textContent || '').trim();
+    const tl = _biGestaoTexto(true); out.loja = tl && tl.msg; out.lojaTit = tl && tl.titulo;
+    _biEscopo = 'CAXIAS'; out.caxias = (_biGestaoTexto(true) || {}).msg || '';
+    _biEscopo = 'REDE'; renderDashboard();
     // Botões: Whats abre wa.me com o texto; PDF manda o texto pro gerador de PDF.
     const abertos = []; window.open = u => { abertos.push(u); return null; };
     const pdfs = []; window.gnRelatorioPDFTexto = (txt, tit) => { pdfs.push([txt, tit]); };
@@ -145,6 +151,23 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   check('Caxias: cancelamento acima da rede', /Cancelamento em 2,67% das vendas \(rede 1,64%\): rever motivos/.test(bloco('Caxias')), bloco('Caxias'));
   check('avaria sem lançamento NÃO entra na lista por loja (fica só nos passos da rede)', !/avaria/i.test(porLoja) && /Cobrar o lançamento de avarias em Caxias/.test(passos), porLoja);
   check('Caxias não leva "sem 10%" (começou agora, e 4% está abaixo da rede)', !/Sem 10%/.test(bloco('Caxias')));
+  // Relatório por loja (20/11/2026: "quando selecionar a loja vem o relatório da rede").
+  const lj = r.loja || '';
+  check('loja escolhida: botões dizem "Relatório de gestão (Bangu)"', /Relatório de gestão \(Bangu\)/.test(r.rotLoja), r.rotLoja);
+  check('loja: título e PDF com o nome da loja', /^\*Relatório de Gestão – Bangu\*/.test(lj) && r.lojaTit === 'Relatório de Gestão — Bangu — nov/2026', lj.slice(0, 80));
+  check('loja: faturamento só dela (R$ 24.000,00) e comparação com a rede', /\*R\$\s?24\.000,00\* em 30 dias/.test(lj) && /\*-20,0%\* \(R\$\s?30,0k\); a rede -13,3%/.test(lj), (lj.match(/.*Comparado.*/) || [])[0]);
+  check('loja: posição e participação na rede', /1º de 2 na rede · 61,5% do faturamento da rede/.test(lj), (lj.match(/.*na rede ·.*/) || [])[0]);
+  check('loja: cancelamento dela contra o da rede', /Cancelamentos:\* 1 \(1,00% das vendas = R\$\s?240,00; rede 1,64%\)/.test(lj), (lj.match(/.*Cancelamentos.*/) || [])[0]);
+  check('loja: sem 10% antes → agora (piorou)', /Antes: 5,0% → agora \*10,0%\* \(piorou\)/.test(lj));
+  check('loja: faltas com o peso na rede', /Faltas:\* 8 dias.*— 100% da rede/.test(lj));
+  const pl = (lj.split('*⚠️ Onde atuar*')[1] || '');
+  check('loja: onde atuar — queda pior que a da rede', /1\. Entender a queda de 20,0% no faturamento \(a rede caiu 13,3%\)/.test(pl), pl);
+  check('loja: onde atuar — sem 10% subiu, meta e presença', /Sem 10% subiu de 5,0% para 10,0%/.test(pl) && /Meta de sem 10%: baixar de 10,0% para 3%/.test(pl) && /Plano de presença: 8 faltas/.test(pl));
+  check('loja: não cobra avaria de quem lançou, nem cancelamento abaixo da rede', !/avarias/.test(pl) && !/cancelamentos/i.test(pl));
+  check('loja: não traz a lista "onde atuar em cada loja" da rede', !/Onde atuar em cada loja/.test(lj) && !/Caxias/.test(lj));
+  const cx = r.caxias;
+  check('Caxias: cancelamento acima da rede e avaria a lançar viram passo', /Reduzir cancelamentos: 2,67% das vendas contra 1,64% da rede/.test(cx) && /Cobrar o lançamento de avarias/.test(cx), (cx.split('Onde atuar*')[1] || ''));
+  check('Caxias: sem 10% sem comparação (começou a lançar agora)', /Sem comparação: a loja começou a lançar/.test(cx));
   check('sem rolagem de lado em 390 px', r.largura <= 390, r.largura);
   check('nenhum erro de JavaScript', erros.length === 0, erros);
 
