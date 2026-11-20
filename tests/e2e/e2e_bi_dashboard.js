@@ -89,6 +89,18 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   check('o índice de saúde de antes continua, embaixo', r.saude);
   check('nada passa da largura em 360 px', r.largos.length === 0, r.largos);
 
+  // Print do dono (20/11/2026): na aba BI, mudar Dia/Semana/Mês/Trimestre "não muda nada".
+  // O BI é mensal (seletor próprio) — os botões do período não podem aparecer nele.
+  const per = await page.evaluate(() => {
+    const botoes = () => [...document.querySelectorAll('#dash-section button')].map(b => b.textContent.trim());
+    _dashTab = 'bi'; try { renderDashboard(); } catch (e) { return { erro: String(e) }; }
+    const noBi = botoes(), txtBi = document.getElementById('dash-section').innerText;
+    _dashTab = 'cancel'; try { renderDashboard(); } catch (e) {}
+    const noCancel = botoes();
+    return { biTemTri: noBi.includes('Trimestre'), cancelTemTri: noCancel.includes('Trimestre'), aviso: /O BI é por mês/.test(txtBi) };
+  });
+  check('na aba BI os botões Dia/Semana/Mês/Trimestre/Livre não aparecem (o BI é mensal, com seletor próprio) — nas outras abas continuam', per.biTemTri === false && per.cancelTemTri === true && per.aviso, per);
+
   // Abrir a Bangu pelo comparativo.
   await page.evaluate(() => { renderDashboard = () => {}; _biTrocarEscopo('BANGU'); });
   const b = await ler();
