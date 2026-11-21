@@ -699,7 +699,7 @@
     const lojaNome = (CFG.nomeLoja && CFG.nomeLoja(v.loja)) || v.loja || '';
     const M = { tipo: _ctx.tipo, icone: t.icon, tipoLabel: t.label, loja: lojaNome, data: v.data, info: [], kpis: [], secoes: [], fotos: [], obs: d.obs || '', fim: '' };
     const foto = (url, legenda) => { if (url && /^https:\/\//.test(url)) M.fotos.push({ url, legenda: `${lojaNome} · ${_dmY(v.data)}\n${legenda}` }); };
-    // Rótulo pelo cargo de quem visitou (Diretoria/Supervisão — gnCargoTitulo, gn-lojas-config.js).
+    // Rótulo pelo cargo de quem visitou (Master/Supervisão — gnCargoTitulo, gn-lojas-config.js).
     if (v.visitante) M.info.push(((v.cargo && window.gnCargoTitulo) ? window.gnCargoTitulo(v.cargo) : 'Supervisão') + ': ' + v.visitante);
     if (v.hora_chegada && v.hora_chegada !== 'PLAN') M.info.push('Chegada ' + v.hora_chegada + (v.hora_saida ? ' → saída ' + v.hora_saida : ''));
     const corN = n => n < 7 ? 'ruim' : n < 9 ? 'aten' : 'ok';
