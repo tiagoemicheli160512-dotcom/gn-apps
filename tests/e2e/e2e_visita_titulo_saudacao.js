@@ -4,7 +4,7 @@
 //  noite de acordo com o horário." (17/11/2026)
 //
 // O cargo gravado continua "mestre" (é chave de permissão); muda o RÓTULO nos relatórios:
-// mestre → Diretoria, supervisor → Supervisão. Saudação pela hora, madrugada é boa noite.
+// mestre → Master (era Diretoria até 21/11/2026), supervisor → Supervisão. Saudação pela hora, madrugada é boa noite.
 const CAMINHOS = require('../_env');
 const { chromium } = require('playwright');
 const HOME = process.env.ARQ_HOME || CAMINHOS.pub('gn-home.html');
@@ -41,8 +41,8 @@ const VIS = { id: 9, loja: 'BANGU', data: '2026-11-17', visitante: 'Tiago', carg
   }, VIS);
   check('saudação pela hora: 04h boa noite, 05h–11h bom dia, 12h–17h boa tarde, 18h+ boa noite',
     JSON.stringify(r.horas) === JSON.stringify(['Boa noite', 'Bom dia', 'Bom dia', 'Boa tarde', 'Boa tarde', 'Boa noite', 'Boa noite']), r.horas);
-  check('legenda da foto: "Tiago · Diretoria", não "mestre"', /👤 Tiago · Diretoria/.test(r.legenda) && !/mestre/i.test(r.legenda), r.legenda);
-  check('relatório de visitas: abre com "Bom dia!" às 09h30 e traz "Tiago · Diretoria"', /^Bom dia! 👋/.test(r.texto) && /👤 Tiago · Diretoria/.test(r.texto) && !/mestre/i.test(r.texto), r.texto.slice(0, 200));
+  check('legenda da foto: "Tiago · Master", não "mestre" nem "Diretoria"', /👤 Tiago · Master/.test(r.legenda) && !/mestre/i.test(r.legenda), r.legenda);
+  check('relatório de visitas: abre com "Bom dia!" às 09h30 e traz "Tiago · Master"', /^Bom dia! 👋/.test(r.texto) && /👤 Tiago · Master/.test(r.texto) && !/mestre/i.test(r.texto), r.texto.slice(0, 200));
   check('supervisor vira "Supervisão"; outro cargo só ganha maiúscula; vazio fica vazio', r.sup === 'Supervisão' && r.outro === 'Gerente' && r.vazio === '', r);
   const env = await a.page.evaluate(async (v) => {
     _visFotoReg[v.id] = Object.assign({}, v, { foto_chegada: 'https://x/f.jpg' });
@@ -50,7 +50,7 @@ const VIS = { id: 9, loja: 'BANGU', data: '2026-11-17', visitante: 'Tiago', carg
     navigator.canShare = () => true; let t = null; navigator.share = async d => { t = d.text; };
     await _visFotoCompartilhar(String(v.id), 'chegada'); return t;
   }, VIS);
-  check('enviar a foto: o texto começa com a saudação e traz Diretoria', /^Bom dia!\n\n📍 Visita — Bangu/.test(env || '') && /Tiago · Diretoria/.test(env || ''), env);
+  check('enviar a foto: o texto começa com a saudação e traz Master', /^Bom dia!\n\n📍 Visita — Bangu/.test(env || '') && /Tiago · Master/.test(env || ''), env);
   todos.push(...a.erros); await a.ctx.close();
 
   const n = await abrir(browser, '2026-11-17T20:15:00');

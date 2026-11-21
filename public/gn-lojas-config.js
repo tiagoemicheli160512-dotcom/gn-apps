@@ -1760,7 +1760,8 @@ window.gnConfirmarExclusaoFunc = function (opts) {
    O cargo gravado continua "mestre"/"supervisor" (é chave de permissão em vários apps);
    muda só o RÓTULO impresso. Um lugar só pra trocar o título, se o dono quiser outro.
    Saudação: 05h–11h59 bom dia, 12h–17h59 boa tarde, 18h–04h59 boa noite (madrugada é noite). */
-window.GN_CARGO_TITULO = { mestre: 'Diretoria', supervisor: 'Supervisão' };
+// 21/11/2026: "Diretoria ainda fora de contexto, pode ser Master? Acho melhor."
+window.GN_CARGO_TITULO = { mestre: 'Master', supervisor: 'Supervisão' };
 window.gnCargoTitulo = function (cargo) {
   var c = String(cargo == null ? '' : cargo).trim();
   if (!c) return '';
