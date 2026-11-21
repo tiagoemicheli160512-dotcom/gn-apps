@@ -13979,7 +13979,7 @@ function _buildBiGraficos() {
       <button type="button" onclick="gerarPDFBiGraficos()" style="background:rgba(192,57,43,.12);border:1px solid rgba(192,57,43,.3);border-radius:6px;padding:5px 10px;color:var(--txt-red);font-size:11px;font-weight:700;cursor:pointer">📄 PDF com gráficos</button>
       <button type="button" onclick="enviarPDFBiGraficosWpp()" style="background:rgba(37,211,102,.12);border:1px solid rgba(37,211,102,.3);border-radius:6px;padding:5px 10px;color:var(--txt-green);font-size:11px;font-weight:700;cursor:pointer">📄📲 PDF no Whats</button></div>
     <div class="bi-gest-btns" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:-4px 0 12px">
-      <span style="font-size:10.5px;font-weight:800;color:var(--t2)">📝 Relatório de gestão (rede):</span>
+      <span style="font-size:10.5px;font-weight:800;color:var(--t2)">📝 Relatório de gestão (${_biEscopo === 'REDE' ? 'rede' : esc(LOJA_DISPLAY[_biEscopo] || _biEscopo)}):</span>
       <button type="button" onclick="enviarWppGestaoBi()" style="background:rgba(37,211,102,.12);border:1px solid rgba(37,211,102,.3);border-radius:6px;padding:5px 10px;color:var(--txt-green);font-size:11px;font-weight:700;cursor:pointer">📲 Whats</button>
       <button type="button" onclick="gerarPDFGestaoBi()" style="background:rgba(192,57,43,.12);border:1px solid rgba(192,57,43,.3);border-radius:6px;padding:5px 10px;color:var(--txt-red);font-size:11px;font-weight:700;cursor:pointer">📄 PDF</button>
       <button type="button" onclick="copiarGestaoBi(this)" style="background:var(--fill-sutil);border:1px solid var(--b2);border-radius:6px;padding:5px 10px;color:var(--t2);font-size:11px;font-weight:700;cursor:pointer">📋 Copiar</button></div>`;
@@ -14046,26 +14046,30 @@ async function enviarPDFBiGraficosWpp() { await _pdfWppComo(gerarPDFBiGraficos);
 // agora não "piorou": passou a aparecer).
 const BI_GEST_META_S10 = 3;           // % das vendas em nota sem 10% — meta da rede
 function _biGestaoDados() {
-  const R = _biGRange(_biGPer, _biGOff);
+  let R = _biGRange(_biGPer, _biGOff);
   const D = _biGDados[_biGChave()]; if (!D || D.erro) return null;
+  // Período em andamento: o dia de hoje ainda não fechou (as lojas lançam a venda no fim do
+  // dia) — contá-lo deixava toda loja "em queda" contra o mesmo dia completo do período
+  // anterior. O relatório vai até ONTEM e compara com os mesmos dias de antes.
+  if (R.parcial && R.ate === _biGIso(new Date())) {
+    const ontem = new Date(R.ate + 'T12:00:00'); ontem.setDate(ontem.getDate() - 1);
+    const ate = _biGIso(ontem);
+    if (ate >= R.de) {
+      const dias = Math.round((new Date(ate + 'T12:00:00') - new Date(R.de + 'T12:00:00')) / 864e5);
+      const pa = new Date(R.prev.de + 'T12:00:00'); pa.setDate(pa.getDate() + dias);
+      const pAte = _biGIso(pa) < R.prev.ate ? _biGIso(pa) : R.prev.ate;
+      R = { ...R, ate, semHoje: true, prev: { de: R.prev.de, ate: pAte } };
+    }
+  }
   const lojas = _biLojas();
   const c = _biGCalc(D, R, lojas, lojas);
   const prevOk = R.prev.de >= BI_G_PRIMEIRO_DADO;
   const cp = prevOk ? _biGCalc(D, { de: R.prev.de, ate: R.prev.ate, prev: R.prev }, lojas, lojas) : null;
   return { R, D, c, cp, lojas };
 }
-function _biGestaoTexto(wpp) {
-  const G = _biGestaoDados(); if (!G) return null;
-  const { R, c, cp, lojas } = G;
-  const b = s => wpp ? '*' + s + '*' : s, it = s => wpp ? '_' + s + '_' : s;
-  const nome = k => LOJA_DISPLAY[k] || k;
-  const fR = v => _fmtBRL(v), fRs = v => _fmtBRLs(v);
-  const pc = (v, n) => (v == null || !isFinite(v)) ? '—' : v.toFixed(n == null ? 1 : n).replace('.', ',') + '%';
-  const nInt = v => Number(v || 0).toLocaleString('pt-BR');
-  const lista = ks => ks.length <= 1 ? ks.join('') : ks.slice(0, -1).join(', ') + ' e ' + ks[ks.length - 1];
-  const o = c.opEsc, op = cp ? cp.opEsc : null;
-  // Desde quando cada lançamento existe (cancelamento começou em 15/10/2026, transferência
-  // em 23/10): sem isso, o período anterior aparece com "0%" e a comparação inventa piora.
+// Desde quando cada lançamento existe (cancelamento começou em 15/10/2026, transferência
+// em 23/10): sem isso, o período anterior aparece com "0%" e a comparação inventa piora.
+function _biGestaoAux(G) {
   const arr = x => Array.isArray(x) ? x : (x ? [x] : []);
   const ini = { canc: null, transf: null, s10: null }, iniS10Loja = {};
   (G.D.caixa || []).forEach(f => {
@@ -14078,13 +14082,29 @@ function _biGestaoTexto(wpp) {
   const existia = (k, de) => !!ini[k] && ini[k] <= de;
   const fatEntre = (k, de, ate) => (G.D.vendas || []).reduce((t, r) => {
     const d = String(r.data_operacao).slice(0, 10), kk = _normLoja(r.loja);
-    if (d < de || d > ate || !lojas.includes(kk) || (k && kk !== k)) return t;
+    if (d < de || d > ate || !G.lojas.includes(kk) || (k && kk !== k)) return t;
     return t + (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0);
   }, 0);
+  return { ini, iniS10Loja, existia, fatEntre, dBr };
+}
+function _biGestaoTexto(wpp) {
+  const G = _biGestaoDados(); if (!G) return null;
+  // Uma loja escolhida no BI → relatório DA LOJA (pedido do dono, 20/11/2026: "quando
+  // selecionar a loja vem o relatório da rede, tem como ter por loja?").
+  if (_biEscopo !== 'REDE' && G.lojas.includes(_biEscopo)) return _biGestaoTextoLoja(wpp, G, _biEscopo);
+  const { R, c, cp, lojas } = G;
+  const b = s => wpp ? '*' + s + '*' : s, it = s => wpp ? '_' + s + '_' : s;
+  const nome = k => LOJA_DISPLAY[k] || k;
+  const fR = v => _fmtBRL(v), fRs = v => _fmtBRLs(v);
+  const pc = (v, n) => (v == null || !isFinite(v)) ? '—' : v.toFixed(n == null ? 1 : n).replace('.', ',') + '%';
+  const nInt = v => Number(v || 0).toLocaleString('pt-BR');
+  const lista = ks => ks.length <= 1 ? ks.join('') : ks.slice(0, -1).join(', ') + ' e ' + ks[ks.length - 1];
+  const o = c.opEsc, op = cp ? cp.opEsc : null;
+  const { ini, iniS10Loja, existia, fatEntre, dBr } = _biGestaoAux(G);
   const hojeTxt = R.ate.slice(8, 10) + '/' + R.ate.slice(5, 7);
   const L = [];
   L.push(b('Relatório de Gestão – Rede Gigante Nordestino'));
-  L.push(it(`${R.rot}${R.parcial ? ` (em andamento, até ${hojeTxt})` : ''} – números do Painel de Gestão`));
+  L.push(it(`${R.rot}${R.parcial ? ` (em andamento, até ${hojeTxt}${R.semHoje ? ' — hoje fica de fora, o dia ainda não fechou' : ''})` : ''} – números do Painel de Gestão`));
   L.push('');
 
   // Faturamento
@@ -14186,8 +14206,144 @@ function _biGestaoTexto(wpp) {
   L.push(b('⚠️ Próximos passos'));
   if (P.length) P.forEach((t, i) => L.push(`${i + 1}. ${t}`));
   else L.push('Nenhum ponto fora do normal neste período.');
+
+  // Onde atuar em cada loja (pedido do dono, 20/11/2026: "dá pra ter a sugestão por loja do
+  // que atuar?"). Mesmas regras dos passos da rede, aplicadas loja a loja — cada linha diz o
+  // número e a ação. Loja sem nada fora do normal vai pra uma linha só no fim.
+  const PL = {};
+  const add = (k, t) => { (PL[k] = PL[k] || []).push(t); };
+  quedas.forEach(x => add(x.k, `Faturamento ${pc(x.v)} vs período anterior: entender a queda (movimento, cardápio, equipe)`));
+  cancAlto.forEach(x => add(x.k, `Cancelamento em ${pc(x.v, 2)} das vendas (rede ${pc(cancPct, 2)}): rever motivos e quem cancela`));
+  const pioraK = new Set(s10Pior.map(x => x.k));
+  s10Pior.forEach(x => add(x.k, `Sem 10% subiu de ${pc(x.p)} para ${pc(x.a)} das vendas: cobrar os garçons das notas`));
+  if (s10Rede != null) lojas.forEach(k => {
+    if (pioraK.has(k) || !(c.porLoja[k] > 0)) return;
+    const v = s10Pct(c.op[k], c.porLoja[k]);
+    if (v != null && v >= Math.max(s10Rede * 1.5, s10Rede + 2)) add(k, `Sem 10% em ${pc(v)} das vendas (rede ${pc(s10Rede)}): cobrar os garçons das notas`);
+  });
+  const pessoa = (campo, rot, acao) => { const tot = o[campo]; if (!tot) return;
+    lojas.forEach(k => { const v = c.op[k][campo]; if (v >= 5 && v / tot >= 0.15) add(k, `${v} ${rot} (${Math.round(v / tot * 100)}% da rede): ${acao}`); }); };
+  pessoa('FALTA', 'faltas', 'plano de presença com a gerência');
+  pessoa('ATESTADO', 'dias de atestado', 'olhar os atestados e a escala');
+  // Avaria sem lançamento fica só nos passos da rede (pedido do dono: aparecia em quase
+  // toda loja e alongava a lista sem dizer nada novo).
+  const comPonto = lojas.filter(k => PL[k]).sort((a, z) => PL[z].length - PL[a].length || (c.porLoja[z] || 0) - (c.porLoja[a] || 0));
+  const semPonto = lojas.filter(k => !PL[k] && (c.porLoja[k] || 0) > 0);
+  if (comPonto.length) {
+    L.push('');
+    L.push(b('🏪 Onde atuar em cada loja'));
+    comPonto.forEach(k => { L.push(`• ${b(nome(k))}`); PL[k].forEach(t => L.push(`  – ${t}`)); });
+    if (semPonto.length) L.push(`• Sem ponto fora do normal: ${lista(semPonto.map(nome))}`);
+  }
   if (R.parcial) { L.push(''); L.push(it('Período em andamento: os números ainda vão mudar até o fechamento.')); }
   return { msg: L.join('\n'), titulo: `Relatório de Gestão — ${R.rot}` };
+}
+// Relatório de uma loja: os números dela, sempre ao lado da rede (posição, média da rede),
+// e os passos com as mesmas regras do relatório da rede, aplicadas à loja.
+function _biGestaoTextoLoja(wpp, G, k) {
+  const { R, c, cp, lojas } = G;
+  const { ini, iniS10Loja, existia, fatEntre, dBr } = _biGestaoAux(G);
+  const b = s => wpp ? '*' + s + '*' : s, it = s => wpp ? '_' + s + '_' : s;
+  const nome = x => LOJA_DISPLAY[x] || x;
+  const fR = v => _fmtBRL(v), fRs = v => _fmtBRLs(v);
+  const pc = (v, n) => (v == null || !isFinite(v)) ? '—' : v.toFixed(n == null ? 1 : n).replace('.', ',') + '%';
+  const nInt = v => Number(v || 0).toLocaleString('pt-BR');
+  const cl = _biGCalc(G.D, R, [k], lojas);
+  const clp = cp ? _biGCalc(G.D, { de: R.prev.de, ate: R.prev.ate, prev: R.prev }, [k], lojas) : null;
+  const o = cl.opEsc, op = clp ? clp.opEsc : null, oR = c.opEsc;
+  const N = nome(k);
+  const hojeTxt = R.ate.slice(8, 10) + '/' + R.ate.slice(5, 7);
+  const L = [];
+  L.push(b(`Relatório de Gestão – ${N}`));
+  L.push(it(`${R.rot}${R.parcial ? ` (em andamento, até ${hojeTxt}${R.semHoje ? ' — hoje fica de fora, o dia ainda não fechou' : ''})` : ''} – números do Painel de Gestão`));
+  L.push('');
+  if (!(cl.total > 0)) { L.push(`Sem venda lançada de ${N} neste período.`); return { msg: L.join('\n'), titulo: `Relatório de Gestão — ${N} — ${R.rot}` }; }
+
+  // Faturamento
+  const varPct = clp && clp.total > 0 ? (cl.total - clp.total) / clp.total * 100 : null;
+  const varRede = cp && cp.total > 0 ? (c.total - cp.total) / cp.total * 100 : null;
+  const ord = lojas.map(x => [x, c.porLoja[x] || 0]).filter(x => x[1] > 0).sort((a, z) => z[1] - a[1]);
+  const pos = ord.findIndex(x => x[0] === k) + 1;
+  L.push(b('💰 Faturamento'));
+  L.push(`• ${b(fR(cl.total))} em ${cl.dias} dia${cl.dias === 1 ? '' : 's'} com venda (média de ${b(fRs(cl.dias ? cl.total / cl.dias : 0) + '/dia')})`);
+  if (varPct !== null) L.push(`• Comparado ao período anterior${R.parcial ? ' (mesmos dias)' : ''}: ${b((varPct >= 0 ? '+' : '-') + pc(Math.abs(varPct)))} (${fRs(clp.total)})${varRede !== null ? `; a rede ${varRede >= 0 ? '+' : '-'}${pc(Math.abs(varRede))}` : ''}`);
+  else L.push('• Sem comparação com o período anterior: os dados começam em 10/07/2026.');
+  if (pos) L.push(`• ${pos}º de ${ord.length} na rede · ${pc(cl.total / c.total * 100)} do faturamento da rede`);
+  L.push('');
+
+  // Como vendemos
+  const pagTot = BI_PAG.reduce((s, p) => s + cl.pag[p.k], 0) + cl.pagOutros;
+  const sd = cl.salao + cl.deliv, pDel = sd ? cl.deliv / sd * 100 : null;
+  const sdR = c.salao + c.deliv, pDelR = sdR ? c.deliv / sdR * 100 : null;
+  const DOWN = ['segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado', 'domingo'];
+  const dm = cl.dowMedia.map((v, i) => ({ i, v })).filter(x => x.v);
+  L.push(b('📊 Como vendemos'));
+  if (pagTot) L.push('• Pagamento: ' + BI_PAG.map(p => ({ r: p.rot, v: cl.pag[p.k] })).filter(x => x.v > 0).sort((a, z) => z.v - a.v).map(x => `${x.r} ${Math.round(x.v / pagTot * 100)}%`).join(' · '));
+  if (pDel !== null) L.push(`• Salão ${Math.round(100 - pDel)}% × Delivery ${Math.round(pDel)}%${pDelR !== null ? ` (rede: delivery ${Math.round(pDelR)}%)` : ''}`);
+  if (dm.length >= 2) {
+    const mx = dm.reduce((a, z) => z.v > a.v ? z : a), mn = dm.reduce((a, z) => z.v < a.v ? z : a);
+    L.push(`• Melhor dia: ${DOWN[mx.i]} (média ${fRs(mx.v)}); mais fraco: ${DOWN[mn.i]} (${fRs(mn.v)})`);
+  }
+  L.push('');
+
+  // Operação
+  const cancTem = !!ini.canc && ini.canc <= R.ate;
+  const cancDe = cancTem && ini.canc > R.de ? ini.canc : R.de;
+  const fL = cancTem ? fatEntre(k, cancDe, R.ate) : 0, fRd = cancTem ? fatEntre(null, cancDe, R.ate) : 0;
+  const cancPct = cancTem && fL > 0 ? o.cancValor / fL * 100 : null;
+  const cancRede = cancTem && fRd > 0 ? oR.cancValor / fRd * 100 : null;
+  const cancPrev = op && existia('canc', R.prev.de) && clp.total > 0 ? op.cancValor / clp.total * 100 : null;
+  const cancAlto = cancPct != null && cancRede != null && cancPct >= Math.max(cancRede * 1.5, cancRede + 0.5);
+  L.push(b('🔍 Operação'));
+  if (!cancTem) L.push(`• ${b('Cancelamentos:')} ainda não eram lançados neste período${ini.canc ? ` (o lançamento começou em ${dBr(ini.canc)})` : ''}`);
+  else L.push(`• ${b('Cancelamentos:')} ${nInt(o.cancQtd)} (${pc(cancPct, 2)} das vendas = ${fR(o.cancValor)}; rede ${pc(cancRede, 2)})${cancDe > R.de ? ` — lançados a partir de ${dBr(cancDe)}` : ''}${cancPrev != null ? `; antes ${pc(cancPrev, 2)}` : ''}`);
+  const trTem = !!ini.transf && ini.transf <= R.ate;
+  L.push(`• ${b('Transferências de mesa:')} ${trTem ? nInt(o.transf) + (op && existia('transf', R.prev.de) ? ` (antes ${nInt(op.transf)})` : '') : 'ainda não eram lançadas neste período'}`);
+  L.push(`• ${b('Funcionário extra:')} ${fR(o.extraValor)} em ${nInt(o.extraQtd)} lançamento${o.extraQtd === 1 ? '' : 's'}${op ? ` (antes ${fR(op.extraValor)})` : ''}`);
+  L.push(`• ${b('Avarias:')} ${o.avQtd ? `${fR(o.avValor)} em ${nInt(o.avQtd)} ite${o.avQtd === 1 ? 'm' : 'ns'}` : 'nenhuma lançada'}`);
+  L.push('');
+
+  // Sem 10%
+  const s10Pct = (oo, fat) => fat > 0 ? oo.s10Dez * 10 / fat * 100 : null;
+  const s10 = s10Pct(o, cl.total), s10Rede = s10Pct(oR, c.total);
+  const comparavel = clp && iniS10Loja[k] && iniS10Loja[k] <= R.prev.de && op.s10Qtd > 0 && clp.total > 0;
+  const s10Prev = comparavel ? s10Pct(op, clp.total) : null;
+  L.push(b('💸 Notas sem 10%'));
+  L.push(`• ${nInt(o.s10Qtd)} nota${o.s10Qtd === 1 ? '' : 's'} · ${b(fR(o.s10Dez) + ' de serviço que não entrou')} (${pc(s10)} das vendas; rede ${pc(s10Rede)})`);
+  if (s10Prev != null) L.push(`• Antes: ${pc(s10Prev)} → agora ${b(pc(s10))} ${Math.abs(s10 - s10Prev) < 0.3 ? '(estável)' : s10 < s10Prev ? '(melhorou)' : '(piorou)'}`);
+  else if (o.s10Qtd && clp) L.push('• Sem comparação: a loja começou a lançar no período anterior ou depois.');
+  L.push('');
+
+  // Pessoas
+  const share = (v, t) => t ? Math.round(v / t * 100) : 0;
+  L.push(b('👥 Pessoas'));
+  L.push(`• ${b('Faltas:')} ${nInt(o.FALTA)} dia${o.FALTA === 1 ? '' : 's'}${op ? ` (antes ${nInt(op.FALTA)})` : ''}${oR.FALTA ? ` — ${share(o.FALTA, oR.FALTA)}% da rede` : ''}`);
+  L.push(`• ${b('Atestados:')} ${nInt(o.ATESTADO)} dia${o.ATESTADO === 1 ? '' : 's'}${op ? ` (antes ${nInt(op.ATESTADO)})` : ''}${oR.ATESTADO ? ` — ${share(o.ATESTADO, oR.ATESTADO)}% da rede` : ''}`);
+  if (o['SUSPENSÃO'] || o.ADVERTENCIA) L.push(`• Suspensões: ${nInt(o['SUSPENSÃO'])} dia${o['SUSPENSÃO'] === 1 ? '' : 's'} · Advertências: ${nInt(o.ADVERTENCIA)}`);
+  L.push('');
+
+  // Próximos passos da loja
+  const P = [];
+  if (varPct !== null && varPct <= -5) {
+    if (varRede !== null && varRede < 0 && varPct >= varRede) P.push(`Queda de ${pc(Math.abs(varPct))} no faturamento, menor que a da rede (${pc(Math.abs(varRede))}): acompanha o movimento geral — manter o olho.`);
+    else P.push(`Entender a queda de ${pc(Math.abs(varPct))} no faturamento${varRede !== null ? ` (a rede ${varRede >= 0 ? 'subiu' : 'caiu'} ${pc(Math.abs(varRede))})` : ''}: movimento, cardápio, equipe.`);
+  }
+  if (cancAlto) P.push(`Reduzir cancelamentos: ${pc(cancPct, 2)} das vendas contra ${pc(cancRede, 2)} da rede — rever motivos e quem cancela.`);
+  if (s10Prev != null && s10 >= s10Prev + 1) P.push(`Sem 10% subiu de ${pc(s10Prev)} para ${pc(s10)}: cobrar os garçons das notas.`);
+  else if (s10 != null && s10Rede != null && s10 >= Math.max(s10Rede * 1.5, s10Rede + 2)) P.push(`Sem 10% em ${pc(s10)} das vendas (rede ${pc(s10Rede)}): cobrar os garçons das notas.`);
+  if (s10 != null && s10 >= BI_GEST_META_S10 + 0.5 && cl.dias) {
+    const porMes = (s10 - BI_GEST_META_S10) / 100 * cl.total * 0.10 * 30 / cl.dias;
+    P.push(`Meta de sem 10%: baixar de ${pc(s10)} para ${BI_GEST_META_S10}% das vendas — vale cerca de ${fRs(porMes)}/mês de serviço para a equipe.`);
+  }
+  if (o.FALTA >= 5 && oR.FALTA && o.FALTA / oR.FALTA >= 0.15) P.push(`Plano de presença: ${o.FALTA} faltas, ${share(o.FALTA, oR.FALTA)}% das faltas da rede.`);
+  if (o.ATESTADO >= 5 && oR.ATESTADO && o.ATESTADO / oR.ATESTADO >= 0.15) P.push(`Olhar os atestados e a escala: ${o.ATESTADO} dias, ${share(o.ATESTADO, oR.ATESTADO)}% da rede.`);
+  if (!o.avQtd) P.push('Cobrar o lançamento de avarias: nenhuma lançada no período, a perda não aparece.');
+  if (pDel !== null && pDel < 10) P.push(`Delivery em ${pc(pDel, 0)} das vendas: plano para crescer o canal.`);
+  L.push(b('⚠️ Onde atuar'));
+  if (P.length) P.forEach((t, i) => L.push(`${i + 1}. ${t}`));
+  else L.push('Nenhum ponto fora do normal neste período.');
+  if (R.parcial) { L.push(''); L.push(it('Período em andamento: os números ainda vão mudar até o fechamento.')); }
+  return { msg: L.join('\n'), titulo: `Relatório de Gestão — ${N} — ${R.rot}` };
 }
 function enviarWppGestaoBi() { const r = _biGestaoTexto(true); if (!r) { alert('Abra a vista 📈 Gráficos e espere carregar.'); return; } window.open('https://wa.me/?text=' + encodeURIComponent(r.msg), '_blank'); }
 function gerarPDFGestaoBi() { const r = _biGestaoTexto(false); if (!r) { alert('Abra a vista 📈 Gráficos e espere carregar.'); return; } window.gnRelatorioPDFTexto(r.msg, r.titulo); }
