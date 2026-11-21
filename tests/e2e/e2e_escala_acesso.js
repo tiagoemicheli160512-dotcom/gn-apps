@@ -176,9 +176,12 @@ const verificar = (page, sess) => page.evaluate(
   // quebrado no app. O resto do teste segue com data fixa de propósito (a escala da semana
   // 38 é o fixture); só a liberação precisa da data de verdade.
   const lib = await comSup.page.evaluate(async s => {
-    const hojeReal = new Date().getFullYear() + '-' +
-      String(new Date().getMonth() + 1).padStart(2, '0') + '-' +
-      String(new Date().getDate()).padStart(2, '0');
+    // Dia operacional, igual ao app: até as 2h da manhã ainda vale o dia anterior.
+    const agora = new Date();
+    const op = agora.getHours() < 2 ? new Date(agora.getFullYear(), agora.getMonth(), agora.getDate() - 1, 12) : agora;
+    const hojeReal = op.getFullYear() + '-' +
+      String(op.getMonth() + 1).padStart(2, '0') + '-' +
+      String(op.getDate()).padStart(2, '0');
     const r = await gnEscalaAcesso.liberar(s, 'Anderson', 'x');
     const depois = await gnEscalaAcesso.verificar(s, { hoje: hojeReal, semCache: true });
     return { r, hojeReal, bloqueadoDepois: depois.bloqueado,
