@@ -822,7 +822,9 @@ window.gnPdfAgora = function () {
   return `${p(d.getDate())}/${p(d.getMonth() + 1)} ${p(d.getHours())}:${p(d.getMinutes())}`;
 };
 
-// opts: { titulo, subtitulo, kpis:[{label,valor,sub}], texto | html, rodape }
+// opts: { titulo, subtitulo, kpis:[{label,valor,sub}], visual, texto | html, rodape }
+// `visual` (21/11/2026): os quadros da tela — "por categoria", ranking com barras — já com as
+// cores trocadas pras do papel; entram logo abaixo dos KPIs, antes do texto.
 // `html` é pra quem já monta tabela própria (o relatório do Painel); `texto` é o caminho
 // dos outros, que mandam texto corrido.
 window.gnRelatorioHtml = function (opts, imprimir) {
@@ -871,6 +873,7 @@ window.gnRelatorioHtml = function (opts, imprimir) {
   .lin{font-size:10pt;line-height:1.5;white-space:pre-wrap;word-break:break-word}
   .det{font-size:9pt;line-height:1.45;color:#555;white-space:pre-wrap;word-break:break-word;padding-left:2px}
   .gap{height:7px}
+  .pdf-vis>div{page-break-inside:avoid;break-inside:avoid;margin-bottom:12px!important}
   .footer{font-size:7.5pt;color:#aaa;border-top:1px solid #eee;padding-top:8px;margin-top:18px}
   @media print{body{padding:0}@page{margin:1.5cm}}
 </style></head><body>
@@ -878,6 +881,7 @@ window.gnRelatorioHtml = function (opts, imprimir) {
   <h1>${titulo}</h1>
   <div class="sub">${sub}</div>
   ${kpiHtml}
+  ${o.visual || ''}
   ${corpo}
   <div class="footer">${rodape}</div>
   ${imprimir ? '<script>window.onload=function(){window.print()}<\/script>' : ''}
