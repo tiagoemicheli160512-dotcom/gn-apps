@@ -10,7 +10,10 @@ const check = (n, c) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ? ok++ :
 const P = 'PRESENTE';
 // Hoje de verdade: o guardião roda sem parâmetro, usando a data do navegador. O teste
 // monta a semana sob a chave do dia de hoje, calculada igual ao app (âncora 05/01/2026).
-const hoje = new Date();
+// Mesma virada do app (gn-escala-acesso.js, _agoraOperacional): até as 2h da manhã o dia
+// que vale ainda é o ANTERIOR. Sem isso o teste montava a escala no dia seguinte e falhava
+// toda madrugada entre 0h e 2h, sem nada ter quebrado no app.
+const hoje = (() => { const d = new Date(); return d.getHours() < 2 ? new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1, 12) : d; })();
 const seg = Date.UTC(hoje.getFullYear(), hoje.getMonth(), hoje.getDate() - ((hoje.getDay() + 6) % 7));
 const SEM = Math.round((seg - Date.UTC(2026, 0, 5)) / 604800000);
 const DIA = (hoje.getDay() + 6) % 7;

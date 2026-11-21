@@ -13744,13 +13744,23 @@ async function _biGCarregar() {
   const isoDia = x => x.y + '-' + _p2(x.m) + '-' + _p2(x.d);
   const semanas = []; CAL.forEach((sem, i) => { if ((sem.days || []).some(x => { const d = isoDia(x); return d >= de && d <= R.ate; })) semanas.push(i); });
   const comKeys = _biLojas().map(l => LOJA_COM_KEY[l] || l);
-  const [vendas, caixa, coms, avs] = await Promise.all([
+  // Banco de horas (o LANÇADO de cada mês da janela + a CONFIG com o salário por setor) e
+  // couvert × cachê do trio (gn_trios_agenda) — pro relatório de gestão, com as mesmas
+  // contas do card do mês fechado da Home (_mesAnteriorBanco / _triosAgregar).
+  const mesesJan = []; for (let m = de.slice(0, 7); m <= R.ate.slice(0, 7); m = _biGMesSeguinte(m)) mesesJan.push(m);
+  const chkKeys = _biLojas().filter(l => l !== LOJA_FORA_BANCO_GERENCIA).map(l => LOJA_DB_KEY[l] || l);
+  const slugs = (window.GN_LOJAS || []).filter(l => l.trioSlug && _biLojas().includes(l.userKey)).map(l => l.trioSlug);
+  const [vendas, caixa, coms, avs, banco, trios] = await Promise.all([
     _biGPaginado(`${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${de}&data_operacao=lte.${R.ate}&select=loja,data_operacao,venda_salao,venda_delivery&order=data_operacao.asc`, 'biGraf:vendas'),
     _biGPaginado(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${de}&data=lte.${R.ate}&select=loja,data,gn_caixa_comprovante(bandeira,valor),gn_caixa_cancelamento(valor),gn_caixa_transferencia(id),gn_caixa_gorjeta(valor),gn_caixa_despesa(categoria,valor,nome,justificativa)&order=data.asc`, 'biGraf:caixa'),
     semanas.length ? window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=in.(${comKeys.map(encodeURIComponent).join(',')})&select=loja,${semanas.map(i => `s${i}:all_data->"${i}"`).join(',')}`, H, 'biGraf:comissoes', null) : Promise.resolve([]),
     window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=in.(${comKeys.map(encodeURIComponent).join(',')})&select=loja,av:all_data->avariasAll`, H, 'biGraf:avarias', null),
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_banco_horas?loja=in.(${chkKeys.map(encodeURIComponent).join(',')})&mes=in.(CONFIG,${mesesJan.join(',')})&select=loja,mes,registros`, H, 'biGraf:banco', null),
+    slugs.length ? _biGPaginado(`${SB_URL}/rest/v1/gn_trios_agenda?loja=in.(${slugs.map(encodeURIComponent).join(',')})&data=gte.${de}&data=lte.${R.ate}` +
+      `&select=data,loja,artista,cache,couver_qtd,couver_valor,couver_lancado_em,presenca_confirmada,banda_nao_veio,banda_nao_veio_motivo,horario_inicio&order=data.asc`, 'biGraf:trios') : Promise.resolve([]),
   ]);
-  _biGDados[chave] = { vendas: vendas || [], caixa: caixa || [], coms: coms || [], avs: avs || [], erro: !vendas, erroPag: !caixa, erroCom: !coms, erroAv: !avs };
+  _biGDados[chave] = { vendas: vendas || [], caixa: caixa || [], coms: coms || [], avs: avs || [], banco: banco || [], trios: trios || [],
+    erro: !vendas, erroPag: !caixa, erroCom: !coms, erroAv: !avs, erroBanco: !banco, erroTrios: !trios };
   _biGCarregando = '';
   if (_dashTab === 'bi' && _biVista === 'graf') renderDashboard();
 }
@@ -14067,6 +14077,97 @@ function _biGestaoDados() {
   const cp = prevOk ? _biGCalc(D, { de: R.prev.de, ate: R.prev.ate, prev: R.prev }, lojas, lojas) : null;
   return { R, D, c, cp, lojas };
 }
+function _biGMesSeguinte(ym) { const [y, m] = ym.split('-').map(Number); return m === 12 ? (y + 1) + '-01' : y + '-' + String(m + 1).padStart(2, '0'); }
+const _BI_MES_NOME = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+// Banco de horas e couvert × cachê de uma loja no período do relatório (pedido do dono,
+// 21/11/2026: "senti falta do banco de horas e do couvert no relatório").
+//   · banco: o LANÇADO em cada mês do período (o banco é lançado uma vez por mês, no
+//     fechamento), somado; mês já fechado sem lançamento vira pendência; o mês corrente
+//     sem lançamento é só "ainda não lançado" — o banco fecha no fim do mês.
+//   · couvert: _triosAgregar por mês, só dias até o fim do período (dia futuro tem cachê
+//     contratado e couvert zero — entraria como prejuízo que não existiu).
+function _biGestaoBancoCouvert(G, k) {
+  const D = G.D, R = G.R;
+  const meses = []; for (let m = R.de.slice(0, 7); m <= R.ate.slice(0, 7); m = _biGMesSeguinte(m)) meses.push(m);
+  const mesAtual = _biGIso(new Date()).slice(0, 7);
+  let banco;
+  if (k === LOJA_FORA_BANCO_GERENCIA) banco = { fora: true };
+  else if (D.erroBanco) banco = { erro: true };
+  else {
+    const chk = LOJA_DB_KEY[k] || k, comKey = LOJA_COM_KEY[k] || k;
+    const rows = (D.banco || []).filter(r => r.loja === chk);
+    const comRow = (D.coms || []).find(r => r.loja === comKey) || {};
+    const allData = {}; Object.keys(comRow).forEach(c => { const m = /^s(\d+)$/.exec(c); if (m && comRow[c]) allData[m[1]] = comRow[c]; });
+    const comRows = [{ loja: comKey, all_data: allData }];
+    banco = { pos: 0, neg: 0, valorPos: 0, valorNeg: 0, pessoasPos: 0, pessoasNeg: 0, semSalario: 0, lancados: [], pendentes: [], abertos: [] };
+    meses.forEach(m => {
+      const b = _mesAnteriorBanco(k, rows, comRows, m);
+      if (b.semLancamento) { (m < mesAtual ? banco.pendentes : banco.abertos).push(m); return; }
+      if (b.erro || b.fora) return;
+      banco.lancados.push(m);
+      ['pos', 'neg', 'valorPos', 'valorNeg', 'pessoasPos', 'pessoasNeg', 'semSalario'].forEach(c => { banco[c] += b[c] || 0; });
+    });
+  }
+  let couvert;
+  const temTrio = (window.GN_LOJAS || []).some(l => l.userKey === k && l.trioSlug);
+  if (!temTrio) couvert = { semTrio: true };
+  else if (D.erroTrios) couvert = { erro: true };
+  else {
+    const rows = (D.trios || []).filter(r => { const d = String(r.data).slice(0, 10); return d >= R.de && d <= R.ate; });
+    const dentro = {}; dentro[k] = true;
+    const agg = _triosAgregar(rows, 'mes', dentro, _triosHojeISO());
+    couvert = { couver: 0, cache: 0, saldo: 0, diasSemCouver: [], noites: 0 };
+    let algum = false;
+    Object.values(agg).forEach(sx => {
+      if (sx.k !== k) return; algum = true;
+      couvert.couver += sx.couver; couvert.cache += sx.cacheDevido; couvert.saldo += sx.saldo;
+      couvert.diasSemCouver.push(...(sx.diasSemCouver || [])); couvert.noites += (sx.diasValidos || []).length;
+    });
+    if (!algum) couvert = { semTrio: true, semAgenda: true };
+  }
+  return { banco, couvert, meses };
+}
+const _biMesTxt = ym => _BI_MES_NOME[+ym.slice(5, 7) - 1] + '/' + ym.slice(0, 4);
+const _biDiaMes = iso => iso.slice(8, 10) + '/' + iso.slice(5, 7);
+const _biListaMeses = ms => ms.map(_biMesTxt).join(', ');
+// Linhas de texto (loja) — b = negrito do WhatsApp.
+function _biCouvertLinha(cv, b) {
+  if (!cv || cv.semTrio) return null;
+  if (cv.erro) return `• ${b('Couvert × cachê do trio:')} não carregou agora`;
+  const sinal = cv.saldo < 0 ? '−' : '+';
+  return `• ${b('Couvert × cachê do trio:')} couvert ${_fmtBRL(cv.couver)} − cachê ${_fmtBRL(cv.cache)} = ${b(sinal + _fmtBRL(Math.abs(cv.saldo)))}` +
+    (cv.diasSemCouver.length ? ` — faltou lançar o couvert de ${cv.diasSemCouver.map(_biDiaMes).join(', ')}` : '');
+}
+function _biBancoLinha(bh, b) {
+  if (!bh || bh.fora) return null;
+  if (bh.erro) return `• ${b('Banco de horas:')} não carregou agora`;
+  const h = x => _raioxHoras(x);
+  const partes = [];
+  if (bh.lancados.length) partes.push(`lançado em ${_biListaMeses(bh.lancados)}: +${h(bh.pos)} a pagar (${bh.pessoasPos} pessoa${bh.pessoasPos === 1 ? '' : 's'}${bh.valorPos ? ' · ' + _fmtBRL(bh.valorPos) + ' com +50%' : ''}) · −${h(bh.neg)} a compensar (${bh.pessoasNeg} pessoa${bh.pessoasNeg === 1 ? '' : 's'})`);
+  if (bh.pendentes.length) partes.push(`${_biListaMeses(bh.pendentes)} sem lançamento`);
+  if (bh.abertos.length) partes.push(`${_biListaMeses(bh.abertos)} ainda não lançado (o banco fecha no fim do mês)`);
+  return partes.length ? `• ${b('Banco de horas:')} ${partes.join('; ')}` : null;
+}
+// Ações (loja) que saem do banco e do couvert — as mesmas na lista da rede e no relatório
+// da loja.
+// Banco "alto" é relativo à rede: em out/2026, 9 de 11 lojas passavam de 20h a pagar — um
+// passo em quase toda loja não aponta nada. Vale quem tem ≥ 20h E ≥ 1,5× a média das lojas.
+function _biBancoMediaPos(G) {
+  const v = G.lojas.map(k => _biGestaoBancoCouvert(G, k).banco).filter(bh => bh && !bh.fora && !bh.erro && bh.lancados.length).map(bh => bh.pos);
+  return v.length ? v.reduce((a, z) => a + z, 0) / v.length : 0;
+}
+function _biBancoCouvertAcoes(bc, mediaPos) {
+  const A = [], cv = bc.couvert, bh = bc.banco;
+  if (cv && !cv.semTrio && !cv.erro) {
+    if (cv.diasSemCouver.length) A.push(`Lançar o couvert de ${cv.diasSemCouver.map(_biDiaMes).join(', ')}: sem ele o resultado do trio não fecha`);
+    else if (cv.saldo < 0) A.push(`Couvert não cobriu o cachê do trio (−${_fmtBRL(Math.abs(cv.saldo))}): rever dias e atrações`);
+  }
+  if (bh && !bh.fora && !bh.erro) {
+    if (bh.pendentes.length) A.push(`Lançar o banco de horas de ${_biListaMeses(bh.pendentes)}`);
+    if (bh.pos >= 20 && bh.pos >= 1.5 * (mediaPos || 0)) A.push(`Banco de horas com +${_raioxHoras(bh.pos)} a pagar${bh.valorPos ? ` (${_fmtBRL(bh.valorPos)} com +50%)` : ''}${mediaPos ? ` — média das lojas +${_raioxHoras(mediaPos)}` : ''}: programar compensação com folga`);
+  }
+  return A;
+}
 // Desde quando cada lançamento existe (cancelamento começou em 15/10/2026, transferência
 // em 23/10): sem isso, o período anterior aparece com "0%" e a comparação inventa piora.
 function _biGestaoAux(G) {
@@ -14154,6 +14255,20 @@ function _biGestaoTexto(wpp) {
   L.push(`• ${b('Transferências de mesa:')} ${trTem ? nInt(o.transf) + (ini.transf > R.de ? ` — lançadas a partir de ${dBr(ini.transf)}` : '') + (op && existia('transf', R.prev.de) ? ` (antes ${nInt(op.transf)})` : '') : `ainda não eram lançadas neste período${ini.transf ? ` (começou em ${dBr(ini.transf)})` : ''}`}`);
   L.push(`• ${b('Funcionário extra:')} ${fR(o.extraValor)} em ${nInt(o.extraQtd)} lançamento${o.extraQtd === 1 ? '' : 's'}${op ? ` (antes ${fR(op.extraValor)})` : ''}`);
   L.push(`• ${b('Avarias:')} ${fR(o.avValor)} em ${nInt(o.avQtd)} ite${o.avQtd === 1 ? 'm' : 'ns'}${semAv.length ? ` — ${semAv.length} loja${semAv.length === 1 ? '' : 's'} sem nenhum lançamento` : ''}`);
+  // Couvert × cachê dos trios (só lojas com trio).
+  const BC = {}; lojas.forEach(k => { BC[k] = _biGestaoBancoCouvert(G, k); });
+  const cvOk = lojas.filter(k => BC[k].couvert && !BC[k].couvert.semTrio && !BC[k].couvert.erro);
+  const cvErro = lojas.some(k => BC[k].couvert && BC[k].couvert.erro);
+  const cvFalta = cvOk.filter(k => BC[k].couvert.diasSemCouver.length);
+  const cvNeg = cvOk.filter(k => !BC[k].couvert.diasSemCouver.length && BC[k].couvert.saldo < 0);
+  if (cvErro) L.push(`• ${b('Couvert × cachê dos trios:')} não carregou agora`);
+  else if (cvOk.length) {
+    const sm = c2 => cvOk.reduce((t, k) => t + BC[k].couvert[c2], 0);
+    const sal = sm('saldo');
+    L.push(`• ${b('Couvert × cachê dos trios:')} couvert ${fR(sm('couver'))} − cachê ${fR(sm('cache'))} = ${b((sal < 0 ? '−' : '+') + fR(Math.abs(sal)))} (${cvOk.length} loja${cvOk.length === 1 ? '' : 's'} com trio)`);
+    if (cvNeg.length) L.push(`  – Couvert não cobriu o cachê: ${cvNeg.map(k => `${nome(k)} (−${fRs(Math.abs(BC[k].couvert.saldo))})`).join(', ')}`);
+    if (cvFalta.length) L.push(`  – Faltou lançar o couvert: ${cvFalta.map(k => `${nome(k)} (${BC[k].couvert.diasSemCouver.length} dia${BC[k].couvert.diasSemCouver.length === 1 ? '' : 's'})`).join(', ')}`);
+  }
   L.push('');
 
   // Sem 10%: % das vendas em nota sem 10% (valor da nota = 10 × o 10% não cobrado).
@@ -14188,6 +14303,20 @@ function _biGestaoTexto(wpp) {
   L.push(`• ${b('Faltas:')} ${nInt(o.FALTA)} dia${o.FALTA === 1 ? '' : 's'}${op ? ` (antes ${nInt(op.FALTA)})` : ''}${cF ? ` — ${nome(cF.k)} soma ${cF.v}` : ''}`);
   L.push(`• ${b('Atestados:')} ${nInt(o.ATESTADO)} dia${o.ATESTADO === 1 ? '' : 's'}${op ? ` (antes ${nInt(op.ATESTADO)})` : ''}${cA ? ` — ${nome(cA.k)} soma ${cA.v}` : ''}`);
   if (o['SUSPENSÃO'] || o.ADVERTENCIA) L.push(`• Suspensões: ${nInt(o['SUSPENSÃO'])} dia${o['SUSPENSÃO'] === 1 ? '' : 's'} · Advertências: ${nInt(o.ADVERTENCIA)}`);
+  // Banco de horas da rede: o lançado no período, somado; quem não lançou mês já fechado.
+  const bhOk = lojas.filter(k => BC[k].banco && !BC[k].banco.fora && !BC[k].banco.erro);
+  const bhPend = bhOk.filter(k => BC[k].banco.pendentes.length);
+  const bhLanc = bhOk.filter(k => BC[k].banco.lancados.length);
+  if (lojas.some(k => BC[k].banco && BC[k].banco.erro)) L.push(`• ${b('Banco de horas:')} não carregou agora`);
+  else if (bhOk.length) {
+    const sm = c2 => bhLanc.reduce((t, k) => t + BC[k].banco[c2], 0);
+    if (bhLanc.length) L.push(`• ${b('Banco de horas:')} +${_raioxHoras(sm('pos'))} a pagar${sm('valorPos') ? ` (${fR(sm('valorPos'))} com +50%)` : ''} · −${_raioxHoras(sm('neg'))} a compensar — lançado por ${bhLanc.length} de ${bhOk.length} lojas`);
+    else if (bhOk.every(k => BC[k].banco.abertos.length && !BC[k].banco.pendentes.length)) L.push(`• ${b('Banco de horas:')} ${_biListaMeses(BC[bhOk[0]].banco.abertos)} ainda não lançado (o banco fecha no fim do mês)`);
+    if (bhPend.length) L.push(`  – Sem lançamento: ${bhPend.map(k => `${nome(k)} (${_biListaMeses(BC[k].banco.pendentes)})`).join(', ')}`);
+    const mPos = bhLanc.length ? sm('pos') / bhLanc.length : 0;
+    const bhAlto = bhLanc.filter(k => BC[k].banco.pos >= 20 && BC[k].banco.pos >= 1.5 * mPos).sort((a, z) => BC[z].banco.pos - BC[a].banco.pos);
+    if (bhAlto.length) L.push(`  – Mais horas a pagar: ${bhAlto.slice(0, 3).map(k => `${nome(k)} (+${_raioxHoras(BC[k].banco.pos)})`).join(', ')}`);
+  }
   L.push('');
 
   // Próximos passos — cada um sai de um número acima.
@@ -14203,6 +14332,9 @@ function _biGestaoTexto(wpp) {
   if (cA && (!cF || cA.k !== cF.k)) P.push(`Olhar os atestados de ${nome(cA.k)}: ${cA.v} dos ${o.ATESTADO} da rede.`);
   if (semAv.length) P.push(`Cobrar o lançamento de avarias${semAv.length <= 4 ? ` em ${lista(semAv.map(nome))}` : ` (${semAv.length} lojas sem nenhum)`}: sem lançamento, a perda não aparece.`);
   if (pDel !== null && pDel < 10) P.push(`Delivery em ${pc(pDel, 0)} das vendas: plano para crescer o canal.`);
+  if (cvFalta.length) P.push(`Cobrar o lançamento do couvert em ${lista(cvFalta.map(nome))}: sem ele o resultado do trio não fecha.`);
+  if (cvNeg.length) P.push(`Rever o trio em ${lista(cvNeg.map(nome))}: o couvert não cobriu o cachê.`);
+  if (bhPend.length) P.push(`Cobrar o lançamento do banco de horas em ${lista(bhPend.map(nome))}.`);
   L.push(b('⚠️ Próximos passos'));
   if (P.length) P.forEach((t, i) => L.push(`${i + 1}. ${t}`));
   else L.push('Nenhum ponto fora do normal neste período.');
@@ -14225,6 +14357,8 @@ function _biGestaoTexto(wpp) {
     lojas.forEach(k => { const v = c.op[k][campo]; if (v >= 5 && v / tot >= 0.15) add(k, `${v} ${rot} (${Math.round(v / tot * 100)}% da rede): ${acao}`); }); };
   pessoa('FALTA', 'faltas', 'plano de presença com a gerência');
   pessoa('ATESTADO', 'dias de atestado', 'olhar os atestados e a escala');
+  const mediaPosBh = _biBancoMediaPos(G);
+  lojas.forEach(k => _biBancoCouvertAcoes(BC[k], mediaPosBh).forEach(t => add(k, t)));
   // Avaria sem lançamento fica só nos passos da rede (pedido do dono: aparecia em quase
   // toda loja e alongava a lista sem dizer nada novo).
   const comPonto = lojas.filter(k => PL[k]).sort((a, z) => PL[z].length - PL[a].length || (c.porLoja[z] || 0) - (c.porLoja[a] || 0));
@@ -14301,6 +14435,8 @@ function _biGestaoTextoLoja(wpp, G, k) {
   L.push(`• ${b('Transferências de mesa:')} ${trTem ? nInt(o.transf) + (op && existia('transf', R.prev.de) ? ` (antes ${nInt(op.transf)})` : '') : 'ainda não eram lançadas neste período'}`);
   L.push(`• ${b('Funcionário extra:')} ${fR(o.extraValor)} em ${nInt(o.extraQtd)} lançamento${o.extraQtd === 1 ? '' : 's'}${op ? ` (antes ${fR(op.extraValor)})` : ''}`);
   L.push(`• ${b('Avarias:')} ${o.avQtd ? `${fR(o.avValor)} em ${nInt(o.avQtd)} ite${o.avQtd === 1 ? 'm' : 'ns'}` : 'nenhuma lançada'}`);
+  const bc = _biGestaoBancoCouvert(G, k);
+  const lCv = _biCouvertLinha(bc.couvert, b); if (lCv) L.push(lCv);
   L.push('');
 
   // Sem 10%
@@ -14320,6 +14456,7 @@ function _biGestaoTextoLoja(wpp, G, k) {
   L.push(`• ${b('Faltas:')} ${nInt(o.FALTA)} dia${o.FALTA === 1 ? '' : 's'}${op ? ` (antes ${nInt(op.FALTA)})` : ''}${oR.FALTA ? ` — ${share(o.FALTA, oR.FALTA)}% da rede` : ''}`);
   L.push(`• ${b('Atestados:')} ${nInt(o.ATESTADO)} dia${o.ATESTADO === 1 ? '' : 's'}${op ? ` (antes ${nInt(op.ATESTADO)})` : ''}${oR.ATESTADO ? ` — ${share(o.ATESTADO, oR.ATESTADO)}% da rede` : ''}`);
   if (o['SUSPENSÃO'] || o.ADVERTENCIA) L.push(`• Suspensões: ${nInt(o['SUSPENSÃO'])} dia${o['SUSPENSÃO'] === 1 ? '' : 's'} · Advertências: ${nInt(o.ADVERTENCIA)}`);
+  const lBh = _biBancoLinha(bc.banco, b); if (lBh) L.push(lBh);
   L.push('');
 
   // Próximos passos da loja
@@ -14339,6 +14476,7 @@ function _biGestaoTextoLoja(wpp, G, k) {
   if (o.ATESTADO >= 5 && oR.ATESTADO && o.ATESTADO / oR.ATESTADO >= 0.15) P.push(`Olhar os atestados e a escala: ${o.ATESTADO} dias, ${share(o.ATESTADO, oR.ATESTADO)}% da rede.`);
   if (!o.avQtd) P.push('Cobrar o lançamento de avarias: nenhuma lançada no período, a perda não aparece.');
   if (pDel !== null && pDel < 10) P.push(`Delivery em ${pc(pDel, 0)} das vendas: plano para crescer o canal.`);
+  _biBancoCouvertAcoes(bc, _biBancoMediaPos(G)).forEach(t => P.push(t + '.'));
   L.push(b('⚠️ Onde atuar'));
   if (P.length) P.forEach((t, i) => L.push(`${i + 1}. ${t}`));
   else L.push('Nenhum ponto fora do normal neste período.');

@@ -66,6 +66,15 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
         const f = { dias: ['FALTA', 'FALTA', 'FALTA', 'FALTA', 'PRESENTE', 'PRESENTE', 'FOLGA'] };
         return [{ loja: 'BANGU', ['s' + idx]: { funcs: [{ nome: 'A', ...f }, { nome: 'B', ...f }] } }];
       }
+      // Banco de horas: só a Bangu lançou novembro (+30h e −5h); as outras ficam pendentes.
+      if (nome === 'biGraf:banco') { window.__bancoUrl = u; return [{ loja: 'Bangu', mes: 'CONFIG', registros: {} }, { loja: 'Bangu', mes: '2026-11', registros: [{ nome: 'Ana', horas: 30 }, { nome: 'Beto', horas: -5 }] }]; }
+      // Trio: Bangu tocou 07 e 08/11 (cachê 800 cada) e só lançou o couvert de 07 (R$ 600);
+      // Caxias tocou 14/11 (cachê 500, couvert 300 lançado) → −R$ 200.
+      if (nome === 'biGraf:trios') return off ? [] : [
+        { data: '2026-11-07', loja: 'bangu', artista: 'Trio A', cache: 800, couver_valor: 600, couver_lancado_em: '2026-11-08T02:00:00Z' },
+        { data: '2026-11-08', loja: 'bangu', artista: 'Trio A', cache: 800, couver_valor: 0 },
+        { data: '2026-11-14', loja: 'caxias', artista: 'Trio B', cache: 500, couver_valor: 300, couver_lancado_em: '2026-11-15T02:00:00Z' },
+      ].filter(r => r.data >= de && r.data <= ate);
       if (nome === 'biGraf:avarias') return [{ loja: 'BANGU', av: { BANGU: [{ id: 'a1', ts: '2026-11-12T15:00:00Z', valorTotal: 40, status: 'finalizado' }] } }];
       return fb === undefined ? [] : fb;
     };
@@ -104,6 +113,7 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
     out.bannerTri = !!el.querySelector('.bi-gest-fechado');
     out.triTxt = (_biGestaoTexto(true) || {}).msg || '';
     out.largura = document.documentElement.scrollWidth;
+    out.bancoUrl = window.__bancoUrl || '';
     return out;
   });
 
@@ -168,6 +178,17 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   const cx = r.caxias;
   check('Caxias: cancelamento acima da rede e avaria a lançar viram passo', /Reduzir cancelamentos: 2,67% das vendas contra 1,64% da rede/.test(cx) && /Cobrar o lançamento de avarias/.test(cx), (cx.split('Onde atuar*')[1] || ''));
   check('Caxias: sem 10% sem comparação (começou a lançar agora)', /Sem comparação: a loja começou a lançar/.test(cx));
+  // Banco de horas e couvert (21/11/2026: "senti falta do banco de horas e do couvert").
+  check('rede: couvert × cachê dos trios somado (só dias até o fim do período)', /Couvert × cachê dos trios:\* couvert R\$\s?900,00 − cachê R\$\s?2\.100,00 = \*−R\$\s?1\.200,00\* \(2 lojas com trio\)/.test(w), (w.match(/.*Couvert × cachê dos trios.*/) || [])[0]);
+  check('rede: quem não cobriu o cachê e quem não lançou o couvert', /Couvert não cobriu o cachê: Caxias \(−R\$\s?200/.test(w) && /Faltou lançar o couvert: Bangu \(1 dia\)/.test(w));
+  check('rede: banco de horas lançado somado e quem não lançou', /Banco de horas:\* \+30h a pagar · −5h a compensar — lançado por 1 de \d+ lojas/.test(w) && /Sem lançamento: .*Caxias \(nov\/2026\)/.test(w), (w.match(/.*Banco de horas.*/g) || []).join(' | '));
+  check('rede: passos de couvert e banco', /Cobrar o lançamento do couvert em Bangu/.test(passos) && /Rever o trio em Caxias: o couvert não cobriu o cachê/.test(passos) && /Cobrar o lançamento do banco de horas em .*Caxias/.test(passos), passos);
+  check('rede, por loja: Bangu lança o couvert de 08/11; Caxias revê o trio e lança o banco', /Lançar o couvert de 08\/11/.test(bloco('Bangu')) && /Couvert não cobriu o cachê do trio \(−R\$\s?200,00\)/.test(bloco('Caxias')) && /Lançar o banco de horas de nov\/2026/.test(bloco('Caxias')), bloco('Bangu') + ' || ' + bloco('Caxias'));
+  check('banco: busca o mês do período e a CONFIG (salário por setor)', /gn_banco_horas\?loja=in\..*Bangu.*&mes=in\.\(CONFIG,.*2026-11/.test(r.bancoUrl || ''), r.bancoUrl);
+  check('loja: couvert × cachê da Bangu com o dia sem lançamento', /Couvert × cachê do trio:\* couvert R\$\s?600,00 − cachê R\$\s?1\.600,00 = \*−R\$\s?1\.000,00\* — faltou lançar o couvert de 08\/11/.test(lj), (lj.match(/.*Couvert.*/) || [])[0]);
+  check('loja: banco de horas da Bangu (lançado em nov)', /Banco de horas:\* lançado em nov\/2026: \+30h a pagar \(1 pessoa\) · −5h a compensar \(1 pessoa\)/.test(lj), (lj.match(/.*Banco de horas.*/) || [])[0]);
+  check('loja: passo "lançar o couvert de 08/11"', /Lançar o couvert de 08\/11: sem ele o resultado do trio não fecha/.test(pl));
+  check('Caxias (loja): banco pendente vira passo', /Lançar o banco de horas de nov\/2026/.test(cx));
   check('sem rolagem de lado em 390 px', r.largura <= 390, r.largura);
   check('nenhum erro de JavaScript', erros.length === 0, erros);
 
