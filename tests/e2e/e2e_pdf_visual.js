@@ -64,6 +64,15 @@ const TRIOS = [ap('pedreira', '2026-10-10', 600, 900), ap('pedreira', '2026-10-1
     _triosPer = 'mes'; _triosGerLoaded = false; _triosGerData = null; _triosGerOff = 0;
     try { await _loadTriosGerencia(); } finally { window.gnFetchJson = orig; }
     out.trios = pega(gerarPDFTrios);
+    // Avarias (geral e de uma loja)
+    const av = (id, ts, insumo, valor) => ({ id, ts, insumo, qtd: 1, valorTotal: valor, status: 'finalizado', registrado_por: 'Ana' });
+    _dashLojasAll = [
+      { loja: 'BANGU', all_data: { avariasAll: { BANGU: [av('b1', '2026-10-10T15:00:00Z', 'PICANHA', 120), av('b2', '2026-10-12T15:00:00Z', 'ARROZ', 10)] } } },
+      { loja: 'PEDREIRA', all_data: { avariasAll: { PEDREIRA: [av('p1', '2026-10-16T15:00:00Z', 'ABOBORA', 14.4)] } } },
+    ];
+    _avPainelDesp = []; _avRelatorioLojasFiltro = []; _dashPer = 'mes'; _dashMoff = 0;
+    out.av = pega(gerarPDFAvarias);
+    _avRelatorioLojasFiltro = ['BANGU']; out.avLoja = pega(gerarPDFAvarias); _avRelatorioLojasFiltro = [];
     return out;
   }, { CANCEL, N: { BANGU: nota(3, 500, 'Júlio'), CAXIAS: nota(2, 200, 'Renan'), BOULEVARD: nota(1, 1000, 'Ana') }, TRIOS });
 
@@ -84,6 +93,11 @@ const TRIOS = [ap('pedreira', '2026-10-10', 600, 900), ap('pedreira', '2026-10-1
   const t = (r.trios && r.trios.visual) || '';
   check('trios: o ranking do couvert (do melhor pro pior saldo) no PDF', /DO MELHOR PRO PIOR SALDO/.test(t) && /Pedreira[\s\S]*Bangu/.test(t) && !/var\(--/.test(t), t.slice(0, 300));
   check('trios: KPIs de couvert, cachê e saldo', r.trios && r.trios.kpis.map(k => k.label).join('|') === 'Couvert arrecadado|Cachê a pagar|Saldo da rede', r.trios && r.trios.kpis);
+
+  const a = (r.av && r.av.visual) || '';
+  check('avarias: o ranking "de quem mais perdeu pra quem menos" no PDF, sem o "toque numa loja"', /DE QUEM MAIS PERDEU PRA QUEM MENOS/.test(a) && /Bangu[\s\S]*Pedreira/.test(a) && !/toque numa loja|os itens|onclick|var\(--/i.test(a), a.slice(0, 300));
+  check('avarias: KPIs no topo (R$ 144,40 em 3 itens, 2 lojas)', r.av && r.av.kpis && /R\$\s?144,40/.test(r.av.kpis[0].valor) && /3 itens · 2 lojas/.test(r.av.kpis[0].sub), r.av && r.av.kpis);
+  check('avarias de uma loja: sem o ranking da rede, KPI só dela', r.avLoja && r.avLoja.kpis && !r.avLoja.visual && /R\$\s?130,00/.test(r.avLoja.kpis[0].valor), r.avLoja && r.avLoja.kpis);
 
   // Impressão de verdade do PDF do cancelamento (o quadro tem que sair no papel).
   const imp = await ctx.newPage();

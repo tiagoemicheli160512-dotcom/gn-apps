@@ -105,7 +105,7 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
     _biEscopo = 'REDE'; renderDashboard();
     // Botões: Whats abre wa.me com o texto; PDF manda o texto pro gerador de PDF.
     const abertos = []; window.open = u => { abertos.push(u); return null; };
-    const pdfs = []; window.gnRelatorioPDFTexto = (txt, tit) => { pdfs.push([txt, tit]); };
+    const pdfs = []; window.gnRelatorioPDF = o => { pdfs.push([o.texto, o.titulo, o]); };
     enviarWppGestaoBi(); gerarPDFGestaoBi();
     out.wa = abertos[0] || ''; out.pdf = pdfs[0] || null;
     // Trimestre da rede: em 03/12 (1º mês do Dez–Fev) tem atalho pro Set–Nov que fechou.
@@ -146,7 +146,12 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   check('Maglia não aparece em nada', !/Maglia/i.test(w));
   check('PDF sai sem os asteriscos do WhatsApp', r.plano && !/\*/.test(r.plano) && /Relatório de Gestão – Rede/.test(r.plano));
   check('botão Whats abre o wa.me com o texto', r.wa.startsWith('https://wa.me/?text=') && decodeURIComponent(r.wa.split('text=')[1]).includes('Próximos passos'));
-  check('botão PDF manda o texto com título do período', r.pdf && r.pdf[1] === 'Relatório de Gestão — nov/2026' && /Próximos passos/.test(r.pdf[0]), r.pdf && r.pdf[1]);
+  check('botão PDF manda o texto com título do período (sem repetir título e período no corpo)', r.pdf && r.pdf[1] === 'Relatório de Gestão — nov/2026' && /Próximos passos/.test(r.pdf[0]) && !/^Relatório de Gestão/.test(r.pdf[0]) && /^💰 Faturamento/.test(r.pdf[0]) && /^nov\/2026 · números do Painel/.test(r.pdf[2].subtitulo), r.pdf && [r.pdf[1], r.pdf[0].slice(0, 60), r.pdf[2].subtitulo]);
+  // PDF com quadro (21/11/2026: "em todos os controles que temos isso"): KPIs e o
+  // "Faturamento por loja" com os MESMOS números do texto, e a variação por loja.
+  const po = (r.pdf && r.pdf[2]) || {};
+  check('PDF da gestão: KPIs (faturamento com variação, média por dia, período)', po.kpis && /R\$\s?39\.000,00/.test(po.kpis[0].valor) && /▼ 13,3% vs período anterior/.test(po.kpis[0].sub) && po.kpis[2].valor === 'nov/2026', po.kpis);
+  check('PDF da gestão: quadro "Faturamento por loja" com a variação de cada loja, sem var(--…)', /FATURAMENTO POR LOJA/.test(po.visual || '') && /Bangu[\s\S]{0,400}▼ 20,0%/.test(po.visual || '') && !/var\(--/.test(po.visual || '') && !/Maglia/i.test(po.visual || ''), (po.visual || '').slice(0, 400));
   // Trimestre da rede: Set–Nov fecha em 30/11 e dezembro abre o Dez–Fev.
   check('trimestre: em 03/12 (1º mês do trimestre Dez–Fev) atalho "o trimestre de Set–Nov 2026 fechou"', /O trimestre de Set–Nov 2026 fechou/.test(r.bannerTri || ''), r.bannerTri);
   check('trimestre em andamento (Dez/2026–Fev/2027) também gera o relatório, até ONTEM', /Trimestre Dez\/2026–Fev\/2027 \(em andamento, até 02\/12 — hoje fica de fora, o dia ainda não fechou\)/.test(r.triTxt) && /andamento: os números ainda vão mudar/.test(r.triTxt), r.triTxt.slice(0, 200));
