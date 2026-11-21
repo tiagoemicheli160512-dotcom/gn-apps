@@ -123,7 +123,9 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   check('salão × delivery: delivery é só o da Caixas (100 × 20 = R$ 2,0k)', /Delivery 6% · R\$ 2,0k/.test(r.mes.txt), r.mes.txt.match(/Salão[^|]{0,80}/));
   check('média por dia da semana: domingo e segunda (dobro) são os maiores — "melhor: Seg" ou "Dom"', /melhor: (Seg|Dom)/.test(r.mes.txt), r.mes.txt.match(/melhor: \w+/));
   check('evolução: os meses desde jul/2026 (jul a nov), nada antes dos dados', r.mes.meses.join() === '2026-07,2026-08,2026-09,2026-10,2026-11', r.mes.meses);
-  check('Trimestre (4º tri, out–dez): SEM comparação, porque o 3º tri começa antes de 10/07', /4º tri 2026 \(out–dez\)/.test(r.tri.rot) && /sem comparação: o período anterior começa antes de 10\/07\/2026/.test(r.tri.txt) && !/▲|▼/.test(r.tri.txt.split('MÉDIA POR DIA')[0] || r.tri.txt.slice(0, 300)), r.tri.txt.slice(0, 300));
+  // Trimestre da REDE (Set–Nov), não o do calendário (20/11/2026: "nosso trimestre é setembro,
+  // outubro e novembro, e dezembro já é o início do próximo").
+  check('Trimestre da rede (Set–Nov 2026): SEM comparação, porque Jun–Ago começa antes de 10/07', /^Trimestre Set–Nov 2026/.test(r.tri.rot) && /sem comparação: o período anterior começa antes de 10\/07\/2026/.test(r.tri.txt) && !/▲|▼/.test(r.tri.txt.split('MÉDIA POR DIA')[0] || r.tri.txt.slice(0, 300)), r.tri.txt.slice(0, 300));
   check('Outubro fechado compara com setembro inteiro', /out\/2026/.test(r.out.rot) && !/em andamento/.test(r.out.rot) && /no período anterior/.test(r.out.txt) && !/mesmos dias/.test(r.out.txt), r.out.txt.slice(0, 300));
   check('navegação para em jul/2026 (não vai pra junho, sem dados)', /jul\/2026/.test(r.jul) && /jul\/2026/.test(r.julDepois), [r.jul, r.julDepois]);
   check('Ano 2026: soma do ano todo (Bangu + Caxias desde 10/07)', /^2026/.test(r.ano.rot) && /FATURAMENTO \(ATÉ HOJE\) R\$ [\d.]+,\d\d/i.test(r.ano.txt), r.ano.txt.slice(0, 260));

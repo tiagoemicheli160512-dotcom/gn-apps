@@ -108,9 +108,9 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
     const pdfs = []; window.gnRelatorioPDFTexto = (txt, tit) => { pdfs.push([txt, tit]); };
     enviarWppGestaoBi(); gerarPDFGestaoBi();
     out.wa = abertos[0] || ''; out.pdf = pdfs[0] || null;
-    // Trimestre: em 03/12 (3º mês do 4º tri) não tem atalho de trimestre fechado.
+    // Trimestre da rede: em 03/12 (1º mês do Dez–Fev) tem atalho pro Set–Nov que fechou.
     _biGPer = 'tri'; _biGOff = 0; await esperar();
-    out.bannerTri = !!el.querySelector('.bi-gest-fechado');
+    out.bannerTri = (el.querySelector('.bi-gest-fechado') || {}).textContent || '';
     out.triTxt = (_biGestaoTexto(true) || {}).msg || '';
     out.largura = document.documentElement.scrollWidth;
     out.bancoUrl = window.__bancoUrl || '';
@@ -147,8 +147,10 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   check('PDF sai sem os asteriscos do WhatsApp', r.plano && !/\*/.test(r.plano) && /Relatório de Gestão – Rede/.test(r.plano));
   check('botão Whats abre o wa.me com o texto', r.wa.startsWith('https://wa.me/?text=') && decodeURIComponent(r.wa.split('text=')[1]).includes('Próximos passos'));
   check('botão PDF manda o texto com título do período', r.pdf && r.pdf[1] === 'Relatório de Gestão — nov/2026' && /Próximos passos/.test(r.pdf[0]), r.pdf && r.pdf[1]);
-  check('trimestre: em dezembro (3º mês do 4º tri) sem atalho de trimestre fechado', r.bannerTri === false);
-  check('trimestre em andamento também gera o relatório (até ONTEM: o dia de hoje ainda não fechou)', /4º tri 2026 \(out–dez\) \(em andamento, até 02\/12 — hoje fica de fora, o dia ainda não fechou\)/.test(r.triTxt) && /andamento: os números ainda vão mudar/.test(r.triTxt), r.triTxt.slice(0, 200));
+  // Trimestre da rede: Set–Nov fecha em 30/11 e dezembro abre o Dez–Fev.
+  check('trimestre: em 03/12 (1º mês do trimestre Dez–Fev) atalho "o trimestre de Set–Nov 2026 fechou"', /O trimestre de Set–Nov 2026 fechou/.test(r.bannerTri || ''), r.bannerTri);
+  check('trimestre em andamento (Dez/2026–Fev/2027) também gera o relatório, até ONTEM', /Trimestre Dez\/2026–Fev\/2027 \(em andamento, até 02\/12 — hoje fica de fora, o dia ainda não fechou\)/.test(r.triTxt) && /andamento: os números ainda vão mudar/.test(r.triTxt), r.triTxt.slice(0, 200));
+  check('trimestre em andamento compara com o Set–Nov, nos mesmos dias', /Comparado ao período anterior \(mesmos dias\)/.test(r.triTxt), (r.triTxt.match(/.*Comparado.*/) || [])[0]);
 
   // "dá pra ter a sugestão por loja do que atuar?" — seção por loja, com o número e a ação.
   const porLoja = (w.split('*🏪 Onde atuar em cada loja*')[1] || '');
