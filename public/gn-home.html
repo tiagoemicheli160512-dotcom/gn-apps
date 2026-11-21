@@ -14499,7 +14499,51 @@ function _biGestaoTextoLoja(wpp, G, k) {
   return { msg: L.join('\n'), titulo: `Relatório de Gestão — ${N} — ${R.rot}` };
 }
 function enviarWppGestaoBi() { const r = _biGestaoTexto(true); if (!r) { alert('Abra a vista 📈 Gráficos e espere carregar.'); return; } window.open('https://wa.me/?text=' + encodeURIComponent(r.msg), '_blank'); }
-function gerarPDFGestaoBi() { const r = _biGestaoTexto(false); if (!r) { alert('Abra a vista 📈 Gráficos e espere carregar.'); return; } window.gnRelatorioPDFTexto(r.msg, r.titulo); }
+// Quadro "Faturamento por loja" do relatório de gestão — com os MESMOS números do texto
+// (o relatório vai até ontem no período em andamento; o gráfico da tela vai até hoje, e
+// copiar o da tela deixaria quadro e texto discordando). Variação contra o período anterior
+// por loja; a loja do relatório (quando é de uma loja) em destaque.
+function _biGestaoVisualHtml(G, k) {
+  const { c, cp, lojas } = G;
+  const esc = s => window.escapeHtml(String(s == null ? '' : s));
+  const ord = lojas.map(x => ({ x, v: c.porLoja[x] || 0, p: cp ? (cp.porLoja[x] || 0) : 0 })).filter(o => o.v > 0).sort((a, z) => z.v - a.v);
+  if (ord.length < 2) return '';
+  const max = ord[0].v || 1;
+  return `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:12px 14px;margin-bottom:10px">
+    <div style="font-size:10px;font-weight:800;color:var(--t3);letter-spacing:.5px;margin-bottom:2px">FATURAMENTO POR LOJA</div>
+    <div style="font-size:9.5px;color:var(--t4);margin-bottom:9px">${esc(G.R.rot)} · da maior pra menor${cp ? ' · variação contra o período anterior' : ''}</div>
+    ${ord.map((o, i) => { const dest = !k || k === o.x; const vr = cp && o.p > 0 ? (o.v - o.p) / o.p * 100 : null; return `
+      <div style="margin-bottom:6px;opacity:${dest ? 1 : .55}">
+        <div style="display:flex;justify-content:space-between;gap:10px;font-size:11.5px;align-items:baseline">
+          <span style="color:var(--t1);font-weight:${k === o.x ? 800 : 600};min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t4);font-weight:700">${i + 1}º</span> ${esc(LOJA_DISPLAY[o.x] || o.x)}</span>
+          <span style="white-space:nowrap;font-variant-numeric:tabular-nums"><b style="color:var(--t1)">${_fmtBRLs(o.v)}</b>${vr === null ? '' : ` <span style="font-weight:700;color:${vr >= 0 ? 'var(--txt-green)' : 'var(--txt-red)'}">${vr >= 0 ? '▲' : '▼'} ${Math.abs(vr).toFixed(1).replace('.', ',')}%</span>`}</span>
+        </div>
+        <div style="height:4px;border-radius:3px;background:var(--fill-sutil);margin-top:3px;overflow:hidden"><div style="height:100%;width:${Math.max(2, Math.round(o.v / max * 100))}%;background:var(--vz-1);border-radius:3px"></div></div>
+      </div>`; }).join('')}
+  </div>`;
+}
+function gerarPDFGestaoBi() {
+  const r = _biGestaoTexto(false); if (!r) { alert('Abra a vista 📈 Gráficos e espere carregar.'); return; }
+  const G = _biGestaoDados();
+  const k = _biEscopo !== 'REDE' && G.lojas.includes(_biEscopo) ? _biEscopo : null;
+  const cc = k ? _biGCalc(G.D, G.R, [k], G.lojas) : G.c;
+  const cpp = G.cp ? (k ? _biGCalc(G.D, { de: G.R.prev.de, ate: G.R.prev.ate, prev: G.R.prev }, [k], G.lojas) : G.cp) : null;
+  const vr = cpp && cpp.total > 0 ? (cc.total - cpp.total) / cpp.total * 100 : null;
+  // As duas primeiras linhas do texto (título e período) já estão no cabeçalho do PDF.
+  const linhas = r.msg.split('\n');
+  const texto = /^Relatório de Gestão/.test(linhas[0] || '') ? linhas.slice(linhas[2] === '' ? 3 : 2).join('\n') : r.msg;
+  window.gnRelatorioPDF({
+    titulo: r.titulo,
+    subtitulo: (linhas[1] || '').replace(/ – números do Painel de Gestão$/, '') + ' · números do Painel de Gestão · gerado em ' + window.gnPdfAgora(),
+    texto,
+    kpis: [
+      { label: 'Faturamento', valor: _fmtBRL(cc.total), sub: vr === null ? 'sem comparação' : `${vr >= 0 ? '▲' : '▼'} ${Math.abs(vr).toFixed(1).replace('.', ',')}% vs período anterior` },
+      { label: 'Média por dia', valor: cc.dias ? _fmtBRLs(cc.total / cc.dias) : '—', sub: `${cc.dias} dia${cc.dias === 1 ? '' : 's'} com venda` },
+      { label: 'Período', valor: G.R.rot.replace(/^Trimestre /, ''), sub: G.R.semHoje ? 'até ontem (hoje ainda não fechou)' : '' },
+    ],
+    visual: _pdfVisual(_biGestaoVisualHtml(G, k)),
+  });
+}
 async function copiarGestaoBi(btn) {
   const r = _biGestaoTexto(true); if (!r) return;
   try { await navigator.clipboard.writeText(r.msg); if (btn) { btn.textContent = '✓ Copiado'; setTimeout(() => { btn.textContent = '📋 Copiar'; }, 1800); } }
@@ -17670,6 +17714,21 @@ function _avQtdTxt(a) { const q = Number(a.qtd); return (isFinite(q) ? q.toLocal
 function _avDespItensTxt(r) { return (r.itens || []).map(x => `${x.insumo} ${String(x.qtd).replace('.', ',')} ${x.unidade || ''}`.trim()).join(' · ') || '—'; }
 const _AV_DESP_ROT = { rodizio: '🍖 Rodízio', feijoada: '🍲 Buffet de feijoada' };
 
+// Ranking das avarias, de quem mais perdeu pra quem menos — o mesmo quadro na tela e no PDF.
+function _avRankingHtml(d) {
+  const esc = s => window.escapeHtml(String(s == null ? '' : s));
+  const pior = Math.max(...d.lojas.map(l => l.valor)) || 1;
+  return d.lojas.length < 2 ? '' : `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:12px 14px;margin-bottom:10px">
+    <div style="font-size:10px;font-weight:800;color:var(--t3);letter-spacing:.5px;margin-bottom:2px">LOJAS — DE QUEM MAIS PERDEU PRA QUEM MENOS</div>
+    <div style="font-size:9.5px;color:var(--t4);margin-bottom:8px">valor das avarias no período · toque numa loja pra ver os itens</div>
+    ${d.lojas.map((l, i) => `<div class="pl-rank" role="button" tabindex="0" onclick="_plIrLoja('avarias','${esc(l.k)}')" style="display:flex;align-items:center;gap:8px;margin-bottom:5px;cursor:pointer">
+      <span style="font-size:10px;color:var(--t4);width:16px;flex-shrink:0;text-align:right">${i + 1}º</span>
+      <span style="font-size:11px;font-weight:700;color:var(--t2);width:96px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.nome)}</span>
+      <span style="flex:1;height:7px;border-radius:4px;background:var(--fill-sutil);overflow:hidden"><span style="display:block;height:100%;width:${l.valor ? Math.max(2, Math.round(l.valor / pior * 100)) : 0}%;background:var(--txt-red)"></span></span>
+      <span style="font-size:10.5px;font-weight:800;color:var(--t1);font-variant-numeric:tabular-nums;width:86px;text-align:right;flex-shrink:0">${_fmtBRL(l.valor)}<span style="display:block;font-size:9px;font-weight:600;color:var(--t4)">${l.itens.length} ite${l.itens.length === 1 ? 'm' : 'ns'}${l.semValor ? ` · ${l.semValor} s/ valor` : ''}</span></span>
+    </div>`).join('')}
+  </div>`;
+}
 function _buildAvariasPanel() {
   if (!_dashLojasAll) return _skelPanel(3);
   const R = _dashRangeOf(_dashOff());
@@ -17694,17 +17753,7 @@ function _buildAvariasPanel() {
     return _reportBtnsRowHtml('Avarias') + _avLojaFiltroHtml() + kpis + `<div class="att-item"><div><div class="att-nm">Nenhuma avaria em ${esc(d.label)}</div>
       <div class="att-rs">Nenhuma das ${_avLojasDaRegra().length} lojas registrou avaria ou desperdício neste período.</div></div></div>`;
   }
-  const pior = Math.max(...d.lojas.map(l => l.valor)) || 1;
-  const ranking = d.lojas.length < 2 ? '' : `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:12px 14px;margin-bottom:10px">
-    <div style="font-size:10px;font-weight:800;color:var(--t3);letter-spacing:.5px;margin-bottom:2px">LOJAS — DE QUEM MAIS PERDEU PRA QUEM MENOS</div>
-    <div style="font-size:9.5px;color:var(--t4);margin-bottom:8px">valor das avarias no período · toque numa loja pra ver os itens</div>
-    ${d.lojas.map((l, i) => `<div class="pl-rank" role="button" tabindex="0" onclick="_plIrLoja('avarias','${esc(l.k)}')" style="display:flex;align-items:center;gap:8px;margin-bottom:5px;cursor:pointer">
-      <span style="font-size:10px;color:var(--t4);width:16px;flex-shrink:0;text-align:right">${i + 1}º</span>
-      <span style="font-size:11px;font-weight:700;color:var(--t2);width:96px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.nome)}</span>
-      <span style="flex:1;height:7px;border-radius:4px;background:var(--fill-sutil);overflow:hidden"><span style="display:block;height:100%;width:${l.valor ? Math.max(2, Math.round(l.valor / pior * 100)) : 0}%;background:var(--txt-red)"></span></span>
-      <span style="font-size:10.5px;font-weight:800;color:var(--t1);font-variant-numeric:tabular-nums;width:86px;text-align:right;flex-shrink:0">${_fmtBRL(l.valor)}<span style="display:block;font-size:9px;font-weight:600;color:var(--t4)">${l.itens.length} ite${l.itens.length === 1 ? 'm' : 'ns'}${l.semValor ? ` · ${l.semValor} s/ valor` : ''}</span></span>
-    </div>`).join('')}
-  </div>`;
+  const ranking = _avRankingHtml(d);
   const blocos = _plTodasHtml('avarias', d.lojas) + d.lojas.map(l => { const aberta = _plAbertas.avarias.has(l.k); return `
     <div class="pl-loja${aberta ? ' aberta' : ''}" data-painel="avarias" data-loja="${esc(l.k)}" style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid var(--txt-red);border-radius:14px;padding:12px 14px;margin-bottom:10px">
       <div class="pl-cab" role="button" tabindex="0" aria-expanded="${aberta}" onclick="_plToggle('avarias','${esc(l.k)}')" style="cursor:pointer">
@@ -17776,7 +17825,24 @@ function _avRelatorioTexto(wpp) {
   return { msg, titulo: 'Avarias' + (f.length ? ' — ' + nomes : ' — Rede') };
 }
 function gerarWppAvarias() { const r = _avRelatorioTexto(true); if (!r) { alert('Aguarde os dados carregarem.'); return; } window.open('https://wa.me/?text=' + encodeURIComponent(r.msg), '_blank'); }
-function gerarPDFAvarias() { const r = _avRelatorioTexto(false); if (!r) { alert('Aguarde os dados carregarem.'); return; } window.gnRelatorioPDFTexto(r.msg, r.titulo); }
+function gerarPDFAvarias() {
+  const r = _avRelatorioTexto(false); if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  // Os quadros da tela (21/11/2026): KPIs e o ranking das lojas (só no geral — com lojas
+  // marcadas o texto já diz a posição delas na rede).
+  const d = _avMacroDados();
+  const f = _avRelatorioLojasFiltro.filter(k => _avLojasDaRegra().includes(k));
+  const lojas = f.length ? d.lojas.filter(l => f.includes(l.k)) : d.lojas;
+  const valor = lojas.reduce((t, l) => t + l.valor, 0), qtd = lojas.reduce((t, l) => t + l.itens.length, 0), semValor = lojas.reduce((t, l) => t + l.semValor, 0);
+  window.gnRelatorioPDF({
+    titulo: r.titulo,
+    texto: r.msg,
+    kpis: [
+      { label: 'Avarias no período', valor: _fmtBRL(valor), sub: `${qtd} ite${qtd === 1 ? 'm' : 'ns'} · ${lojas.length} loja${lojas.length === 1 ? '' : 's'}${semValor ? ` · ${semValor} sem valor` : ''}` },
+      { label: 'Período', valor: d.label },
+    ],
+    visual: f.length ? '' : _pdfVisual(_avRankingHtml(d)),
+  });
+}
 async function enviarPDFAvariasWpp() { await _pdfWppComo(gerarPDFAvarias); }
 
 // ── 🎵 TRIOS — cachê, couvert e saldo por fim de semana ou por mês ────────────────────
@@ -21203,7 +21269,7 @@ function _pdfVisual(...blocos) {
     .replace(/<button[\s\S]*?<\/button>/g, '')
     .replace(/\s(?:onclick|role|tabindex|title)="[^"]*"/g, '')
     .replace(/;?cursor:pointer/g, '')
-    .replace(/\s*·\s*toque numa loja pra ver(?: as notas)?/gi, '')
+    .replace(/\s*·\s*toque numa loja pra ver[^<]*/gi, '')
     .replace(/<div[^>]*>\s*Toque numa loja pra ver as notas dela\.\s*<\/div>/gi, '')
     .replace(/\. Ver abaixo\./g, '. Detalhes abaixo.');
   return `<div class="pdf-vis">${_biPdfCores(limpo)}</div>`;
