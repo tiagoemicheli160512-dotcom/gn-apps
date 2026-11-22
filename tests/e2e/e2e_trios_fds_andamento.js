@@ -50,7 +50,15 @@ const LINHAS = [
       if (nome) cards[nome.trim()] = dv.textContent.replace(/\s+/g, ' ').trim();
     });
     const wpp = (_triosRelatorioTexto(true) || {}).msg || '';
-    return { txt: el.textContent.replace(/\s+/g, ' ').trim(), cards, wpp };
+    // A cor de cada valor de couvert nas linhas do dia, por loja: "Loja|R$ x" → cor.
+    const cores = {};
+    [...el.querySelectorAll('div')].forEach(dv => {
+      if (!/border-left:\s*3px solid/.test(dv.getAttribute('style') || '')) return;
+      const nome = ((dv.querySelector('span') || {}).textContent || '').trim();
+      [...dv.querySelectorAll('span')].forEach(sp => { const t = sp.textContent.trim(); const c = sp.style.color;
+        if (/^R\$/.test(t) && /min-width:\s*62px/.test(sp.getAttribute('style') || '')) cores[nome + '|' + t.replace(/\s/g, ' ')] = c; });
+    });
+    return { txt: el.textContent.replace(/\s+/g, ' ').trim(), cards, wpp, cores };
   }, { LINHAS, per, off });
 
   const r = await montar('sem', 1);
@@ -68,6 +76,12 @@ const LINHAS = [
   check('Guarulhos (só domingo) segue "ainda não aconteceu"', /ainda não aconteceu/i.test(r.cards.Guarulhos || ''), r.cards.Guarulhos);
   check('ninguém aparece como "sem couvert lançado" nem "saldo negativo"', !/sem o couvert lançado|com saldo negativo/.test(r.txt), (r.txt.match(/.{80}(sem o couvert lançado|saldo negativo).{80}/) || [])[0]);
   check('WhatsApp: saldo até agora e o andamento, sem "Saldo da rede" falso', /Saldo até agora: -R\$\s?129,00/.test(r.wpp) && /em andamento/.test(r.wpp) && !/Saldo da rede/.test(r.wpp) && /Couvert até agora: R\$\s?609,00/.test(r.wpp), r.wpp.slice(0, 600));
+
+  // A cor do couvert diz se pagou o cachê (22/11: "verde só se for maior que o cachê").
+  const cor = (loja, v) => { const k = Object.keys(r.cores).find(x => x.startsWith(loja + '|') && x.replace(/\s/g, '').endsWith(v)); return k ? r.cores[k] : null; };
+  check('Bangu 21/11: couvert R$ 609 contra cachê R$ 700 → vermelho (não pagou)', /txt-red/.test(cor('Bangu', 'R$609,00') || ''), r.cores);
+  check('São Gonçalo 21/11: couvert R$ 707 contra cachê R$ 600 → verde (pagou)', /txt-green/.test(cor('São Gonçalo', 'R$707,00') || ''), r.cores);
+  check('Pedreira 21/11: couvert R$ 455 contra cachê R$ 600 → vermelho', /txt-red/.test(cor('Pedreira', 'R$455,00') || ''), r.cores);
 
   // Mês corrente: o sábado lançado entra (era cortado até ontem); quem não lançou fica pra depois.
   const m = await montar('mes', 0);
