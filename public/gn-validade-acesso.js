@@ -16,7 +16,8 @@
 // Qualquer dúvida libera: sem internet, sem lista cadastrada, sessão estranha, erro de
 // qualquer natureza — passa. Travar a loja por um blip de rede é um estrago muito maior do
 // que deixar passar um dia com item vencido. Só bloqueia quando a resposta é inequívoca:
-// existe item com data anterior a hoje na lista daquela loja.
+// existe item com data anterior a hoje na lista daquela loja — ou que vence HOJE e já são
+// 20h (ver HORA_TRAVA_HOJE).
 //
 // ── O QUE DESTRAVA ──────────────────────────────────────────────────────────
 // Não sobrar nenhum vencido. Vale corrigir a data OU excluir o item — produto vencido se
@@ -37,6 +38,15 @@
   // Maglia não entra: o pedido não citou a Maglia (ver CLAUDE.md), e ela não usa a lista de
   // validades. Fica explícito aqui em vez de depender de ela não ter linha no banco.
   var LOJAS_FORA = ['MAGLIA'];
+
+  // ── O QUE VENCE HOJE TRAVA ÀS 20H (22/11/2026) ─────────────────────────────
+  // "Aconteceu em Bangu que o caixa não foi fechado porque as etiquetas vencendo na data de
+  // ontem travaram o app após 00h. O que podemos fazer é trocar a regra de travamento até
+  // 20h do dia que tá vencendo. Até porque não pode ficar data vencida pro dia seguinte,
+  // nunca." Antes a trava só vinha à meia-noite, no meio do fechamento do caixa. Agora o item
+  // que vence hoje trava a partir das 20h do próprio dia, com a loja aberta e tempo de
+  // resolver antes de fechar; o vencido de dias anteriores continua travando como sempre.
+  var HORA_TRAVA_HOJE = 20;
 
   var CACHE_KEY = 'gn_validade_cache';
   var CACHE_MS = 5 * 60 * 1000;   // só o resultado LIBERADO é cacheado (ver _cacheLer)
@@ -109,9 +119,12 @@
   }
 
   // ── A regra ────────────────────────────────────────────────────────────────
-  function _avaliar(itens, hojeISO) {
+  // `hora`: a hora de agora (0–23). Sem ela, só o vencido de dias anteriores conta.
+  function _avaliar(itens, hojeISO, hora) {
+    var travaHoje = typeof hora === 'number' && hora >= HORA_TRAVA_HOJE;
     var vencidos = (itens || []).filter(function (it) {
-      return /^\d{4}-\d{2}-\d{2}$/.test(it.validade) && it.validade < hojeISO;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(it.validade)) return false;
+      return it.validade < hojeISO || (travaHoje && it.validade === hojeISO);
     });
     vencidos.sort(function (a, b) { return a.validade < b.validade ? -1 : a.validade > b.validade ? 1 : 0; });
     var porArea = {};
@@ -126,12 +139,14 @@
     try {
       var c = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null');
       if (!c || c.comKey !== comKey || c.dia !== hojeISO) return null;
+      // O liberado das 19h59 não vale às 20h: é a hora em que o que vence hoje passa a travar.
+      if (!!c.apos20 !== (new Date().getHours() >= HORA_TRAVA_HOJE)) return null;
       if (Date.now() - c.ts > CACHE_MS) return null;
       return { bloqueado: false, vencidos: [], porArea: {}, doCache: true };
     } catch (_) { return null; }
   }
   function _cacheGravar(comKey, hojeISO) {
-    try { localStorage.setItem(CACHE_KEY, JSON.stringify({ comKey: comKey, dia: hojeISO, ts: Date.now() })); }
+    try { localStorage.setItem(CACHE_KEY, JSON.stringify({ comKey: comKey, dia: hojeISO, ts: Date.now(), apos20: new Date().getHours() >= HORA_TRAVA_HOJE })); }
     catch (_) {}
   }
   function _cacheLimpar() { try { localStorage.removeItem(CACHE_KEY); } catch (_) {} }
@@ -151,12 +166,14 @@
       if (!comKey || LOJAS_FORA.indexOf(comKey) >= 0) return Promise.resolve(livre);
 
       var hoje = opts.hoje || _hojeISO();
+      var hora = typeof opts.hora === 'number' ? opts.hora : (opts.hoje ? null : new Date().getHours());
       if (!opts.semCache) {
         var c = _cacheLer(comKey, hoje);
         if (c) return Promise.resolve(c);
       }
       return _buscarItens(comKey).then(function (itens) {
-        var r = _avaliar(itens, hoje);
+        var r = _avaliar(itens, hoje, hora);
+        r.hoje = hoje;
         if (!r.bloqueado) _cacheGravar(comKey, hoje); else _cacheLimpar();
         return r;
       }).catch(function (e) {
@@ -179,7 +196,7 @@
       var linhas = itens.slice(0, 6).map(function (it) {
         return '<div style="display:flex;justify-content:space-between;gap:8px;padding:3px 0;font-size:12px">' +
                '<span style="flex:1;min-width:0;word-break:break-word">' + _esc(it.nome) + '</span>' +
-               '<span style="flex-shrink:0;font-weight:700;color:#fca5a5">' + _esc(_brData(it.validade)) + '</span></div>';
+               '<span style="flex-shrink:0;font-weight:700;color:#fca5a5">' + (it.validade === res.hoje ? 'vence hoje' : _esc(_brData(it.validade))) + '</span></div>';
       }).join('');
       var resto = itens.length > 6 ? '<div style="font-size:11px;opacity:.7;margin-top:2px">+ ' + (itens.length - 6) + ' no mesmo setor</div>' : '';
       return '<div style="margin-top:10px">' +
@@ -196,11 +213,13 @@
     el.innerHTML =
       '<div style="max-width:520px;margin:0 auto">' +
         '<div style="font-size:40px;line-height:1">⛔</div>' +
-        '<div style="font-size:19px;font-weight:800;margin-top:8px">Produto vencido na lista de validades</div>' +
+        '<div style="font-size:19px;font-weight:800;margin-top:8px">' +
+          (res.vencidos.some(function (it) { return it.validade < res.hoje; }) ? 'Produto vencido na lista de validades' : 'Produto vencendo hoje na lista de validades') + '</div>' +
         '<div style="font-size:13px;line-height:1.5;margin-top:8px;opacity:.95">' +
           'O acesso aos apps fica fechado enquanto houver item vencido. Abra o <b>Check-list</b>, ' +
           'na aba Check-list, e resolva cada um: <b>corrija a data</b> se estiver errada, ou ' +
-          '<b>exclua o item</b> se o produto foi descartado.' +
+          '<b>exclua o item</b> se o produto foi descartado. O que vence hoje trava a partir das ' +
+          HORA_TRAVA_HOJE + 'h, pra nunca virar o dia com produto vencido.' +
         '</div>' +
         '<div style="background:rgba(0,0,0,.25);border-radius:12px;padding:12px 14px;margin-top:14px">' +
           '<div style="font-size:12px;font-weight:800">' + res.vencidos.length + ' item(ns) vencido(s)</div>' +
@@ -306,6 +325,7 @@
     fechar: fechar,
     _avaliar: _avaliar,
     _hojeISO: _hojeISO,
+    HORA_TRAVA_HOJE: HORA_TRAVA_HOJE,
     AREA_LABEL: AREA_LABEL,
     CARGOS_LIVRES: CARGOS_LIVRES,
     APP_DA_CORRECAO: APP_DA_CORRECAO
