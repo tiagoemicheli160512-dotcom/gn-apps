@@ -17,7 +17,7 @@
 // qualquer natureza — passa. Travar a loja por um blip de rede é um estrago muito maior do
 // que deixar passar um dia com item vencido. Só bloqueia quando a resposta é inequívoca:
 // existe item com data anterior a hoje na lista daquela loja — ou que vence HOJE e já são
-// 20h (ver HORA_TRAVA_HOJE).
+// 22h (ver HORA_TRAVA_HOJE). Das 10h às 22h, o que vence hoje só AVISA (HORA_AVISO_HOJE).
 //
 // ── O QUE DESTRAVA ──────────────────────────────────────────────────────────
 // Não sobrar nenhum vencido. Vale corrigir a data OU excluir o item — produto vencido se
@@ -39,14 +39,21 @@
   // validades. Fica explícito aqui em vez de depender de ela não ter linha no banco.
   var LOJAS_FORA = ['MAGLIA'];
 
-  // ── O QUE VENCE HOJE TRAVA ÀS 20H (22/11/2026) ─────────────────────────────
+  // ── O QUE VENCE HOJE: AVISO ÀS 10H, TRAVA ÀS 22H (22/11/2026) ──────────────
   // "Aconteceu em Bangu que o caixa não foi fechado porque as etiquetas vencendo na data de
   // ontem travaram o app após 00h. O que podemos fazer é trocar a regra de travamento até
   // 20h do dia que tá vencendo. Até porque não pode ficar data vencida pro dia seguinte,
-  // nunca." Antes a trava só vinha à meia-noite, no meio do fechamento do caixa. Agora o item
-  // que vence hoje trava a partir das 20h do próprio dia, com a loja aberta e tempo de
-  // resolver antes de fechar; o vencido de dias anteriores continua travando como sempre.
-  var HORA_TRAVA_HOJE = 20;
+  // nunca." Antes a trava só vinha à meia-noite, no meio do fechamento do caixa. Depois o
+  // dono ajustou: "mudar pras 10h e, ao invés de travar, pois não virou vencida ainda, abrir
+  // a lista pra ser trocada antes de travar" — trava às 22h. Então, no dia do vencimento:
+  //   · das 10h às 22h abre a lista do que vence hoje, SEM travar (dá pra fechar; volta em
+  //     1h ou ao reabrir o app depois disso);
+  //   · às 22h, se ainda sobrou, trava — antes do fechamento do caixa, nunca vira o dia.
+  // O vencido de dias anteriores continua travando sempre.
+  var HORA_AVISO_HOJE = 10;
+  var HORA_TRAVA_HOJE = 22;
+  var AVISO_ADIA_MS = 60 * 60 * 1000;
+  var AVISO_KEY = 'gn_validade_aviso_adiado';
 
   var CACHE_KEY = 'gn_validade_cache';
   var CACHE_MS = 5 * 60 * 1000;   // só o resultado LIBERADO é cacheado (ver _cacheLer)
@@ -129,24 +136,32 @@
     vencidos.sort(function (a, b) { return a.validade < b.validade ? -1 : a.validade > b.validade ? 1 : 0; });
     var porArea = {};
     vencidos.forEach(function (it) { (porArea[it.area] = porArea[it.area] || []).push(it); });
-    return { bloqueado: vencidos.length > 0, vencidos: vencidos, porArea: porArea };
+    // Vence hoje e ainda não é hora de travar: só a lista pra trocar.
+    var avisoHoje = typeof hora === 'number' && hora >= HORA_AVISO_HOJE && !travaHoje;
+    var avisos = avisoHoje ? (itens || []).filter(function (it) { return it.validade === hojeISO; }) : [];
+    var porAreaAviso = {};
+    avisos.forEach(function (it) { (porAreaAviso[it.area] = porAreaAviso[it.area] || []).push(it); });
+    return { bloqueado: vencidos.length > 0, vencidos: vencidos, porArea: porArea,
+             avisos: avisos, porAreaAviso: porAreaAviso };
   }
 
   // ── Cache: só o liberado ───────────────────────────────────────────────────
   // Guardar o BLOQUEADO deixaria a loja travada depois de já ter corrigido, que é o pior
   // momento possível pra uma tela teimosa.
+  function _faixa(h) { return h < HORA_AVISO_HOJE ? 0 : h < HORA_TRAVA_HOJE ? 1 : 2; }
   function _cacheLer(comKey, hojeISO) {
     try {
       var c = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null');
       if (!c || c.comKey !== comKey || c.dia !== hojeISO) return null;
       // O liberado das 19h59 não vale às 20h: é a hora em que o que vence hoje passa a travar.
-      if (!!c.apos20 !== (new Date().getHours() >= HORA_TRAVA_HOJE)) return null;
+      // Mudou de faixa (antes das 10h / aviso / depois das 22h): o liberado de antes não vale.
+      if (c.faixa !== _faixa(new Date().getHours())) return null;
       if (Date.now() - c.ts > CACHE_MS) return null;
-      return { bloqueado: false, vencidos: [], porArea: {}, doCache: true };
+      return { bloqueado: false, vencidos: [], porArea: {}, avisos: [], porAreaAviso: {}, doCache: true };
     } catch (_) { return null; }
   }
   function _cacheGravar(comKey, hojeISO) {
-    try { localStorage.setItem(CACHE_KEY, JSON.stringify({ comKey: comKey, dia: hojeISO, ts: Date.now(), apos20: new Date().getHours() >= HORA_TRAVA_HOJE })); }
+    try { localStorage.setItem(CACHE_KEY, JSON.stringify({ comKey: comKey, dia: hojeISO, ts: Date.now(), faixa: _faixa(new Date().getHours()) })); }
     catch (_) {}
   }
   function _cacheLimpar() { try { localStorage.removeItem(CACHE_KEY); } catch (_) {} }
@@ -154,7 +169,7 @@
   // ── Verificação ────────────────────────────────────────────────────────────
   function verificar(sess, opts) {
     opts = opts || {};
-    var livre = { bloqueado: false, vencidos: [], porArea: {} };
+    var livre = { bloqueado: false, vencidos: [], porArea: {}, avisos: [], porAreaAviso: {} };
     try {
       if (!sess || !sess.loja) return Promise.resolve(livre);
       // O Check-list é a porta de saída — nunca cobrir.
@@ -174,7 +189,8 @@
       return _buscarItens(comKey).then(function (itens) {
         var r = _avaliar(itens, hoje, hora);
         r.hoje = hoje;
-        if (!r.bloqueado) _cacheGravar(comKey, hoje); else _cacheLimpar();
+        // Só o "nada a fazer" vai pro cache: com aviso, a lista tem que poder voltar.
+        if (!r.bloqueado && !r.avisos.length) _cacheGravar(comKey, hoje); else _cacheLimpar();
         return r;
       }).catch(function (e) {
         _log('validadeAcesso:buscar', e);
@@ -189,10 +205,11 @@
   // ── A tela ─────────────────────────────────────────────────────────────────
   var _overlay = null;
 
-  function _listaHtml(res) {
-    var areas = Object.keys(res.porArea);
+  function _listaHtml(res, porArea) {
+    porArea = porArea || res.porArea;
+    var areas = Object.keys(porArea);
     return areas.map(function (a) {
-      var itens = res.porArea[a];
+      var itens = porArea[a];
       var linhas = itens.slice(0, 6).map(function (it) {
         return '<div style="display:flex;justify-content:space-between;gap:8px;padding:3px 0;font-size:12px">' +
                '<span style="flex:1;min-width:0;word-break:break-word">' + _esc(it.nome) + '</span>' +
@@ -219,7 +236,7 @@
           'O acesso aos apps fica fechado enquanto houver item vencido. Abra o <b>Check-list</b>, ' +
           'na aba Check-list, e resolva cada um: <b>corrija a data</b> se estiver errada, ou ' +
           '<b>exclua o item</b> se o produto foi descartado. O que vence hoje trava a partir das ' +
-          HORA_TRAVA_HOJE + 'h, pra nunca virar o dia com produto vencido.' +
+          HORA_TRAVA_HOJE + 'h (o aviso começa às ' + HORA_AVISO_HOJE + 'h), pra nunca virar o dia com produto vencido.' +
         '</div>' +
         '<div style="background:rgba(0,0,0,.25);border-radius:12px;padding:12px 14px;margin-top:14px">' +
           '<div style="font-size:12px;font-weight:800">' + res.vencidos.length + ' item(ns) vencido(s)</div>' +
@@ -254,6 +271,43 @@
         _ligarBotoes(el, sess);
       });
     };
+  }
+
+  // ── O aviso (10h–22h): a mesma lista, mas dá pra fechar ─────────────────────
+  var _aviso = null;
+  function _avisoAdiado() { try { return Number(localStorage.getItem(AVISO_KEY) || 0) > Date.now(); } catch (_) { return false; } }
+  function fecharAviso() { if (_aviso) { _aviso.remove(); _aviso = null; } }
+  function mostrarAviso(sess, res) {
+    fecharAviso();
+    var el = document.createElement('div');
+    el.id = 'gn-validade-aviso';
+    el.setAttribute('style', 'position:fixed;inset:0;z-index:2147483645;background:rgba(0,0,0,.55);' +
+      'font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow-y:auto;padding:22px 16px;box-sizing:border-box');
+    el.innerHTML =
+      '<div style="max-width:520px;margin:0 auto;background:#78350f;color:#fff;border-radius:16px;padding:18px 16px">' +
+        '<div style="font-size:32px;line-height:1">⏳</div>' +
+        '<div style="font-size:18px;font-weight:800;margin-top:6px">' + res.avisos.length + ' item(ns) vencendo hoje</div>' +
+        '<div style="font-size:13px;line-height:1.5;margin-top:6px;opacity:.95">' +
+          'Troque agora, no <b>Check-list</b> (aba Check-list): <b>corrija a data</b> da etiqueta nova ou ' +
+          '<b>exclua o item</b> se foi descartado. Se até as <b>' + HORA_TRAVA_HOJE + 'h</b> ainda houver item ' +
+          'vencendo hoje, os apps travam.' +
+        '</div>' +
+        '<div style="background:rgba(0,0,0,.25);border-radius:12px;padding:10px 14px;margin-top:12px">' +
+          _listaHtml({ hoje: res.hoje }, res.porAreaAviso) + '</div>' +
+        '<button id="gn-val-aviso-ir" style="width:100%;margin-top:14px;background:#fff;color:#78350f;border:none;' +
+          'border-radius:12px;padding:13px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit">' +
+          '📋 Abrir o Check-list e trocar</button>' +
+        '<button id="gn-val-aviso-depois" style="width:100%;margin-top:8px;background:transparent;color:#fff;' +
+          'border:1px solid rgba(255,255,255,.5);border-radius:12px;padding:11px;font-size:13px;font-weight:700;' +
+          'cursor:pointer;font-family:inherit">Lembrar em 1 hora</button>' +
+      '</div>';
+    el.querySelector('#gn-val-aviso-ir').onclick = function () { location.href = 'gn-checklist.html'; };
+    el.querySelector('#gn-val-aviso-depois').onclick = function () {
+      try { localStorage.setItem(AVISO_KEY, String(Date.now() + AVISO_ADIA_MS)); } catch (_) {}
+      fecharAviso();
+    };
+    _aviso = el;
+    document.body.appendChild(el);
   }
 
   function mostrar(sess, res) {
@@ -301,8 +355,10 @@
     var sess = _lerSessao();
     if (!sess) { fechar(); return; }
     verificar(sess, forcar ? { semCache: true } : {}).then(function (res) {
-      if (res.bloqueado) mostrar(sess, res);
-      else fechar();
+      if (res.bloqueado) { fecharAviso(); mostrar(sess, res); return; }
+      fechar();
+      if (res.avisos && res.avisos.length && !_avisoAdiado()) { if (!_aviso) mostrarAviso(sess, res); }
+      else fecharAviso();
     });
   }
 
@@ -326,6 +382,9 @@
     _avaliar: _avaliar,
     _hojeISO: _hojeISO,
     HORA_TRAVA_HOJE: HORA_TRAVA_HOJE,
+    HORA_AVISO_HOJE: HORA_AVISO_HOJE,
+    mostrarAviso: mostrarAviso,
+    fecharAviso: fecharAviso,
     AREA_LABEL: AREA_LABEL,
     CARGOS_LIVRES: CARGOS_LIVRES,
     APP_DA_CORRECAO: APP_DA_CORRECAO
