@@ -16,8 +16,8 @@
 // Qualquer dúvida libera: sem internet, sem lista cadastrada, sessão estranha, erro de
 // qualquer natureza — passa. Travar a loja por um blip de rede é um estrago muito maior do
 // que deixar passar um dia com item vencido. Só bloqueia quando a resposta é inequívoca:
-// existe item com data anterior a hoje na lista daquela loja — ou que vence HOJE e já são
-// 22h (ver HORA_TRAVA_HOJE). Das 10h às 22h, o que vence hoje só AVISA (HORA_AVISO_HOJE).
+// existe item com data anterior a hoje na lista daquela loja. O que vence HOJE não trava até
+// passou da meia-noite. Das 22h à meia-noite, o que vence hoje só AVISA (HORA_AVISO_HOJE).
 //
 // ── O QUE DESTRAVA ──────────────────────────────────────────────────────────
 // Não sobrar nenhum vencido. Vale corrigir a data OU excluir o item — produto vencido se
@@ -39,19 +39,20 @@
   // validades. Fica explícito aqui em vez de depender de ela não ter linha no banco.
   var LOJAS_FORA = ['MAGLIA'];
 
-  // ── O QUE VENCE HOJE: AVISO ÀS 10H, TRAVA ÀS 22H (22/11/2026) ──────────────
+  // ── O QUE VENCE HOJE: LISTA ÀS 22H, TRAVA À MEIA-NOITE (22/11/2026) ─────────
   // "Aconteceu em Bangu que o caixa não foi fechado porque as etiquetas vencendo na data de
   // ontem travaram o app após 00h. O que podemos fazer é trocar a regra de travamento até
   // 20h do dia que tá vencendo. Até porque não pode ficar data vencida pro dia seguinte,
   // nunca." Antes a trava só vinha à meia-noite, no meio do fechamento do caixa. Depois o
   // dono ajustou: "mudar pras 10h e, ao invés de travar, pois não virou vencida ainda, abrir
-  // a lista pra ser trocada antes de travar" — trava às 22h. Então, no dia do vencimento:
-  //   · das 10h às 22h abre a lista do que vence hoje, SEM travar (dá pra fechar; volta em
-  //     1h ou ao reabrir o app depois disso);
-  //   · às 22h, se ainda sobrou, trava — antes do fechamento do caixa, nunca vira o dia.
-  // O vencido de dias anteriores continua travando sempre.
-  var HORA_AVISO_HOJE = 10;
-  var HORA_TRAVA_HOJE = 22;
+  // a lista pra ser trocada antes de travar", e por fim fixou: a lista às 22h e a trava à
+  // meia-noite. Então, no dia do vencimento:
+  //   · das 22h à meia-noite abre a lista do que vence hoje, SEM travar (dá pra fechar;
+  //     volta em 1h);
+  //   · à meia-noite o item vira vencido e trava, como sempre foi.
+  // HORA_TRAVA_HOJE = 24 quer dizer "o próprio dia nunca trava" — a trava é a do vencido.
+  var HORA_AVISO_HOJE = 22;
+  var HORA_TRAVA_HOJE = 24;
   var AVISO_ADIA_MS = 60 * 60 * 1000;
   var AVISO_KEY = 'gn_validade_aviso_adiado';
 
@@ -235,8 +236,8 @@
         '<div style="font-size:13px;line-height:1.5;margin-top:8px;opacity:.95">' +
           'O acesso aos apps fica fechado enquanto houver item vencido. Abra o <b>Check-list</b>, ' +
           'na aba Check-list, e resolva cada um: <b>corrija a data</b> se estiver errada, ou ' +
-          '<b>exclua o item</b> se o produto foi descartado. O que vence hoje trava a partir das ' +
-          HORA_TRAVA_HOJE + 'h (o aviso começa às ' + HORA_AVISO_HOJE + 'h), pra nunca virar o dia com produto vencido.' +
+          '<b>exclua o item</b> se o produto foi descartado. A lista do que vence no dia abre às ' +
+          HORA_AVISO_HOJE + 'h, pra trocar antes da meia-noite.' +
         '</div>' +
         '<div style="background:rgba(0,0,0,.25);border-radius:12px;padding:12px 14px;margin-top:14px">' +
           '<div style="font-size:12px;font-weight:800">' + res.vencidos.length + ' item(ns) vencido(s)</div>' +
@@ -289,8 +290,8 @@
         '<div style="font-size:18px;font-weight:800;margin-top:6px">' + res.avisos.length + ' item(ns) vencendo hoje</div>' +
         '<div style="font-size:13px;line-height:1.5;margin-top:6px;opacity:.95">' +
           'Troque agora, no <b>Check-list</b> (aba Check-list): <b>corrija a data</b> da etiqueta nova ou ' +
-          '<b>exclua o item</b> se foi descartado. Se até as <b>' + HORA_TRAVA_HOJE + 'h</b> ainda houver item ' +
-          'vencendo hoje, os apps travam.' +
+          '<b>exclua o item</b> se foi descartado. Se à <b>meia-noite</b> ainda houver item ' +
+          'vencido, os apps travam — inclusive o fechamento do caixa.' +
         '</div>' +
         '<div style="background:rgba(0,0,0,.25);border-radius:12px;padding:10px 14px;margin-top:12px">' +
           _listaHtml({ hoje: res.hoje }, res.porAreaAviso) + '</div>' +

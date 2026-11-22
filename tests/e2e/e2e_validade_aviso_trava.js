@@ -4,10 +4,11 @@
 //  seguinte, nunca." (22/11/2026)
 //
 // Ajuste do dono, no mesmo dia: "mudar pras 10h e, ao invés de travar, pois não virou
-// vencida ainda, abrir a lista pra ser trocada antes de travar" — e trava às 22h.
+// vencida ainda, abrir a lista pra ser trocada antes de travar". E por fim: "colocar o aviso
+// às 22h", com a trava à meia-noite.
 //
-// Regra: no dia do vencimento, das 10h às 22h abre a LISTA pra trocar (dá pra fechar, volta
-// em 1h); às 22h, se sobrou, TRAVA. O vencido de dias anteriores segue travando sempre. O
+// Regra: no dia do vencimento, das 22h à meia-noite abre a LISTA pra trocar (dá pra fechar,
+// volta em 1h); à meia-noite o item vira vencido e TRAVA, como sempre. O
 // Check-list continua aberto (é onde se corrige). Roda o guardião de verdade, no app do
 // Caixa, com o relógio fixado — sem passar hora nem data à mão.
 const CAMINHOS = require('../_env');
@@ -47,60 +48,56 @@ async function abrir(browser, relogio, validade, url, cargo) {
   const casos = [];
   const caso = async (...a) => { const r = await abrir(browser, ...a); casos.push(r); return r; };
 
-  let r = await caso('2026-11-21T09:59:00', '2026-11-21');
-  check('vence hoje, 09h59: nada (nem aviso, nem trava)', r.tela === null && r.aviso === null, r);
-  await r.ctx.close();
-
-  r = await caso('2026-11-21T10:00:00', '2026-11-21');
-  check('vence hoje, 10h00: abre a LISTA pra trocar, sem travar', r.tela === null && !!r.aviso, r);
-  check('a lista mostra o item "vence hoje" e não o de dezembro', /ETIQUETA CARNE DE SOL\s*vence hoje/.test(r.aviso || '') && !/QUEIJO COALHO/.test(r.aviso || ''), r.aviso);
-  check('o aviso diz que trava às 22h', /até as 22h ainda houver item vencendo hoje, os apps travam/.test(r.aviso || ''), r.aviso);
-  if (r.aviso) await r.page.click('#gn-val-aviso-depois');
-  check('"Lembrar em 1 hora" fecha o aviso e o app fica usável', (await r.ler()).aviso === null);
-  const adiado = await r.page.evaluate(() => Number(localStorage.getItem('gn_validade_aviso_adiado') || 0) - Date.now());
-  check('o adiamento é gravado por 1 hora', adiado > 59 * 60e3 && adiado <= 60 * 60e3, adiado);
-  await CAMINHOS.recarregarPreservando(r.page); await r.page.waitForFunction(() => !!window.gnValidadeAcesso, null, { timeout: 30000 }); await r.page.waitForTimeout(2500);
-  check('reabrindo o app dentro da 1 hora: o aviso não volta', (await r.ler()).aviso === null);
+  let r = await caso('2026-11-21T10:00:00', '2026-11-21');
+  check('vence hoje, 10h: nada (nem lista, nem trava)', r.tela === null && r.aviso === null, r);
   await r.ctx.close();
 
   r = await caso('2026-11-21T21:59:00', '2026-11-21');
-  check('vence hoje, 21h59: ainda é só aviso', r.tela === null && !!r.aviso, r);
+  check('vence hoje, 21h59: nada ainda', r.tela === null && r.aviso === null, r);
   await r.ctx.close();
 
   r = await caso('2026-11-21T22:00:00', '2026-11-21');
-  check('vence hoje, 22h00: TRAVA', !!r.tela && r.aviso === null, r);
-  check('a tela de trava diz "vencendo hoje" e explica 10h/22h', /Produto vencendo hoje/.test(r.tela || '') && /trava a partir das 22h \(o aviso começa às 10h\)/.test(r.tela || ''), r.tela);
+  check('vence hoje, 22h00: abre a LISTA pra trocar, sem travar', r.tela === null && !!r.aviso, r);
+  check('a lista mostra o item "vence hoje" e não o de dezembro', /ETIQUETA CARNE DE SOL\s*vence hoje/.test(r.aviso || '') && !/QUEIJO COALHO/.test(r.aviso || ''), r.aviso);
+  check('a lista avisa que trava à meia-noite', /Se à meia-noite ainda houver item vencido, os apps travam/.test(r.aviso || ''), r.aviso);
+  if (r.aviso) await r.page.click('#gn-val-aviso-depois');
+  check('"Lembrar em 1 hora" fecha a lista e o app fica usável', (await r.ler()).aviso === null);
+  const adiado = await r.page.evaluate(() => Number(localStorage.getItem('gn_validade_aviso_adiado') || 0) - Date.now());
+  check('o adiamento é gravado por 1 hora', adiado > 59 * 60e3 && adiado <= 60 * 60e3, adiado);
+  await CAMINHOS.recarregarPreservando(r.page);
+  await r.page.waitForFunction(() => !!window.gnValidadeAcesso, null, { timeout: 30000 }); await r.page.waitForTimeout(2500);
+  check('reabrindo o app dentro da 1 hora: a lista não volta', (await r.ler()).aviso === null);
   await r.ctx.close();
 
-  r = await caso('2026-11-21T23:30:00', '2026-11-21');
-  check('vence hoje, 23h30 (fechando o caixa): já travou desde as 22h', !!r.tela, r);
+  r = await caso('2026-11-21T23:50:00', '2026-11-21');
+  check('vence hoje, 23h50: ainda é só a lista, não trava', r.tela === null && !!r.aviso, r);
   await r.ctx.close();
 
-  r = await caso('2026-11-22T00:30:00', '2026-11-21');
-  check('venceu ontem, 00h30: continua travado', !!r.tela && /Produto vencido na lista/.test(r.tela || ''), r.tela);
+  r = await caso('2026-11-22T00:00:00', '2026-11-21');
+  check('meia-noite: virou vencido e TRAVA', !!r.tela && r.aviso === null && /Produto vencido na lista/.test(r.tela || ''), r.tela);
+  check('a tela de trava explica que a lista abre às 22h', /A lista do que vence no dia abre às 22h/.test(r.tela || ''), r.tela);
   await r.ctx.close();
 
   r = await caso('2026-11-22T15:00:00', '2026-11-21');
-  check('venceu ontem, 15h: trava (vencido não vira aviso)', !!r.tela && r.aviso === null, r);
+  check('venceu ontem, 15h: trava', !!r.tela && r.aviso === null, r);
   await r.ctx.close();
 
-  r = await caso('2026-11-21T21:00:00', '2026-11-22');
-  check('vence amanhã, 21h: nada hoje', r.tela === null && r.aviso === null, r);
+  r = await caso('2026-11-21T23:00:00', '2026-11-22');
+  check('vence amanhã, 23h: nada hoje', r.tela === null && r.aviso === null, r);
   await r.ctx.close();
 
-  r = await caso('2026-11-21T22:30:00', '2026-11-21', null, 'supervisor');
-  check('supervisor segue livre depois das 22h', r.tela === null && r.aviso === null, r);
+  r = await caso('2026-11-21T23:00:00', '2026-11-21', null, 'supervisor');
+  check('supervisor não recebe a lista', r.tela === null && r.aviso === null, r);
   await r.ctx.close();
 
-  r = await caso('2026-11-21T22:30:00', '2026-11-21', CAMINHOS.pub('gn-checklist.html'));
-  check('o Check-list segue aberto depois das 22h (é onde se corrige)', r.tela === null && r.aviso === null, r);
+  r = await caso('2026-11-21T23:00:00', '2026-11-21', CAMINHOS.pub('gn-checklist.html'));
+  check('no Check-list a lista não cobre a tela (é onde se troca)', r.tela === null && r.aviso === null, r);
   await r.ctx.close();
 
   if (!GUARD_ENV) {
     const x = await caso('2026-11-21T15:00:00', '2026-11-21', HOME);
-    await x.page.evaluate(() => { const a = document.getElementById('gn-validade-aviso'); if (a) a.remove(); });
     const t = await x.page.evaluate(() => { const el = document.getElementById('validades-home-card'); return el ? el.textContent.replace(/\s+/g, ' ') : ''; });
-    check('Home às 15h: "vence HOJE · trava às 22h" e o aviso pra resolver antes', /vence HOJE · trava às 22h/.test(t) && /trava os apps às 22h — resolva antes/.test(t), t);
+    check('Home às 15h: "vence HOJE · trava à meia-noite" e "troque antes do fechamento"', /vence HOJE · trava à meia-noite/.test(t) && /troque antes do fechamento/.test(t), t);
     await x.ctx.close();
   }
   check('nenhum erro de JavaScript', casos.every(c => !c.erros.length), casos.map(c => c.erros).flat());
