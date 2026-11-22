@@ -83,6 +83,12 @@ const LINHAS = [
   check('São Gonçalo 21/11: couvert R$ 707 contra cachê R$ 600 → verde (pagou)', /txt-green/.test(cor('São Gonçalo', 'R$707,00') || ''), r.cores);
   check('Pedreira 21/11: couvert R$ 455 contra cachê R$ 600 → vermelho', /txt-red/.test(cor('Pedreira', 'R$455,00') || ''), r.cores);
 
+  const regra = await page.evaluate(() => typeof _triosCorCouver === 'function'
+    ? [_triosCorCouver(600, 600), _triosCorCouver('600.00', 600), _triosCorCouver(600.01, 600), _triosCorCouver(599.99, 600)] : null);
+  check('couvert IGUAL ao cachê → laranja (atenção, é o limite), também com "600.00" contra 600', !!regra && /txt-orange/.test(regra[0]) && /txt-orange/.test(regra[1]), regra);
+  check('um centavo acima → verde; um centavo abaixo → vermelho', !!regra && /txt-green/.test(regra[2]) && /txt-red/.test(regra[3]), regra);
+  check('o laranja existe nos dois temas (claro e escuro)', await page.evaluate(() => { const st = [...document.querySelectorAll('style')].map(x => x.textContent).join(''); return (st.match(/--txt-orange:/g) || []).length >= 2; }));
+
   // Mês corrente: o sábado lançado entra (era cortado até ontem); quem não lançou fica pra depois.
   const m = await montar('mes', 0);
   check('mês: o couvert de hoje já lançado entra na conta do cartão de Bangu', /Couvert R\$\s?609,00/.test(m.cards.Bangu || ''), m.cards.Bangu);
