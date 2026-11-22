@@ -50,6 +50,7 @@
 <script src="gn-desperdicio-acesso.js"></script>
 <script src="gn-vendidos.js"></script>
 <script src="gn-validade-acesso.js"></script>
+<script src="gn-utensilios-acesso.js"></script>
 <script src="gn-comissoes-calendario.js"></script>
 <script src="gn-avaliacoes-setores.js"></script>
 <script src="gn-avaliacoes-pesos.js"></script>
@@ -11656,6 +11657,13 @@ async function _utensiliosGravar(mutator){
   const {error:e2}=await sb.from('gn_lojas').update({all_data:{...allData, utensilios_saldo:novo}}).eq('loja',ck);
   if(e2) throw e2;
   state.utensiliosSaldo=novo;
+  // Cada peça nova pode ser a que completa o mínimo: revê a trava na hora, sem esperar
+  // recarregar o app (ver _checarUtensiliosMinimo).
+  if(typeof _pendenciasEssenciaisAtivas!=='undefined' && _pendenciasEssenciaisAtivas.some(p=>p.chave==='utensilios')){
+    _atualizarPendenciasEssenciais().then(()=>{
+      if(!_pendenciasEssenciaisAtivas.some(p=>p.chave==='utensilios')) showToast('✅ Mínimo de utensílios cadastrado — o app está liberado.','success');
+    }).catch(()=>{});
+  }
   return novo;
 }
 function _utensilioPodeCorrigir(){
@@ -17985,6 +17993,45 @@ async function _checarChecklistPrazo(cfg) {
   };
 }
 
+// ── Mínimo de utensílios cadastrados (22/11/2026) ─────────────────────────────────────
+// "Temos pelo menos que ter 20 itens cadastrados nessa aba de utensílios; loja que não
+// tiver, bloquear o gerente e o sub, a partir de amanhã, e abrir somente essa aba pra ser
+// preenchida." Conta as peças do controle (gn_lojas.all_data.utensilios_saldo, uma chave por
+// peça) — o mesmo número que gn-utensilios-acesso.js usa pra fechar os OUTROS apps. Aqui é
+// a pendência "soft": switchTab só deixa ir pra aba Utensílios (e Guia) até completar.
+// Só gerente/sub; supervisão e mestre já saem antes (CARGOS_MASTER_EQUIV). Falha de rede
+// nunca trava. Maglia fora.
+const UTENS_MINIMO_ITENS = 20;
+const UTENS_MINIMO_DESDE = '2026-11-23';
+async function _checarUtensiliosMinimo() {
+  if (LOJA === 'Maglia') return null;
+  if (hojeLocal() < UTENS_MINIMO_DESDE) return null;
+  const cargo = String((usuarioLogado && usuarioLogado.cargo) || '').toLowerCase();
+  if (cargo !== 'gerente' && cargo !== 'sub_gerente') return null;
+  if (!_temAcessoAbaChecklist('utensilios')) return null;
+  let n;
+  try {
+    const { data, error } = await sb.from('gn_lojas').select('all_data').eq('loja', comissoesLojaKey()).maybeSingle();
+    if (error) throw error;
+    const saldo = data && data.all_data && data.all_data.utensilios_saldo;
+    n = (saldo && typeof saldo === 'object') ? Object.keys(saldo).length : 0;
+  } catch (e) { return null; }
+  if (n >= UTENS_MINIMO_ITENS) return null;
+  return {
+    chave: 'utensilios',
+    titulo: '🍽️ Cadastro de utensílios incompleto',
+    mensagem: `A loja precisa de pelo menos ${UTENS_MINIMO_ITENS} peças no controle de utensílios e tem ${n} — `
+      + `faltam ${UTENS_MINIMO_ITENS - n}. Na aba Utensílios, toque em 📋 Contar e informe quantas a loja tem de `
+      + 'cada peça (copo, prato, talher, panela, travessa…). Até completar, só essa aba abre.',
+    tabAlvo: 'utensilios',
+    hard: false,
+    acaoExtra: async () => {
+      switchTab('utensilios', document.querySelector('.tab-btn'));
+      if (typeof abrirContagemUtensilio === 'function') abrirContagemUtensilio();
+    },
+  };
+}
+
 async function _atualizarPendenciasEssenciais() {
   // Mestre/supervisor/administrador/compras nunca travam por pendência de loja — mesmo
   // bypass de acesso já usado em outras partes do app (CARGOS_MASTER_EQUIV, ver GN RH/
@@ -18009,6 +18056,7 @@ async function _atualizarPendenciasEssenciais() {
       _checarCadastroFuncIncompleto(),
       _checarChecklistPrazo(CHECKLIST_PRAZOS[0]),
       _checarChecklistPrazo(CHECKLIST_PRAZOS[1]),
+      _checarUtensiliosMinimo(),
     ]);
   } catch (e) { resultados = []; }
   _pendenciasEssenciaisAtivas = resultados.filter(Boolean);
