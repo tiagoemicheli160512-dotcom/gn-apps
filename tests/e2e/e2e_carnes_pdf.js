@@ -105,7 +105,8 @@ const RAZAO = (TOT_KG / (FAT_CONTOU / 1000)).toFixed(2).replace('.', ',');  // 0
         return Math.round(esq ? Math.abs(a.left - b2.left) : Math.abs(a.right - b2.right));
       });
     };
-    const tabs = d.querySelectorAll('table');
+    // Por classe, não pela ordem: desde 23/11 o PDF abre com a tabela do ranking (.cp0).
+    const tabs = [d.querySelector('table.cp1'), d.querySelector('table.cp2')];
     const res = { t1: medir(tabs[0]), t2: medir(tabs[1]), heads: Array.from(tabs[0].querySelectorAll('thead th')).map(th => th.textContent.replace(/\s+/g, ' ').trim()),
                   blocos: tabs[1].querySelectorAll('tbody.bloco-loja').length, faixas: Array.from(tabs[1].querySelectorAll('tr.loja')).map(x => x.textContent.trim()) };
     ifr.remove();
