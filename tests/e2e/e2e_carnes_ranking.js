@@ -56,6 +56,20 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   check('Maglia não entra (nem no ranking nem fora)', !/Maglia/.test(a.txt), a.txt.slice(0, 200));
   check('média da rede aparece', /Média da rede: 2,\d\d kg por R\$ mil/.test(a.txt), a.txt);
 
+  // ── 1b. O card da loja mostra o mesmo total que o ranking (dúvida do dono, 23/11) ──
+  const tot = await page.evaluate(() => {
+    const h = document.createElement('div'); h.innerHTML = _buildCarnesPanel();
+    const cards = [...h.querySelectorAll('.carnes-total-loja')].map(x => x.textContent.replace(/\s+/g, ' ').trim());
+    const rkB = [...h.querySelectorAll('.carnes-rank-linha')].find(l => l.getAttribute('data-loja') === 'BANGU');
+    return { cards, rankBangu: rkB ? rkB.querySelector('.carnes-rank-valor').textContent : '', wpp: _carnesRelatorioTexto(true).msg };
+  });
+  const cardBangu = tot.cards.find(c => /194,5 kg/.test(c)) || '';
+  check('card do Bangu: "Total das 4 carnes: 194,5 kg · 2,29 kg por R$ mil"', /Total das 4 carnes: 194,5 kg/.test(cardBangu) && /2,29 kg por R\$ mil/.test(cardBangu), tot.cards);
+  check('…e é o mesmo 2,29 do ranking', /^2,29/.test(tot.rankBangu), tot.rankBangu);
+  check('loja sem as 4 contagens não ganha total (Itaquera e Guarulhos): 9 cards com total', tot.cards.length === 9, tot.cards.length);
+  check('WhatsApp traz o total por loja', /\*Total das 4 carnes\*: 194,5 kg \(2,29 kg por R\$ mil — é o que o ranking compara\)/.test(tot.wpp), tot.wpp.slice(0, 200));
+  check('critério do ranking diz que são as 4 carnes juntas', /as 4 juntas: carne de sol, picanha, carne seca e camarão/.test(a.txt), a.txt.slice(0, 250));
+
   // ── 2. WhatsApp e PDF levam o ranking ──
   const rel = await page.evaluate(() => ({ w: (_carnesRelatorioTexto(true) || {}).msg || '', p: (_carnesPdfHtml() || {}).html || '' }));
   check('WhatsApp: traz o ranking com 1º São Gonçalo e os fora', /RANKING DE CONTROLE/.test(rel.w) && /1º São Gonçalo — 2,10/.test(rel.w) && /Fora do ranking\*: .*Campo Grande/.test(rel.w), rel.w.slice(0, 500));
