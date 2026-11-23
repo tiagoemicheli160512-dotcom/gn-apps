@@ -2851,6 +2851,65 @@ Cancelar = voltar e corrigir`;
   return true;
 }
 
+/* ── Trio: couvert e presença obrigatórios pra fechar o caixa (23/11/2026) ────────────
+   "O couvert é um item obrigatório: precisamos ter a confirmação ou não do trio no dia que
+   tem, e a quantidade arrecadada, e mesmo com as obrigatoriedades que temos fica sem
+   lançar. A partir do próximo fim de semana, nos dias que tem, caso esteja faltando alguma
+   informação, bloquear o fechamento do caixa."
+
+   As MESMAS definições da trava do dia seguinte no Check-list (_bandaGapNoDia):
+     · presença: cada apresentação tem que estar confirmada (presenca_confirmada) ou
+       marcada como "não veio" (banda_nao_veio);
+     · couvert: se alguém tocou, o couvert do dia tem que estar LANÇADO — a marca é o ato
+       (couver_lancado_em), não o valor, porque zero lançado de propósito é resposta válida
+       e couver_valor nasce 0 no banco.
+   Só cobra a apresentação que JÁ TERMINOU na hora do fechamento (horario_fim, ou início +
+   4h): fechar o turno do dia às 13h não pode travar por um trio que toca às 19h — esse
+   fica pro fechamento da noite e, se escapar, pra trava do Check-list no dia seguinte.
+   Caixa de dia anterior: tudo já terminou, cobra tudo. Falha de rede não trava. Maglia
+   não tem trio. Vale a partir de TRIO_CAIXA_DESDE. */
+const TRIO_CAIXA_DESDE = '2026-11-27';
+function _trioSlugDaLoja(loja) {
+  const l = (window.GN_LOJAS || []).find(x => x.userKey === loja);
+  return l && l.trioSlug ? l.trioSlug : null;
+}
+function _trioFimMin(r) {
+  const hm = s => { const m = /^(\d{1,2}):(\d{2})/.exec(String(s || '')); return m ? (+m[1]) * 60 + (+m[2]) : null; };
+  const fim = hm(r.horario_fim);
+  if (fim !== null) return fim === 0 ? 24 * 60 : fim;
+  const ini = hm(r.horario_inicio);
+  return ini === null ? 0 : ini + 240;
+}
+async function trioPendenteNoFechamento(agora) {
+  try {
+    const data = S.fech && S.fech.data;
+    if (!data || data < TRIO_CAIXA_DESDE) return [];
+    if (S.loja === 'MAGLIA') return [];   // o pedido não citou a Maglia (CLAUDE.md)
+    const slug = _trioSlugDaLoja(S.loja);
+    if (!slug) return [];
+    const rows = await sb(`gn_trios_agenda?loja=eq.${encodeURIComponent(slug)}&data=eq.${data}` +
+      `&select=artista,horario_inicio,horario_fim,presenca_confirmada,banda_nao_veio,couver_lancado_em,couver_valor&order=horario_inicio.asc`);
+    if (!Array.isArray(rows) || !rows.length) return [];
+    const d = agora || new Date();
+    const hoje = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    const agoraMin = d.getHours() * 60 + d.getMinutes();
+    const terminadas = data < hoje ? rows : (data > hoje ? [] : rows.filter(r => _trioFimMin(r) <= agoraMin));
+    if (!terminadas.length) return [];
+    const out = [];
+    const semPresenca = terminadas.filter(r => !r.presenca_confirmada && !r.banda_nao_veio);
+    if (semPresenca.length)
+      out.push(`• Trio: confirme se ${semPresenca.length === 1 ? 'a apresentação' : 'as apresentações'} de hoje aconteceu ou se a banda não veio (${semPresenca.map(r => (r.artista || 'trio') + (r.horario_inicio ? ' ' + String(r.horario_inicio).slice(0, 5) : '')).join(', ')}) — Check-list › Banda`);
+    const houveShow = terminadas.some(r => !r.banda_nao_veio);
+    const lancado = rows.some(r => !r.banda_nao_veio && (r.couver_lancado_em || (parseFloat(r.couver_valor) || 0) > 0));
+    if (houveShow && !lancado)
+      out.push('• Trio: lance a quantidade de couvert arrecadada no dia (informe 0 se ninguém pagou) — Check-list › Banda');
+    return out;
+  } catch (e) {
+    if (window.gnLogError) window.gnLogError('caixa:trioPendente', e);
+    return [];
+  }
+}
+
 async function fecharCaixa() {
   // Reabertura exige autorização de cargo superior
   if (S.fech.status === 'FECHADO') { abrirModalReabrir(); return; }
@@ -2890,6 +2949,9 @@ async function fecharCaixa() {
   // (não vendeu nenhum) — o que trava é o campo em branco, igual ao repique.
   buffetFaltando().forEach(lbl =>
     erros.push(`• ${lbl}: quantidade não informada (informe 0 se não vendeu)`));
+  // Trio do dia: presença (veio / não veio) e couvert lançado — ver trioPendenteNoFechamento.
+  const trioErros = await trioPendenteNoFechamento();
+  trioErros.forEach(t => erros.push(t));
   const saidasSemJust = S.saidas.filter(_semJustificativa);
   if (saidasSemJust.length > 0) {
     const SAIDA_MAP_J = Object.fromEntries(SAIDAS);
@@ -2912,6 +2974,13 @@ async function fecharCaixa() {
     el.style.color = 'var(--err)';
     el.style.whiteSpace = 'pre-line';
     el.textContent = 'Preencha os campos obrigatórios antes de fechar:\n' + erros.join('\n');
+    if (trioErros.length) {
+      const a = document.createElement('a');
+      a.href = 'gn-checklist.html?tab=banda';
+      a.textContent = '🎵 Abrir Check-list › Banda';
+      a.setAttribute('style', 'display:block;margin-top:8px;text-align:center;background:#7c3aed;color:#fff;border-radius:10px;padding:9px;font-weight:800;text-decoration:none;white-space:normal');
+      el.appendChild(a);
+    }
     return;
   }
 
