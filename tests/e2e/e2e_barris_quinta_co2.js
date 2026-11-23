@@ -79,8 +79,10 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   const g = await page.evaluate(async () => {
     window.__post = []; window.showToast = () => {};
     await _confirmarContagemBarrisSemanal();
-    const linhas = (window.__post.find(p => /gn_barris_semanal_contagem/.test(p.url)) || {}).body || [];
-    const conf = (window.__post.find(p => /confirmacao/.test(p.url)) || {}).body || {};
+    // Desde 23/11: uma chamada só (rpc/gn_barris_semanal_registrar) com a confirmação e as linhas.
+    const rpc = (window.__post.find(p => /gn_barris_semanal_registrar/.test(p.url)) || {}).body || {};
+    const linhas = rpc.p_linhas || [];
+    const conf = { rodada: rpc.p_rodada, semana_inicio: rpc.p_semana };
     return { linhas, conf };
   });
   const co2 = g.linhas.filter(x => x.tipo === 'CO2');
