@@ -858,6 +858,32 @@ const COR_LOJA = Object.fromEntries([...GN_LOJAS.map(l=>[l.userKey,l.cor]),['GER
 const LOJA_DISPLAY = Object.fromEntries([...GN_LOJAS.map(l=>[l.userKey,l.display]),['GERAL','Mestre'],[LOJA_TESTE,'Loja Teste']]);
 const LOJA_COM_KEY = Object.fromEntries(GN_LOJAS.map(l=>[l.userKey,l.comKey]));
 const LOJA_DB_KEY = Object.fromEntries(GN_LOJAS.map(l=>[l.userKey,l.chkKey]));
+// ─── Avarias: em que linha do gn_lojas elas moram ─────────────────────────────────────
+// O app Lojas grava as avarias na linha da chave de USUÁRIO ("SÃO GONÇALO", "NORTE
+// SHOPPING", "NOVA AMERICA"), não na do comKey ("SAO_GONCALO", "NORTE", "NOVA_AMERICA").
+// Nas outras lojas as duas chaves são iguais — por isso o Painel acertava 8 lojas e dava
+// "sem resposta"/zero pras três (23/11/2026; o mesmo erro do Lojas, PR #1253). Toda leitura
+// de avarias do Painel passa por aqui: busca as duas linhas e junta, sem repetir id.
+function _avLinhas(k) {
+  const L = GN_LOJAS.find(l => l.userKey === k || l.comKey === k);
+  return L ? [...new Set([L.userKey, L.comKey])] : [k];
+}
+function _avLinhasIn(keys) {   // filtro in.(...) do PostgREST, com aspas (nomes têm espaço e acento)
+  return encodeURIComponent([...new Set(keys.flatMap(_avLinhas))].map(x => '"' + x + '"').join(','));
+}
+// rows: [{loja, av}] (select av:all_data->avariasAll) ou [{loja, all_data}].
+function _avariasDaLoja(rows, k) {
+  const chaves = _avLinhas(k), vistos = new Set(), out = [];
+  (rows || []).filter(r => r && chaves.includes(r.loja)).forEach(r => {
+    const av = r.av !== undefined ? r.av : ((r.all_data || {}).avariasAll);
+    Object.values(av || {}).flatMap(v => Array.isArray(v) ? v : []).forEach(a => {
+      if (!a) return;
+      if (a.id) { if (vistos.has(a.id)) return; vistos.add(a.id); }
+      out.push(a);
+    });
+  });
+  return out;
+}
 function _normLoja(n) {
   if (n === 'SAO_GONCALO') return 'SÃO GONÇALO';
   // "Nova América" é a única loja onde o chkKey ("Nova América") diverge do
@@ -3419,6 +3445,7 @@ async function _mesDadosDaLoja(loja, iniMesAnterior, opts) {
   const iniAntISO = iso(iniMesRetrasado), fimAntISO = iso(fimMesRetrasado);
   const mesAnteriorNome = MESES_PT_RESUMO[iniMesRetrasado.getMonth()];
 
+  const avRowsP = window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=in.(${_avLinhasIn([loja])})&select=loja,av:all_data->avariasAll`, H, 'mesAnt:avarias', []);
   const [vendaRows, lojaRows, vendaAntRows, comissoesRows, caixaRowsLidos, bancoRows, triosRows] = await Promise.all([
     window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${iniISO}&data_operacao=lte.${fimISO}&select=venda_salao,venda_delivery`, H, 'mesAnt:venda', []),
     window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'mesAnt:lojas', []),
@@ -3478,7 +3505,7 @@ async function _mesDadosDaLoja(loja, iniMesAnterior, opts) {
       extraValor += parseFloat(d.valor) || 0; extraQtd++;
     });
   });
-  const avariasLoja = ((lojaRows[0] && lojaRows[0].all_data && lojaRows[0].all_data.avariasAll) || {})[comKey] || [];
+  const avariasLoja = _avariasDaLoja(await avRowsP, loja);
   const avariasMes = avariasLoja.filter(a => a.status !== 'cancelado' && a.tipo !== 'transferencia_dinheiro' && a.tipo !== 'saida_terceiro'
     && a.ts && a.ts.slice(0, 10) >= iniISO && a.ts.slice(0, 10) <= fimISO);
   const avariasValor = avariasMes.reduce((s, a) => s + (parseFloat(a.valorTotal) || 0), 0);
@@ -4922,12 +4949,13 @@ async function _fechaMontarRelatorio(loja) {
   const chkKey = LOJA_DB_KEY[loja] || loja;
   const comKey = LOJA_COM_KEY[loja] || loja;
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
-  const [dias, diasAnt, carnesRows, lojaRows, caixaRows] = await Promise.all([
+  const [dias, diasAnt, carnesRows, lojaRows, caixaRows, avRows] = await Promise.all([
     window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${iniISO}&data_operacao=lte.${fimISO}&select=data_operacao,venda_salao,venda_delivery,faltas,manutencao`, H, 'fecha:dias', []),
     window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${_fechaISO(antIni)}&data_operacao=lte.${_fechaISO(antFim)}&select=venda_salao,venda_delivery`, H, 'fecha:diasAnt', []),
     window.gnFetchJson(`${SB_URL}/rest/v1/checklist_carnes?loja=eq.${encodeURIComponent(chkKey)}&semana_inicio=eq.${iniISO}&select=carnes`, H, 'fecha:carnes', []),
     window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(comKey)}&select=all_data`, H, 'fecha:loja', []),
     window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?loja=eq.${encodeURIComponent(loja)}&data=gte.${iniISO}&data=lte.${fimISO}&select=data`, H, 'fecha:caixa', []),
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=in.(${_avLinhasIn([loja])})&select=loja,av:all_data->avariasAll`, H, 'fecha:avarias', []),
   ]);
   const soma = rows => (rows || []).reduce((s, r) => s + (parseFloat(r.venda_salao) || 0) + (parseFloat(r.venda_delivery) || 0), 0);
   const venda = soma(dias), vendaAnt = soma(diasAnt);
@@ -4940,7 +4968,7 @@ async function _fechaMontarRelatorio(loja) {
     .reduce((t, m) => t + (parseFloat(m.qtd) || 0), 0);
   const manutAbertas = manutTodas.filter(m => m && !(m.status === 'Resolvido' && m.confirmado_loja)).length;
   const allData = (lojaRows && lojaRows[0] && lojaRows[0].all_data) || {};
-  const avarias = Object.values(allData.avariasAll || {}).flatMap(v => arr(v))
+  const avarias = _avariasDaLoja(avRows, loja)
     .filter(a => a && String(a.ts || '').slice(0, 10) >= iniISO && String(a.ts || '').slice(0, 10) <= fimISO);
   const avariaRS = avarias.reduce((t, a) => t + (parseFloat(a.valorTotal) || 0), 0);
   const saldoUtens = Object.values(allData.utensilios_saldo || {}).filter(v => v && v.nome);
@@ -7614,18 +7642,18 @@ async function _loadSemLancPainel() {
     const de = semanas[3].ini, ate = semanas[0].fim;
     const comKeys = lojas.map(k => '"' + (LOJA_COM_KEY[k] || k) + '"');
     const [lojaRows, chkRows, confRows] = await Promise.all([
-      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=in.(${encodeURIComponent(comKeys.join(','))})&select=loja,av:all_data->avariasAll`, H, 'semLancPainel:lojas', null),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=in.(${_avLinhasIn(lojas)})&select=loja,av:all_data->avariasAll`, H, 'semLancPainel:lojas', null),
       window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${de}&data_operacao=lte.${ate}&select=loja,data_operacao,manutencao`, H, 'semLancPainel:chk', null),
       window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=in.(${Object.values(SEM_LANC_TIPOS).map(t => t.linha).join(',')})&select=loja,all_data`, H, 'semLancPainel:conf', null),
     ]);
     if (lojaRows === null || chkRows === null || confRows === null) { _semLancPainel = { erro: true }; return; }
     const linhas = lojas.map(k => {
-      const lr = lojaRows.find(r => r.loja === (LOJA_COM_KEY[k] || k));
+      const avK = { [k]: _avariasDaLoja(lojaRows, k) };
       const chk = chkRows.filter(r => _normLoja(r.loja) === k);
       const por = {};
       Object.keys(SEM_LANC_TIPOS).forEach(tipo => {
         const conf = ((confRows.find(r => r.loja === SEM_LANC_TIPOS[tipo].linha) || {}).all_data) || {};
-        por[tipo] = semanas.map(w => ({ semIni: w.ini, qtd: _semLancContar(tipo, { avariasAll: (lr && lr.av) || {} }, chk, w.ini, w.fim), conf: (conf[w.ini] || {})[k] || null }));
+        por[tipo] = semanas.map(w => ({ semIni: w.ini, qtd: _semLancContar(tipo, { avariasAll: avK }, chk, w.ini, w.fim), conf: (conf[w.ini] || {})[k] || null }));
       });
       return { k, nome: LOJA_DISPLAY[k] || k, por };
     });
@@ -12745,9 +12773,7 @@ function _raioxDaLoja(lojaKey, dates, opts) {
   // ── Avarias e perdas ────────────────────────────────────────────────────────
   // Mesmo filtro do card de Desempenho do mês anterior: transferência de dinheiro e saída
   // de terceiro não são perda, e cancelado não aconteceu.
-  const lojaRow = (_dashLojasAll || []).find(x => x.loja === comKey);
-  const allLoja = (lojaRow && lojaRow.all_data) || {};
-  ((allLoja.avariasAll || {})[comKey] || []).forEach(a => {
+  _avariasDaLoja(_dashLojasAll, lojaKey).forEach(a => {
     if (!a || a.status === 'cancelado' || a.tipo === 'transferencia_dinheiro' || a.tipo === 'saida_terceiro') return;
     const dia = a.ts ? String(a.ts).slice(0, 10) : '';
     if (dia < de || dia > ate) return;
@@ -13852,7 +13878,7 @@ async function _biGCarregar() {
     _biGPaginado(`${SB_URL}/rest/v1/checklist_diario?data_operacao=gte.${de}&data_operacao=lte.${R.ate}&select=loja,data_operacao,venda_salao,venda_delivery&order=data_operacao.asc`, 'biGraf:vendas'),
     _biGPaginado(`${SB_URL}/rest/v1/gn_caixa_fechamento?data=gte.${de}&data=lte.${R.ate}&select=loja,data,gn_caixa_comprovante(bandeira,valor),gn_caixa_cancelamento(valor),gn_caixa_transferencia(id),gn_caixa_gorjeta(valor),gn_caixa_despesa(categoria,valor,nome,justificativa)&order=data.asc`, 'biGraf:caixa'),
     semanas.length ? window.gnFetchJson(`${SB_URL}/rest/v1/gn_comissoes?loja=in.(${comKeys.map(encodeURIComponent).join(',')})&select=loja,${semanas.map(i => `s${i}:all_data->"${i}"`).join(',')}`, H, 'biGraf:comissoes', null) : Promise.resolve([]),
-    window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=in.(${comKeys.map(encodeURIComponent).join(',')})&select=loja,av:all_data->avariasAll`, H, 'biGraf:avarias', null),
+    window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=in.(${_avLinhasIn(_biLojas())})&select=loja,av:all_data->avariasAll`, H, 'biGraf:avarias', null),
     window.gnFetchJson(`${SB_URL}/rest/v1/gn_banco_horas?loja=in.(${chkKeys.map(encodeURIComponent).join(',')})&mes=in.(CONFIG,${mesesJan.join(',')})&select=loja,mes,registros`, H, 'biGraf:banco', null),
     slugs.length ? _biGPaginado(`${SB_URL}/rest/v1/gn_trios_agenda?loja=in.(${slugs.map(encodeURIComponent).join(',')})&data=gte.${de}&data=lte.${R.ate}` +
       `&select=data,loja,artista,cache,couver_qtd,couver_valor,couver_lancado_em,presenca_confirmada,banda_nao_veio,banda_nao_veio_motivo,horario_inicio&order=data.asc`, 'biGraf:trios') : Promise.resolve([]),
@@ -13924,11 +13950,9 @@ function _biGCalc(D, R, lojasEsc, lojasTodas) {
       });
     });
   });
-  (D.avs || []).forEach(row => {
-    const k = porCom[row.loja] || _normLoja(row.loja); if (!op[k]) return;
-    const vistos = new Set();
-    Object.values(row.av || {}).flatMap(v => Array.isArray(v) ? v : []).forEach(a => {
-      if (!a || a.tipo || a.status === 'cancelado' || !a.ts || (a.id && vistos.has(a.id))) return; if (a.id) vistos.add(a.id);
+  Object.keys(op).forEach(k => {
+    _avariasDaLoja(D.avs, k).forEach(a => {
+      if (!a || a.tipo || a.status === 'cancelado' || !a.ts) return;
       if (!dentro(_avDiaLocal(a.ts), R.de, R.ate)) return;
       op[k].avQtd++; op[k].avValor += parseFloat(a.valorTotal) || 0;
     });
@@ -17771,9 +17795,7 @@ function _avMacroDados() {
   const R = _dashRangeOf(_dashOff()), de = R.from, ate = R.to;
   const desp = Array.isArray(_avPainelDesp) ? _avPainelDesp : [];
   const lojas = _avLojasDaRegra().map(k => {
-    const ck = _avComKey(k);
-    const row = (_dashLojasAll || []).find(x => x.loja === ck || x.loja === k);
-    const todos = Object.values(((row && row.all_data) || {}).avariasAll || {}).flatMap(v => Array.isArray(v) ? v : []);
+    const todos = _avariasDaLoja(_dashLojasAll, k);
     const vistos = new Set();
     const itens = todos.filter(a => {
       if (!a || a.tipo || a.status === 'cancelado' || !a.ts) return false;

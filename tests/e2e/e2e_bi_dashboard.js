@@ -45,6 +45,8 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
         'BANGU|2026-10': { cmv_pct: 30, folha_pct: 25, agua: 1000, gas: 1000, luz: 2000 },
         'CAXIAS|2026-10': { cmv_pct: 26 } } } }];
       if (ctxName === 'mesAnt:venda' || ctxName === 'mesAnt:vendaAnt') { const v = (fat[loja] || {})[mes]; return v ? [{ venda_salao: v, venda_delivery: 0 }] : []; }
+      // As avarias têm leitura própria desde 23/11 (_avariasDaLoja: linha do userKey + do comKey).
+      if (ctxName === 'mesAnt:avarias') return /"BANGU"/.test(u) ? [{ loja: 'BANGU', av: { BANGU: [{ id: 'a', ts: '2026-10-10T12:00:00Z', insumo: 'X', valorTotal: 40, status: 'pendente' }] } }] : [];
       if (ctxName === 'mesAnt:lojas') return loja === 'BANGU' ? [{ all_data: { avariasAll: { BANGU: [{ id: 'a', ts: '2026-10-10T12:00:00Z', insumo: 'X', valorTotal: 40, status: 'pendente' }] } } }] : [{ all_data: {} }];
       if (ctxName === 'bi:comissoes') {
         const idxs = [...u.matchAll(/s(\d+):all_data/g)].map(m => +m[1]);
