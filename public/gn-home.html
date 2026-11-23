@@ -449,6 +449,12 @@
     .guia-callout.tip{background:rgba(34,197,94,.1)}
     .guia-callout.info{background:rgba(99,102,241,.1)}
     @media (max-width:480px){.guia-field{grid-template-columns:1fr}}
+    /* Campos e botões dos formulários dentro do Painel (ex.: edição de barris da supervisão).
+       Sem cor própria, select/input/button ficam com o branco e o preto do navegador — no
+       tema escuro o "+ Adicionar" sumia (texto preto em fundo escuro, 23/11/2026). */
+    .gn-campo{background:var(--s2);color:var(--t1);border:1px solid var(--b2);color-scheme:light}
+    :root[data-tema="escuro"] .gn-campo{color-scheme:dark}
+    .gn-campo option{background:var(--s2);color:var(--t1)}
   </style>
 <script src="gn-armazenamento.js"></script>
 <script src="gn-lojas-config.js"></script>
@@ -16187,6 +16193,11 @@ function _barrisEntregaTxt(e){
 let _barrisSemEditLoja = null;
 let _barrisSemEditItens = null;
 let _barrisSemEditSalvando = false;
+// CO2 na edição (23/11/2026): "o CO2 não aparece se precisar corrigir, só os chopps — o
+// Boulevard lançou 2 vazios a mais". Edita a MESMA contagem que o card mostra (a de quinta,
+// se já houve; senão a de segunda), como quantidade de cheios e vazios — cilindro não tem
+// validade, então linha a linha só dava trabalho (mesma ideia dos vazios de chopp).
+let _barrisSemEditCo2 = null;   // { rodada: 'SEG'|'QUI', cheio, vazio, cheio0, vazio0 }
 function _abrirEditarBarrisLoja(lojaKey){
   const d = _barrisSemGerenciaData && _barrisSemGerenciaData.porLoja[lojaKey];
   if (!d) return;
@@ -16202,11 +16213,21 @@ function _abrirEditarBarrisLoja(lojaKey){
     CLARO: (d.itensEfetivos.CLARO || []).map(doEfetivo),
     VINHO: (d.itensEfetivos.VINHO || []).map(doEfetivo),
   };
+  const rod = (d.co2Itens && d.co2Itens.QUI.length) ? 'QUI' : 'SEG';
+  const its = (d.co2Itens && d.co2Itens[rod]) || [];
+  const c = its.filter(i => i.status !== 'VAZIO').length, v = its.filter(i => i.status === 'VAZIO').length;
+  _barrisSemEditCo2 = { rodada: rod, cheio: c, vazio: v, cheio0: c, vazio0: v };
   renderDashboard();
+}
+function _editCo2Change(campo, el){
+  if (!_barrisSemEditCo2) return;
+  const n = Math.max(0, Math.min(99, parseInt(el.value, 10) || 0));
+  _barrisSemEditCo2[campo] = n; el.value = n;
 }
 function _fecharEditarBarrisLoja(){
   _barrisSemEditLoja = null;
   _barrisSemEditItens = null;
+  _barrisSemEditCo2 = null;
   renderDashboard();
 }
 function _editAdicionarItemBarris(tipo){
@@ -16265,7 +16286,7 @@ async function _salvarEdicaoBarrisLoja(){
   const criadoPor = (session && session.nome) ? session.nome + ' (edição supervisão)' : 'Supervisão';
   try {
     const idsFinais = new Set();
-    const proms = [];
+    const proms = [], proms2 = [];
     ['CLARO', 'VINHO'].forEach(tipo => {
       _barrisSemEditItens[tipo].forEach(item => {
         const validadeFinal = item.status === 'VAZIO' ? null : item.validade;
@@ -16291,9 +16312,30 @@ async function _salvarEdicaoBarrisLoja(){
         proms.push(fetch(`${SB_URL}/rest/v1/gn_barris_semanal_contagem?id=eq.${i.id}`, { method: 'DELETE', headers: H }));
       }
     });
-    await Promise.all(proms);
+    // CO2: acerta a quantidade de cada status na contagem editada — cria as linhas que
+    // faltam (na mesma rodada e data da contagem) e apaga as que sobram, mais novas primeiro.
+    const co2 = _barrisSemEditCo2;
+    if (co2 && (co2.cheio !== co2.cheio0 || co2.vazio !== co2.vazio0)) {
+      const dataRod = co2.rodada === 'QUI' ? _barrisSemGerenciaData.quintaIni : monday;
+      const its = ((d.co2Itens || {})[co2.rodada] || []).slice().sort((a, b) => String(b.criado_em || '').localeCompare(String(a.criado_em || '')));
+      [['CHEIO', co2.cheio], ['VAZIO', co2.vazio]].forEach(([st, alvo]) => {
+        const atuais = its.filter(i => (i.status === 'VAZIO') === (st === 'VAZIO'));
+        for (let n = atuais.length; n < alvo; n++) {
+          proms2.push(fetch(`${SB_URL}/rest/v1/gn_barris_semanal_contagem`, {
+            method: 'POST', headers: { ...H, Prefer: 'return=minimal' },
+            body: JSON.stringify({ loja: LOJA_DISPLAY[lojaKey] || lojaKey, loja_slug: slug, semana_inicio: dataRod, rodada: co2.rodada, tipo: 'CO2', status: st, validade: null, criado_por: criadoPor }),
+          }));
+        }
+        atuais.slice(0, Math.max(0, atuais.length - alvo)).forEach(i => {
+          proms2.push(fetch(`${SB_URL}/rest/v1/gn_barris_semanal_contagem?id=eq.${i.id}`, { method: 'DELETE', headers: H }));
+        });
+      });
+    }
+    const resps = await Promise.all(proms.concat(proms2));
+    if (resps.some(r => r && r.ok === false)) throw new Error('falha ao gravar');
     _barrisSemEditLoja = null;
     _barrisSemEditItens = null;
+    _barrisSemEditCo2 = null;
     await _loadBarrisSemanalGerencia();
   } catch (e) {
     alert('Erro ao salvar a edição. Tente novamente.');
@@ -16332,6 +16374,7 @@ async function _loadBarrisSemanalGerencia(){
     entregas: {CLARO:[], VINHO:[]}, vaziosTrocados: {CLARO:0, VINHO:0},
     contagemEm: null, confirmado: null,
     co2Seg: null, co2Qui: null, quinta: null, quintaConf: null,
+    co2Itens: { SEG: [], QUI: [] },        // linhas de CO2 com id, pra edição da supervisão
   }; });
   (contagens || []).forEach(r => {
     const k = slugToLoja[r.loja_slug];
@@ -16339,10 +16382,10 @@ async function _loadBarrisSemanalGerencia(){
     const d = porLoja[k];
     if (r.semana_inicio === quintaIni) {
       if (!d.quinta) d.quinta = { CLARO: 0, VINHO: 0 };
-      if (r.tipo === 'CO2') { d.co2Qui = d.co2Qui || { cheio: 0, vazio: 0 }; d.co2Qui[r.status === 'VAZIO' ? 'vazio' : 'cheio']++; }
+      if (r.tipo === 'CO2') { d.co2Qui = d.co2Qui || { cheio: 0, vazio: 0 }; d.co2Qui[r.status === 'VAZIO' ? 'vazio' : 'cheio']++; d.co2Itens.QUI.push({ id: r.id, status: r.status, criado_em: r.criado_em }); }
       else if (d.quinta[r.tipo] != null && r.status !== 'VAZIO') d.quinta[r.tipo]++;
     } else if (r.semana_inicio === semanaAtualIni && r.tipo === 'CO2') {
-      d.co2Seg = d.co2Seg || { cheio: 0, vazio: 0 }; d.co2Seg[r.status === 'VAZIO' ? 'vazio' : 'cheio']++;
+      d.co2Seg = d.co2Seg || { cheio: 0, vazio: 0 }; d.co2Seg[r.status === 'VAZIO' ? 'vazio' : 'cheio']++; d.co2Itens.SEG.push({ id: r.id, status: r.status, criado_em: r.criado_em });
     }
   });
   (contagens || []).forEach(r => {
@@ -16417,31 +16460,40 @@ function _buildEditPanelBarris(lojaKey){
       .map((item, idx) => ({ item, idx }))
       .filter(({ item }) => item.status !== 'VAZIO')
       .map(({ item, idx }) => `<div style="display:flex;gap:6px;align-items:center;margin-bottom:5px">
-        <select onchange="_editStatusBarrisChange('${tipo}',${idx},this.value)" style="flex:1.4;min-width:110px;font-size:11px;padding:5px 6px;border-radius:6px;border:1px solid rgba(0,0,0,.15);font-family:inherit">
+        <select class="gn-campo" onchange="_editStatusBarrisChange('${tipo}',${idx},this.value)" style="flex:1.4;min-width:110px;font-size:11px;padding:5px 6px;border-radius:6px;font-family:inherit">
           ${statusOpts.map(([val, lbl]) => `<option value="${val}" ${val === item.status ? 'selected' : ''}>${lbl}</option>`).join('')}
         </select>
-        <input type="date" value="${item.validade || ''}" onchange="_editValidadeBarrisChange('${tipo}',${idx},this.value)" style="flex:1;font-size:11px;padding:5px 6px;border-radius:6px;border:1px solid rgba(0,0,0,.15);font-family:inherit"/>
-        <button onclick="_editRemoverItemBarris('${tipo}',${idx})" style="background:none;border:none;color:#dc2626;font-size:14px;cursor:pointer;padding:0 2px">×</button>
+        <input class="gn-campo" type="date" value="${item.validade || ''}" onchange="_editValidadeBarrisChange('${tipo}',${idx},this.value)" style="flex:1;font-size:11px;padding:5px 6px;border-radius:6px;font-family:inherit"/>
+        <button onclick="_editRemoverItemBarris('${tipo}',${idx})" style="background:none;border:none;color:var(--txt-red);font-size:14px;cursor:pointer;padding:0 2px">×</button>
       </div>`).join('');
     const linhaVazios = `<div style="display:flex;gap:6px;align-items:center;margin-bottom:5px">
       <span style="flex:1.4;min-width:110px;font-size:11px;font-weight:700;color:var(--t2)">Vazios (sem validade)</span>
-      <input type="number" min="0" step="1" value="${qtdVazios}" onchange="_editQtdVaziosChange('${tipo}',this)" style="flex:1;font-size:11px;padding:5px 6px;border-radius:6px;border:1px solid rgba(0,0,0,.15);font-family:inherit"/>
+      <input class="gn-campo" type="number" min="0" step="1" value="${qtdVazios}" onchange="_editQtdVaziosChange('${tipo}',this)" style="flex:1;font-size:11px;padding:5px 6px;border-radius:6px;font-family:inherit"/>
       <span style="width:14px;flex-shrink:0"></span>
     </div>`;
     return `<div style="margin-bottom:8px">
       <div style="font-size:10px;font-weight:800;color:var(--t3);margin-bottom:4px">${emoji} ${label}</div>
       ${linhas}
       ${linhaVazios}
-      <button onclick="_editAdicionarItemBarris('${tipo}')" style="background:var(--s1);border:1px solid rgba(0,0,0,.12);border-radius:6px;font-size:10px;padding:4px 8px;cursor:pointer;font-family:inherit">+ Adicionar</button>
+      <button class="gn-campo" onclick="_editAdicionarItemBarris('${tipo}')" style="border-radius:6px;font-size:11px;font-weight:700;padding:5px 10px;cursor:pointer;font-family:inherit">+ Adicionar</button>
     </div>`;
   };
   return `<div style="margin-top:8px;padding:10px;background:rgba(217,119,6,.05);border:1px dashed rgba(217,119,6,.3);border-radius:8px">
-    <div style="font-size:10px;font-weight:800;color:#D97706;margin-bottom:8px">✏️ Editando (supervisão)</div>
+    <div style="font-size:10px;font-weight:800;color:var(--txt-amber);margin-bottom:8px">✏️ Editando (supervisão)</div>
     ${secaoTipo('CLARO', '🍺', 'Chopp Claro')}
     ${secaoTipo('VINHO', '🍷', 'Chopp de Vinho')}
+    ${_barrisSemEditCo2 ? `<div class="barris-edit-co2" style="margin-bottom:8px">
+      <div style="font-size:10px;font-weight:800;color:var(--t3);margin-bottom:4px">🧯 Cilindros de CO2 <span style="font-weight:600">· contagem de ${_barrisSemEditCo2.rodada === 'QUI' ? 'quinta' : 'segunda'}</span></div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <span style="font-size:11px;font-weight:700;color:var(--t2);width:52px">Cheios</span>
+        <input class="gn-campo" type="number" min="0" step="1" data-co2="cheio" value="${_barrisSemEditCo2.cheio}" onchange="_editCo2Change('cheio',this)" style="flex:1;font-size:11px;padding:5px 6px;border-radius:6px;font-family:inherit"/>
+        <span style="font-size:11px;font-weight:700;color:var(--t2);width:52px;text-align:right">Vazios</span>
+        <input class="gn-campo" type="number" min="0" step="1" data-co2="vazio" value="${_barrisSemEditCo2.vazio}" onchange="_editCo2Change('vazio',this)" style="flex:1;font-size:11px;padding:5px 6px;border-radius:6px;font-family:inherit"/>
+      </div>
+    </div>` : ''}
     <div style="display:flex;gap:8px;margin-top:2px">
-      <button ${_barrisSemEditSalvando ? 'disabled' : ''} onclick="_salvarEdicaoBarrisLoja()" style="flex:1;background:${_barrisSemEditSalvando ? 'rgba(5,150,105,.5)' : '#059669'};border:none;border-radius:8px;color:#fff;padding:9px;font-size:12px;font-weight:800;cursor:${_barrisSemEditSalvando ? 'default' : 'pointer'};font-family:inherit">${_barrisSemEditSalvando ? 'Salvando…' : '💾 Salvar'}</button>
-      <button ${_barrisSemEditSalvando ? 'disabled' : ''} onclick="_fecharEditarBarrisLoja()" style="background:none;border:1px solid rgba(0,0,0,.15);border-radius:8px;color:var(--t2);padding:9px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit">Cancelar</button>
+      <button ${_barrisSemEditSalvando ? 'disabled' : ''} onclick="_salvarEdicaoBarrisLoja()" style="flex:1;background:${_barrisSemEditSalvando ? 'rgba(4,120,87,.55)' : '#047857'};border:none;border-radius:8px;color:#fff;padding:9px;font-size:12px;font-weight:800;cursor:${_barrisSemEditSalvando ? 'default' : 'pointer'};font-family:inherit">${_barrisSemEditSalvando ? 'Salvando…' : '💾 Salvar'}</button>
+      <button ${_barrisSemEditSalvando ? 'disabled' : ''} onclick="_fecharEditarBarrisLoja()" style="background:none;border:1px solid var(--b2);border-radius:8px;color:var(--t2);padding:9px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit">Cancelar</button>
     </div>
   </div>`;
 }

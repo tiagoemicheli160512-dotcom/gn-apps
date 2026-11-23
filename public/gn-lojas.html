@@ -2617,15 +2617,34 @@ async function _confirmarContagemBarrisSemanal() {
     // Cilindros de CO2: uma linha por cilindro, tipo 'CO2', CHEIO ou VAZIO (sem validade).
     for (let i = 0; i < co2C; i++) linhas.push({ loja: loja, loja_slug: slug, semana_inicio: monday, rodada: _barrisSemRodada, tipo: 'CO2', status: 'CHEIO', validade: null, criado_por: criadoPor });
     for (let i = 0; i < co2V; i++) linhas.push({ loja: loja, loja_slug: slug, semana_inicio: monday, rodada: _barrisSemRodada, tipo: 'CO2', status: 'VAZIO', validade: null, criado_por: criadoPor });
-    if (linhas.length) {
-      await sbRequest('gn_barris_semanal_contagem', { method: 'POST', headers: { 'Prefer': 'return=minimal' }, body: JSON.stringify(linhas) });
-    }
-    await sbRequest('gn_barris_semanal_confirmacao?on_conflict=loja_slug,semana_inicio', {
+    // Uma contagem por loja e rodada (23/11/2026): Boulevard teve a de segunda lançada por
+    // João (09:51) e Leandro (10:00) e o banco SOMOU as duas — barris e CO2 em dobro. Antes,
+    // as linhas entravam primeiro e a confirmação era regravada por cima, então o segundo
+    // aparelho (com a tela aberta antes do primeiro salvar) gravava tudo de novo. Agora uma
+    // função no banco marca a confirmação PRIMEIRO, sem regravar, e só então grava as linhas,
+    // na mesma transação. Se já havia contagem, nada é gravado e volta quem lançou e quando.
+    const reg = await sbRequest('rpc/gn_barris_semanal_registrar', {
       method: 'POST',
-      headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
-      body: JSON.stringify({ loja_slug: slug, semana_inicio: monday, rodada: _barrisSemRodada, loja: loja, confirmado_por: criadoPor,
-                             sem_vazios: _barrisSemVaziosLancados() === 0 })
+      body: JSON.stringify({ p_loja_slug: slug, p_semana: monday, p_rodada: _barrisSemRodada, p_loja: loja, p_por: criadoPor,
+                             p_sem_vazios: _barrisSemVaziosLancados() === 0, p_linhas: linhas })
     });
+    if (reg && reg.ja_lancada) {
+      // Mesma pessoa = o envio anterior chegou e só a resposta se perdeu (caso Nova América
+      // 02/11: Júlia 08:43 e 08:44). Outra pessoa = contagem dupla evitada: avisa quem fez.
+      const mesma = reg.por && criadoPor && String(reg.por).trim().toLowerCase() === String(criadoPor).trim().toLowerCase();
+      const hora = reg.em ? new Date(reg.em).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+      _barrisSemPendente = false;
+      _barrisSemCheckFalhou = false;
+      _barrisSemMarcarOkLocal(slug, monday);
+      _barrisSemItens = { CLARO: [], VINHO: [] };
+      _barrisSemComparativo = null;
+      _barrisSemSemVazios = false;
+      _barrisSemCo2 = { cheio: '', vazio: '' };
+      if (mesma) showToast('✅ Sua contagem já estava salva' + (hora ? ' (' + hora + ')' : '') + '.');
+      else alert('A contagem ' + (_barrisSemRodada === 'QUI' ? 'de quinta' : 'desta semana') + ' já foi lançada por ' + (reg.por || 'outra pessoa') + (hora ? ' em ' + hora : '') +
+                 '.\n\nA sua NÃO foi gravada, pra não somar duas contagens. Se precisar corrigir algum número, peça à supervisão (Painel › Barris › editar).');
+      return;
+    }
     _barrisSemPendente = false;
     _barrisSemCheckFalhou = false;
     // Só aqui, depois do POST voltar OK: é o que evita re-travar a loja que já fez a contagem

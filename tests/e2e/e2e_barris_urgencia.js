@@ -161,12 +161,14 @@ const check = (n, c) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ? ok++ :
     const realToast = window.showToast; window.showToast = () => {};
     await _confirmarContagemBarrisSemanal();
     window.sbRequest = realReq; window.confirm = realConf; window.showToast = realToast;
-    const conf = corpos.find(c => /confirmacao/.test(c.url));
+    // Desde 23/11 a confirmação e as linhas vão juntas numa função do banco
+    // (rpc/gn_barris_semanal_registrar), que recusa a segunda contagem da semana.
+    const conf = corpos.find(c => /gn_barris_semanal_registrar|confirmacao/.test(c.url));
     return { btnOff: btn ? btn.disabled : null, msg, body: conf ? conf.body : '' };
   });
   check('declarando "não tenho nenhum vazio", o botão libera', declarado.btnOff === false);
   check('a confirmação avisa em voz alta que vai sem vazio', /NENHUM casco vazio/.test(declarado.msg));
-  check('e grava sem_vazios=true no banco (fica auditável)', /"sem_vazios":true/.test(declarado.body));
+  check('e grava sem_vazios=true no banco (fica auditável)', /"p_sem_vazios":true|"sem_vazios":true/.test(declarado.body));
 
   // ── (c) Urgência primeiro ───────────────────────────────────────────────────────────
   const urg = await page.evaluate(() => {
