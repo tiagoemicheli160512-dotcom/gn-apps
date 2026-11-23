@@ -251,6 +251,33 @@ function _presHojeISO() {
   const d = agora.getHours() < PRES_VIRADA_TOLERANCIA_H ? new Date(agora.getFullYear(), agora.getMonth(), agora.getDate() - 1, 12) : agora;
   return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
 }
+// Dia de operação em que a sessão foi ABERTA (mesma tolerância de 2h da virada).
+// Login de ontem não confirma presença de hoje (23/11/2026): o Marlon (Pedreira, turno
+// 15h–23h) "confirmou presença" às 07:54, às 08:18 e às 08:50 em três manhãs — no
+// computador da loja, minutos antes da gerente da manhã entrar. O login vale 12h, então o
+// dele, aberto no fim da noite, ainda valia de manhã, e quem abriu o app confirmou por ele.
+function _presDiaDaSessao(ts) {
+  const t = Number(ts);
+  if (!isFinite(t) || t <= 0) return null;
+  const a = new Date(t);
+  const d = a.getHours() < PRES_VIRADA_TOLERANCIA_H ? new Date(a.getFullYear(), a.getMonth(), a.getDate() - 1, 12) : a;
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+function _presSessaoDeOutroDia(sess) {
+  const dia = sess ? _presDiaDaSessao(sess.ts) : null;
+  return !!(dia && dia < _presHojeISO());          // sem ts (apps de sessão própria): não decide
+}
+function _presTelaSessaoVelha(sess) {
+  const esc = s => _gnEsc3(String(s == null ? '' : s));
+  const ov = _presOverlay();
+  ov.innerHTML = `<div style="max-width:560px;margin:0 auto;padding:14px 16px 26px">
+    <div style="font-size:9px;font-weight:800;letter-spacing:1.6px;text-transform:uppercase;color:var(--t4)">Gigante Nordestino</div>
+    <div style="font-size:16px;font-weight:900;color:var(--t1);margin-top:3px;line-height:1.25">Este login é de outro dia</div>
+    <div style="font-size:12px;color:var(--t2);margin-top:8px;line-height:1.5">O aparelho ainda está com o login de <b>${esc(sess.nome || '')}</b>, aberto em outro dia. Pra presença de hoje valer, cada um entra com o <b>próprio usuário</b>.</div>
+    <button id="gn-pres-velha-sair" onclick="gnPresencaSair()" style="${_PRES_BTN};margin-top:14px">Entrar com o meu usuário</button>
+  </div>`;
+  ov.scrollTop = 0;
+}
 function _presChaveLocal(usuarioId, loja) { return 'gn_presenca_' + usuarioId + '_' + loja + '_' + _presHojeISO(); }
 
 // Minutos desde a meia-noite, pra comparar com tolerância sem mexer em string de hora.
@@ -287,6 +314,9 @@ function _presDeveCobrar(sess, isMaster) {
 async function _gnPresChecar(sess, isMaster) {
   try {
     if (!_presDeveCobrar(sess, isMaster)) return;
+    // Antes de tudo (inclusive do "já respondeu neste aparelho"): login de outro dia não
+    // pergunta "você está na loja?" — manda entrar de novo. Ver _presDiaDaSessao.
+    if (_presSessaoDeOutroDia(sess)) { _presTelaSessaoVelha(sess); return; }
     const loja = sess.loja, hoje = _presHojeISO();
     // Já respondeu neste aparelho hoje: nem busca. A linha no banco continua sendo a
     // verdade — isto só evita perguntar de novo a cada recarga da página.
