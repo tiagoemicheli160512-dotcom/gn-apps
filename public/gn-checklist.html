@@ -2724,7 +2724,26 @@ function _comissoesBlankFunc(id){
 // (variações de grafia entre semanas não são casadas automaticamente, de propósito, pra
 // não arriscar mesclar duas pessoas diferentes por engano).
 function _comissoesNormNome(s){
-  return (s||'').trim().toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
+  // \s+ → um espaço: "THAIS  DE OLIVEIRA" (espaço duplo) e "THAIS DE OLIVEIRA" são a
+  // mesma pessoa — sem isso a fusão a duplicava (Nova América, semana 23/11: 3 Thais).
+  return (s||'').trim().replace(/\s+/g,' ').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
+}
+// "Mesma pessoa, nome mexido" entre a vaga i da semana anterior e a vaga i desta semana.
+// A herança semanal copia funcionário por ÍNDICE, então a vaga i daqui é a mesma pessoa da
+// vaga i de lá; só não dá pra confiar nisso sozinho porque uma vaga esvaziada pode receber
+// outra pessoa. Por isso, além da mesma vaga, exige que os nomes se pareçam (uma palavra de
+// 3+ letras em comum) OU que um deles seja lixo de digitação (número, ou a mesma letra 3x
+// seguidas: "Tmj6666", "Hdtytyyyyyy", "SANTrtrr4tttyy5OS").
+function _comissoesNomeLixo(n){
+  const s=String(n||'');
+  return /[0-9]/.test(s) || /(\p{L})\1\1/iu.test(s);   // dentro da palavra: "ANA AARÃO" não conta
+}
+function _comissoesMesmaPessoaRenomeada(a, b){
+  const na=_comissoesNormNome(a), nb=_comissoesNormNome(b);
+  if(!na || !nb || na===nb) return false;
+  if(_comissoesNomeLixo(a) || _comissoesNomeLixo(b)) return true;
+  const pa=new Set(na.split(' ').filter(p=>p.length>=3));
+  return nb.split(' ').some(p=>p.length>=3 && pa.has(p));
 }
 // Transforma um funcionário de uma semana anterior na versão "herdada" pra semana alvo
 // (semAlvo). Retorna null se não deve ser herdado (sem nome ou arquivado) — quem chama
@@ -2872,8 +2891,18 @@ function _comissoesMesclarFuncsFaltantes(funcs, allData, idx){
     // o arquivamento automático não deixa nenhuma, por isso a checagem extra aqui.
     const arquivados = new Set(funcs.filter(f=>f && f.nome && f.nome.trim() && f.arquivado)
       .map(f=>_comissoesNormNome(f.nome)));
+    // Renomeado NA SEMANA ANTERIOR (depois que esta já existia): o nome novo de lá não está
+    // aqui, mas o antigo está — é a mesma pessoa, não um faltante. Caso real (Nova América,
+    // 23/11): a Luana virou "LUANA PEREIRA LIMA ty.ym" na semana 45 e ganhou uma cópia na 46;
+    // a Tatiana virou "Tmj6666" na 44 e ganhou uma cópia na 45 — e as cópias recebiam repique.
+    const mesmaVagaRenomeada = f => {
+      const j = wdAnt.funcs.indexOf(f), aqui = funcs[j];
+      return !!(aqui && aqui.nome && aqui.nome.trim() && _comissoesMesmaPessoaRenomeada(f.nome, aqui.nome));
+    };
     const faltantes = comNome.filter(f=>!f.arquivado
       && !nomesAtuais.has(_comissoesNormNome(f.nome))
+      && !(f._nomesAnteriores||[]).some(n=>nomesAtuais.has(_comissoesNormNome(n)))
+      && !mesmaVagaRenomeada(f)
       && !removidos.has(_comissoesNormNome(f.nome))
       && !renomeados.has(_comissoesNormNome(f.nome))
       && !arquivados.has(_comissoesNormNome(f.nome)));
@@ -8129,6 +8158,13 @@ function updComissoesNome(i,v,semRender){
   if(!comissoesWD) return;
   if(_nomeFuncPareceColagem(v||'')) return;   // texto colado não vira nome (ver _nomeFuncLimpo)
   v=_nomeFuncLimpo(v);
+  // Tecla apertada sem querer ("Hdtytyyyyyy", "SANTrtrr4tttyy5OS"): a mesma letra 3x seguidas
+  // não existe em nome. Recusa e mantém o que estava, como no texto colado.
+  if(_comissoesNomeLixo(v)){
+    if(typeof showToast==='function') showToast('⚠️ Isso não parece um nome (letra repetida). O nome anterior foi mantido.', 'error');
+    if(typeof renderComissoesFuncs==='function') renderComissoesFuncs();
+    return;
+  }
   // Carimba QUANDO essa vaga virou um cadastro de verdade (primeira vez que ganha nome).
   // É o que separa "cadastro novo, já nasce obrigado a ter nome completo e função" de
   // "quem já estava aí antes da regra, que tem prazo" — ver _checarCadastroFuncIncompleto.
