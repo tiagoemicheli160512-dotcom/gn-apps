@@ -183,7 +183,11 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   check('Caxias: contagem de terça vale como a da semana (feriado); vendido de 3/7 dias não dá diferença', e.cx[37] && e.cx[37].saida === 30 && /\(3\/7\)/.test(e.cxTxt) && /30 27 \(3\/7\) —/.test(e.cxTxt), e.cxTxt);
   check('Itaquera (SP, catálogo próprio ligado pelo item de origem): 40 + 36 − 29 = 47; vendido 35 → +12', e.it[37] && e.it[37].saida === 47 && e.it[37].vendido === 35, e.it);
   check('relatório leva a Coca × estoque com a conta e a diferença', /lata 350 ml: saída 133 \(126 \+ 60 − 53\) · vendido 130 · dif\. \+3/.test(e.rel) && /subiu sem recebimento confirmado/.test(e.rel), e.rel);
-  check('semana em andamento: "fecha na segunda, com a contagem"', /fecha na segunda/.test(e.vigente), e.vigente);
+  // Desde 23/11 a semana em andamento mostra o saldo inicial ("queria ter a visão do saldo
+  // inicial") em vez de só "fecha na segunda": contagem de segunda 23/11 + o que chegou depois
+  // dela (1 cx de lata às 15h = 12 un) − vendido lançado (nenhum dia ainda) = deve ter hoje.
+  check('semana em andamento: mostra o saldo inicial (contagem de segunda) já na segunda', /SALDO DA SEMANA/.test(e.vigente) && /Saldo inicial/.test(e.vigente) && /Deve ter hoje/.test(e.vigente), e.vigente);
+  check('…Bangu lata: 53 + 12 (1 cx chegou depois da contagem) − 0 vendido = 65; KS 156', /lata 350 ml 53 \+12 −0 65/.test(e.vigente) && /KS 290 ml 156 \+0 −0 156/.test(e.vigente) && /Vendido \(0 dias\)/.test(e.vigente), e.vigente);
   check('a tabela da Coca não estoura 360 px', e.largos === 0, e.largos);
 
   // ── 5. Aviso de gramatura muito baixa (caso real: Picanha de Sol Executivo com 0,15 g) ──
