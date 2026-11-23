@@ -17696,10 +17696,15 @@ async function _vendEstoqueSemana(ini, cad, vendRows, diasISO) {
       return c && c.base === +b && lojaDe(p.loja_slug) === k && r.validado_em > a.criado_em && r.validado_em <= z.criado_em; })
       .reduce((s2, r) => s2 + (parseFloat(r.qtd_recebida) || 0) * cat[r.gn_provisoes.catalogo_id].upc, 0) : null;
     const ini0 = a ? parseFloat(a.atual) : null, fim = z ? parseFloat(z.atual) : null;
+    // Semana em andamento (sem a contagem da segunda seguinte): o que chegou DEPOIS da
+    // contagem de segunda até agora — é o que soma no saldo inicial pra estimar o de hoje.
+    const entAgora = a && !z ? rec.filter(r => { const p = r.gn_provisoes || {}, c = cat[p.catalogo_id];
+      return c && c.base === +b && lojaDe(p.loja_slug) === k && r.validado_em > a.criado_em; })
+      .reduce((s2, r) => s2 + (parseFloat(r.qtd_recebida) || 0) * cat[r.gn_provisoes.catalogo_id].upc, 0) : null;
     const saida = a && z ? ini0 + ent - fim : null;
     const pendCx = (pend || []).filter(r => { const c = cat[r.catalogo_id]; return c && c.base === +b && lojaDe(r.loja_slug) === k; })
       .reduce((s2, r) => s2 + (parseFloat(r.qtd_prevista) || 0), 0);
-    (porLoja[k] = porLoja[k] || {})[b] = { ini: ini0, ent, fim, saida, vendido: vend[key] == null ? null : vend[key], diasVend: diasVend[k] || 0,
+    (porLoja[k] = porLoja[k] || {})[b] = { ini: ini0, ent, fim, saida, entAgora, contadoEm: a ? a.criado_em : null, vendido: vend[key] == null ? null : vend[key], diasVend: diasVend[k] || 0,
       repetida: a && z && ini0 === fim && ini0 > 0, pendCx };
   });
   return { porLoja };
@@ -17710,9 +17715,46 @@ function _vendNomeEstoque(base) {
   return c ? c.nome.replace(/^Coca-Cola\s*/i, '') : 'item ' + base;
 }
 function _vendEstoqueHtml(d, fechada) {
-  const e = d.estoque; if (!e || !Object.keys(e).length) return '';
+  const e = d.estoque;
+  if (!e || !Object.keys(e).length) {
+    // Semana em andamento sem nenhuma contagem de Coca na segunda: diz, em vez de sumir.
+    if (!fechada && _vendGerData && !_vendGerData.estoqueFalhou && (_vendGerData.cadastro || []).some(c => c.item_estoque))
+      return `<div class="vend-estoque vend-estoque-andamento" style="margin-top:6px;border-top:1px solid var(--b1);padding-top:5px;font-size:10px;color:var(--txt-amber);font-weight:700">🥤 Coca: sem a contagem de segunda — sem saldo inicial desta semana.</div>`;
+    return '';
+  }
   const bases = Object.keys(e).sort((a, b) => a - b);
-  if (!fechada) return `<div class="vend-estoque" style="margin-top:6px;border-top:1px solid rgba(0,0,0,.08);padding-top:5px;font-size:10px;color:var(--t4)">🥤 Coca × estoque: fecha na segunda, com a contagem — veja a semana passada (‹).</div>`;
+  // Semana em andamento (23/11/2026): "queria ter a visão do saldo inicial". A contagem de
+  // segunda já existe desde a segunda — esperar a semana fechar pra mostrá-la deixava o
+  // quadro vazio a semana inteira. Aqui: saldo inicial + o que chegou desde a contagem − o
+  // vendido lançado até agora = o que DEVERIA ter hoje. É estimativa: dia de venda ainda
+  // não lançado deixa o número maior do que o real, e a tela diz quantos dias entraram.
+  if (!fechada) {
+    const linhasV = bases.map(b => {
+      const x = e[b];
+      if (x.ini === null) return `<tr><td style="padding:2px 4px;color:var(--t2);font-weight:700;white-space:nowrap">${_vendNomeEstoque(b)}</td><td colspan="4" style="padding:2px 4px;color:var(--txt-amber);font-weight:700">sem a contagem de segunda</td></tr>`;
+      const vend = x.vendido || 0, deve = x.ini + (x.entAgora || 0) - vend;
+      return `<tr>
+        <td style="padding:2px 4px;color:var(--t2);font-weight:700;white-space:nowrap">${_vendNomeEstoque(b)}</td>
+        <td class="vend-saldo-ini" style="padding:2px 3px;text-align:right;font-weight:800;color:var(--t1)">${_vendNum(x.ini)}</td>
+        <td style="padding:2px 3px;text-align:right;color:var(--txt-green)">+${_vendNum(x.entAgora || 0)}</td>
+        <td style="padding:2px 3px;text-align:right">−${_vendNum(vend)}</td>
+        <td class="vend-deve-ter" style="padding:2px 3px;text-align:right;font-weight:800;color:${deve < 0 ? 'var(--txt-amber)' : 'var(--t1)'}">${_vendNum(deve)}</td>
+      </tr>`;
+    }).join('');
+    const umQualquer = e[bases[0]] || {};
+    const quando = (bases.map(b => e[b].contadoEm).filter(Boolean).sort()[0]) || null;
+    const quandoTxt = quando ? new Date(quando).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+    const pend = bases.filter(b => e[b].pendCx > 0).map(b => `${_vendNomeEstoque(b)}: ${_vendNum(e[b].pendCx)} cx`);
+    return `<div class="vend-estoque vend-estoque-andamento" style="margin-top:6px;border-top:1px solid var(--b1);padding-top:5px">
+      <div style="font-size:9.5px;color:var(--t3);font-weight:700;margin-bottom:3px">🥤 COCA · SALDO DA SEMANA (unidades) · <span style="font-weight:400;color:var(--t4)">contagem de segunda${quandoTxt ? ' (' + quandoTxt + ')' : ''} + o que chegou − o vendido lançado = o que deveria ter hoje</span></div>
+      <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:9.5px;width:100%;min-width:300px;font-variant-numeric:tabular-nums">
+        <tr style="color:var(--t3)"><th style="text-align:left;padding:2px 4px">Item</th><th style="padding:2px 3px;text-align:right">Saldo inicial</th><th style="padding:2px 3px;text-align:right">Chegou</th><th style="padding:2px 3px;text-align:right">Vendido (${umQualquer.diasVend || 0} dia${(umQualquer.diasVend || 0) === 1 ? '' : 's'})</th><th style="padding:2px 3px;text-align:right">Deve ter hoje</th></tr>
+        ${linhasV}
+      </table></div>
+      ${pend.length ? `<div style="font-size:9.5px;color:var(--txt-amber);font-weight:700;margin-top:3px">⚠ Pedido desta semana "aguardando" no recebimento: ${pend.join(' · ')} — se chegou e não foi confirmado, não entra no "Chegou".</div>` : ''}
+      <div style="font-size:9px;color:var(--t4);margin-top:3px">A diferença de verdade (saída × vendido) sai na segunda, com a contagem nova.</div>
+    </div>`;
+  }
   const linhas = bases.map(b => {
     const x = e[b];
     if (x.saida === null) return `<tr><td style="padding:2px 4px;color:var(--t2);font-weight:700;white-space:nowrap">${_vendNomeEstoque(b)}</td><td colspan="6" style="padding:2px 4px;color:var(--t4)">${x.ini === null ? 'sem a contagem de segunda' : 'sem a contagem da segunda seguinte'}</td></tr>`;
