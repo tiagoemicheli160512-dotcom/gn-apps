@@ -16857,6 +16857,160 @@ function _carnesDiasContados(d) {
     })).length;
 }
 
+// ─── Ranking de controle de carnes (23/11/2026) ─────────────────────────────────────
+// "Tem como ter um relatório de desempenho, pras lojas terem a visão de como está o
+//  controle, da melhor pra pior loja? Vai ficar melhor agora que vai começar a ser lançado
+//  os que estão vendendo de fato."
+//
+// Dois critérios, e a tela diz qual está valendo:
+//  · VENDIDOS (o de verdade): quanto a saída real (início + compras − contagem) se afasta
+//    do que os pratos vendidos explicam (_carnesVendidos), somando o desvio de cada corte
+//    em módulo — 5 kg a mais na picanha e 5 kg a menos no camarão não se anulam. Só entra
+//    loja com a semana inteira de vendidos (7/7) nos 4 cortes. Vale assim que pelo menos
+//    uma loja tiver isso; a que não tiver fica fora, dizendo quantos dias faltaram — o que
+//    também cobra o lançamento.
+//  · KG POR R$ MIL (provisório, até os vendidos existirem): carne que saiu por mil reais
+//    vendidos, menor primeiro. É indicador de consumo, não de controle: sente o mix de
+//    pratos de cada loja. Medido na semana 16/11: as lojas válidas ficaram entre 2,10 e
+//    2,52 — diferença pequena, por isso a cor só marca quem foge 5% da média da rede.
+//
+// Fora do ranking, com o motivo (corrigir é o que coloca a loja de volta): sem contagem,
+// corte sem contagem e saída negativa. Saída negativa NÃO pode ranquear: na semana 16/11
+// Campo Grande daria −0,31 kg por R$ mil e ficaria em 1º justamente por erro de contagem.
+const CARNES_RANK_FAIXA = 5;   // % — dentro disso é ruído de pesagem/porção (mesma régua do "bate com os vendidos")
+function _carnesRanking(porLoja) {
+  const nome = k => LOJA_DISPLAY[k] || k;
+  const base = Object.keys(porLoja).map(k => {
+    const d = porLoja[k];
+    const cortes = CARNES_DEF_HOME.map(c => ({ c, r: _carnesDoCorte(d && d.carnes, c.key) }));
+    const semCont = cortes.filter(x => x.r.contagem === null).map(x => x.c.label);
+    const neg = cortes.filter(x => x.r.contagem !== null && x.r.venda < 0).map(x => x.c.label);
+    const saida = cortes.reduce((t, x) => t + (x.r.contagem === null ? 0 : x.r.venda), 0);
+    const vend = cortes.map(x => _carnesVendidos(d, x.c.key, x.r.venda));
+    const vendDias = Math.min(...vend.map(v => v ? v.nDias : 0));
+    const vendOk = vend.every(v => v && v.completo && v.diff !== null);
+    let desvio = null;
+    if (vendOk) {
+      const devia = vend.reduce((t, v) => t + v.devia, 0);
+      const mais = vend.reduce((t, v) => t + Math.max(0, v.diff), 0);
+      const menos = vend.reduce((t, v) => t + Math.max(0, -v.diff), 0);
+      desvio = { devia, mais, menos, pct: devia > 0 ? (mais + menos) / devia * 100 : null };
+    }
+    return { k, nome: nome(k), d, semCont, neg, saida, fat: (d && d.fat) || 0, razao: _carnesRazao(saida, d && d.fat),
+             vendDias, desvio };
+  });
+  const fora = [], validas = [];
+  base.forEach(x => {
+    if (!_carnesLojaContou(x.d)) fora.push({ ...x, motivo: 'não lançou a contagem da semana' });
+    else if (x.semCont.length) fora.push({ ...x, motivo: 'sem contagem de ' + x.semCont.join(', ') });
+    else if (x.neg.length) fora.push({ ...x, motivo: 'saída negativa em ' + x.neg.join(', ') + ' (contagem maior que o disponível)' });
+    else validas.push(x);
+  });
+  const modo = validas.some(x => x.desvio && x.desvio.pct !== null) ? 'vendidos' : 'razao';
+  const ranq = [];
+  validas.forEach(x => {
+    if (modo === 'vendidos') {
+      if (x.desvio && x.desvio.pct !== null) ranq.push(x);
+      else fora.push({ ...x, motivo: x.vendDias < 7 ? `vendidos incompletos (${x.vendDias}/7 dias lançados)` : 'sem pratos vendidos lançados' });
+    } else {
+      if (x.razao !== null) ranq.push(x);
+      else fora.push({ ...x, motivo: 'sem faturamento lançado na semana' });
+    }
+  });
+  const val = x => modo === 'vendidos' ? x.desvio.pct : x.razao;
+  ranq.sort((a, b) => val(a) - val(b) || a.nome.localeCompare(b.nome, 'pt-BR'));
+  let rede = null;
+  if (ranq.length) {
+    if (modo === 'vendidos') {
+      const dv = ranq.reduce((t, x) => t + x.desvio.devia, 0);
+      rede = dv > 0 ? ranq.reduce((t, x) => t + x.desvio.mais + x.desvio.menos, 0) / dv * 100 : null;
+    } else {
+      const f = ranq.reduce((t, x) => t + x.fat, 0);
+      rede = f > 0 ? ranq.reduce((t, x) => t + x.saida, 0) / f * 1000 : null;
+    }
+  }
+  fora.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+  return { modo, ranq, fora, rede, val };
+}
+// Verde / neutro / vermelho de cada posição. Por vendidos, a mesma régua do "bate com os
+// vendidos" (até 5%); por kg/R$ mil, a distância da média da rede.
+function _carnesRankNivel(rk, x) {
+  const v = rk.val(x);
+  if (rk.modo === 'vendidos') return v <= CARNES_RANK_FAIXA ? 'bom' : v <= CARNES_RANK_FAIXA * 3 ? 'atencao' : 'ruim';
+  if (!(rk.rede > 0)) return 'neutro';
+  const pct = (v - rk.rede) / rk.rede * 100;
+  return pct <= -CARNES_RANK_FAIXA ? 'bom' : pct >= CARNES_RANK_FAIXA ? 'ruim' : 'neutro';
+}
+function _carnesRankValorTxt(rk, x) {
+  const kg = v => (Math.round(v * 10) / 10).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  if (rk.modo === 'vendidos') {
+    const dz = x.desvio;
+    const mais = dz.mais >= 0.05, menos = dz.menos >= 0.05;   // abaixo disso é resíduo de arredondamento ("+0,0 kg")
+    return `desvio ${dz.pct.toFixed(0)}%` + (mais || menos ? ` (${mais ? '+' + kg(dz.mais) + ' kg' : ''}${mais && menos ? ' / ' : ''}${menos ? '−' + kg(dz.menos) + ' kg' : ''})` : '');
+  }
+  const vsRede = rk.rede > 0 ? (x.razao - rk.rede) / rk.rede * 100 : null;
+  return x.razao.toFixed(2).replace('.', ',') + ' kg/R$ mil' + (vsRede === null ? '' : ` (${vsRede > 0 ? '+' : ''}${vsRede.toFixed(0)}% vs rede)`);
+}
+function _carnesRankCriterioTxt(rk) {
+  return rk.modo === 'vendidos'
+    ? 'diferença entre a carne que saiu e a que os pratos vendidos explicam — menor desvio = melhor controle'
+    : 'kg de carne por R$ mil vendido, menor primeiro — PROVISÓRIO até a primeira semana inteira de vendidos lançados';
+}
+function _carnesRankingHtml(porLoja, vigente) {
+  const esc = s2 => window.escapeHtml(String(s2 == null ? '' : s2));
+  if (vigente) return `<div class="carnes-rank" data-modo="vigente" style="background:var(--s2);border:1px solid var(--b1);border-radius:12px;padding:10px 14px;margin-bottom:10px;font-size:11px;color:var(--t2)">🏆 O ranking de controle sai com a semana fechada — depende da contagem de segunda. Volte uma semana (‹) pra ver o da semana passada.</div>`;
+  const rk = _carnesRanking(porLoja);
+  const COR = { bom: 'var(--txt-green)', atencao: 'var(--txt-amber)', ruim: 'var(--txt-red)', neutro: 'var(--t1)' };
+  const medalha = i => ['🥇', '🥈', '🥉'][i] || `${i + 1}º`;
+  const linhas = rk.ranq.map((x, i) => {
+    const nv = _carnesRankNivel(rk, x);
+    return `<div class="carnes-rank-linha" data-loja="${esc(x.k)}" data-pos="${i + 1}" style="display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--b1)">
+      <span style="width:26px;text-align:center;font-size:${i < 3 ? '15px' : '11px'};font-weight:800;color:var(--t2)">${medalha(i)}</span>
+      <span style="flex:1;min-width:0;font-size:12px;font-weight:800;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(x.nome)}</span>
+      <span class="carnes-rank-valor" style="font-size:11px;font-weight:800;color:${COR[nv]};font-variant-numeric:tabular-nums;text-align:right">${esc(_carnesRankValorTxt(rk, x))}</span>
+    </div>`;
+  }).join('');
+  const redeTxt = rk.rede === null ? '' : rk.modo === 'vendidos'
+    ? `Média da rede: desvio de ${rk.rede.toFixed(0)}%.`
+    : `Média da rede: ${rk.rede.toFixed(2).replace('.', ',')} kg por R$ mil.`;
+  const foraHtml = rk.fora.length ? `<div class="carnes-rank-fora" style="margin-top:8px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.25);border-radius:10px;padding:8px 10px">
+      <div style="font-size:11px;font-weight:800;color:var(--txt-amber);margin-bottom:3px">Fora do ranking (${rk.fora.length}) — corrigir o lançamento coloca a loja de volta</div>
+      ${rk.fora.map(x => `<div style="font-size:10.5px;color:var(--t2);line-height:1.45"><b style="color:var(--t1)">${esc(x.nome)}</b>: ${esc(x.motivo)}</div>`).join('')}
+    </div>` : '';
+  return `<div class="carnes-rank" data-modo="${rk.modo}" style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:12px 14px;margin-bottom:12px">
+    <div style="font-size:13px;font-weight:800;color:var(--t1)">🏆 Ranking de controle — da melhor pra pior</div>
+    <div style="font-size:10px;color:var(--t3);margin:2px 0 6px;line-height:1.45">Critério: ${esc(_carnesRankCriterioTxt(rk))}.</div>
+    ${rk.ranq.length ? linhas : `<div style="font-size:11px;color:var(--t4);padding:6px 0">Nenhuma loja com dado completo pra ranquear nesta semana.</div>`}
+    ${redeTxt ? `<div style="font-size:10px;color:var(--t3);margin-top:6px">${redeTxt}${rk.modo === 'razao' ? ' Verde/vermelho = 5% ou mais abaixo/acima da média; uma semana sozinha oscila, olhe a tendência.' : ' Verde até 5% (ruído de pesagem), âmbar até 15%, vermelho acima.'}</div>` : ''}
+    ${foraHtml}
+  </div>`;
+}
+// Mesmo ranking, em texto (WhatsApp e PDF no Whats).
+function _carnesOffPdf() { return _carnesGerOff >= 1; }   // semana vigente: sem contagem de fechamento, sem ranking
+// `so`: lojas do relatório filtrado. Com filtro, o relatório é DELA (regra antiga do filtro:
+// "marcando uma loja, o relatório sai só dela") — então vai só a posição de cada loja
+// marcada contra a rede, sem expor o nome nem o número das outras.
+function _carnesRankingTexto(porLoja, wpp, so) {
+  const rk = _carnesRanking(porLoja);
+  const b = s2 => wpp ? '*' + s2 + '*' : s2;
+  if (so && so.length) {
+    let t2 = `\n${wpp ? '🏆 ' : ''}${b('POSIÇÃO NO RANKING DE CONTROLE')}\nCritério: ${_carnesRankCriterioTxt(rk)}\n`;
+    so.forEach(k => {
+      const i = rk.ranq.findIndex(x => x.k === k), nm = LOJA_DISPLAY[k] || k;
+      if (i >= 0) t2 += `${nm}: ${i + 1}º de ${rk.ranq.length} — ${_carnesRankValorTxt(rk, rk.ranq[i])}\n`;
+      else { const f = rk.fora.find(x => x.k === k); t2 += `${nm}: fora do ranking${f ? ' — ' + f.motivo : ''}\n`; }
+    });
+    if (rk.rede !== null) t2 += rk.modo === 'vendidos' ? `Média da rede: desvio de ${rk.rede.toFixed(0)}%\n` : `Média da rede: ${rk.rede.toFixed(2).replace('.', ',')} kg por R$ mil\n`;
+    return t2;
+  }
+  let t = `\n${wpp ? '🏆 ' : ''}${b('RANKING DE CONTROLE — da melhor pra pior')}\nCritério: ${_carnesRankCriterioTxt(rk)}\n`;
+  if (!rk.ranq.length) t += 'Nenhuma loja com dado completo pra ranquear.\n';
+  rk.ranq.forEach((x, i) => { t += `${i + 1}º ${x.nome} — ${_carnesRankValorTxt(rk, x)}\n`; });
+  if (rk.rede !== null) t += rk.modo === 'vendidos' ? `Média da rede: desvio de ${rk.rede.toFixed(0)}%\n` : `Média da rede: ${rk.rede.toFixed(2).replace('.', ',')} kg por R$ mil\n`;
+  if (rk.fora.length) t += `${b('Fora do ranking')}: ` + rk.fora.map(x => `${x.nome} (${x.motivo})`).join('; ') + '\n';
+  return t;
+}
+
 function _carnesFiltroLojaToggle(key, marcado) {
   _carnesRelatorioLojasFiltro = marcado
     ? [..._carnesRelatorioLojasFiltro.filter(k => k !== key), key]
@@ -17049,7 +17203,7 @@ function _buildCarnesPanel() {
       <b>kg por R$ mil</b> é o que compara duas lojas de tamanhos diferentes: quem vende o dobro sai com mais carne sem estar gastando mais.<br>
       <b>🍖 Rodízios × ${CARNE_SOL_POR_RODIZIO_KG * 1000} g</b> diz quanto da carne de sol saiu pelo rodízio e quanto saiu pelo resto do cardápio — na rede o rodízio fica por volta de 6%, então o que chama atenção é a loja fora dessa faixa.<br>
       <b>🧾 Pelos vendidos</b> é quanto <i>devia</i> ter saído: pratos lançados pela gerência × gramatura do cadastro (mais os rodízios, na carne de sol). A diferença pra saída real é carne que saiu sem venda que explique.</div>
-    ${avisoFatHtml}${avisoRodHtml}${_carnesGerData.vendFalhou ? `<div style="background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.3);border-radius:12px;padding:10px 14px;margin-bottom:10px;font-size:11px;color:var(--t2)">⚠ Não deu pra carregar os vendidos da semana — a comparação "pelos vendidos" fica de fora.</div>` : ''}${avisoHtml}${linhas}`;
+    ${_carnesRankingHtml(porLoja, vigente)}${avisoFatHtml}${avisoRodHtml}${_carnesGerData.vendFalhou ? `<div style="background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.3);border-radius:12px;padding:10px 14px;margin-bottom:10px;font-size:11px;color:var(--t2)">⚠ Não deu pra carregar os vendidos da semana — a comparação "pelos vendidos" fica de fora.</div>` : ''}${avisoHtml}${linhas}`;
 }
 
 // ── Relatórios da aba 🥩 Carnes (mesmo padrão de gerarWpp/gerarPDF/enviarPDF...Wpp) ───
@@ -17062,6 +17216,8 @@ function _carnesRelatorioTexto(wpp) {
   const tituloFiltro = lojas.length < Object.keys(porLoja).length
     ? ' — ' + lojas.map(k => LOJA_DISPLAY[k]||k).join(', ') : '';
   let msg = `${wpp ? '🥩 ' : ''}${b('CONTROLE DE CARNES' + tituloFiltro)}\nSemana ${_carnesDM(iniISO)} a ${_carnesDM(fimISO)}\n`;
+  // Sem filtro: o ranking da rede inteira. Com filtro: só a posição das lojas marcadas.
+  if (_carnesGerOff < 1) msg += _carnesRankingTexto(porLoja, wpp, lojas.length < Object.keys(porLoja).length ? lojas : null);
   const naoContaram = [];
   lojas.forEach(k => {
     const d = porLoja[k];
@@ -17194,7 +17350,23 @@ function _carnesPdfHtml() {
     .cp2 tbody.bloco-loja{break-inside:avoid;page-break-inside:avoid}
     @media print{.cp *{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
   </style>`;
-  const html = css +
+  // Ranking primeiro: é a leitura que a loja procura ("como estou em relação às outras").
+  // Sempre da rede inteira, mesmo com filtro — é comparação.
+  const rk = _carnesOffPdf() ? null : _carnesRanking(porLoja);
+  const filtrado = lojas.length < Object.keys(porLoja).length;   // relatório de loja: só a posição dela
+  const corPdf = { bom: '#15803d', atencao: '#b45309', ruim: '#cf222e', neutro: '#222' };
+  const rankHtml = !rk ? '' :
+    `<h2 class="sec">Ranking de controle — da melhor pra pior</h2>
+     <div style="font-size:8pt;color:#666;margin:-4px 0 6px">Critério: ${esc(_carnesRankCriterioTxt(rk))}.${filtrado ? ` Posição entre as ${rk.ranq.length} lojas ranqueadas da rede.` : ''}</div>
+     <table class="cp cp0"><colgroup><col style="width:10%"><col><col style="width:46%"></colgroup>
+       <thead><tr><th class="l">Pos.</th><th class="l">Loja</th><th>${rk.modo === 'vendidos' ? 'Desvio pelos vendidos' : 'kg por R$ mil'}</th></tr></thead><tbody>` +
+     (rk.ranq.length ? rk.ranq.map((x, i) => (filtrado && !lojas.includes(x.k)) ? '' : `<tr><td class="l"><b>${i + 1}º</b></td><td class="l"><b>${esc(x.nome)}</b></td>` +
+       `<td style="color:${corPdf[_carnesRankNivel(rk, x)]};font-weight:700">${esc(_carnesRankValorTxt(rk, x))}</td></tr>`).join('')
+       : `<tr><td class="l" colspan="3">Nenhuma loja com dado completo pra ranquear.</td></tr>`) +
+     `</tbody></table>` +
+     (rk.rede === null ? '' : `<div style="font-size:8pt;color:#888;margin:-10px 0 8px">${rk.modo === 'vendidos' ? `Média da rede: desvio de ${rk.rede.toFixed(0)}%.` : `Média da rede: ${rk.rede.toFixed(2).replace('.', ',')} kg por R$ mil.`}</div>`) +
+     (rk.fora.filter(x => !filtrado || lojas.includes(x.k)).length ? `<div style="font-size:9pt;color:#b45309;margin:0 0 16px"><b>Fora do ranking:</b> ${rk.fora.filter(x => !filtrado || lojas.includes(x.k)).map(x => `${esc(x.nome)} (${esc(x.motivo)})`).join('; ')}.</div>` : '');
+  const html = css + rankHtml +
     `<h2 class="sec">Saída da semana, por loja</h2>
      <table class="cp cp1"><colgroup><col style="width:15%"><col style="width:14%">` +
        CARNES_DEF_HOME.map(() => '<col>').join('') + `<col style="width:11%"><col style="width:8%"></colgroup>
