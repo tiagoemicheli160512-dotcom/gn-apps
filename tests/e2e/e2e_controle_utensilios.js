@@ -96,11 +96,17 @@ const servirGnLojas = (ctx) => ctx.route('**/rest/v1/**', async (rota) => {
   // nascer, o state.manutencao[0] ser o item ANTERIOR e o Object.assign corromper ele —
   // foi o que aconteceu na primeira vez que rodei isto, e os dois testes que falharam
   // acusaram o código de um erro que era do teste.
+  //
+  // Desde 24/11/2026 registrar um "Quebrou" já desconta sozinho (ver bloco 12). Estes
+  // cenários testam as regras do lancarUtensilioNoControle em itens que AINDA não foram
+  // descontados (os antigos, de antes da mudança, ou os que a pessoa cancelou a pergunta),
+  // então o item nasce como "Faltando" — que não desconta — e só depois recebe a situação do
+  // cenário.
   const novoItem = (campos) => chk.evaluate((campos) => {
     addUtensilio();                      // já nasce com tipo 'Utensílio / Louça'
     _utensNovoSet('nome', String(campos.descricao || '').trim() || 'Peça do teste');
     _utensNovoSet('qtd', (parseFloat(campos.qtd) || 0) > 0 ? campos.qtd : '1');
-    _utensNovoSet('situacao', campos.situacao || 'Quebrou');
+    _utensNovoSet('situacao', 'Faltando');
     _utensNovoRegistrar();
     const m = state.manutencao[0];
     Object.assign(m, campos);            // agora sim o estado que o cenário quer
@@ -208,6 +214,40 @@ const servirGnLojas = (ctx) => ctx.route('**/rest/v1/**', async (rota) => {
     chaves[0] === chaves[1] && chaves[1] === chaves[2]);
   check('e espaços repetidos não criam peça nova', chaves[3] === 'copo de chopp');
 
+  // ── 12. Registrar a quebra JÁ desconta (24/11/2026) ─────────────────────────────────
+  // Antes era um segundo toque ("Lançar no controle") e metade das quebras nunca passou por
+  // ele. Agora o próprio registro desconta — pelo mesmo caminho idempotente.
+  const registrar = (campos, respostas) => chk.evaluate(async ({ campos, respostas }) => {
+    const fila = (respostas || []).slice(); window.prompt = () => (fila.length ? fila.shift() : null);
+    const avisos = []; showToast = (m) => avisos.push(String(m));
+    addUtensilio();
+    _utensNovoSet('nome', campos.nome); _utensNovoSet('qtd', String(campos.qtd)); _utensNovoSet('situacao', campos.situacao || 'Quebrou');
+    await _utensNovoRegistrar();
+    const m = state.manutencao[0];
+    return { aplicado: !!m.saldo_aplicado, chave: m.saldo_chave || null, avisos };
+  }, { campos, respostas });
+  let reg = await registrar({ nome: 'Copo de chopp', qtd: 4 });
+  s = await saldoDoBanco();
+  check('registrar "Quebrou 4" de peça que já está no controle desconta na hora (99 → 95), sem pergunta',
+    s[k].qtd === 95 && reg.aplicado && reg.chave === k, { s: s[k], reg });
+  reg = await registrar({ nome: 'Pires', qtd: 2 }, ['10']);
+  s = await saldoDoBanco();
+  check('peça nova: pergunta quantas tem em bom estado e já desconta (10 - 2 = 8)', s['pires'] && s['pires'].inicial === 10 && s['pires'].qtd === 8 && reg.aplicado, s['pires']);
+  reg = await registrar({ nome: 'Xícara', qtd: 1 }, []);   // cancela a pergunta
+  s = await saldoDoBanco();
+  check('cancelou a pergunta: a quebra fica registrada, NÃO desconta, e avisa que falta lançar',
+    !s['xicara'] && !reg.aplicado && reg.avisos.some(a => /NÃO descontada/.test(a)), reg);
+  reg = await registrar({ nome: 'Copo de chopp', qtd: 3, situacao: 'Faltando' });
+  s = await saldoDoBanco();
+  check('"Faltando" registrado não mexe no saldo (continua 95)', s[k].qtd === 95 && !reg.aplicado, s[k]);
+  const travado = await chk.evaluate(() => {
+    const m = state.manutencao.find(x => x.saldo_aplicado && x.descricao === 'Pires');
+    const h = document.createElement('div'); h.innerHTML = _manutCardHtml(m);
+    return { qtd: h.querySelector('input[type=number]').disabled, peca: h.querySelector('input[type=text]').disabled, txt: h.innerText };
+  });
+  check('depois de descontado, peça e quantidade ficam travadas no cartão (mudar ali não mexeria no saldo)',
+    travado.qtd && travado.peca && /Já descontado/.test(travado.txt), travado);
+
   const dbFinal = JSON.parse(JSON.stringify(DB));
   await ctx.close();
 
@@ -272,11 +312,11 @@ const servirGnLojas = (ctx) => ctx.route('**/rest/v1/**', async (rota) => {
              oficiaisIntactos: ((window.__db.all_data || {}).manut_oficial_items || []).length };
   }, dbFinal);
 
-  check('a reposição soma no saldo da peça (99 + 12 = 111)', r.depois1['copo de chopp'].qtd === 111);
+  check('a reposição soma no saldo da peça (95 + 12 = 107)', r.depois1['copo de chopp'].qtd === 107);
   check('e marca o item como reposição já lançada', r.marcado === true);
   check('um segundo "Resolvido" não soma de novo',
-    r.somouDeNovo === false && r.depois2['copo de chopp'].qtd === 111);
-  check('pular a pergunta da reposição não mexe no saldo', r.depois3['copo de chopp'].qtd === 111);
+    r.somouDeNovo === false && r.depois2['copo de chopp'].qtd === 107);
+  check('pular a pergunta da reposição não mexe no saldo', r.depois3['copo de chopp'].qtd === 107);
   check('o manut_oficial_items continua intacto depois das gravações', r.oficiaisIntactos === 1);
   check('as duas pontas normalizam o nome IGUAL (senão o controle parte em dois)',
     r.chaveIgual === chaves[0]);
