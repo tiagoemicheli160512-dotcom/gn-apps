@@ -22,7 +22,10 @@ const AV = { 'SÃO GONÇALO': [{ id: 'a1', ts: '2026-11-18T15:00:00Z', semana: '
   await ctx.route('**/rest/v1/**', r => {
     const u = decodeURIComponent(r.request().url());
     const json = b => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b) });
-    if (/gn_lojas\?loja=in\./.test(u)) return json([]);                       // ninguém assinou
+    // Ninguém assinou a semana 16/11. A de 09/11 todas responderam (como no banco real) —
+    // desde 23/11 a cobrança começa pela semana pendente mais antiga (gn-semlanc-acesso.js).
+    const ok0911 = { '2026-11-09': { 'SÃO GONÇALO': { nome: 'x' }, 'NORTE SHOPPING': { nome: 'x' }, 'NOVA AMERICA': { nome: 'x' }, 'BANGU': { nome: 'x' } } };
+    if (/gn_lojas\?loja=in\./.test(u)) return json([{ loja: 'AVARIAS_SEM_SEMANA', all_data: ok0911 }, { loja: 'UTENSILIOS_SEM_SEMANA', all_data: ok0911 }]);
     const m = /gn_lojas\?loja=eq\.([^&]+)&select=all_data/.exec(u);
     if (m) { lidas.push(m[1]); return json(AV[m[1]] ? [{ all_data: { avariasAll: { [m[1]]: AV[m[1]] } } }] : [{ all_data: {} }]); }
     if (/checklist_diario/.test(u)) return json([{ data_operacao: '2026-11-18', manutencao: [{ tipo: 'Utensílio / Louça' }] }]);
