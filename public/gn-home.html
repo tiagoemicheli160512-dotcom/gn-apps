@@ -463,6 +463,7 @@
 <script src="gn-vendidos.js"></script>
 <script src="gn-validade-acesso.js"></script>
 <script src="gn-utensilios-acesso.js"></script>
+<script src="gn-semlanc-acesso.js"></script>
 <script src="gn-avaliacoes-pesos.js"></script>
 <script src="gn-comissoes-calendario.js"></script>
 <script src="gn-presenca.js"></script>
@@ -7247,28 +7248,24 @@ async function _renderSemLancHome(mostrar, sess, isMaster) {
   const loja = (isMaster && masterLoja) ? masterLoja : (sess && sess.loja);
   const limpar = () => { Object.values(SEM_LANC_TIPOS).forEach(t => { const e = document.getElementById(t.el); if (e) { e.innerHTML = ''; _homeMarcar(e, null); } }); _semLancTravaTirar(); };
   if (!mostrar || !loja || loja === 'GERAL' || SEM_LANC_FORA.includes(loja) || !LOJAS_LISTA.includes(loja)) { _semLanc = {}; limpar(); return; }
-  const chkKey = LOJA_DB_KEY[loja] || loja;
-  const { ini, fim } = _avSemSemanaFechada();
-  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  _semLancSess = { sess, isMaster };
+  // Número de ordem: uma leitura que começou antes de uma confirmação (ou de outra leitura)
+  // não pode sobrescrever o estado mais novo quando terminar por último — senão a trava
+  // voltava depois de confirmar as duas pendências em sequência.
+  const geracao = ++_semLancGen;
   try {
-    const [lojaRows, diasChk, confRows] = await Promise.all([
-      // As avarias moram na linha com o NOME da loja (a `loja` do app Lojas: "SÃO GONÇALO",
-      // "NORTE SHOPPING"), não na comKey ("SAO_GONCALO", "NORTE"). Lendo a comKey, São Gonçalo
-      // (6 avarias em 16–22/11, Matheus) e Norte Shopping (2) eram cobradas de "não houve
-      // avaria" — 23/11/2026. Nas lojas em que os dois nomes coincidem não mudava nada.
-      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=eq.${encodeURIComponent(loja)}&select=all_data`, H, 'semLanc:loja', null),
-      window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=eq.${encodeURIComponent(chkKey)}&data_operacao=gte.${ini}&data_operacao=lte.${fim}&select=data_operacao,manutencao`, H, 'semLanc:chk', null),
-      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=in.(${Object.values(SEM_LANC_TIPOS).map(t => t.linha).join(',')})&select=loja,all_data`, H, 'semLanc:conf', null),
-    ]);
-    if (confRows === null) { _semLanc = {}; limpar(); return; }   // falha aberto
-    const confDe = linha => (((confRows.find(r => r.loja === linha) || {}).all_data || {})[ini] || {})[loja] || null;
-    const allData = lojaRows === null ? null : ((lojaRows[0] && lojaRows[0].all_data) || {});
+    // A regra mora em gn-semlanc-acesso.js (23/11/2026), a MESMA que trava os outros apps:
+    // cobra a semana pendente mais ANTIGA desde 09/11 (não só a última fechada) e lê as
+    // avarias na linha com o nome da loja. Sem o arquivo (não carregou): não cobra.
+    const G = window.gnSemLanc;
+    const res = G ? await G.calcular(loja) : null;
+    if (geracao !== _semLancGen) return;             // chegou depois de algo mais novo: descarta
+    if (!res) { _semLanc = {}; limpar(); return; }   // falha aberto
     const novo = {};
     Object.keys(SEM_LANC_TIPOS).forEach(tipo => {
-      const qtd = _semLancContar(tipo, allData, diasChk, ini, fim);
-      if (qtd === null) return;                                    // não leu: não cobra
-      const ant = _semLanc[tipo] && _semLanc[tipo].loja === loja && _semLanc[tipo].semIni === ini ? _semLanc[tipo] : {};
-      novo[tipo] = { loja, semIni: ini, semFim: fim, qtd, conf: confDe(SEM_LANC_TIPOS[tipo].linha), form: !!ant.form, erro: ant.erro || '', salvando: false };
+      const st = res.porTipo[tipo]; if (!st) return;   // não leu: não cobra
+      const ant = _semLanc[tipo] && _semLanc[tipo].loja === st.loja && _semLanc[tipo].semIni === st.semIni ? _semLanc[tipo] : {};
+      novo[tipo] = { ...st, form: !!ant.form, erro: ant.erro || '', salvando: false };
     });
     _semLanc = novo;
     _semLancCtx = { loja, cargo: String((sess && sess.cargo) || '').toLowerCase(), isMaster: !!isMaster };
@@ -7278,11 +7275,14 @@ async function _renderSemLancHome(mostrar, sess, isMaster) {
     _semLanc = {}; limpar();
   }
 }
+let _semLancSess = null, _semLancGen = 0;
 const _semLancPendente = tipo => { const st = _semLanc[tipo]; return !!(st && st.qtd === 0 && !st.conf); };
 // Trava: terça a domingo, só pra quem resolve (gerente/sub da própria loja, não o mestre).
 function _semLancDeveTravar() {
   const c = _semLancCtx;
   if (!c || c.isMaster || !CIENTE_CARGOS.includes(c.cargo)) return false;
+  // Semana ATRASADA (anterior à última fechada) trava em qualquer dia; a última, de terça em diante.
+  if (Object.keys(SEM_LANC_TIPOS).some(t => _semLancPendente(t) && _semLanc[t].atrasada)) return true;
   if (!_barrisSemDiaDeTravar(new Date())) return false;
   return Object.keys(SEM_LANC_TIPOS).some(_semLancPendente);
 }
@@ -7301,7 +7301,7 @@ function _semLancBlocoHtml(tipo, naTrava) {
       </div></div>`;
   return `<div class="semlanc-bloco" data-tipo="${tipo}" style="background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.22);border-left:3px solid #dc2626;border-radius:18px;padding:14px 16px;margin:0 14px 14px;box-shadow:0 1px 10px rgba(0,0,0,.05)">
     <div style="font-size:12px;font-weight:800;color:var(--t1);margin-bottom:4px">${T.ico} ${T.nome} da semana ${dm(st.semIni)} a ${dm(st.semFim)}: ${T.nada}</div>
-    <div style="font-size:11px;color:var(--t2);line-height:1.5">${T.explica} Se a semana foi mesmo sem, a <b>gerência ou a sub</b> confirma com a senha.${naTrava ? '' : (_barrisSemDiaDeTravar(new Date()) ? '' : ' <b>A partir de amanhã o app trava</b> pra gerência até resolver.')}</div>
+    <div style="font-size:11px;color:var(--t2);line-height:1.5">${st.atrasada ? '<b style="color:var(--txt-red)">Semana atrasada — continua cobrada até ser respondida.</b> ' : ''}${T.explica} Se a semana foi mesmo sem, a <b>gerência ou a sub</b> confirma com a senha.${naTrava || st.atrasada ? '' : (_barrisSemDiaDeTravar(new Date()) ? '' : ' <b>A partir de amanhã o app trava</b> pra gerência até resolver.')}</div>
     ${st.form ? form : `<div style="display:flex;gap:6px;margin-top:9px">
       <button onclick="navTo('${T.url}')" style="flex:1;background:var(--s2);border:1px solid rgba(239,68,68,.35);border-radius:9px;padding:9px;font-size:11.5px;font-weight:800;color:var(--t1);cursor:pointer;font-family:inherit">${T.lancar}</button>
       <button onclick="_semLanc['${tipo}'].form=true;_semLancPintar()" style="flex:1;background:#059669;border:none;border-radius:9px;padding:9px;font-size:11.5px;font-weight:800;color:#fff;cursor:pointer;font-family:inherit">✓ ${T.houve}</button>
@@ -7354,6 +7354,7 @@ async function _semLancConfirmar(tipo) {
   const user = (document.getElementById(`semlanc-${tipo}-user`)?.value || '').trim();
   const pass = document.getElementById(`semlanc-${tipo}-senha`)?.value || '';
   if (!user || !pass) { st.erro = 'Preencha usuário e senha.'; _semLancPintar(); return; }
+  _semLancGen++;                                     // invalida leitura em andamento (ver _renderSemLancHome)
   st.salvando = true; st.erro = ''; _semLancPintar();
   const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
   try {
@@ -7372,6 +7373,8 @@ async function _semLancConfirmar(tipo) {
     st.conf = dados[st.semIni][st.loja];
     st.form = false;
     window.showToast && window.showToast('✓ Registrado: ' + T.ok, 'success');
+    // Pode haver outra semana pendente (a cobrança vai da mais antiga pra mais nova).
+    if (_semLancSess) setTimeout(() => _renderSemLancHome(true, _semLancSess.sess, _semLancSess.isMaster), 0);
   } catch (e) {
     window.gnLogError && window.gnLogError('semLanc:confirmar', e);
     st.erro = 'Não consegui registrar agora. Confere a internet e tenta de novo.';
