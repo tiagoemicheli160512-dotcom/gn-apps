@@ -463,6 +463,7 @@
 <script src="gn-vendidos.js"></script>
 <script src="gn-validade-acesso.js"></script>
 <script src="gn-utensilios-acesso.js"></script>
+<script src="gn-utensilios-quebras.js"></script>
 <script src="gn-semlanc-acesso.js"></script>
 <script src="gn-avaliacoes-pesos.js"></script>
 <script src="gn-comissoes-calendario.js"></script>
@@ -7406,7 +7407,17 @@ async function _loadUtensEntradasPainel() {
     const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
     const lojas = LOJAS_LISTA.filter(k => k !== 'MAGLIA');
     const comKeys = lojas.map(k => '"' + (LOJA_COM_KEY[k] || k) + '"');
-    const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=in.(${encodeURIComponent(comKeys.join(','))})&select=loja,us:all_data->utensilios_saldo`, H, 'utensEntPainel', null);
+    // Quebras: contadas dos lançamentos da manutenção (gn-utensilios-quebras.js) — o saldo só
+    // mostra o que foi descontado, e mais da metade das quebras da rede nunca foi. 90 dias
+    // cobre as duas janelas da tela (30/90), +15 dias pra a quebra herdada de antes da janela
+    // ser reconhecida como herdada e não contar como nova; ~1,5 MB pra rede toda.
+    const d90 = new Date(Date.now() - (89 + 15) * 864e5);
+    const desde90 = d90.getFullYear() + '-' + String(d90.getMonth() + 1).padStart(2, '0') + '-' + String(d90.getDate()).padStart(2, '0');
+    const chkIn = lojas.map(k => '"' + (LOJA_DB_KEY[k] || k) + '"').join(',');
+    const [rows, qRows] = await Promise.all([
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=in.(${encodeURIComponent(comKeys.join(','))})&select=loja,us:all_data->utensilios_saldo`, H, 'utensEntPainel', null),
+      window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?loja=in.(${encodeURIComponent(chkIn)})&data_operacao=gte.${desde90}&select=loja,data_operacao,manutencao`, H, 'utensEntPainel:quebras', null),
+    ]);
     if (rows === null) { _utensEntPainel = { erro: true }; return; }
     const entradas = [], saldos = {};
     lojas.forEach(k => {
@@ -7419,7 +7430,10 @@ async function _loadUtensEntradasPainel() {
       });
     });
     entradas.sort((a, b) => String(b.em).localeCompare(String(a.em)));
-    _utensEntPainel = { lojas, entradas, saldos };
+    // Falhou só a leitura das quebras: o resto da aba segue, e a tela diz que a quebra não veio.
+    const quebrasRows = qRows === null ? null : {};
+    if (quebrasRows) lojas.forEach(k => { quebrasRows[k] = qRows.filter(r => r.loja === (LOJA_DB_KEY[k] || k)); });
+    _utensEntPainel = { lojas, entradas, saldos, quebrasRows };
   } catch (e) {
     window.gnLogError && window.gnLogError('utensEntPainel', e);
     _utensEntPainel = { erro: true };
@@ -7456,10 +7470,11 @@ function _buildUtensEntradasPanel() {
     <div class="kpi-row">
       <div class="kpi-tile" style="border-left-color:#0891b2"><div class="kpi-tile-lbl">Peças que entraram</div><div class="kpi-tile-val" style="color:#0e7490">${x.total}</div><div class="kpi-tile-sub">${x.lista.length} entrada${x.lista.length === 1 ? '' : 's'} · ${x.com.length} loja${x.com.length === 1 ? '' : 's'}</div></div>
       <div class="kpi-tile" style="border-left-color:var(--t3)"><div class="kpi-tile-lbl">Lojas sem entrada</div><div class="kpi-tile-val">${x.sem.length}</div><div class="kpi-tile-sub">de ${d.lojas.length} no período</div></div>
+      ${(() => { const e = _utensEstoqueDados(d); return e.quebrasOk ? `<div class="kpi-tile utens-kpi-quebras" style="border-left-color:#dc2626"><div class="kpi-tile-lbl">Peças quebradas</div><div class="kpi-tile-val" style="color:var(--txt-red)">${e.quebrou}</div><div class="kpi-tile-sub">${e.naoDesc ? e.naoDesc + ' não descontada' + (e.naoDesc === 1 ? '' : 's') + ' do saldo' : 'todas descontadas do saldo'}</div></div>` : ''; })()}
     </div>`;
   if (!x.lista.length) {
     return topo + `<div class="att-item"><div><div class="att-nm">Nenhuma entrada de utensílio nos últimos ${_utensEntDias} dias</div>
-      <div class="att-rs">As lojas dão entrada no Check-list › Utensílios › 📥 Entrada, quando chega peça comprada pela loja ou fora da manutenção.</div></div></div>` + _utensEstoqueHtml(d);
+      <div class="att-rs">As lojas dão entrada no Check-list › Utensílios › 📥 Entrada, quando chega peça comprada pela loja ou fora da manutenção.</div></div></div>` + _utensQuebrasHtml(d) + _utensEstoqueHtml(d);
   }
   const blocos = x.com.map(l => `<div class="utensent-loja" data-loja="${esc(l.k)}" style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid #0891b2;border-radius:14px;padding:12px 14px;margin-bottom:10px">
       <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:4px">
@@ -7478,7 +7493,41 @@ function _buildUtensEntradasPanel() {
         </div>
       </div>`).join('')}
     </div>`).join('');
-  return topo + blocos + (x.sem.length ? `<div style="font-size:10.5px;color:var(--t3);line-height:1.5;margin:2px 2px 0">Sem entrada no período: ${esc(x.sem.join(', '))}.</div>` : '') + _utensEstoqueHtml(d);
+  return topo + blocos + (x.sem.length ? `<div style="font-size:10.5px;color:var(--t3);line-height:1.5;margin:2px 2px 0">Sem entrada no período: ${esc(x.sem.join(', '))}.</div>` : '') + _utensQuebrasHtml(d) + _utensEstoqueHtml(d);
+}
+
+/* ── 💥 Quebras por loja ────────────────────────────────────────────────────────────────
+   "Não aparece quantidade quebrada, o saldo só diminui." (24/11/2026)
+   Da loja que mais quebrou pra que menos, na mesma janela da tela (30/90 dias), com as
+   peças que mais quebraram e quanto disso NÃO foi descontado do saldo — é o número que diz
+   se o saldo daquela loja merece recontagem. */
+function _utensQuebrasHtml(d) {
+  const esc = s2 => window.escapeHtml(String(s2 == null ? '' : s2));
+  const e = _utensEstoqueDados(d);
+  if (!e.quebrasOk) return `<div class="utens-quebras-erro" style="font-size:11px;color:var(--txt-amber);margin:12px 2px 0">⚠ Não deu pra carregar as quebras agora — o estoque abaixo mostra só o saldo.</div>`;
+  const lojas = e.todas.slice().sort((a, b) => (b.quebrou || 0) - (a.quebrou || 0) || a.nome.localeCompare(b.nome, 'pt-BR'));
+  const com = lojas.filter(l => l.quebrou > 0), sem = lojas.filter(l => !l.quebrou);
+  const top = l => {
+    const pecas = l.pecas.filter(p => p.quebrou > 0).map(p => ({ nome: p.nome, q: p.quebrou }))
+      .concat(l.foraCtrl.map(p => ({ nome: p.nome, q: p.quebrou, fora: true })))
+      .sort((a, b) => b.q - a.q || a.nome.localeCompare(b.nome, 'pt-BR'));
+    return pecas.slice(0, 4).map(p => esc(p.nome) + ' ' + p.q + (p.fora ? ' (fora do controle)' : '')).join(' · ') + (pecas.length > 4 ? ` · +${pecas.length - 4}` : '');
+  };
+  return `<div class="utens-quebras" style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid #dc2626;border-radius:14px;padding:12px 14px;margin:14px 0 10px">
+    <div style="font-size:12.5px;font-weight:800;color:var(--t1);margin-bottom:2px">💥 Quebras por loja — últimos ${_utensEntDias} dias</div>
+    <div style="font-size:10px;color:var(--t3);margin-bottom:9px;line-height:1.45">Contadas dos lançamentos "Quebrou" no Check-list. "Não descontada" = lançada sem tocar "Lançar no controle": o saldo daquela peça está acima do real.</div>
+    ${com.length ? com.map(l => `<div class="utens-quebras-loja" data-loja="${esc(l.k)}" style="display:flex;gap:10px;align-items:flex-start;padding:7px 0;border-top:1px solid var(--b1)">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:800;color:var(--t1)">${esc(l.nome)}</div>
+        <div style="font-size:10px;color:var(--t3);overflow-wrap:anywhere;line-height:1.4">${top(l)}</div>
+      </div>
+      <div style="text-align:right;white-space:nowrap">
+        <div class="utens-quebras-qtd" style="font-size:14px;font-weight:900;color:var(--txt-red);font-variant-numeric:tabular-nums">${l.quebrou}</div>
+        <div style="font-size:9px;color:${l.naoDesc ? 'var(--txt-amber)' : 'var(--t4)'};font-weight:${l.naoDesc ? 800 : 400}">${l.naoDesc ? l.naoDesc + ' não descontada' + (l.naoDesc === 1 ? '' : 's') : 'descontadas'}</div>
+      </div>
+    </div>`).join('') : `<div style="font-size:11px;color:var(--txt-green);font-weight:700">Nenhuma quebra lançada no período.</div>`}
+    ${com.length && sem.length ? `<div style="font-size:10px;color:var(--t3);margin-top:6px;line-height:1.45">Sem quebra lançada: ${esc(sem.map(l => l.nome).join(', '))}.</div>` : ''}
+  </div>`;
 }
 
 /* ── Estoque de utensílios por loja: quem tem o controle e quem não fez ────────────────
@@ -7530,7 +7579,7 @@ function _utensRelatorioTexto(wpp) {
   const nomes = f ? f.map(k => LOJA_DISPLAY[k] || k).sort((a, c) => a.localeCompare(c, 'pt-BR')).join(', ') : '';
   const titulo = 'Utensílios' + (f ? ' — ' + nomes : '') + ' · ' + new Date().toLocaleDateString('pt-BR');
   const est = _utensEstoqueDados(d);
-  const lojasEst = d.lojas.map(k => est.comControle.find(l => l.k === k) || { k, nome: LOJA_DISPLAY[k] || k, pecas: [], unidades: 0, zeradas: 0, ult: '' });
+  const lojasEst = d.lojas.map(k => est.todas.find(l => l.k === k) || { k, nome: LOJA_DISPLAY[k] || k, pecas: [], unidades: 0, zeradas: 0, ult: '', quebrou: 0, naoDesc: 0, foraCtrl: [] });
   const alvo = so(lojasEst);
   const x = _utensEntDados();
   const ents = f ? x.lista.filter(e => f.includes(e.k)) : x.lista;
@@ -7548,8 +7597,23 @@ function _utensRelatorioTexto(wpp) {
       const parado = diasDesde(l.ult) !== null && diasDesde(l.ult) > 30;
       msg += `${f ? '\n' : ''}   ${f ? b(l.nome) : l.nome}: ${l.pecas.length} peça${l.pecas.length === 1 ? '' : 's'}, ${l.unidades} unidades${l.zeradas ? ', ' + l.zeradas + ' zerada' + (l.zeradas === 1 ? '' : 's') : ''} · atualizado ${quando(l.ult)}${parado ? ' (parado)' : ''}\n`;
       // Com loja marcada vai a lista das peças: é o que a gerência confere na prateleira.
-      if (f) l.pecas.forEach(p => { msg += `      ${p.nome}: ${p.qtd}${p.qtd <= 0 ? ' ⚠ zerada' : ''}\n`; });
+      if (f) l.pecas.forEach(p => { msg += `      ${p.nome}: ${p.qtd}${p.qtd <= 0 ? ' ⚠ zerada' : ''}${p.quebrou ? ' · quebrou ' + p.quebrou : ''}\n`; });
     });
+  }
+  // 2b. Quebras na mesma janela das entradas.
+  if (est.quebrasOk) {
+    const qLojas = alvo.filter(l => l.quebrou > 0).sort((a, c) => c.quebrou - a.quebrou);
+    const totQ = qLojas.reduce((a, l) => a + l.quebrou, 0), totND = qLojas.reduce((a, l) => a + l.naoDesc, 0);
+    msg += `\n${wpp ? '💥 ' : ''}${b('Quebras — últimos ' + _utensEntDias + ' dias')}\n`;
+    if (!qLojas.length) msg += `   Nenhuma quebra lançada.\n`;
+    else {
+      msg += `   ${totQ} peça${totQ === 1 ? '' : 's'}${totND ? ' (' + totND + ' não descontada' + (totND === 1 ? '' : 's') + ' do saldo)' : ''}\n`;
+      qLojas.forEach(l => {
+        msg += `   ${l.nome}: ${l.quebrou}${l.naoDesc ? ' (' + l.naoDesc + ' não desc.)' : ''}\n`;
+        if (f) l.pecas.filter(p => p.quebrou).concat(l.foraCtrl.map(p => ({ nome: p.nome + ' (fora do controle)', quebrou: p.quebrou })))
+          .sort((a, c) => c.quebrou - a.quebrou).forEach(p => { msg += `      ${p.nome}: ${p.quebrou}\n`; });
+      });
+    }
   }
   // 3. Entradas do período.
   msg += `\n${wpp ? '📥 ' : ''}${b('Entradas — últimos ' + _utensEntDias + ' dias')}\n`;
@@ -7581,6 +7645,7 @@ function gerarPDFUtens() {
       { label: 'Com o controle', valor: `${comCtrl.length}/${r.alvo.length}`, sub: r.sem.length ? r.sem.length + ' sem contagem' : 'todas contadas' },
       { label: 'Unidades no estoque', valor: String(comCtrl.reduce((a, l) => a + l.unidades, 0)), sub: comCtrl.reduce((a, l) => a + l.zeradas, 0) + ' peça(s) zerada(s)' },
       { label: 'Entradas (' + _utensEntDias + ' dias)', valor: String(r.totEnt), sub: r.ents.length + ' lançamento(s)' },
+      ...(r.alvo.some(l => l.quebrou != null) ? [{ label: 'Quebradas (' + _utensEntDias + ' dias)', valor: String(r.alvo.reduce((t, l) => t + (l.quebrou || 0), 0)), sub: r.alvo.reduce((t, l) => t + (l.naoDesc || 0), 0) + ' não descontada(s)' }] : []),
     ],
   });
 }
@@ -7588,20 +7653,37 @@ async function enviarPDFUtensWpp() {
   await _pdfWppComo(gerarPDFUtens);
 }
 function _utensEstToggle(k) { _utensEstAberta.has(k) ? _utensEstAberta.delete(k) : _utensEstAberta.add(k); renderDashboard(); }
+// Quebras da loja na janela da tela (30/90 dias). null = a leitura das quebras falhou.
+function _utensQuebrasLoja(d, k) {
+  if (!d.quebrasRows || !window.gnUtensQuebras) return null;
+  const c = new Date(Date.now() - (_utensEntDias - 1) * 864e5);
+  const desde = c.getFullYear() + '-' + String(c.getMonth() + 1).padStart(2, '0') + '-' + String(c.getDate()).padStart(2, '0');
+  return window.gnUtensQuebras.agrupar(d.quebrasRows[k] || [], desde, null);
+}
 function _utensEstoqueDados(d) {
   const linhas = d.lojas.map(k => {
     const us = d.saldos[k] || {};
-    const pecas = Object.values(us).filter(v => v && v.nome).map(v => ({
+    const qb = _utensQuebrasLoja(d, k);
+    const pecas = Object.entries(us).filter(([, v]) => v && v.nome).map(([c, v]) => ({
       nome: v.nome, qtd: parseFloat(v.qtd) || 0,
       quando: v.atualizado_em || v.contado_em || v.inicial_em || '',
+      quebrou: qb && qb.porPeca[c] ? qb.porPeca[c].qtd : 0,
+      naoDesc: qb && qb.porPeca[c] ? qb.porPeca[c].naoDesc : 0,
     })).sort((a, b) => a.qtd - b.qtd || a.nome.localeCompare(b.nome, 'pt-BR'));
     const ult = pecas.reduce((m, p) => (p.quando > m ? p.quando : m), '');
+    // Quebrou e não está no controle: entra na conta da loja, senão a perda some.
+    const foraCtrl = qb ? Object.entries(qb.porPeca).filter(([c]) => !us[c] || !us[c].nome).map(([, p]) => ({ nome: p.nome, quebrou: p.qtd })) : [];
     return { k, nome: LOJA_DISPLAY[k] || k, pecas, unidades: pecas.reduce((a, p) => a + p.qtd, 0),
-             zeradas: pecas.filter(p => p.qtd <= 0).length, ult };
+             zeradas: pecas.filter(p => p.qtd <= 0).length, ult,
+             quebrou: qb ? qb.total : null, naoDesc: qb ? qb.naoDesc : 0, foraCtrl };
   });
   return {
     semControle: linhas.filter(l => !l.pecas.length).map(l => l.nome).sort((a, b) => a.localeCompare(b, 'pt-BR')),
     comControle: linhas.filter(l => l.pecas.length).sort((a, b) => String(a.ult).localeCompare(String(b.ult)) || a.nome.localeCompare(b.nome, 'pt-BR')),
+    todas: linhas,
+    quebrasOk: !!d.quebrasRows,
+    quebrou: linhas.reduce((a, l) => a + (l.quebrou || 0), 0),
+    naoDesc: linhas.reduce((a, l) => a + (l.naoDesc || 0), 0),
   };
 }
 function _utensEstoqueHtml(d) {
@@ -7622,7 +7704,7 @@ function _utensEstoqueHtml(d) {
         <span style="font-size:10px;color:var(--t4);width:10px">${aberta ? '▾' : '▸'}</span>
         <div style="flex:1;min-width:0">
           <div style="font-size:12px;font-weight:800;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.nome)}</div>
-          <div style="font-size:10px;color:${velho ? 'var(--txt-amber)' : 'var(--t3)'}">${l.pecas.length} peça${l.pecas.length === 1 ? '' : 's'} no controle · atualizado ${quando(l.ult)}${velho ? ' — parado' : ''}</div>
+          <div style="font-size:10px;color:${velho ? 'var(--txt-amber)' : 'var(--t3)'}">${l.pecas.length} peça${l.pecas.length === 1 ? '' : 's'} no controle · atualizado ${quando(l.ult)}${velho ? ' — parado' : ''}${l.quebrou ? ` · <span style="color:var(--txt-red);font-weight:700">💥 ${l.quebrou} quebrada${l.quebrou === 1 ? '' : 's'}</span>` : ''}</div>
         </div>
         <div style="text-align:right;white-space:nowrap">
           <div style="font-size:13px;font-weight:900;color:var(--t1);font-variant-numeric:tabular-nums">${l.unidades}</div>
@@ -7631,12 +7713,12 @@ function _utensEstoqueHtml(d) {
       </div>
       ${aberta ? `<div class="utensest-pecas" style="padding:0 0 8px 18px">${l.pecas.map(p => `<div style="display:flex;justify-content:space-between;gap:8px;font-size:11px;padding:3px 0;border-top:1px dashed var(--b1)">
         <span style="color:var(--t2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.nome)}</span>
-        <span style="font-weight:800;font-variant-numeric:tabular-nums;color:${p.qtd <= 0 ? 'var(--txt-red)' : p.qtd <= 2 ? 'var(--txt-amber)' : 'var(--t1)'}">${p.qtd}</span></div>`).join('')}</div>` : ''}
+        <span style="white-space:nowrap">${p.quebrou ? `<span class="utensest-peca-quebrou" style="font-size:10px;color:var(--txt-red);font-weight:700;margin-right:4px">💥 ${p.quebrou}${p.naoDesc ? ` <span style="color:var(--txt-amber)">(${p.naoDesc} não desc.)</span>` : ''}</span> · ` : ''}<span style="font-weight:800;font-variant-numeric:tabular-nums;color:${p.qtd <= 0 ? 'var(--txt-red)' : p.qtd <= 2 ? 'var(--txt-amber)' : 'var(--t1)'}">${p.qtd}</span></span></div>`).join('')}</div>` : ''}
     </div>`;
   }).join('');
   return `<div class="utensest" style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:12px 14px;margin:14px 0 10px">
     <div style="font-size:12.5px;font-weight:800;color:var(--t1);margin-bottom:2px">📦 Estoque de utensílios por loja</div>
-    <div style="font-size:10px;color:var(--t3);margin-bottom:9px">${e.comControle.length} de ${d.lojas.length} lojas com o controle começado. Toque na loja pra ver as peças.</div>
+    <div style="font-size:10px;color:var(--t3);margin-bottom:9px">${e.comControle.length} de ${d.lojas.length} lojas com o controle começado. Toque na loja pra ver as peças${e.quebrasOk ? ` — o 💥 é quanto quebrou nos últimos ${_utensEntDias} dias, o número da direita é o saldo` : ''}.</div>
     ${cobrar}
     ${linhas}
   </div>`;
