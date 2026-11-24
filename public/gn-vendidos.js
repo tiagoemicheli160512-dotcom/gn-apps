@@ -76,30 +76,46 @@
     return out;
   }
 
+  // ── Delivery (iFood + 99), 23/11/2026 ─────────────────────────────────────
+  // "Faltou a opção de colocar os itens pra viagem: no Check-list, onde vai o total de cada
+  //  prato, um campo iFood e 99 — vale a mesma gramatura, então só a multiplicação a mais.
+  //  Sem criar itens só pra viagem. Unir iFood e 99 num campo só (sai junto). Colocar a Coca."
+  // O relatório de vendas do sistema traz salão e delivery SEPARADOS, então não há dobra.
+  // Cada item guarda `q` = TOTAL (salão + delivery) — é o que todo o resto já lê (carnes pela
+  // gramatura, Coca × estoque, Painel, ranking) — e `qd` = a parte do delivery. Lançamento
+  // antigo, sem `qd`, é todo salão. Chopp não tem delivery.
+  var GRUPOS_DELIVERY = ['prato', 'coca'];
+
   // A conta: quantidades × cadastro (foto gravada no lançamento).
   function calcTotais(itens) {
     var t = { carne_sol: 0, picanha: 0, carne_seca: 0, camarao: 0, coca_un: 0, chopp_l_claro: 0, chopp_l_vinho: 0 };
+    var dlv = { carne_sol: 0, picanha: 0, carne_seca: 0, camarao: 0, coca_un: 0 };
     Object.keys(itens || {}).forEach(function (id) {
-      var it = itens[id] || {}, q = Number(it.q) || 0;
+      var it = itens[id] || {}, q = Number(it.q) || 0, qd = Math.min(q, Number(it.qd) || 0);
       if (!q) return;
       if (it.grupo === 'prato') {
-        CARNES.forEach(function (c) { t[c.key] += q * (Number((it.gramas || {})[c.key]) || 0) / 1000; });
+        CARNES.forEach(function (c) { var g = (Number((it.gramas || {})[c.key]) || 0) / 1000; t[c.key] += q * g; dlv[c.key] += qd * g; });
       } else if (it.grupo === 'coca') {
-        t.coca_un += q;
+        t.coca_un += q; dlv.coca_un += qd;
       } else if (it.grupo === 'chopp') {
         var l = q * (Number(it.ml) || 0) / 1000;
         if (it.chopp_tipo === 'VINHO') t.chopp_l_vinho += l; else t.chopp_l_claro += l;
       }
     });
     Object.keys(t).forEach(function (k) { t[k] = Math.round(t[k] * 1000) / 1000; });
+    Object.keys(dlv).forEach(function (k) { dlv[k] = Math.round(dlv[k] * 1000) / 1000; });
+    t.delivery = dlv;              // a parte do delivery, já DENTRO dos totais acima
     return t;
   }
   // Foto do cadastro com as quantidades digitadas.
-  function montarItens(cadastro, qtds) {
+  // qtds = salão; qtdsD = delivery (só pratos e Coca). Grava q = salão + delivery e qd.
+  function montarItens(cadastro, qtds, qtdsD) {
     var out = {};
     (cadastro || []).forEach(function (c) {
-      var q = Number((qtds || {})[c.id]) || 0;
-      out[c.id] = { q: q, nome: c.nome, grupo: c.grupo, gramas: c.gramas || {}, ml: c.ml == null ? null : Number(c.ml), chopp_tipo: c.chopp_tipo || null };
+      var qs = Number((qtds || {})[c.id]) || 0;
+      var qd = GRUPOS_DELIVERY.indexOf(c.grupo) >= 0 ? (Number((qtdsD || {})[c.id]) || 0) : 0;
+      out[c.id] = { q: qs + qd, nome: c.nome, grupo: c.grupo, gramas: c.gramas || {}, ml: c.ml == null ? null : Number(c.ml), chopp_tipo: c.chopp_tipo || null };
+      if (qd) out[c.id].qd = qd;
     });
     return out;
   }
@@ -262,9 +278,12 @@
     _montar('<div style="padding:30px;text-align:center;color:rgba(232,234,237,.6);font-size:13px">Carregando…</div>');
     return Promise.all([buscarCadastro(false), buscarLancamentos(_estado.loja, dataISO, dataISO)]).then(function (r) {
       var cad = r[0] || [], lanc = (r[1] || [])[0] || null;
-      var qtds = {};
-      if (lanc) Object.keys(lanc.itens || {}).forEach(function (id) { qtds[id] = lanc.itens[id].q; });
-      _telaForm(dataISO, cad, qtds, libera || {}, lanc);
+      var qtds = {}, qtdsD = {};
+      if (lanc) Object.keys(lanc.itens || {}).forEach(function (id) {
+        var it = lanc.itens[id] || {}, qd = Number(it.qd) || 0;
+        qtds[id] = (Number(it.q) || 0) - qd; if (qd) qtdsD[id] = qd;
+      });
+      _telaForm(dataISO, cad, qtds, libera || {}, lanc, qtdsD);
     }).catch(function (e) {
       _log('vendidos:form', e);
       _montar('<div style="font-size:14px;font-weight:800;margin-bottom:8px">Sem conexão</div><div style="font-size:12.5px;color:rgba(232,234,237,.7);margin-bottom:12px">Não deu pra carregar o cadastro dos itens. Tente de novo.</div><button id="gv-voltar" style="' + CSS_BTN2 + '">Voltar</button>');
@@ -273,7 +292,8 @@
   }
   function _voltarOrigem() { if (_estado && _estado.origem === 'guardiao' && _estado.pend.length) _telaLista(); else fechar(); }
 
-  function _telaForm(dataISO, cad, qtds, libera, lanc) {
+  function _telaForm(dataISO, cad, qtds, libera, lanc, qtdsD) {
+    qtdsD = qtdsD || {};
     var porGrupo = {};
     cad.forEach(function (c) { (porGrupo[c.grupo] = porGrupo[c.grupo] || []).push(c); });
     var desc = function (c) {
@@ -289,12 +309,14 @@
       var arr = porGrupo[g.key] || [];
       if (!arr.length) return '';
       return '<div style="font-size:11px;font-weight:800;color:rgba(232,234,237,.6);letter-spacing:.4px;margin:14px 0 6px">' + g.label + '</div>' +
+        (GRUPOS_DELIVERY.indexOf(g.key) >= 0 ? '<div style="display:flex;justify-content:flex-end;gap:6px;font-size:9.5px;font-weight:800;color:rgba(232,234,237,.5);margin-bottom:2px"><span style="width:64px;text-align:center">SALÃO</span><span style="width:64px;text-align:center;white-space:nowrap">🛵 iFOOD+99</span></div>' : '') +
         arr.map(function (c) {
-          var v = qtds[c.id];
-          return '<div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-top:1px solid rgba(255,255,255,.06)">' +
+          var v = qtds[c.id], vd = qtdsD[c.id], comDlv = GRUPOS_DELIVERY.indexOf(c.grupo) >= 0;
+          return '<div style="display:flex;align-items:center;gap:6px;padding:7px 0;border-top:1px solid rgba(255,255,255,.06)">' +
             '<div style="flex:1;min-width:0"><div style="font-size:12.5px;font-weight:700">' + _esc(c.nome) + '</div>' +
             '<div style="font-size:10.5px;color:rgba(232,234,237,.5)">' + _esc(desc(c)) + '</div></div>' +
-            '<input class="gv-q" data-id="' + _esc(c.id) + '" inputmode="numeric" placeholder="0" value="' + (v ? _esc(v) : '') + '" style="' + CSS_IN + ';width:72px;text-align:center;font-weight:800;padding:9px 6px">' +
+            '<input class="gv-q" data-id="' + _esc(c.id) + '" inputmode="numeric" placeholder="0" aria-label="Salão" value="' + (v ? _esc(v) : '') + '" style="' + CSS_IN + ';width:64px;text-align:center;font-weight:800;padding:9px 4px">' +
+            (comDlv ? '<input class="gv-qd" data-id="' + _esc(c.id) + '" inputmode="numeric" placeholder="0" aria-label="Delivery (iFood + 99)" value="' + (vd ? _esc(vd) : '') + '" style="' + CSS_IN + ';width:64px;text-align:center;font-weight:800;padding:9px 4px;border-color:rgba(250,204,21,.35)">' : '') +
           '</div>';
         }).join('');
     }).join('');
@@ -303,7 +325,7 @@
       : (lanc ? '<div style="background:rgba(250,204,21,.10);border:1px solid rgba(250,204,21,.3);border-radius:10px;padding:9px 11px;font-size:11.5px;margin-bottom:10px">Já lançado por <b>' + _esc(lanc.lancado_por) + '</b>. Dá pra corrigir até ' + _br(_addDias(dataISO, 1)) + ' às ' + PRAZO_H + 'h.</div>' : '');
     _montar(
       '<div style="font-size:17px;font-weight:800;margin-bottom:2px">🧾 Vendidos — ' + _esc(_brDia(dataISO)) + '</div>' +
-      '<div style="font-size:12px;color:rgba(232,234,237,.55);margin-bottom:10px">' + _esc(_estado.loja) + ' · quantidade vendida no dia (do relatório do caixa). Em branco conta como zero.</div>' +
+      '<div style="font-size:12px;color:rgba(232,234,237,.55);margin-bottom:10px">' + _esc(_estado.loja) + ' · quantidade vendida no dia (do relatório do caixa): no salão e no delivery (iFood + 99, juntos). Em branco conta como zero.</div>' +
       aviso +
       (cad.length ? secoes : '<div style="font-size:12.5px;color:#fbbf24;margin:10px 0">Nenhum item cadastrado ainda — o cadastro fica no Painel de Gestão › Vendidos.</div>') +
       '<div id="gv-tot" style="background:rgba(255,255,255,.05);border-radius:10px;padding:9px 11px;font-size:11.5px;line-height:1.6;margin:14px 0 10px"></div>' +
@@ -312,14 +334,16 @@
         '<button id="gv-voltar" style="' + CSS_BTN2 + '">Voltar</button>' +
         '<button id="gv-seguir" style="' + CSS_BTN + ';background:#facc15;color:#1a1d23">Assinar</button></div>');
     var ler = function () {
-      var out = {}, ruim = null;
-      _overlay.querySelectorAll('.gv-q').forEach(function (i) {
-        var t = String(i.value || '').replace(/\s/g, '');
-        if (t === '') return;
-        if (!/^\d+$/.test(t)) { ruim = ruim || i; return; }
-        out[i.dataset.id] = parseInt(t, 10);
+      var out = {}, outD = {}, ruim = null;
+      [['.gv-q', out], ['.gv-qd', outD]].forEach(function (par) {
+        _overlay.querySelectorAll(par[0]).forEach(function (i) {
+          var t = String(i.value || '').replace(/\s/g, '');
+          if (t === '') return;
+          if (!/^\d+$/.test(t)) { ruim = ruim || i; return; }
+          par[1][i.dataset.id] = parseInt(t, 10);
+        });
       });
-      return { qtds: out, ruim: ruim };
+      return { qtds: out, qtdsD: outD, ruim: ruim };
     };
     var resumoTot = function (t) {
       var carnes = CARNES.filter(function (c) { return t[c.key] > 0; }).map(function (c) { return c.icon + ' ' + c.label + ': <b>' + _kg(t[c.key]) + '</b>'; });
@@ -328,33 +352,39 @@
       if (t.chopp_l_claro) outros.push('🍺 Chopp claro: <b>' + _num(t.chopp_l_claro, 1) + ' L</b>');
       if (t.chopp_l_vinho) outros.push('🍷 Chopp de vinho: <b>' + _num(t.chopp_l_vinho, 1) + ' L</b>');
       var tudo = carnes.concat(outros);
-      return tudo.length ? tudo.join('<br>') : 'Nada vendido (tudo zero).';
+      var d = t.delivery || {}, dl = CARNES.filter(function (c) { return d[c.key] > 0; }).map(function (c) { return c.label + ' ' + _kg(d[c.key]); });
+      if (d.coca_un) dl.push('Coca ' + _num(d.coca_un) + ' un');
+      return (tudo.length ? tudo.join('<br>') : 'Nada vendido (tudo zero).') +
+        (dl.length ? '<div class="gv-tot-dlv" style="margin-top:4px;color:rgba(250,204,21,.9);font-size:11px">🛵 dos quais no delivery: ' + dl.join(' · ') + '</div>' : '');
     };
     var atualizar = function () {
       var l = ler();
-      _overlay.querySelector('#gv-tot').innerHTML = '<div style="font-size:10.5px;font-weight:800;color:rgba(232,234,237,.55);margin-bottom:2px">PELA GRAMATURA</div>' + resumoTot(calcTotais(montarItens(cad, l.qtds)));
+      _overlay.querySelector('#gv-tot').innerHTML = '<div style="font-size:10.5px;font-weight:800;color:rgba(232,234,237,.55);margin-bottom:2px">PELA GRAMATURA (salão + delivery)</div>' + resumoTot(calcTotais(montarItens(cad, l.qtds, l.qtdsD)));
     };
-    _overlay.querySelectorAll('.gv-q').forEach(function (i) { i.oninput = atualizar; });
+    _overlay.querySelectorAll('.gv-q, .gv-qd').forEach(function (i) { i.oninput = atualizar; });
     atualizar();
     _overlay.querySelector('#gv-voltar').onclick = function () { _voltarOrigem(); };
     _overlay.querySelector('#gv-seguir').onclick = function () {
       var l = ler();
       if (l.ruim) { _overlay.querySelector('#gv-err').textContent = 'Só números inteiros (quantidade vendida).'; l.ruim.focus(); return; }
       if (!libera.atrasado && !dentroDoPrazo(dataISO)) { _overlay.querySelector('#gv-err').textContent = 'O prazo deste dia já passou (' + PRAZO_H + 'h). Precisa da liberação da supervisão.'; return; }
-      _telaAssinar(dataISO, cad, l.qtds, libera, lanc);
+      _telaAssinar(dataISO, cad, l.qtds, libera, lanc, l.qtdsD);
     };
   }
 
-  function _telaAssinar(dataISO, cad, qtds, libera, lanc) {
-    var itens = montarItens(cad, qtds), t = calcTotais(itens);
-    var nItens = Object.keys(qtds).filter(function (k) { return qtds[k] > 0; }).length;
+  function _telaAssinar(dataISO, cad, qtds, libera, lanc, qtdsD) {
+    var itens = montarItens(cad, qtds, qtdsD), t = calcTotais(itens);
+    var nItens = Object.keys(itens).filter(function (k) { return itens[k].q > 0; }).length;
     _montar(
       '<div style="font-size:17px;font-weight:800;margin-bottom:2px">✍️ Assinar</div>' +
       '<div style="font-size:12px;color:rgba(232,234,237,.55);margin-bottom:10px">Vendidos de ' + _esc(_brDia(dataISO)) + ' · ' + nItens + ' ite' + (nItens === 1 ? 'm' : 'ns') + ' com venda</div>' +
       '<div style="background:rgba(255,255,255,.05);border-radius:10px;padding:9px 11px;font-size:12px;line-height:1.6;margin-bottom:12px">' +
         (CARNES.filter(function (c) { return t[c.key] > 0; }).map(function (c) { return c.label + ' ' + _kg(t[c.key]); }).concat(
           t.coca_un ? ['Coca ' + _num(t.coca_un) + ' un'] : [], t.chopp_l_claro ? ['Chopp claro ' + _num(t.chopp_l_claro, 1) + ' L'] : [], t.chopp_l_vinho ? ['Chopp vinho ' + _num(t.chopp_l_vinho, 1) + ' L'] : []
-        ).join(' · ') || 'Nada vendido (tudo zero)') + '</div>' +
+        ).join(' · ') || 'Nada vendido (tudo zero)') +
+        (function () { var d = t.delivery || {}, dl = CARNES.filter(function (c) { return d[c.key] > 0; }).map(function (c) { return c.label + ' ' + _kg(d[c.key]); });
+          if (d.coca_un) dl.push('Coca ' + _num(d.coca_un) + ' un');
+          return dl.length ? '<div style="margin-top:3px;color:rgba(250,204,21,.9);font-size:11px">🛵 dos quais no delivery (iFood + 99): ' + dl.join(' · ') + '</div>' : ''; })() + '</div>' +
       '<div style="font-size:11px;font-weight:800;color:rgba(232,234,237,.6);margin-bottom:7px">GERENTE OU SUB-GERENTE</div>' +
       '<input id="gv-nome" autocomplete="off" placeholder="Nome" style="' + CSS_IN + ';margin-bottom:8px">' +
       '<input id="gv-senha" type="password" autocomplete="off" placeholder="Senha" style="' + CSS_IN + '">' +
@@ -362,7 +392,7 @@
       '<div style="display:grid;grid-template-columns:1fr 1.4fr;gap:8px">' +
         '<button id="gv-voltar" style="' + CSS_BTN2 + '">Voltar</button>' +
         '<button id="gv-ok" style="' + CSS_BTN + ';background:#facc15;color:#1a1d23">Confirmar</button></div>');
-    _overlay.querySelector('#gv-voltar').onclick = function () { _telaForm(dataISO, cad, qtds, libera, lanc); };
+    _overlay.querySelector('#gv-voltar').onclick = function () { _telaForm(dataISO, cad, qtds, libera, lanc, qtdsD); };
     var ok = _overlay.querySelector('#gv-ok'), err = _overlay.querySelector('#gv-err');
     _overlay.querySelector('#gv-senha').onkeydown = function (e) { if (e.key === 'Enter') ok.click(); };
     ok.onclick = function () {
