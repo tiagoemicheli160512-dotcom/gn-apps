@@ -11860,16 +11860,16 @@ function _manutCardHtml(m){
           </select></div>
         ${m.tipo===MANUT_TIPO_UTENSILIO?`
         <div><label class="field-label">Qual a peça *</label>
-          <input type="text" style="font-size:12px;" autocomplete="off"
+          <input type="text" style="font-size:12px;" autocomplete="off" ${m.saldo_aplicado?'disabled title="Já descontado do saldo"':''}
             placeholder="ex.: copo de chopp, prato fundo, garfo" value="${escHtml(m.descricao||'')}"
             oninput="updateManut(${m.id},'descricao',this.value)" onchange="renderUtensilios()"></div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
           <div><label class="field-label">O que houve</label>
-            <select onchange="updateManut(${m.id},'situacao',this.value)">
+            <select ${m.saldo_aplicado?'disabled':''} onchange="updateManut(${m.id},'situacao',this.value)">
               ${MANUT_SITUACOES_UTENSILIO.map(s=>`<option value="${s}" ${(m.situacao||MANUT_SITUACOES_UTENSILIO[0])===s?'selected':''}>${s}</option>`).join('')}
             </select></div>
           <div><label class="field-label">Quantas *</label>
-            <input type="number" min="1" step="1" inputmode="numeric" style="font-size:12px;"
+            <input type="number" min="1" step="1" inputmode="numeric" style="font-size:12px;" ${m.saldo_aplicado?'disabled':''}
               oninput="updateManut(${m.id},'qtd',this.value)" onchange="renderUtensilios()"
               value="${escHtml(m.qtd||'')}" placeholder="1"></div>
         </div>
@@ -11878,7 +11878,8 @@ function _manutCardHtml(m){
           // cada dígito, e descontar ali tiraria 1, depois 12, depois 120 ao digitar "120".
           const s=_utensilioDe(m.descricao);
           if(m.saldo_aplicado) return `<div style="font-size:11px;color:#047857;font-weight:700;background:rgba(5,150,105,.08);border-radius:8px;padding:7px 9px;">
-            ✅ Já está no controle${s?` · saldo de "${escHtml(s.nome)}": <b>${s.qtd}</b>`:''}</div>`;
+            ✅ Já descontado do controle${s?` · saldo de "${escHtml(s.nome)}": <b>${s.qtd}</b>`:''}
+            <div style="font-weight:400;color:var(--t3);margin-top:2px">Peça e quantidade ficam travadas: mudar aqui não mexeria no saldo. Lançou errado? A supervisão corrige o saldo no fim da tela.</div></div>`;
           const nome=String(m.descricao||'').trim();
           const pronto=nome && (parseFloat(m.qtd)||0)>0;
           return `<div style="background:rgba(217,119,6,.07);border:1px solid rgba(217,119,6,.22);border-radius:8px;padding:8px 9px;">
@@ -11974,18 +11975,32 @@ function _utensNovoSet(campo,val){
   if(dica) dica.textContent=_utensFalta(_utensNovo.nome,_utensNovo.qtd);
 }
 function _utensNovoCancelar(){ _utensNovo=null; renderUtensilios(); }
-function _utensNovoRegistrar(){
+/* "Quebrou" desconta do saldo NA HORA do registro (24/11/2026). Antes era um segundo passo
+   ("📦 Lançar no controle") e metade das quebras da rede nunca passou por ele: o saldo ficava
+   acima do real sem ninguém ver. Agora registrar a quebra já é descontar — é o mesmo
+   lancarUtensilioNoControle de sempre (idempotente por saldo_aplicado, relê a linha da loja
+   antes de gravar), só que chamado aqui. Na primeira vez da peça ele ainda pergunta quantas
+   a loja tem em bom estado; se a pessoa cancelar, a quebra fica registrada e o botão
+   "Lançar no controle" continua no cartão pra terminar depois.
+   "Faltando" não mexe no saldo (não é perda), então segue sem o passo. */
+async function _utensNovoRegistrar(){
   const falta=_utensNovo?_utensFalta(_utensNovo.nome,_utensNovo.qtd):'';
   if(falta){ showToast('⚠️ '+falta,'error'); return; }
   const n=_utensNovo, nome=String(n.nome).trim(), qtd=parseFloat(n.qtd)||0;
-  state.manutencao.unshift({id:novoIdLocalChk(),setor:n.setor||'Salão',tipo:MANUT_TIPO_UTENSILIO,
-    situacao:n.situacao||MANUT_SITUACOES_UTENSILIO[0],qtd:String(qtd),descricao:nome,
+  const situacao=n.situacao||MANUT_SITUACOES_UTENSILIO[0];
+  const id=novoIdLocalChk();
+  state.manutencao.unshift({id,setor:n.setor||'Salão',tipo:MANUT_TIPO_UTENSILIO,
+    situacao,qtd:String(qtd),descricao:nome,
     contato:'',fotoBase64:'',fotoName:'',
     status:'Pendente',prioridade:'Normal',confirmado_loja:false});
   _utensNovo=null;
   renderUtensilios();
   autoSave();
-  showToast(`✅ Lançado: ${qtd} ${nome}`);
+  if(situacao!=='Quebrou'){ showToast(`✅ Lançado: ${qtd} ${nome}`); return; }
+  await lancarUtensilioNoControle(id);          // mostra o próprio aviso com o saldo novo
+  const m=state.manutencao.find(x=>String(x.id)===String(id));
+  if(m && !m.saldo_aplicado)
+    showToast(`⚠️ Quebra registrada, mas ainda NÃO descontada do saldo. Toque "📦 Lançar no controle" no cartão.`,'error');
 }
 /* ── Contagem de peça ────────────────────────────────────────────────────────────────
    Até aqui o saldo de uma peça só nascia junto de um "Quebrou"/"Faltando": a pergunta de
