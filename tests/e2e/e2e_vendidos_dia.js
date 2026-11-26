@@ -30,6 +30,7 @@ async function abrir(browser, quando, opts) {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 860 } });
   await CAMINHOS.fixarRelogio(ctx, quando);
   const banco = { linhas: (opts.linhas || []).slice(), posts: [], login: opts.login || [{ nome: 'Rayanne', cargo: 'sub_gerente', loja: 'NORTE SHOPPING' }] };
+  banco.libs = [];   // gn_vendidos_liberacao: a liberação da supervisão vale pra loja toda
   await ctx.route('**/rest/v1/**', r => {
     const req = r.request(), u = decodeURIComponent(req.url().replace(/\+/g, '%20'));
     const json = (b, st) => r.fulfill({ status: st || 200, contentType: 'application/json', body: JSON.stringify(b) });
@@ -42,6 +43,11 @@ async function abrir(browser, quando, opts) {
       const b = JSON.parse(req.postData()); banco.posts.push({ url: u, b });
       banco.linhas = banco.linhas.filter(x => !(x.loja === b.loja && x.data === b.data)); banco.linhas.push(b); return json([], 201);
     }
+    if (/gn_vendidos_liberacao/.test(u) && req.method() === 'GET') {
+      const lj = (u.match(/loja=eq\.([^&]+)/) || [])[1], dia = (u.match(/dia=eq\.([\d-]+)/) || [])[1];
+      return json(banco.libs.filter(x => x.loja === lj && x.dia === dia));
+    }
+    if (/gn_vendidos_liberacao/.test(u) && req.method() === 'POST') { banco.libs.push(JSON.parse(req.postData())); return json([], 201); }
     if (/rpc\/verificar_login/.test(u)) return json(banco.login);
     return json([]);
   });
