@@ -16734,6 +16734,124 @@ function _choppControleHtml() {
     ${linhas}
   </div>`;
 }
+/* ── ⇄ TRANSFERÊNCIAS ENTRE LOJAS (Painel › Operação) — Etapa 3, 26/11/2026 ──────────────
+   Prefixo _emprest (empréstimo, que é o que são): "_transf*" já é das transferências de
+   CAIXA da aba Cancel. e transf. — um nome repetido de function sobrescreve o outro calado.
+   "Precisamos trazer para o Painel de Gestão o controle de transferência de mercadorias
+    entre lojas, que atualmente fica no aplicativo Lojas, na aba Transferência."
+
+   SÓ LEITURA: quem cria e quita continua sendo o app Lojas (gn_lojas.all_data.transferAll,
+   na linha de cada loja). O mesmo empréstimo existe nas duas pontas (origem e destino) —
+   aqui as cópias viram UM registro por id, com as confirmações somadas por OU, igual ao
+   reconciliarTransferAll() do app Lojas. Uma requisição só pras 11 lojas (Maglia fora da
+   leitura; um empréstimo com ela ainda aparece pela cópia da loja parceira). */
+let _emprestPainel = null, _emprestCarregando = false, _emprestDias = 30, _emprestFiltro = 'abertos', _emprestLoja = '';
+async function _loadEmprestPainel() {
+  if (_emprestCarregando) return;
+  _emprestCarregando = true;
+  try {
+    const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+    const lojas = LOJAS_LISTA.filter(k => k !== 'MAGLIA');
+    const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=in.(${lojas.map(k => '"' + encodeURIComponent(k) + '"').join(',')})&select=loja,tf:all_data->transferAll`, H, 'emprestPainel', null);
+    if (rows === null) { _emprestPainel = { erro: true }; return; }
+    const FLAGS = ['confirmadoOrigem', 'confirmadoDestino', 'pagDinheiroOrigem', 'pagDinheiroDestino', 'quitado'];
+    const porId = new Map();
+    rows.forEach(r => {
+      Object.values((r.tf && typeof r.tf === 'object') ? r.tf : {}).forEach(lista => {
+        (Array.isArray(lista) ? lista : []).forEach(t => {
+          if (!t || !t.id) return;
+          const a = porId.get(t.id);
+          if (!a) { porId.set(t.id, Object.assign({}, t)); return; }
+          FLAGS.forEach(f => { a[f] = !!a[f] || !!t[f]; });
+          ['dataQuitacao', 'formaQuitacao', 'pagDinheiroAvariaId'].forEach(f => { if (!a[f] && t[f]) a[f] = t[f]; });
+        });
+      });
+    });
+    _emprestPainel = { lista: [...porId.values()].sort((a, b) => String(b.data).localeCompare(String(a.data))) };
+  } catch (e) {
+    window.gnLogError && window.gnLogError('emprestPainel', e);
+    _emprestPainel = { erro: true };
+  } finally {
+    _emprestCarregando = false;
+    if (_dashTab === 'emprest') renderDashboard();
+  }
+}
+// Situação de um empréstimo, do jeito que as duas lojas veem no app Lojas.
+function _emprestSituacao(t) {
+  if (t.quitado) return { k: 'quitado', txt: `✅ devolvido${t.dataQuitacao ? ' em ' + String(t.dataQuitacao).slice(8, 10) + '/' + String(t.dataQuitacao).slice(5, 7) : ''}${t.formaQuitacao ? ' (' + t.formaQuitacao + ')' : ''}`, cor: 'var(--txt-green)' };
+  if (t.pagDinheiroAvariaId || t.pagDinheiroOrigem || t.pagDinheiroDestino) return { k: 'dinheiro', txt: '💵 pagamento em dinheiro em validação', cor: 'var(--txt-purple)' };
+  const nm = k => LOJA_DISPLAY[k] || k;
+  if (t.confirmadoDestino && !t.confirmadoOrigem) return { k: 'meio', txt: `⏳ ${nm(t.destino)} diz que devolveu — falta ${nm(t.origem)} confirmar que recebeu`, cor: 'var(--txt-amber)' };
+  if (t.confirmadoOrigem && !t.confirmadoDestino) return { k: 'meio', txt: `⏳ ${nm(t.origem)} confirmou que recebeu de volta — falta ${nm(t.destino)} confirmar a devolução`, cor: 'var(--txt-amber)' };
+  return { k: 'aberto', txt: `⏳ ${nm(t.destino)} ainda não devolveu`, cor: 'var(--txt-red)' };
+}
+function _emprestDiasAberto(t) { return Math.max(0, Math.floor((Date.now() - new Date(t.data).getTime()) / 864e5)); }
+function _emprestDados() {
+  const d = _emprestPainel;
+  const corte = new Date(Date.now() - _emprestDias * 864e5).toISOString();
+  const lojaOk = t => !_emprestLoja || t.origem === _emprestLoja || t.destino === _emprestLoja;
+  // Aberto aparece sempre (qualquer idade: é o que cobra); quitado só dentro da janela.
+  const lista = d.lista.filter(t => lojaOk(t) && (!t.quitado || String(t.data) >= corte))
+    .filter(t => _emprestFiltro === 'todos' ? true : _emprestFiltro === 'quitados' ? t.quitado : !t.quitado);
+  const abertos = d.lista.filter(t => lojaOk(t) && !t.quitado);
+  return { lista, abertos, antigo: abertos.reduce((m, t) => Math.max(m, _emprestDiasAberto(t)), 0),
+           quitados: d.lista.filter(t => lojaOk(t) && t.quitado && String(t.data) >= corte).length };
+}
+function _emprestTrocar(campo, v) { if (campo === 'dias') _emprestDias = v; else if (campo === 'filtro') _emprestFiltro = v; else _emprestLoja = v; renderDashboard(); }
+function _buildEmprestPanel() {
+  const d = _emprestPainel;
+  if (!d) { if (!_emprestCarregando) _loadEmprestPainel(); return _skelPanel(3); }
+  if (d.erro) return `<div class="att-item"><div><div class="att-nm">Não deu pra carregar as transferências agora</div><div class="att-rs"><button onclick="_emprestPainel=null;_loadEmprestPainel();renderDashboard()" style="margin-top:6px;padding:6px 12px;border-radius:8px;border:1px solid var(--b1);background:var(--s2);color:var(--t1);font-weight:700;cursor:pointer;font-family:inherit">Tentar de novo</button></div></div></div>`;
+  const esc = s => window.escapeHtml(String(s == null ? '' : s));
+  const x = _emprestDados();
+  const chip = (campo, v, rot, on) => `<button type="button" onclick="_emprestTrocar('${campo}',${typeof v === 'number' ? v : `'${v}'`})" style="padding:5px 11px;border-radius:999px;font-size:11px;font-weight:800;font-family:inherit;cursor:pointer;border:1px solid ${on ? 'var(--cor)' : 'var(--b1)'};background:${on ? 'var(--cor)' : 'var(--s2)'};color:${on ? '#1A1D23' : 'var(--t2)'}">${rot}</button>`;
+  const lojas = LOJAS_LISTA.filter(k => k !== 'MAGLIA').slice().sort((a, b) => (LOJA_DISPLAY[a] || a).localeCompare(LOJA_DISPLAY[b] || b));
+  const topo = _reportBtnsRowHtml('Emprest') + `<div style="font-size:11px;color:var(--t4);margin-bottom:10px;line-height:1.5">Empréstimos de mercadoria entre lojas, lançados no app Lojas › Transfer. Aqui é só acompanhamento: a devolução é confirmada pelas duas lojas lá no app.</div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${chip('filtro', 'abertos', 'Em aberto', _emprestFiltro === 'abertos')}${chip('filtro', 'quitados', 'Devolvidos', _emprestFiltro === 'quitados')}${chip('filtro', 'todos', 'Todos', _emprestFiltro === 'todos')}<span style="width:8px"></span>${chip('dias', 30, '30 dias', _emprestDias === 30)}${chip('dias', 90, '90 dias', _emprestDias === 90)}</div>
+    <select class="gn-campo emprest-loja" onchange="_emprestTrocar('loja',this.value)" style="width:100%;margin-bottom:10px;font-size:12px;padding:7px 8px;border-radius:8px;font-family:inherit"><option value="">Todas as lojas</option>${lojas.map(k => `<option value="${esc(k)}"${_emprestLoja === k ? ' selected' : ''}>${esc(LOJA_DISPLAY[k] || k)}</option>`).join('')}</select>
+    <div class="kpi-row">
+      <div class="kpi-tile" style="border-left-color:${x.abertos.length ? '#dc2626' : '#16a34a'}"><div class="kpi-tile-lbl">Em aberto</div><div class="kpi-tile-val emprest-abertos" style="color:${x.abertos.length ? 'var(--txt-red)' : 'var(--txt-green)'}">${x.abertos.length}</div><div class="kpi-tile-sub">${x.abertos.length ? 'mais antigo há ' + x.antigo + ' dia' + (x.antigo === 1 ? '' : 's') : 'nada a devolver'}</div></div>
+      <div class="kpi-tile" style="border-left-color:#16a34a"><div class="kpi-tile-lbl">Devolvidos</div><div class="kpi-tile-val">${x.quitados}</div><div class="kpi-tile-sub">nos últimos ${_emprestDias} dias</div></div>
+    </div>`;
+  if (!x.lista.length) return topo + `<div class="att-item"><div><div class="att-nm">Nenhuma transferência ${_emprestFiltro === 'abertos' ? 'em aberto' : 'no período'}</div></div></div>`;
+  const dm = iso => String(iso).slice(8, 10) + '/' + String(iso).slice(5, 7);
+  const itens = x.lista.map(t => {
+    const st = _emprestSituacao(t), dias = _emprestDiasAberto(t);
+    const qtd = (t.qtdOriginal != null ? t.qtdOriginal : t.qtd);
+    return `<div class="emprest-item" data-st="${st.k}" style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid ${st.cor};border-radius:12px;padding:9px 12px;margin-bottom:7px">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
+        <div style="font-size:12px;font-weight:800;color:var(--t1);min-width:0;overflow-wrap:anywhere">${esc(t.insumo)}</div>
+        <div style="font-size:12px;font-weight:800;color:var(--t1);white-space:nowrap;font-variant-numeric:tabular-nums">${Number(qtd || 0).toLocaleString('pt-BR', { maximumFractionDigits: 3 })} ${esc(t.unidade || 'UN')}</div>
+      </div>
+      <div style="font-size:10.5px;color:var(--t2);margin-top:2px">${dm(t.data)} · <b>${esc(LOJA_DISPLAY[t.origem] || t.origem)}</b> → <b>${esc(LOJA_DISPLAY[t.destino] || t.destino)}</b>${t.motivo ? ' · ' + esc(t.motivo) : ''}</div>
+      <div style="font-size:10.5px;font-weight:700;color:${st.cor};margin-top:2px">${esc(st.txt)}${!t.quitado ? ` · ${dias} dia${dias === 1 ? '' : 's'}` : ''}</div>
+    </div>`;
+  }).join('');
+  return topo + itens;
+}
+function _emprestRelatorioTexto(wpp) {
+  const d = _emprestPainel; if (!d || d.erro) return null;
+  const x = _emprestDados();
+  const b = t => wpp ? `*${t}*` : t;
+  const dm = iso => String(iso).slice(8, 10) + '/' + String(iso).slice(5, 7);
+  const loja = _emprestLoja ? ' — ' + (LOJA_DISPLAY[_emprestLoja] || _emprestLoja) : '';
+  let msg = `${wpp ? '⇄ ' : ''}${b('TRANSFERÊNCIAS ENTRE LOJAS' + loja.toUpperCase())}\n${new Date().toLocaleDateString('pt-BR')}\n`;
+  msg += `\nEm aberto: ${x.abertos.length}${x.abertos.length ? ' (mais antigo há ' + x.antigo + ' dias)' : ''} · devolvidos nos últimos ${_emprestDias} dias: ${x.quitados}\n`;
+  x.lista.forEach(t => {
+    const qtd = (t.qtdOriginal != null ? t.qtdOriginal : t.qtd);
+    msg += `\n${dm(t.data)} ${t.insumo}: ${Number(qtd || 0).toLocaleString('pt-BR', { maximumFractionDigits: 3 })} ${t.unidade || 'UN'} · ${LOJA_DISPLAY[t.origem] || t.origem} → ${LOJA_DISPLAY[t.destino] || t.destino}\n   ${_emprestSituacao(t).txt}${!t.quitado ? ' · ' + _emprestDiasAberto(t) + ' dias' : ''}\n`;
+  });
+  return { msg, titulo: 'Transferências entre lojas' + loja + ' · ' + new Date().toLocaleDateString('pt-BR'), x };
+}
+function gerarWppEmprest() { const r = _emprestRelatorioTexto(true); if (!r) { alert('Aguarde os dados carregarem.'); return; } window.open('https://wa.me/?text=' + encodeURIComponent(r.msg), '_blank'); }
+function gerarPDFEmprest() {
+  const r = _emprestRelatorioTexto(false); if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  window.gnRelatorioPDF({ titulo: r.titulo, texto: r.msg, kpis: [
+    { label: 'Em aberto', valor: String(r.x.abertos.length), sub: r.x.abertos.length ? 'mais antigo há ' + r.x.antigo + ' dias' : 'nada a devolver' },
+    { label: 'Devolvidos (' + _emprestDias + ' dias)', valor: String(r.x.quitados), sub: '' } ] });
+}
+async function enviarPDFEmprestWpp() { await _pdfWppComo(gerarPDFEmprest); }
+
 function _buildBarrisSemanalPanel(){
   const reportBtns = _reportBtnsRowHtml('Barris');
   if (!_barrisSemGerenciaLoaded || !_barrisSemGerenciaData) return reportBtns + _skelPanel(4);
@@ -22773,6 +22891,9 @@ function renderDashboard() {
   } else if (_dashTab==='utensent') {
     content = _buildUtensEntradasPanel();
 
+  } else if (_dashTab==='emprest') {
+    content = _buildEmprestPanel();
+
   } else if (_dashTab==='folgas') {
     content = _buildFolgasGerenciaPanel();
 
@@ -22856,7 +22977,7 @@ function renderDashboard() {
       </div>
       <button type="button" class="dash-tabs-seta dir off" id="dash-tabs-dir" aria-label="Mais abas" onclick="_dashTabsRolar(1)"><span>›</span></button>
       </div>
-      ${(_dashTab!=='metas'&&_dashTab!=='folgas'&&_dashTab!=='semlanc'&&_dashTab!=='utensent'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris'&&_dashTab!=='carnes'&&_dashTab!=='vendidos'&&_dashTab!=='bi'&&_dashTab!=='trios'&&_dashTab!=='banco'&&_dashTab!=='extra'&&_dashTab!=='dre')?periodRow:''}
+      ${(_dashTab!=='metas'&&_dashTab!=='folgas'&&_dashTab!=='semlanc'&&_dashTab!=='utensent'&&_dashTab!=='emprest'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris'&&_dashTab!=='carnes'&&_dashTab!=='vendidos'&&_dashTab!=='bi'&&_dashTab!=='trios'&&_dashTab!=='banco'&&_dashTab!=='extra'&&_dashTab!=='dre')?periodRow:''}
       ${content}
     </div>`;
   _dashTabsDepoisDeDesenhar();
@@ -22981,7 +23102,7 @@ const DASH_GRUPOS = [
   { g: 'vendas',   rot: '📈 Vendas',   abas: [['fat', '↓ Faturamento'], ['att', '⚠ Atenção'], ['bi', '📊 BI'], ['metas', '⚙ Metas']] },
   { g: 'caixa',    rot: '🧾 Caixa',    abas: [['cancel', '🧾 Cancel. e transf.'], ['sem10', '💸 Sem 10%']] },
   { g: 'equipe',   rot: '👥 Equipe',   abas: [['presenca', '👤 Presença'], ['folgas', '📅 Folgas'], ['ocorr', '⚠ Ocorrências'], ['ferias', '🏖 Férias'], ['xadrez', '🔀 Xadrez'], ['banco', '⏱ Banco'], ['extra', '👷 Extra']] },
-  { g: 'operacao', rot: '🛠 Operação', abas: [['barris', '🍺 Barris'], ['carnes', '🥩 Carnes'], ['vendidos', '🧾 Vendidos'], ['avarias', '⚠️ Avarias'], ['trios', '🎵 Trios'], ['semlanc', '✅ Validações'], ['utensent', '🍴 Utensílios']] },
+  { g: 'operacao', rot: '🛠 Operação', abas: [['barris', '🍺 Barris'], ['carnes', '🥩 Carnes'], ['vendidos', '🧾 Vendidos'], ['avarias', '⚠️ Avarias'], ['trios', '🎵 Trios'], ['semlanc', '✅ Validações'], ['utensent', '🍴 Utensílios'], ['emprest', '⇄ Transferências']] },
   { g: 'dre',      rot: '💰 DRE',      abas: [['dre', '💰 DRE']] },
 ];
 const _dashGrupoUltima = {};

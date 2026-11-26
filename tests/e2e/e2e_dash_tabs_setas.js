@@ -76,12 +76,13 @@ const estado = page => page.evaluate(() => {
     // 16/11/2026: + 'utensent' (Operação › Utensílios, entradas das lojas) — 19.
     // 20/11/2026: + 'vendidos' (Operação › Vendidos: Coca, chopp e cadastro) — 20.
     // 20/11/2026: + 'avarias' (Operação › Avarias, por loja) — 21.
-    const esperadas = ['fat', 'att', 'cancel', 'sem10', 'presenca', 'folgas', 'ocorr', 'ferias', 'xadrez', 'bi', 'barris', 'carnes', 'vendidos', 'avarias', 'trios', 'semlanc', 'utensent', 'banco', 'extra', 'dre', 'metas'];
-    check('as 21 abas (20 de antes + Avarias) estão nos grupos, cada uma uma vez só', ids.length === 21 && esperadas.every(x => ids.filter(y => y === x).length === 1), JSON.stringify(ids));
+    // 26/11/2026: + 'emprest' (Operação › ⇄ Transferências entre lojas, Etapa 3) — 22.
+    const esperadas = ['fat', 'att', 'cancel', 'sem10', 'presenca', 'folgas', 'ocorr', 'ferias', 'xadrez', 'bi', 'barris', 'carnes', 'vendidos', 'avarias', 'trios', 'semlanc', 'utensent', 'emprest', 'banco', 'extra', 'dre', 'metas'];
+    check('as 22 abas (21 de antes + Transferências) estão nos grupos, cada uma uma vez só', ids.length === 22 && esperadas.every(x => ids.filter(y => y === x).length === 1), JSON.stringify(ids));
     // Cada aba abre e marca o grupo certo.
     const r = await page.evaluate(esp => esp.map(t => { _setDashTab(t); const on = document.querySelector('.dash-grupo.on'); const aba = document.querySelector('#dash-tabs .dash-tab.on');
       return { t, grupo: on && on.dataset.grupo, abaOk: _dashGrupoDe(t).abas.length < 2 || !!aba }; }), esperadas);
-    check('abrir qualquer aba acende o grupo dela e marca a aba', r.every(x => x.grupo === (({ fat: 'vendas', att: 'vendas', bi: 'vendas', metas: 'vendas', cancel: 'caixa', sem10: 'caixa', dre: 'dre', barris: 'operacao', carnes: 'operacao', vendidos: 'operacao', avarias: 'operacao', trios: 'operacao', semlanc: 'operacao', utensent: 'operacao' })[x.t] || 'equipe') && x.abaOk), JSON.stringify(r));
+    check('abrir qualquer aba acende o grupo dela e marca a aba', r.every(x => x.grupo === (({ fat: 'vendas', att: 'vendas', bi: 'vendas', metas: 'vendas', cancel: 'caixa', sem10: 'caixa', dre: 'dre', barris: 'operacao', carnes: 'operacao', vendidos: 'operacao', avarias: 'operacao', trios: 'operacao', semlanc: 'operacao', utensent: 'operacao', emprest: 'operacao' })[x.t] || 'equipe') && x.abaOk), JSON.stringify(r));
     await ctx.close();
   }
 
