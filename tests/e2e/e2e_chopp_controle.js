@@ -83,6 +83,8 @@ const VEND = [
       if (c === 'chopp:contagens') return CONT;
       if (c === 'chopp:entradas') return ENT;
       if (c === 'chopp:vendidos') return VEND;
+      if (c === 'chopp:respostas') return [{ loja_slug: 'pedreira', dia: '2026-12-02', resposta: 'NAO', finalizados: 0, respondido_por: 'Luiz' },
+                                           { loja_slug: 'pedreira', dia: '2026-12-01', resposta: 'SIM', finalizados: 2, respondido_por: 'Ana' }];
       return fb === undefined ? [] : fb;
     };
     renderDashboard = () => {};
@@ -95,6 +97,7 @@ const VEND = [
     const loja = k => { const b = [...el.querySelectorAll('.chopp-loja')].find(x => x.dataset.loja === k); return b ? b.textContent.replace(/\s+/g, ' ') : ''; };
     const out = { urls, ped: loja('PEDREIRA'), ban: loja('BANGU'), temSecao: !!el.querySelector('.chopp-controle'),
       status: [...el.querySelectorAll('.chopp-loja[data-loja="PEDREIRA"] .chopp-cel')].map(x => x.dataset.status),
+      resp: [...el.querySelectorAll('.chopp-loja[data-loja="PEDREIRA"] .chopp-resp')].map(x => x.dataset.dia + ':' + x.dataset.r),
       dados: JSON.parse(JSON.stringify(_choppData.porLoja.PEDREIRA)) };
     el.remove(); return out;
   }, { CONT, ENT, VEND });
@@ -110,6 +113,8 @@ const VEND = [
     /semana_inicio=in\.\(2026-11-23,2026-11-30,2026-12-03\)/.test(p.urls['chopp:contagens']) && /tipo=in\.\(CLARO,VINHO\)/.test(p.urls['chopp:contagens'])
     && /criado_em=gte\.2026-11-23/.test(p.urls['chopp:entradas']) && /data=gte\.2026-11-23&data=lte\.2026-12-02/.test(p.urls['chopp:vendidos']), p.urls);
 
+  check('respostas da pergunta diária do app Lojas, últimos 7 dias (sim 🍺2, não ✓, sem resposta —)',
+    p.resp.length === 7 && p.resp.includes('2026-12-02:NAO') && p.resp.includes('2026-12-01:SIM') && p.resp.includes('2026-11-27:') && /5 sem resposta/.test(p.ped), { resp: p.resp, txt: p.ped.slice(-300) });
   check('nenhum erro de JavaScript', erros.length === 0, erros);
   console.log(`\n${ok} OK, ${falhou} falhou`);
   await browser.close();

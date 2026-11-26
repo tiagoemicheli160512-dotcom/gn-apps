@@ -258,6 +258,7 @@ input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-
 <script src="gn-vendidos.js"></script>
 <script src="gn-validade-acesso.js"></script>
 <script src="gn-utensilios-acesso.js"></script>
+<script src="gn-chopp-controle.js"></script>
 <script src="gn-semlanc-acesso.js"></script>
 <script src="gn-deploy-update.js"></script>
 <script src="gn-lojas-seed.js"></script>
@@ -4346,7 +4347,7 @@ function goTab(t) {
   render();
   if (t === 'entrega') carregarEntregas(true);
   if (t === 'notas') carregarNotasEntrega(true);
-  if (t === 'barris') carregarBarris(true);
+  if (t === 'barris') { carregarBarris(true); _carregarBarrisVisao(); }
   _renderTravaNotaFiscal();
   _renderTravaEntregas();   // na aba Entrega o aviso sai da frente; fora dela, volta
   // foco automático na busca se a aba tem campo de busca
@@ -8728,6 +8729,7 @@ async function confirmarLogin() {
     _atualizarTravaNotaFiscal();
     _atualizarTravaEntregas();
     _checarBarrisSemanalPendencia();
+    _checarBarrisRespostaDiaria();
     _checarUrgenciaPendencia();
     loadChecklistFat(); // Carrega faturamento/vendas do check-list após login para home mostrar correto
     showToast('👋 Bem-vindo(a), ' + u.nome + '! (' + u.cargo + ')');
@@ -12267,6 +12269,7 @@ function render() {
       </div>
       <div style="font-size:11px;color:var(--t3);margin-top:6px;line-height:1.4">Validade lançada ao confirmar a entrega na aba Entrega. Toque em "Finalizar" quando o barril acabar no tirador.</div>
       ${_barrisConfAvisoHtml()}
+      ${_barrisRespHojeHtml()}
       ${_barrisOrdenados.length === 0
         ? `<div class="card" style="padding:16px;text-align:center;color:var(--t2);font-size:12px;margin-top:10px">Nenhum barril em acompanhamento no momento.</div>`
         : `<div class="card" style="margin-top:10px;padding:0">
@@ -12300,6 +12303,7 @@ function render() {
             }).join('')}
           </div>`
       }
+      ${_barrisVisaoHtml()}
     </div>`;
 
   } else if (tab === "relatorio") {
@@ -13574,6 +13578,158 @@ function abrirModalFinalizarBarril(id) {
   document.body.appendChild(modal);
 }
 
+/* ── 🍺 PERGUNTA DIÁRIA: "ALGUM BARRIL FOI FINALIZADO?" (Etapa 3, 26/11/2026) ───────────
+   "Todos os dias, o aplicativo deverá perguntar ao estoquista se algum barril foi
+    finalizado. Caso tenha ocorrido, ele deverá informar para que seja feita a baixa. No
+    final de semana, essa confirmação também deverá aparecer para o gerente e o
+    subgerente." Decisões do dono: uma vez por dia, a primeira resposta resolve pra loja,
+    e SEM trava — só registro (o Painel mostra o dia sem resposta).
+   Grava em gn_barris_resposta_diaria. Finalizar um barril pelo botão também grava SIM, com
+   a quantidade finalizada no dia (substitui um NÃO dado antes no mesmo dia). Maglia fora. */
+const BARRIS_RESP_CARGOS = ['estoquista'];
+const BARRIS_RESP_CARGOS_FDS = ['gerente', 'sub_gerente'];
+let _barrisRespHoje = undefined;   // undefined = não sabe; null = sem resposta; {resposta,…}
+let _barrisRespSimPendente = false;
+function _barrisRespDia() { return wkKey(new Date()); }
+function _barrisRespSlug() { return LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_'); }
+function _barrisRespDeveAparecer() {
+  if (!usuarioAtual || loja === 'MAGLIA' || (usuarioAtual.loja || '') === 'GERAL') return false;
+  if (abasPermitidas && !abasPermitidas.includes('barris')) return false;
+  const dow = new Date().getDay();
+  const fds = dow === 0 || dow === 6;
+  return BARRIS_RESP_CARGOS.includes(usuarioAtual.cargo) || (fds && BARRIS_RESP_CARGOS_FDS.includes(usuarioAtual.cargo));
+}
+async function _checarBarrisRespostaDiaria() {
+  if (!_barrisRespDeveAparecer()) return;
+  const dia = _barrisRespDia(), slug = _barrisRespSlug();
+  try { if (sessionStorage.getItem('gn_barris_resp_adiada') === slug + '|' + dia) return; } catch (e) {}
+  try {
+    const rows = await sbRequest('gn_barris_resposta_diaria?loja_slug=eq.' + slug + '&dia=eq.' + dia + '&select=resposta,finalizados,respondido_por', { method: 'GET' });
+    _barrisRespHoje = (rows && rows[0]) || null;
+  } catch (e) { return; }   // rede caiu: não pergunta (não é trava, e sem a leitura perguntaria de novo a quem já respondeu)
+  if (_barrisRespHoje) return;
+  _mostrarModalBarrisResposta();
+}
+function _mostrarModalBarrisResposta() {
+  if (document.getElementById('modalBarrisResposta')) return;
+  const m = document.createElement('div');
+  m.id = 'modalBarrisResposta';
+  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9990;display:flex;align-items:center;justify-content:center;padding:18px;box-sizing:border-box';
+  m.innerHTML = `<div style="background:var(--s2);border-radius:18px;width:100%;max-width:360px;padding:22px 18px;text-align:center">
+    <div style="font-size:36px">🍺</div>
+    <div style="font-size:16px;font-weight:800;color:var(--t1);margin:6px 0">Algum barril de chopp acabou?</div>
+    <div style="font-size:12.5px;color:var(--t2);line-height:1.5;margin-bottom:14px">Desde a última resposta, algum barril foi trocado no tirador porque acabou? É o que dá baixa no estoque de barris.</div>
+    <button onclick="_barrisResponder('NAO')" style="display:block;width:100%;background:#059669;border:none;border-radius:12px;color:#fff;padding:12px;font-size:14px;font-weight:800;margin-bottom:8px;font-family:inherit">✓ Não, nenhum acabou</button>
+    <button onclick="_barrisRespSim()" style="display:block;width:100%;background:#d97706;border:none;border-radius:12px;color:#fff;padding:12px;font-size:14px;font-weight:800;margin-bottom:8px;font-family:inherit">🍺 Sim — dar baixa agora</button>
+    <button onclick="_barrisRespAdiar()" style="display:block;width:100%;background:none;border:none;color:var(--t3);padding:8px;font-size:12px;font-family:inherit">Responder depois</button>
+  </div>`;
+  document.body.appendChild(m);
+}
+function _barrisRespFechar() { const m = document.getElementById('modalBarrisResposta'); if (m) m.remove(); }
+function _barrisRespAdiar() {
+  try { sessionStorage.setItem('gn_barris_resp_adiada', _barrisRespSlug() + '|' + _barrisRespDia()); } catch (e) {}
+  _barrisRespFechar();
+}
+// resolution=ignore-duplicates: a PRIMEIRA resposta do dia vale pra loja (dois aparelhos não
+// brigam). O SIM gravado ao finalizar usa merge (ver _barrisRespRegistrarFinalizacao).
+async function _barrisResponder(resp) {
+  try {
+    await sbRequest('gn_barris_resposta_diaria?on_conflict=loja_slug,dia', { method: 'POST',
+      headers: { 'Prefer': 'resolution=ignore-duplicates,return=minimal' },
+      body: JSON.stringify({ loja_slug: _barrisRespSlug(), dia: _barrisRespDia(), resposta: resp, finalizados: 0,
+        respondido_por: (usuarioAtual && usuarioAtual.nome) || loja, cargo: (usuarioAtual && usuarioAtual.cargo) || '' }) });
+    _barrisRespHoje = { resposta: resp, finalizados: 0, respondido_por: (usuarioAtual && usuarioAtual.nome) || loja };
+    _barrisRespFechar();
+    showToast(resp === 'NAO' ? '✓ Registrado: nenhum barril acabou hoje.' : '✓ Registrado.');
+    if (tab === 'barris') render();
+  } catch (e) {
+    showToast('⚠️ Não deu pra registrar agora. Tenta de novo.');
+  }
+}
+function _barrisRespSim() {
+  _barrisRespFechar();
+  _barrisRespSimPendente = true;
+  goTab('barris');
+  showToast('Toque em ✓ Finalizar em cada barril que acabou.');
+}
+// Chamado depois de finalizar um barril: o dia passa a SIM com a quantidade finalizada hoje.
+async function _barrisRespRegistrarFinalizacao() {
+  try {
+    const slug = _barrisRespSlug(), dia = _barrisRespDia();
+    const ini = new Date(); ini.setHours(0, 0, 0, 0);
+    const fin = await sbRequest('gn_barris_validade?loja_slug=eq.' + slug + '&status=eq.FINALIZADO&finalizado_em=gte.' + ini.toISOString() + '&select=id', { method: 'GET' });
+    const n = Math.max(1, (fin || []).length);
+    await sbRequest('gn_barris_resposta_diaria?on_conflict=loja_slug,dia', { method: 'POST',
+      headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify({ loja_slug: slug, dia, resposta: 'SIM', finalizados: n,
+        respondido_por: (usuarioAtual && usuarioAtual.nome) || loja, cargo: (usuarioAtual && usuarioAtual.cargo) || '' }) });
+    _barrisRespHoje = { resposta: 'SIM', finalizados: n, respondido_por: (usuarioAtual && usuarioAtual.nome) || loja };
+    _barrisRespSimPendente = false;
+    _barrisRespFechar();
+  } catch (e) { if (typeof window.gnLogError === 'function') window.gnLogError('lojas:barrisResp', e); }
+}
+
+/* ── Visão do Painel dentro da aba Barris (só leitura) ─────────────────────────────────
+   "Vamos precisar trazer para essa aba a visão dos barris que temos no Painel de Gestão
+    (...) sem permitir que os estoquistas editem qualquer informação." O mesmo controle do
+   chopp do Painel (gn-chopp-controle.js, mesma conta) e as respostas da semana, só da
+   própria loja. Nada aqui grava. */
+let _barrisVisao = null;
+async function _carregarBarrisVisao() {
+  if (!window.gnChoppControle) return;
+  try {
+    const slug = _barrisRespSlug();
+    const seg = getMonday(new Date());
+    const W = wkKey(seg), W1 = wkKey(addDays(seg, -7)), QUI = wkKey(addDays(seg, 3));
+    const desde7 = wkKey(addDays(new Date(), -6));
+    const [cont, ent, vend, resp] = await Promise.all([
+      sbRequest('gn_barris_semanal_contagem?loja_slug=eq.' + slug + '&semana_inicio=in.(' + W1 + ',' + W + ',' + QUI + ')&tipo=in.(CLARO,VINHO)&select=semana_inicio,tipo,status,criado_em', { method: 'GET' }),
+      sbRequest('gn_barris_validade?loja_slug=eq.' + slug + '&criado_em=gte.' + W1 + 'T00:00:00-03:00&select=catalogo_id,produto,criado_em', { method: 'GET' }),
+      sbRequest('gn_vendidos_diario?loja=eq.' + encodeURIComponent(loja) + '&data=gte.' + W1 + '&data=lte.' + wkKey(addDays(seg, 2)) + '&select=data,totais', { method: 'GET' }),
+      sbRequest('gn_barris_resposta_diaria?loja_slug=eq.' + slug + '&dia=gte.' + desde7 + '&select=dia,resposta,finalizados,respondido_por', { method: 'GET' }),
+    ]);
+    const j = window.gnChoppControle.janelasLoja({ cont: cont || [], ent: ent || [], tipoDe: _tipoBarrilLoja, vend: vend || [], W1, W, QUI,
+      inicio: (window.gnVendidos && window.gnVendidos.INICIO) || '2026-11-23' });
+    _barrisVisao = { j, W, W1, QUI, resp: [0, 1, 2, 3, 4, 5, 6].map(n => { const d = wkKey(addDays(new Date(desde7 + 'T12:00:00'), n)); return { dia: d, r: (resp || []).find(x => x.dia === d) || null }; }) };
+  } catch (e) {
+    _barrisVisao = { erro: true };
+  }
+  if (tab === 'barris') render();
+}
+function _barrisRespHojeHtml() {
+  const r = _barrisRespHoje;
+  if (_barrisRespSimPendente) return `<div class="barris-resp-hoje" style="background:rgba(217,119,6,.1);border:1px solid rgba(217,119,6,.35);border-radius:12px;padding:10px 12px;margin-top:10px;font-size:12px;color:var(--t1);line-height:1.45">🍺 Toque em <b>✓ Finalizar</b> em cada barril que acabou — a baixa e a resposta de hoje ficam registradas.</div>`;
+  if (r && r.resposta) return `<div class="barris-resp-hoje" style="background:rgba(5,150,105,.08);border:1px solid rgba(5,150,105,.25);border-radius:12px;padding:9px 12px;margin-top:10px;font-size:12px;color:var(--t1)">✓ Pergunta de hoje respondida${r.respondido_por ? ' por ' + escapeHtml(r.respondido_por) : ''}: ${r.resposta === 'SIM' ? (r.finalizados || 0) + ' barril(is) finalizado(s)' : 'nenhum barril acabou'}.</div>`;
+  if (!_barrisRespDeveAparecer()) return '';
+  return `<div class="barris-resp-hoje" style="background:rgba(220,38,38,.06);border:1px solid rgba(220,38,38,.25);border-radius:12px;padding:10px 12px;margin-top:10px">
+    <div style="font-size:12px;font-weight:800;color:var(--t1);margin-bottom:6px">🍺 Algum barril acabou hoje? (ainda sem resposta)</div>
+    <div style="display:flex;gap:8px"><button onclick="_barrisResponder('NAO')" style="flex:1;background:#059669;border:none;border-radius:10px;color:#fff;padding:9px;font-size:12px;font-weight:800;font-family:inherit">✓ Nenhum</button>
+    <button onclick="_barrisRespSim()" style="flex:1;background:#d97706;border:none;border-radius:10px;color:#fff;padding:9px;font-size:12px;font-weight:800;font-family:inherit">🍺 Sim, dar baixa</button></div></div>`;
+}
+function _barrisVisaoHtml() {
+  const v = _barrisVisao;
+  if (!v) return '';
+  if (v.erro) return '';
+  const n = x => Number(x || 0).toLocaleString('pt-BR', { maximumFractionDigits: 2 });
+  const dm = iso => iso.slice(8, 10) + '/' + iso.slice(5, 7);
+  const cel = (r, emoji) => {
+    if (!r || (!r.iniEq && !r.fimEq && !r.entradas && !r.litros)) return '';
+    const cor = r.status === 'ok' ? '#047857' : r.status === 'perda' ? '#DC2626' : r.status === 'conferir' ? '#B45309' : 'var(--t3)';
+    const ver = r.status === 'ok' ? '✓ bate com as vendas' : r.status === 'perda' ? `⚠ usou ${n(r.dif)} barril a mais que as vendas` : r.status === 'conferir' ? `⚠ vendeu ${n(-r.dif)} barril a mais do que usou — conferir` : r.status === 'sem_consumo' ? 'sem consumo' : 'vendidos incompletos';
+    return `<div style="font-size:11px;color:var(--t2);line-height:1.4">${emoji} usados <b>${n(r.consumido)}</b> · vendidos <b>${n(r.vendidoBarris)}</b> (${r.canecas} canecas)<div style="font-weight:800;color:${cor}">${ver}</div></div>`;
+  };
+  const bloco = (j, rot) => j.semContagem ? `<div style="font-size:11px;color:var(--t3)">${rot}: sem a contagem de ${dm(j.semContagem)}</div>`
+    : j.antesDosVendidos ? '' : (cel(j.CLARO, '🍺') + cel(j.VINHO, '🍷')) ? `<div style="margin-top:6px"><div style="font-size:10.5px;font-weight:700;color:var(--t3)">${rot}</div>${cel(j.CLARO, '🍺')}${cel(j.VINHO, '🍷')}</div>` : '';
+  const resp = v.resp.map(x => `<div class="barris-resp-dia" data-r="${x.r ? x.r.resposta : ''}" style="text-align:center"><div style="font-size:9px;color:var(--t3)">${dm(x.dia)}</div><div style="font-size:12px;font-weight:800;color:${!x.r ? '#DC2626' : x.r.resposta === 'SIM' ? '#B45309' : '#047857'}">${!x.r ? '—' : x.r.resposta === 'SIM' ? '🍺' + (x.r.finalizados || '') : '✓'}</div></div>`).join('');
+  return `<div class="card barris-visao" style="margin-top:10px;padding:12px 14px">
+    <div style="font-size:12px;font-weight:800;color:var(--t1)">📊 Controle do chopp (o mesmo do Painel — só consulta)</div>
+    <div style="font-size:10.5px;color:var(--t3);line-height:1.4;margin-top:2px">Barris usados (pela contagem) × canecas vendidas ÷ 128. O barril pela metade na linha não conta como falta.</div>
+    ${bloco(v.j.fechada, `Semana ${dm(v.W1)} → ${dm(v.W)}`)}${bloco(v.j.acomp, `Esta semana ${dm(v.W)} → ${dm(v.QUI)}`)}
+    <div style="font-size:10.5px;font-weight:700;color:var(--t3);margin-top:8px">Pergunta diária — últimos 7 dias (✓ nenhum · 🍺 finalizados · — sem resposta)</div>
+    <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:2px;margin-top:3px">${resp}</div>
+  </div>`;
+}
+
 async function _confirmarFinalizarBarril(id) {
   document.getElementById('modalFinalizarBarril')?.remove();
   const b = barrisAtivos.find(function(x) { return x.id === id; });
@@ -13588,6 +13744,7 @@ async function _confirmarFinalizarBarril(id) {
     // esse acerto automático (junto do de receber entrega, abaixo) que mantém
     // vazios+cheios sempre batendo com a base, sem gerar divergência falsa.
     await _ajustarBarrisVaziosAuto(b.catalogo_id, 1, 'sistema (barril finalizado)');
+    await _barrisRespRegistrarFinalizacao();   // a pergunta diária de hoje vira SIM (Etapa 3)
     showToast('✅ Barril finalizado.');
     carregarBarris();
   } catch (e) {
@@ -14512,6 +14669,7 @@ sbPull(false).then(() => {
   _atualizarTravaNotaFiscal();
   _atualizarTravaEntregas();
   _checarBarrisSemanalPendencia();
+  _checarBarrisRespostaDiaria();
   // Depois do sbPull: urgenciaTemplate só existe a partir daí (vem de gn_lojas.all_data).
   _checarUrgenciaPendencia();
 });

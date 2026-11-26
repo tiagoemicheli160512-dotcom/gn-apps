@@ -16659,31 +16659,16 @@ async function _loadChoppControle() {
     if (!cont || !ent || !vend) { _choppData = { erro: true }; return; }
     const G = window.gnChoppControle;
     const inicio = (window.gnVendidos && window.gnVendidos.INICIO) || '2026-11-23';
+    // Respostas da pergunta diária do app Lojas (últimos 7 dias) — o Painel mostra quem respondeu.
+    const desde7 = dia(_carnesISO(new Date()), -6);
+    const resp = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_barris_resposta_diaria?loja_slug=in.(${slugs.join(',')})&dia=gte.${desde7}&select=loja_slug,dia,resposta,finalizados,respondido_por`, H, 'chopp:respostas', []);
     const porLoja = {};
     lojas.forEach(k => {
       const slug = LOJA_SLUG_HOME[k];
-      const rows = cont.filter(r => r.loja_slug === slug);
-      const daSemana = s => rows.filter(r => r.semana_inicio === s);
-      const quando = rs => rs.reduce((m, r) => (r.criado_em > m ? r.criado_em : m), '');
-      const janela = (sIni, sFim, dias) => {
-        const a = daSemana(sIni), b = daSemana(sFim);
-        if (!a.length || !b.length) return { semContagem: !a.length ? sIni : sFim };
-        if (dias[0] < inicio && dias[dias.length - 1] < inicio) return { antesDosVendidos: true };
-        const tA = quando(a), tB = quando(b);
-        const out = {};
-        ['CLARO', 'VINHO'].forEach(tipo => {
-          const entradas = ent.filter(e => e.loja_slug === slug && _tipoBarrilEntrega(e) === tipo && e.criado_em > tA && e.criado_em <= tB).length;
-          const vRows = vend.filter(v => _normLoja(v.loja) === k && dias.includes(String(v.data).slice(0, 10)));
-          const litros = vRows.reduce((s, v) => s + (+((v.totais || {})[tipo === 'CLARO' ? 'chopp_l_claro' : 'chopp_l_vinho']) || 0), 0);
-          out[tipo] = G.fechar({ ini: a.filter(r => r.tipo === tipo).map(r => r.status), fim: b.filter(r => r.tipo === tipo).map(r => r.status),
-                                 entradas, litros, diasVend: vRows.length, diasTotal: dias.length });
-        });
-        return out;
-      };
-      porLoja[k] = {
-        fechada: janela(W1, W, [0, 1, 2, 3, 4, 5, 6].map(n => dia(W1, n))),
-        acomp: janela(W, QUI, [0, 1, 2].map(n => dia(W, n))),
-      };
+      const j = G.janelasLoja({ cont: cont.filter(r => r.loja_slug === slug), ent: ent.filter(e => e.loja_slug === slug), tipoDe: _tipoBarrilEntrega,
+        vend: vend.filter(v => _normLoja(v.loja) === k), W1, W, QUI, inicio });
+      porLoja[k] = { fechada: j.fechada, acomp: j.acomp,
+        respostas: [0, 1, 2, 3, 4, 5, 6].map(n => { const d = dia(desde7, n); return { dia: d, r: (resp || []).find(x => x.loja_slug === slug && x.dia === d) || null }; }) };
     });
     _choppData = { porLoja, W, W1, QUI };
   } catch (e) {
@@ -16709,6 +16694,19 @@ function _choppCelulaHtml(r, emoji) {
     ${emoji} usados <b>${n(r.consumido)}</b> barril (${n(r.iniEq)} + ${n(r.entradas)} chegaram − ${n(r.fimEq)}) · vendidos <b>${n(r.vendidoBarris)}</b> (${r.canecas} canecas)
     <div style="font-weight:800;color:${cor}">${veredito}</div></div>`;
 }
+// "Algum barril foi finalizado?" — a pergunta diária do app Lojas, nos últimos 7 dias:
+// 🍺N = respondeu sim (N finalizados) · ✓ = nenhum · — = ninguém respondeu.
+function _choppRespostasHtml(lista) {
+  if (!Array.isArray(lista)) return '';
+  const semResp = lista.filter(x => !x.r).length;
+  const cel = x => {
+    const d = x.dia.slice(8, 10) + '/' + x.dia.slice(5, 7);
+    const v = !x.r ? '<span style="color:var(--txt-red);font-weight:800">—</span>' : x.r.resposta === 'SIM' ? `<span style="color:#b45309;font-weight:800">🍺${x.r.finalizados || ''}</span>` : '<span style="color:var(--txt-green);font-weight:800">✓</span>';
+    return `<div class="chopp-resp" data-dia="${x.dia}" data-r="${x.r ? x.r.resposta : ''}" title="${x.r ? window.escapeHtml((x.r.respondido_por || '') + (x.r.resposta === 'SIM' ? ' · ' + (x.r.finalizados || 0) + ' finalizado(s)' : ' · nenhum finalizado')) : 'sem resposta'}" style="text-align:center;min-width:0"><div style="font-size:9px;color:var(--t3)">${d}</div><div style="font-size:11px">${v}</div></div>`;
+  };
+  return `<div style="margin-top:4px"><div style="font-size:9.5px;color:var(--t3);font-weight:700">Pergunta diária "algum barril acabou?" — últimos 7 dias${semResp ? ` · <span style="color:var(--txt-red)">${semResp} sem resposta</span>` : ''}</div>
+    <div style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:2px;margin-top:2px">${lista.map(cel).join('')}</div></div>`;
+}
 function _choppControleHtml() {
   if (!window.gnChoppControle) return '';
   if (!_choppData) { if (!_choppLoading) _loadChoppControle(); return ''; }
@@ -16724,7 +16722,7 @@ function _choppControleHtml() {
   };
   const linhas = Object.keys(porLoja).sort((a, b) => (LOJA_DISPLAY[a] || a).localeCompare(LOJA_DISPLAY[b] || b)).map(k => {
     const p = porLoja[k];
-    const corpo = bloco(p.fechada, `Semana fechada ${dm(W1)} → ${dm(W)}`) + bloco(p.acomp, `Acompanhamento ${dm(W)} → ${dm(QUI)} (indicativo)`);
+    const corpo = bloco(p.fechada, `Semana fechada ${dm(W1)} → ${dm(W)}`) + bloco(p.acomp, `Acompanhamento ${dm(W)} → ${dm(QUI)} (indicativo)`) + _choppRespostasHtml(p.respostas);
     return `<div class="chopp-loja" data-loja="${k}" style="padding:6px 0;border-top:1px dashed rgba(0,0,0,.1)"><div style="font-size:11.5px;font-weight:800;color:var(--t1)">${LOJA_DISPLAY[k] || k}</div>${corpo}</div>`;
   }).join('');
   const G = window.gnChoppControle;
