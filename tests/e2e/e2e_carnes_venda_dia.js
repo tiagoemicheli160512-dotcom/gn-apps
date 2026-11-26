@@ -104,7 +104,10 @@ const ESPERADO_BANGU    = ['2.000', '1.235', '—', '—', '—', '—', '—'];
       const txt = dv.textContent.replace(/\s+/g, ' ').trim();
       const nome = txt.split(/✅|⚠|💰|sem faturamento/)[0].trim();
       if (!nome) return;
-      const linhas = [...dv.querySelectorAll('tr')];
+      // Só a GRADE dia a dia (a tabela que tem a linha da venda): desde 26/11/2026 o card tem
+      // outras tabelas (esperado × contado, saldo agora), que não são o assunto deste teste.
+      const grade = [...dv.querySelectorAll('table')].find(t => /Venda \(R\$\)/.test(t.textContent)) || dv.querySelector('table');
+      const linhas = grade ? [...grade.querySelectorAll('tr')] : [];
       const tr = linhas.find(t => /Venda \(R\$\)/.test(t.textContent));
       const cabecalho = linhas.length ? [...linhas[0].children].map(c => c.textContent.trim()) : [];
       cards[nome] = {
