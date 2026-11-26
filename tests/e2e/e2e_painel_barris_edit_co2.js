@@ -41,7 +41,9 @@ const BOULEVARD = (quinta) => [
     const out = await page.evaluate(async ({ linhas, fazer }) => {
       window.gnFetchJson = async (url, h, c, fb) => c === 'barrisSem:contagens' ? linhas : (fb === undefined ? [] : fb);
       renderDashboard = () => {}; window.alert = m => { window.__alert = m; };
-      session = { nome: 'Nathalia', cargo: 'supervisor', loja: 'GERAL', permissoes: {} };
+      // Desde 26/11/2026 só o MESTRE edita barris ("isso só mestra") — o teste edita como
+      // mestre; o bloco do fim confere que supervisão não abre nem grava.
+      session = { nome: 'Nathalia', cargo: 'mestre', loja: 'GERAL', permissoes: {} };
       LOJAS_LISTA = ['BOULEVARD'];
       await _loadBarrisSemanalGerencia();
       _abrirEditarBarrisLoja('BOULEVARD');
@@ -79,6 +81,34 @@ const BOULEVARD = (quinta) => [
   check('e o cheio novo entra na quinta (26/11, rodada QUI), sem tocar na de segunda', p4.length === 1 && p4[0].semana_inicio === '2026-11-26' && p4[0].rodada === 'QUI' && !d.reqs.some(r => r.m === 'DELETE'), d.reqs);
 
   check('nenhum erro de JavaScript', todos.length === 0, todos);
+  // 6. Só o mestre: supervisão não vê o botão, não abre a edição e não grava.
+  {
+    const ctx = await browser.newContext();
+    const reqsSup = [];
+    await ctx.route('**/rest/v1/**', r => { const m = r.request().method(); if (m !== 'GET') reqsSup.push(m + ' ' + r.request().url()); return r.fulfill({ status: 200, contentType: 'application/json', body: '[]' }); });
+    const page = await ctx.newPage();
+    await page.goto('file://' + HOME);
+    await page.waitForFunction(() => { try { return typeof _loadBarrisSemanalGerencia === 'function'; } catch (e) { return false; } }, null, { timeout: 30000 });
+    const sup = await page.evaluate(async (linhas) => {
+      window.gnFetchJson = async (url, h, c, fb) => c === 'barrisSem:contagens' ? linhas : (fb === undefined ? [] : fb);
+      renderDashboard = () => {}; window.alert = m => { window.__alert = m; };
+      session = { nome: 'Sup', cargo: 'supervisor', loja: 'GERAL', permissoes: {} };
+      LOJAS_LISTA = ['BOULEVARD'];
+      await _loadBarrisSemanalGerencia();
+      const temBotao = /_abrirEditarBarrisLoja/.test(_buildBarrisSemanalPanel());
+      session = { nome: 'M', cargo: 'mestre', loja: 'GERAL', permissoes: {} };
+      const mestreTem = /_abrirEditarBarrisLoja/.test(_buildBarrisSemanalPanel());
+      session = { nome: 'Sup', cargo: 'supervisor', loja: 'GERAL', permissoes: {} };
+      _abrirEditarBarrisLoja('BOULEVARD');
+      const abriu = _barrisSemEditLoja !== null;
+      _barrisSemEditLoja = 'BOULEVARD'; _barrisSemEditItens = { CLARO: [], VINHO: [] };
+      await _salvarEdicaoBarrisLoja();
+      return { temBotao, mestreTem, abriu, alerta: window.__alert || null };
+    }, BOULEVARD('2026-11-23T20:00:00'));
+    await ctx.close();
+    check('supervisão não vê o ✏️ Editar, não abre a edição e não grava nada (só mestre)', sup.mestreTem && !sup.temBotao && !sup.abriu && /mestre/.test(sup.alerta || '') && !reqsSup.length, { sup, reqsSup });
+  }
+
   await browser.close();
   console.log(`\n${ok} ok, ${falhou} falhou`);
   process.exit(falhou ? 1 : 0);

@@ -464,6 +464,7 @@
 <script src="gn-validade-acesso.js"></script>
 <script src="gn-utensilios-acesso.js"></script>
 <script src="gn-utensilios-quebras.js"></script>
+<script src="gn-carnes-diario.js"></script>
 <script src="gn-semlanc-acesso.js"></script>
 <script src="gn-avaliacoes-pesos.js"></script>
 <script src="gn-comissoes-calendario.js"></script>
@@ -16284,6 +16285,7 @@ let _barrisSemEditSalvando = false;
 // validade, então linha a linha só dava trabalho (mesma ideia dos vazios de chopp).
 let _barrisSemEditCo2 = null;   // { rodada: 'SEG'|'QUI', cheio, vazio, cheio0, vazio0 }
 function _abrirEditarBarrisLoja(lojaKey){
+  if (!_dreRedeMestreLogado()) return;
   const d = _barrisSemGerenciaData && _barrisSemGerenciaData.porLoja[lojaKey];
   if (!d) return;
   _barrisSemEditLoja = lojaKey;
@@ -16354,6 +16356,7 @@ function _editQtdVaziosChange(tipo, el){
   _barrisSemEditItens[tipo] = outros.concat(finais);
 }
 async function _salvarEdicaoBarrisLoja(){
+  if (!_dreRedeMestreLogado()) { alert('Só o mestre edita os barris.'); return; }
   if (_barrisSemEditSalvando || !_barrisSemEditLoja || !_barrisSemEditItens) return;
   const lojaKey = _barrisSemEditLoja;
   const d = _barrisSemGerenciaData.porLoja[lojaKey];
@@ -16675,7 +16678,8 @@ function _buildBarrisSemanalPanel(){
         </div>`
       : '';
     const editando = _barrisSemEditLoja === k;
-    const editBtn = `<button onclick="_abrirEditarBarrisLoja('${k}')" title="Editar (supervisão)" style="background:none;border:1px solid rgba(0,0,0,.15);border-radius:6px;color:var(--t2);font-size:10px;padding:2px 7px;cursor:pointer;font-family:inherit">✏️ Editar</button>`;
+    // Só o mestre edita (26/11/2026: "isso só mestra" — mesma regra da correção de carnes).
+    const editBtn = !_dreRedeMestreLogado() ? '' : `<button onclick="_abrirEditarBarrisLoja('${k}')" title="Editar (mestre)" style="background:none;border:1px solid rgba(0,0,0,.15);border-radius:6px;color:var(--t2);font-size:10px;padding:2px 7px;cursor:pointer;font-family:inherit">✏️ Editar</button>`;
     const painelEdicao = editando ? _buildEditPanelBarris(k) : '';
     return `<div style="background:var(--s2);border:1px solid rgba(0,0,0,.08);border-left:3px solid ${COR_LOJA[k]||'#F97316'};border-radius:12px;padding:11px 14px;margin-bottom:8px;box-shadow:0 1px 3px rgba(0,0,0,.06)">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
@@ -16803,6 +16807,28 @@ async function _carnesBuscarSemana(off) {
       H, 'carnesGerencia:vendidos', null),
   ]);
   if (!rows) return { erro: true, iniISO, fimISO };
+  // Itens de carne do catálogo (RJ pelo item_id; SP pela origem_item_id) e o que está pedido e
+  // ainda "aguardando" no recebimento — a previsão de entrega, igual à da Coca em Vendidos.
+  // Complemento: falhou, a aba segue sem a previsão.
+  const cat = await _carnesCatalogo();
+  let provAg = null, recebHora = null;
+  if (cat) {
+    const ids = Object.keys(cat);
+    const desde = _carnesISO(new Date(ini.getTime() - 21 * 864e5));
+    [provAg, recebHora] = ids.length ? await Promise.all([
+      window.gnFetchJson(
+        `${SB_URL}/rest/v1/gn_provisoes?status=eq.AGUARDANDO&catalogo_id=in.(${ids.join(',')})&data_entrega=gte.${desde}&data_entrega=lte.${fimISO}` +
+        `&select=id,loja_slug,catalogo_id,data_entrega,data_entrega_fim,qtd_prevista,fornecedor&order=data_entrega.asc`,
+        H, 'carnesGerencia:provAg', null),
+      // A HORA em que cada entrega foi conferida: antes das 11h ela já está na contagem do
+      // dia; depois, só na do dia seguinte (gn-carnes-diario.js). Complemento: sem ela, toda
+      // entrada vai pra contagem seguinte (o caso normal, entrega à tarde).
+      window.gnFetchJson(
+        `${SB_URL}/rest/v1/gn_provisoes?catalogo_id=in.(${ids.join(',')})&data_entrega=gte.${_carnesISO(new Date(ini.getTime() - 7 * 864e5))}&data_entrega=lte.${fimISO}` +
+        `&select=loja_slug,catalogo_id,gn_recebimentos!inner(qtd_recebida,validado_em)`,
+        H, 'carnesGerencia:recebHora', null),
+    ]) : [[], []];
+  }
   // Faturamento é complemento, não requisito: se só ele falhar a aba continua mostrando os
   // kg, que é o dado principal — e avisa que a razão está de fora.
   const fatFalhou = !fatRows;
@@ -16818,7 +16844,8 @@ async function _carnesBuscarSemana(off) {
     .forEach(k => { porLoja[k] = { k, carnes: null, semana_inicio: null, updated_at: null, fat: 0,
                                    fatDia: [null, null, null, null, null, null, null],
                                    rodizios: 0, rodizioLancado: false, foraDoBuffet: (window.GN_BUFFET_FORA || []).includes(k),
-                                   vendDia: [null, null, null, null, null, null, null] }; });
+                                   rodDia: [null, null, null, null, null, null, null],
+                                   vendDia: [null, null, null, null, null, null, null], provAg: [] }; });
   (rodRows || []).forEach(r => {
     const k = _normLoja(r.loja);
     if (!porLoja[k] || porLoja[k].foraDoBuffet) return;
@@ -16828,6 +16855,32 @@ async function _carnesBuscarSemana(off) {
     const n = v => Math.max(0, parseInt(v, 10) || 0);
     porLoja[k].rodizios += n(r.rodizio_inteira) + n(r.rodizio_meia);
     if (r.rodizio_inteira != null || r.rodizio_meia != null) porLoja[k].rodizioLancado = true;
+    // Por dia também: o esperado × contado da carne de sol desconta o rodízio do dia.
+    const di = _carnesDiaIdx(ini, r.data);
+    if (di >= 0 && (r.rodizio_inteira != null || r.rodizio_meia != null))
+      porLoja[k].rodDia[di] = (porLoja[k].rodDia[di] || 0) + n(r.rodizio_inteira) + n(r.rodizio_meia);
+  });
+  const horaCont = (window.gnCarnesDiario && window.gnCarnesDiario.HORA_CONTAGEM) || 11;
+  (recebHora || []).forEach(p => {
+    const info = window.gnLojaPorChave ? window.gnLojaPorChave(p.loja_slug) : null;
+    const k = info ? _normLoja(info.userKey) : null;
+    const corte = cat && cat[p.catalogo_id];
+    if (!k || !porLoja[k] || !corte) return;
+    (Array.isArray(p.gn_recebimentos) ? p.gn_recebimentos : [p.gn_recebimentos]).forEach(r => {
+      if (!r || !r.validado_em) return;
+      const dt = new Date(r.validado_em);
+      if (dt.getHours() >= horaCont) return;
+      const di = _carnesDiaIdx(ini, _carnesISO(dt));
+      if (di < 0) return;
+      const a = porLoja[k].antesDaContagem = porLoja[k].antesDaContagem || {};
+      (a[corte] = a[corte] || [0, 0, 0, 0, 0, 0, 0])[di] += parseFloat(r.qtd_recebida) || 0;
+    });
+  });
+  (provAg || []).forEach(p => {
+    const info = window.gnLojaPorChave ? window.gnLojaPorChave(p.loja_slug) : null;
+    const k = info ? _normLoja(info.userKey) : null;
+    if (!k || !porLoja[k] || !cat || !cat[p.catalogo_id]) return;
+    porLoja[k].provAg.push(Object.assign({ corte: cat[p.catalogo_id] }, p));
   });
   // Os sete dias como TEXTO, pra casar com data_operacao por string. Montar um Date a
   // partir de "2026-10-29" o lê como meia-noite UTC: num fuso a oeste o getDay() devolve
@@ -16864,7 +16917,43 @@ async function _carnesBuscarSemana(off) {
       || (r.semana_inicio === iniISO && atual.semana_inicio !== iniISO);
     if (melhor) { atual.carnes = r.carnes; atual.semana_inicio = r.semana_inicio; atual.updated_at = r.updated_at; }
   });
-  return { porLoja, iniISO, fimISO, fatFalhou, rodFalhou, vendFalhou };
+  return { porLoja, iniISO, fimISO, fatFalhou, rodFalhou, vendFalhou, provFalhou: !cat || provAg === null, catCarnes: cat };
+}
+
+// Os 4 cortes no catálogo, das duas regiões: {catalogo_id: corte}. Os números são os do
+// catálogo do RIO (os mesmos de CARNES_PEDIDO_ITEM_ID no Check-list); em São Paulo a mesma
+// carne é outra linha, ligada pela origem_item_id. Guardado: não muda durante a sessão.
+const CARNES_ITEM_ID_RJ = { carne_sol: 207, carne_seca: 209, picanha: 392, camarao: 237 };
+let _carnesCatCache = null;
+async function _carnesCatalogo() {
+  if (_carnesCatCache) return _carnesCatCache;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const ids = Object.values(CARNES_ITEM_ID_RJ).join(',');
+  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_catalogo?or=(item_id.in.(${ids}),origem_item_id.in.(${ids}))&select=id,item_id,origem_item_id,regiao`, H, 'carnesGerencia:cat', null);
+  if (!rows) return null;
+  const porItem = {}; Object.entries(CARNES_ITEM_ID_RJ).forEach(([k, v]) => { porItem[v] = k; });
+  const map = {};
+  _carnesCatRegiao = {};
+  rows.forEach(r => {
+    const base = r.regiao === 'SP' ? r.origem_item_id : r.item_id;
+    if (porItem[base]) { map[r.id] = porItem[base]; _carnesCatRegiao[r.id] = r.regiao; }
+  });
+  _carnesCatCache = map;
+  return map;
+}
+let _carnesCatRegiao = {};
+// catalogo_id de um corte pra uma loja (RJ ou SP — a loja usa o catálogo da região dela).
+function _carnesCatIdDe(lojaKey, corte) {
+  const info = (window.GN_LOJAS || []).find(l => _normLoja(l.userKey) === lojaKey);
+  const reg = (info && info.regiao) || 'RJ';
+  return Object.keys(_carnesCatCache || {}).find(id => _carnesCatCache[id] === corte && (_carnesCatRegiao[id] || 'RJ') === reg) || null;
+}
+// Índice 0..6 do dia (texto 'YYYY-MM-DD') na semana que começa em `ini` — por texto, pelo
+// mesmo motivo do diasISO logo acima (meia-noite UTC cai no dia anterior a oeste).
+function _carnesDiaIdx(ini, dataTxt) {
+  const t = String(dataTxt || '').slice(0, 10);
+  for (let i = 0; i < 7; i++) { const d = new Date(ini); d.setDate(d.getDate() + i); if (_carnesISO(d) === t) return i; }
+  return -1;
 }
 
 // Conta de um corte. Devolve null em `contagem` quando a loja não lançou — null e zero não
@@ -17292,6 +17381,233 @@ function _carnesNavSemana(dir) {
   renderDashboard();
 }
 
+/* ── Esperado × contado, previsão de entrega e correção do mestre (26/11/2026) ─────────
+   O cálculo mora em gn-carnes-diario.js (o mesmo que a aba de acompanhamento da loja vai
+   usar). Aqui só se monta a entrada dele — vendidos do dia em kg, com o rodízio na carne
+   de sol — e se desenha. */
+function _carnesVendKgDia(d, corte) {
+  return (d.vendDia || []).map((t, i) => {
+    if (!t) return null;
+    let kg = Number(t[corte]) || 0;
+    // Rodízio a 250 g na carne de sol, como no fechamento da semana. Sem caixa lançado no
+    // dia o rodízio fica fora (é ~6% da carne de sol — não vale travar o dia por isso).
+    if (corte === 'carne_sol' && !d.foraDoBuffet && d.rodDia && d.rodDia[i]) kg += d.rodDia[i] * CARNE_SOL_POR_RODIZIO_KG;
+    return kg;
+  });
+}
+const _carnesKg1 = v => (Math.round(v * 10) / 10).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+function _carnesDiarioHtml(k, d, vigente) {
+  const G = window.gnCarnesDiario;
+  if (!G || !d.carnes) return '';
+  const kg = _carnesKg1;
+  // Semana em andamento: dia que ainda não chegou fica em branco (não é "sem dado").
+  const hojeIdx = vigente ? (new Date().getDay() + 6) % 7 : 99;
+  const linhas = CARNES_DEF_HOME.map(c => {
+    const lista = G.dias(c.key, d.carnes[c.key], _carnesVendKgDia(d, c.key), (d.antesDaContagem || {})[c.key]);
+    const rs = G.resumo(lista);
+    const cel = x => {
+      if (x.i > hojeIdx) return `<td class="carnes-dd" data-status="futuro" style="padding:2px 3px;text-align:center;border-top:1px dashed rgba(0,0,0,.07);color:var(--t4);${x.i === 7 ? 'border-left:1px solid rgba(0,0,0,.12);' : ''}">·</td>`;
+      const tip = (x.esperado === null ? (x.motivo || '') :
+        `esperado ${kg(x.esperado)} = ${G.DIAS_LABEL[x.base]} ${kg(x.baseValor)}${x.entBruta ? ` + chegou ${kg(x.entLiq)}${x.entLiq !== x.entBruta ? ` (${kg(x.entBruta)} − salga)` : ''}` : ''} − vendido ${kg(x.vend)}`)
+        + (x.compensa ? ` · compensou com ${x.compensa}: carne contada um dia depois (salga?), não é perda` : '');
+      const top = x.contado === null ? '<span style="color:var(--t4)">—</span>' : kg(x.contado);
+      const cor = x.status === 'ok' ? 'var(--txt-green)' : x.status === 'falta' ? 'var(--txt-red)' : x.status === 'sobra' ? 'var(--txt-amber)' : 'var(--t4)';
+      const bot = x.status === 'ok' ? '✓' : x.status === 'falta' || x.status === 'sobra' ? (x.compensa ? '↔' : '') + (x.dif > 0 ? '+' : '') + kg(x.dif)
+        : x.status === 'sem_contagem' ? `esp. ${kg(x.esperado)}` : (x.faltaVend.length ? 's/ vend.' : '');
+      return `<td class="carnes-dd" data-status="${x.status}"${x.compensa ? ' data-compensa="1"' : ''} title="${window.escapeHtml(tip)}" style="padding:2px 3px;text-align:center;font-variant-numeric:tabular-nums;border-top:1px dashed rgba(0,0,0,.07);${x.i === 7 ? 'border-left:1px solid rgba(0,0,0,.12);' : ''}">
+        ${top}<div style="font-size:8.5px;font-weight:800;color:${cor};line-height:1.2">${bot}</div></td>`;
+    };
+    const tot = (rs.falta || rs.sobra || rs.compensados) && !(rs.falta || rs.sobra) ? '<div style="font-size:8.5px;color:var(--t3);font-weight:800">↔</div>' : (rs.falta || rs.sobra) ? `<div style="font-size:8.5px;line-height:1.25">${rs.falta ? `<span style="color:var(--txt-red);font-weight:800">${kg(rs.kgFalta)}</span>` : ''}${rs.falta && rs.sobra ? ' ' : ''}${rs.sobra ? `<span style="color:var(--txt-amber);font-weight:800">+${kg(rs.kgSobra)}</span>` : ''}</div>` : (rs.ok ? '<div style="font-size:8.5px;color:var(--txt-green);font-weight:800">✓</div>' : '<div style="font-size:8.5px;color:var(--t4)">—</div>');
+    return `<tr class="carnes-dd-linha" data-corte="${c.key}"><td style="padding:2px 4px;color:var(--t2);font-weight:700;white-space:nowrap;border-top:1px dashed rgba(0,0,0,.07);position:sticky;left:0;z-index:1;background:var(--s2);box-shadow:1px 0 0 var(--b3)">${c.label}${tot}</td>${lista.map(cel).join('')}</tr>`;
+  }).join('');
+  return `<div class="carnes-diario" style="margin-top:8px;border-top:1px solid rgba(0,0,0,.10);padding-top:7px">
+    <div style="font-size:9.5px;color:var(--t3);font-weight:700;margin-bottom:4px">⚖️ ESPERADO × CONTADO · <span style="color:var(--t4);font-weight:400">em cima o que foi contado; embaixo a diferença pro esperado (contagem anterior + o que chegou entre as duas contagens − vendidos do dia anterior). <span style="color:var(--txt-green);font-weight:700">✓</span> até ${G.MARGEM_KG} kg · <span style="color:var(--txt-red);font-weight:700">−</span> falta · <span style="color:var(--txt-amber);font-weight:700">+</span> sobra · <b>↔</b> falta e sobra do mesmo tamanho em dias seguidos: carne contada um dia depois, não é perda. Toque e segure na célula pra ver a conta.</span></div>
+    <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:9.5px;width:100%;min-width:460px">
+      <tr><th style="text-align:left;padding:2px 4px;color:var(--t3);font-weight:700;position:sticky;left:0;z-index:1;background:var(--s2);box-shadow:1px 0 0 var(--b3)">Corte · semana</th>${G.DIAS_LABEL.slice(1).map((l, i) => `<th style="padding:2px 3px;text-align:center;color:var(--t3);font-weight:700;${i === 6 ? 'border-left:1px solid rgba(0,0,0,.12)' : ''}">${l}</th>`).join('')}</tr>
+      ${linhas}
+    </table></div>
+    <div style="font-size:9px;color:var(--t4);margin-top:3px;line-height:1.45">Entrada já descontada da salga (carne de sol −${G.PERDA_SALGA.carne_sol * 100}%, carne seca −${G.PERDA_SALGA.carne_seca * 100}%). A carne entra na primeira contagem depois que chegou: conferida antes das 11h já está na contagem do dia; depois, na do dia seguinte. A que chega na segunda sempre fica pra terça. "Seg seg." é o fechamento: a contagem da segunda seguinte. Dia sem vendidos lançados não é comparado.</div>
+  </div>`;
+}
+// Semana em andamento: o que deveria ter agora (antes da venda de hoje) e o que está a chegar.
+function _carnesPrevisaoHtml(k, d, vigente) {
+  const G = window.gnCarnesDiario;
+  if (!G) return '';
+  const kg = _carnesKg1;
+  const hojeISO = _carnesISO(new Date());
+  const ag = (d.provAg || []);
+  const aChegar = corte => ag.filter(p => p.corte === corte);
+  const aChegarTxt = corte => aChegar(corte).map(p => {
+    const lim = p.data_entrega_fim || p.data_entrega;
+    const atras = lim < hojeISO;
+    return `<span style="white-space:nowrap;${atras ? 'color:var(--txt-red);font-weight:800' : ''}">${kg(parseFloat(p.qtd_prevista) || 0)} kg · ${_carnesDM(p.data_entrega)}${atras ? ' ⚠ atrasada' : ''}</span>`;
+  }).join('<br>') || '<span style="color:var(--t4)">—</span>';
+  if (!vigente) {
+    const atrasadas = ag.filter(p => (p.data_entrega_fim || p.data_entrega) < hojeISO);
+    if (!atrasadas.length) return '';
+    return `<div class="carnes-prev-atrasada" style="margin-top:6px;font-size:9.5px;color:var(--txt-red);font-weight:700;line-height:1.4">⚠ Entrega de carne desta semana ainda "aguardando" no recebimento: ${atrasadas.map(p => `${(CARNES_DEF_HOME.find(c => c.key === p.corte) || {}).label || p.corte} ${kg(parseFloat(p.qtd_prevista) || 0)} kg (${_carnesDM(p.data_entrega)})`).join(' · ')} — se chegou e não foi confirmada, a conta acusa falta que não existe.</div>`;
+  }
+  if (!d.carnes) return '';
+  const hojeIdx = (new Date().getDay() + 6) % 7;
+  const linhas = CARNES_DEF_HOME.map(c => {
+    const p = G.previsao(c.key, d.carnes[c.key], _carnesVendKgDia(d, c.key), hojeIdx, (d.antesDaContagem || {})[c.key]);
+    if (p.semContagem) return `<tr><td style="padding:2px 4px;color:var(--t2);font-weight:700;white-space:nowrap">${c.label}</td><td colspan="4" style="padding:2px 4px;color:var(--txt-amber);font-weight:700">sem contagem nesta semana</td><td style="padding:2px 3px;text-align:right">${aChegarTxt(c.key)}</td></tr>`;
+    return `<tr class="carnes-prev-linha" data-corte="${c.key}">
+      <td style="padding:2px 4px;color:var(--t2);font-weight:700;white-space:nowrap">${c.label}</td>
+      <td style="padding:2px 3px;text-align:right">${kg(p.baseValor)} <span style="color:var(--t4)">(${p.baseLabel})</span></td>
+      <td style="padding:2px 3px;text-align:right;color:var(--txt-green)">+${kg(p.chegouLiq)}</td>
+      <td style="padding:2px 3px;text-align:right">−${kg(p.vendido)}${p.faltaVend.length ? `<div style="font-size:8.5px;color:var(--txt-amber)">sem ${p.faltaVend.join(', ')}</div>` : ''}</td>
+      <td class="carnes-deve-ter" style="padding:2px 3px;text-align:right;font-weight:800;color:${p.deveTer < 0 ? 'var(--txt-amber)' : 'var(--t1)'}">${kg(p.deveTer)}</td>
+      <td style="padding:2px 3px;text-align:right;font-size:9px">${aChegarTxt(c.key)}</td>
+    </tr>`;
+  }).join('');
+  return `<div class="carnes-previsao" style="margin-top:8px;border-top:1px solid rgba(0,0,0,.10);padding-top:7px">
+    <div style="font-size:9.5px;color:var(--t3);font-weight:700;margin-bottom:3px">📦 SALDO AGORA E O QUE ESTÁ PARA CHEGAR (kg) · <span style="font-weight:400;color:var(--t4)">última contagem + o que chegou depois − vendido = o que deveria ter agora, antes da venda de hoje</span></div>
+    <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:9.5px;width:100%;min-width:400px;font-variant-numeric:tabular-nums">
+      <tr style="color:var(--t3)"><th style="text-align:left;padding:2px 4px">Corte</th><th style="padding:2px 3px;text-align:right">Última contagem</th><th style="padding:2px 3px;text-align:right">Chegou</th><th style="padding:2px 3px;text-align:right">Vendido</th><th style="padding:2px 3px;text-align:right">Deve ter</th><th style="padding:2px 3px;text-align:right">A chegar (pedido)</th></tr>
+      ${linhas}
+    </table></div>
+    ${ag.some(p => (p.data_entrega_fim || p.data_entrega) < hojeISO) ? `<div style="font-size:9.5px;color:var(--txt-red);font-weight:700;margin-top:3px">⚠ Pedido com data já passada e ainda "aguardando" no recebimento — se chegou, falta confirmar na aba Entrega do app Lojas.</div>` : ''}
+  </div>`;
+}
+
+// ── Correção pelo MESTRE (26/11/2026) ─────────────────────────────────────────────────
+// "Incluir a opção de editar o estoque inicial e os valores das entregas (...) a alteração
+// atualiza a informação na raiz." Só o mestre logado — supervisor não tem permissão (decisão
+// do dono: sem senha, basta estar logado como mestre). Grava pelas RPCs
+// gn_carnes_mestre_inicial / gn_carnes_mestre_entrega, que mexem na raiz (contagem do app
+// Lojas e recebimento da aba Entrega) e na cópia do Check-list numa transação só, com o
+// valor anterior guardado em gn_backup_ajustes.
+let _carnesEditLoja = null, _carnesEditReceb = null, _carnesEditMsg = '', _carnesEditSalvando = false;
+function _carnesEditAbrir(k) {
+  if (!_dreRedeMestreLogado()) return;
+  _carnesEditLoja = _carnesEditLoja === k ? null : k;
+  _carnesEditReceb = null; _carnesEditMsg = '';
+  if (_carnesEditLoja) _carnesEditCarregarReceb(k);
+  renderDashboard();
+}
+async function _carnesEditCarregarReceb(k) {
+  const info = (window.GN_LOJAS || []).find(l => _normLoja(l.userKey) === k);
+  const cat = await _carnesCatalogo();
+  if (!info || !cat) { _carnesEditReceb = { erro: true }; renderDashboard(); return; }
+  const ids = Object.keys(cat);
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const { iniISO, fimISO } = _carnesGerData || {};
+  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_provisoes?loja_slug=eq.${encodeURIComponent(info.lojaSlug)}&catalogo_id=in.(${ids.join(',')})&data_entrega=gte.${iniISO}&data_entrega=lte.${fimISO}` +
+    `&select=id,catalogo_id,data_entrega,fornecedor,qtd_prevista,status,gn_recebimentos(id,qtd_recebida,validado_em,validado_por,nota_numero)&order=data_entrega.asc`, H, 'carnesEdit:receb', null);
+  if (_carnesEditLoja !== k) return;
+  if (!rows) { _carnesEditReceb = { erro: true }; renderDashboard(); return; }
+  const ini = new Date(iniISO + 'T12:00:00');
+  const lista = [];
+  rows.forEach(p => {
+    (Array.isArray(p.gn_recebimentos) ? p.gn_recebimentos : p.gn_recebimentos ? [p.gn_recebimentos] : []).forEach(r => {
+      // Mesmo dia que a automação do Check-list usa: o da conferência na portaria, e só sem
+      // ela a data programada.
+      const local = r.validado_em ? _carnesISO(new Date(r.validado_em)) : null;
+      let di = local ? _carnesDiaIdx(ini, local) : -1;
+      if (di < 0) di = _carnesDiaIdx(ini, p.data_entrega);
+      lista.push({ id: r.id, corte: cat[p.catalogo_id], qtd: parseFloat(r.qtd_recebida) || 0, prevista: parseFloat(p.qtd_prevista) || 0,
+                   dia: di >= 0 ? window.gnCarnesDiario.DIAS[di] : null, data: p.data_entrega, fornecedor: p.fornecedor, nota: r.nota_numero, por: r.validado_por });
+    });
+  });
+  _carnesEditReceb = { lista };
+  renderDashboard();
+}
+function _carnesEditHtml(k, d) {
+  if (_carnesEditLoja !== k || !_dreRedeMestreLogado()) return '';
+  const inp = 'box-sizing:border-box;width:84px;border:1px solid rgba(0,0,0,.2);border-radius:7px;padding:5px 6px;font-size:12px;font-family:inherit;background:var(--s1);color:var(--t1);text-align:right';
+  const btn = 'border:none;background:var(--cor);color:#1A1D23;border-radius:7px;padding:5px 10px;font-size:11px;font-weight:800;cursor:pointer;font-family:inherit';
+  const R = _carnesEditReceb;
+  const iniHtml = CARNES_DEF_HOME.map(c => {
+    const v = (d.carnes && d.carnes[c.key] && d.carnes[c.key].inicial);
+    const marca = d.carnes && d.carnes[c.key] && d.carnes[c.key].inicialMestrePor;
+    return `<div style="display:flex;align-items:center;gap:6px;padding:4px 0;border-top:1px dashed rgba(0,0,0,.08)">
+      <span style="flex:1;font-size:11px;font-weight:700;color:var(--t1)">${c.label}${marca ? ` <span style="font-size:9px;color:var(--t3);font-weight:400">· corrigido por ${window.escapeHtml(marca)}</span>` : ''}</span>
+      <input class="carnes-edit-ini" data-corte="${c.key}" inputmode="decimal" value="${_carnesEditNum(v)}" style="${inp}"> <span style="font-size:10px;color:var(--t3)">kg</span>
+      <button onclick="_carnesEditSalvarIni('${k}','${c.key}')" style="${btn}">Salvar</button></div>`;
+  }).join('');
+  const recHtml = !R ? '<div style="font-size:10.5px;color:var(--t3);padding:6px 0">Carregando as entregas da semana…</div>'
+    : R.erro ? '<div style="font-size:10.5px;color:var(--txt-red);padding:6px 0">Não deu pra carregar as entregas agora.</div>'
+    : !R.lista.length ? '<div style="font-size:10.5px;color:var(--t3);padding:6px 0">Nenhuma entrega de carne confirmada nesta semana. (Entrega ainda "aguardando" se confirma na aba Entrega do app Lojas.)</div>'
+    : R.lista.map(r => `<div style="display:flex;align-items:center;gap:6px;padding:4px 0;border-top:1px dashed rgba(0,0,0,.08)">
+        <span style="flex:1;min-width:0;font-size:10.5px;color:var(--t1);line-height:1.35"><b>${(CARNES_DEF_HOME.find(c => c.key === r.corte) || {}).label || r.corte}</b> · ${r.dia ? r.dia : _carnesDM(r.data)} · ${window.escapeHtml(r.fornecedor || '')}<br><span style="color:var(--t3)">pedido ${_carnesKg1(r.prevista)} kg${r.nota ? ' · NF ' + window.escapeHtml(r.nota) : ''}${r.por ? ' · conferido por ' + window.escapeHtml(r.por) : ''}</span></span>
+        <input class="carnes-edit-rec" data-id="${r.id}" inputmode="decimal" value="${_carnesEditNum(r.qtd)}" style="${inp}"> <span style="font-size:10px;color:var(--t3)">kg</span>
+        <button onclick="_carnesEditSalvarRec('${k}','${r.id}')" style="${btn}">Salvar</button></div>`).join('');
+  return `<div class="carnes-edit" style="margin-top:8px;background:var(--s1);border:1px solid rgba(0,0,0,.12);border-radius:10px;padding:9px 11px">
+    <div style="font-size:11.5px;font-weight:800;color:var(--t1)">✏️ Correção do mestre — ${LOJA_DISPLAY[k] || k}</div>
+    <div style="font-size:9.5px;color:var(--t3);line-height:1.45;margin:2px 0 6px">Grava na origem: o estoque inicial vai pra contagem do app Lojas (aba Pedido › Contagem) e a entrega pro recebimento da aba Entrega. O Check-list passa a mostrar o valor corrigido e um aparelho com a tela aberta não desfaz. O valor anterior fica guardado.</div>
+    ${_carnesEditMsg ? `<div class="carnes-edit-msg" style="font-size:10.5px;font-weight:700;margin-bottom:6px;color:${/^⚠/.test(_carnesEditMsg) ? 'var(--txt-red)' : 'var(--txt-green)'}">${window.escapeHtml(_carnesEditMsg)}</div>` : ''}
+    <div style="font-size:10px;font-weight:800;color:var(--t2);margin-top:2px">Estoque inicial (contagem de segunda)</div>${iniHtml}
+    <div style="font-size:10px;font-weight:800;color:var(--t2);margin-top:9px">Entregas recebidas na semana</div>${recHtml}
+  </div>`;
+}
+// Número pro campo, no formato brasileiro e SEM zeros à direita: o app Lojas grava "23.100"
+// (23,1 kg) e trocar só o ponto pela vírgula mostrava "23,100" — que se lê vinte e três mil.
+function _carnesEditNum(v) {
+  const x = parseFloat(String(v == null ? '' : v).replace(',', '.'));
+  return isFinite(x) ? String(Math.round(x * 1000) / 1000).replace('.', ',') : '';
+}
+function _carnesEditValor(sel) {
+  const el = document.querySelector(sel);
+  const v = el ? parseFloat(String(el.value).replace(',', '.')) : NaN;
+  return isFinite(v) && v >= 0 ? v : null;
+}
+async function _carnesEditRpc(fn, body) {
+  const res = await fetch(`${SB_URL}/rest/v1/rpc/${fn}`, { method: 'POST',
+    headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const txt = await res.text();
+  if (!res.ok) throw new Error(txt || ('HTTP ' + res.status));
+  return txt ? JSON.parse(txt) : null;
+}
+async function _carnesEditSalvarIni(k, corte) {
+  if (!_dreRedeMestreLogado() || _carnesEditSalvando) return;
+  const v = _carnesEditValor(`.carnes-edit-ini[data-corte="${corte}"]`);
+  if (v === null) { alert('Valor inválido.'); return; }
+  const info = (window.GN_LOJAS || []).find(l => _normLoja(l.userKey) === k);
+  await _carnesCatalogo();
+  const catId = _carnesCatIdDe(k, corte);
+  if (!info || !catId) { alert('Não achei a loja ou o item de carne no catálogo.'); return; }
+  const label = (CARNES_DEF_HOME.find(c => c.key === corte) || {}).label || corte;
+  if (!confirm(`Corrigir o estoque inicial de ${label} em ${LOJA_DISPLAY[k] || k} para ${_carnesKg1(v)} kg?\n\nMuda a contagem de segunda no app Lojas e a cópia do Check-list.`)) return;
+  _carnesEditSalvando = true;
+  try {
+    await _carnesEditRpc('gn_carnes_mestre_inicial', { p_loja_slug: info.lojaSlug, p_loja_chk: info.chkKey, p_catalogo_id: catId,
+      p_corte: corte, p_semana: _carnesGerData.iniISO, p_valor: v, p_por: (session && session.nome) || 'Mestre' });
+    _carnesEditMsg = `✅ Estoque inicial de ${label} corrigido para ${_carnesKg1(v)} kg.`;
+    await _loadCarnesGerencia();
+  } catch (e) {
+    window.gnLogError && window.gnLogError('carnesEdit:inicial', e);
+    _carnesEditMsg = '⚠ Não gravou: ' + String(e.message || e).slice(0, 160);
+    renderDashboard();
+  } finally { _carnesEditSalvando = false; }
+}
+async function _carnesEditSalvarRec(k, id) {
+  if (!_dreRedeMestreLogado() || _carnesEditSalvando) return;
+  const r = ((_carnesEditReceb && _carnesEditReceb.lista) || []).find(x => x.id === id);
+  const v = _carnesEditValor(`.carnes-edit-rec[data-id="${id}"]`);
+  if (!r) return;
+  if (v === null) { alert('Valor inválido.'); return; }
+  if (v === r.qtd) { _carnesEditMsg = 'Nada mudou.'; renderDashboard(); return; }
+  if (!r.dia) { alert('Não consegui situar essa entrega num dia da semana.'); return; }
+  const info = (window.GN_LOJAS || []).find(l => _normLoja(l.userKey) === k);
+  const label = (CARNES_DEF_HOME.find(c => c.key === r.corte) || {}).label || r.corte;
+  if (!confirm(`Corrigir a entrega de ${label} (${r.dia}) de ${_carnesKg1(r.qtd)} kg para ${_carnesKg1(v)} kg?\n\nMuda o recebimento da aba Entrega e a entrada do Check-list.`)) return;
+  _carnesEditSalvando = true;
+  try {
+    const out = await _carnesEditRpc('gn_carnes_mestre_entrega', { p_recebimento_id: id, p_valor: v, p_por: (session && session.nome) || 'Mestre',
+      p_loja_chk: info.chkKey, p_semana: _carnesGerData.iniISO, p_corte: r.corte, p_dia: r.dia });
+    _carnesEditMsg = out && out.chk_manual
+      ? `⚠ Entrega corrigida para ${_carnesKg1(v)} kg, mas a entrada de ${r.dia} no Check-list foi digitada à mão pela loja e não foi mexida — confira lá.`
+      : `✅ Entrega de ${label} corrigida para ${_carnesKg1(v)} kg.`;
+    await _loadCarnesGerencia();
+    await _carnesEditCarregarReceb(k);
+  } catch (e) {
+    window.gnLogError && window.gnLogError('carnesEdit:entrega', e);
+    _carnesEditMsg = '⚠ Não gravou: ' + String(e.message || e).slice(0, 160);
+    renderDashboard();
+  } finally { _carnesEditSalvando = false; }
+}
+
 function _buildCarnesPanel() {
   const reportBtns = _reportBtnsRowHtml('Carnes');
   if (!_carnesGerLoaded || !_carnesGerData) return reportBtns + _skelPanel(4);
@@ -17437,8 +17753,9 @@ function _buildCarnesPanel() {
     return `<div style="background:var(--s2);border:1px solid rgba(0,0,0,.08);border-left:3px solid ${cor};border-radius:12px;padding:11px 14px;margin-bottom:8px;box-shadow:0 1px 3px rgba(0,0,0,.06)">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px">
         <div style="font-size:12px;font-weight:800;color:var(--t1)">${LOJA_DISPLAY[k]||k}</div>
-        <div style="font-size:10px;font-weight:700;color:${contou ? '#16a34a' : '#dc2626'}">${contou ? '✅ contou' + (quando ? ' · ' + quando : '') : '⚠ não lançou'}</div>
+        <div style="display:flex;align-items:center;gap:6px"><div style="font-size:10px;font-weight:700;color:${contou ? '#16a34a' : '#dc2626'}">${contou ? '✅ contou' + (quando ? ' · ' + quando : '') : '⚠ não lançou'}</div>${_dreRedeMestreLogado() ? `<button class="carnes-edit-btn" onclick="_carnesEditAbrir('${k}')" title="Corrigir estoque inicial e entregas (mestre)" style="background:none;border:1px solid rgba(0,0,0,.15);border-radius:6px;color:var(--t2);font-size:10px;padding:2px 7px;cursor:pointer;font-family:inherit">✏️ Corrigir</button>` : ''}</div>
       </div>
+      ${_carnesEditHtml(k, d)}
       <div style="font-size:10.5px;color:var(--t2);font-weight:700;font-variant-numeric:tabular-nums;margin-bottom:2px">${d.fat > 0 ? '💰 Vendeu ' + _fmtBRL(d.fat) + ' na semana' : '<span style="color:var(--t4);font-weight:400">sem faturamento lançado na semana</span>'}</div>
       ${(() => { const tt = _carnesTotalLoja(d); return !tt ? '' : `<div class="carnes-total-loja" style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;background:var(--fill-sutil);border-radius:8px;padding:5px 8px;margin:4px 0 2px">
         <span style="font-size:11px;font-weight:800;color:var(--t1)">🥩 Total das 4 carnes: ${kg(tt.kg)} kg</span>
@@ -17447,6 +17764,8 @@ function _buildCarnesPanel() {
       ${cortesHtml}
       ${rodHtml}
       ${gradeHtml}
+      ${_carnesDiarioHtml(k, d, vigente)}
+      ${_carnesPrevisaoHtml(k, d, vigente)}
     </div>`;
   }).join('');
 
