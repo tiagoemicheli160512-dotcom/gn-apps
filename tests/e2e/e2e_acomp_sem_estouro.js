@@ -68,7 +68,7 @@ const CHOPP_JS = `
     }, largura);
     const estouros = Object.entries(r.itens).filter(([, v]) => v.w > largura).map(([i, v]) => i + ':' + v.w + 'px');
     check(`${largura} px: nenhum dos 7 detalhes empurra a Home pros lados`, estouros.length === 0, estouros);
-    check(`${largura} px: o detalhe do chopp mostra a frase longa inteira (quebrando linha)`, /canecas \(usou mais chopp do que vendeu\)/.test(r.itens[4].det), r.itens[4].det.slice(0, 300));
+    check(`${largura} px: o detalhe do chopp mostra a frase longa inteira (quebrando linha)`, /faltam \d+ canecas — usou mais chopp do que vendeu/.test(r.itens[4].det), r.itens[4].det.slice(0, 300));
     await ctx.close();
   }
   check('nenhum erro de JavaScript', erros.length === 0, erros);

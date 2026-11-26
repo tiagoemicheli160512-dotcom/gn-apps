@@ -48,8 +48,11 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   check('só falta nos dias: saldo negativo, sem a linha de dias', r.cFalta.status === 'falta' && r.cFalta.texto === '−4,0 kg' && !r.cFalta.texto2, r.cFalta);
   check('chopp em canecas: +0,98 barril = +125 canecas (× 128)', r.cSobra.status === 'sobra' && r.cSobra.texto === '+125 can.', r.cSobra);
   check('perda de chopp: −0,5 barril = −64 canecas', r.cPerda.status === 'falta' && r.cPerda.texto === '−64 can.', r.cPerda);
-  check('detalhe do chopp em canecas (usados pela contagem, vendidas, diferença, rendimento)',
-    /barris usados \(pela contagem\) 1,50 ≈ 192 canecas/.test(r.detTxt) && /Canecas vendidas \(101,5 L\) 290/.test(r.detTxt) && /\+99 canecas \(vendeu mais do que a contagem de barris mostra — conferir\)/.test(r.detTxt) && /193 canecas\/barril \(meta 128\)/.test(r.detTxt), r.detTxt);
+  // 26/11/2026: o detalhe passou a ser a conta em canecas, igual à Coca (início + chegou −
+  // vendeu = deveria ter; contou). Sem a lista dos barris (fixture só com os totais), o início
+  // sai em barris → canecas.
+  check('detalhe do chopp em canecas: 3 barris = 384 + chegou 128 − vendeu 290 = deveria ter 222; contou 2½ = 320 → sobram 98',
+    /3 barris = 384 canecas/.test(r.detTxt) && /chegou 128 \(1 barril\)/.test(r.detTxt) && /vendeu 290 = deveria ter 222/.test(r.detTxt) && /2½ barris = 320 canecas/.test(r.detTxt) && /Contou 320 · deveria ter 222 → ⚠ sobram 98 canecas — vendeu mais do que os barris mostram/.test(r.detTxt), r.detTxt);
   check('detalhe da carne mostra o saldo da semana e explica a oscilação', /Saldo da semana: \+7,1 kg/.test(r.detCarne) && /carne contada um dia depois/.test(r.detCarne), r.detCarne.slice(0, 300));
   check('nenhum erro de JavaScript', erros.length === 0, erros);
   console.log(`\n${ok} OK, ${falhou} falhou`);

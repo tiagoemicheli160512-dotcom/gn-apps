@@ -433,24 +433,19 @@
         '<div style="font-size:9.5px;color:var(--t3,#64748b);margin-top:4px">"Seg seg." é o fechamento: a contagem da segunda seguinte. ↔ falta e sobra do mesmo tamanho em dias seguidos: contagem atrasada, não é perda.</div>';
     }
     if (it.tipo === 'chopp') {
-      var jan = function (j, rot) {
+      var jan = function (j, rot, fimIni) {
         if (!j) return '';
         if (j.semContagem) return '<div style="font-size:11px;color:var(--t3,#64748b);margin-bottom:6px"><b>' + rot + ':</b> sem a contagem de barris de ' + br(j.semContagem) + '.</div>';
         if (j.antesDosVendidos) return '<div style="font-size:11px;color:var(--t3,#64748b);margin-bottom:6px"><b>' + rot + ':</b> antes dos vendidos (lançados desde 23/11).</div>';
         var x = j[it.key]; if (!x) return '';
-        var dif = x.dif == null ? null : x.dif;
-        return '<div style="font-size:11px;font-weight:800;color:var(--t2,#334155);margin:2px 0">' + rot + '</div><table style="border-collapse:collapse;width:100%;margin-bottom:6px">' +
-          [['Barris no início', fmt(x.iniEq, 2)], ['+ chegaram', fmt(x.entradas, 0)], ['− barris no fim', fmt(x.fimEq, 2)],
-           ['= barris usados (pela contagem)', fmt(x.consumido, 2) + ' ≈ ' + fmt(Math.round(x.consumido * CANECAS()), 0) + ' canecas'],
-           ['Canecas vendidas (' + fmt(x.litros, 1) + ' L)', fmt(x.canecas, 0)],
-           ['Diferença', dif === null ? (x.completo ? '—' : 'vendidos incompletos') : (dif > 0 ? '−' + fmt(Math.round(dif * CANECAS()), 0) + ' canecas (usou mais chopp do que vendeu)' : dif < 0 ? '+' + fmt(Math.round(-dif * CANECAS()), 0) + ' canecas (vendeu mais do que a contagem de barris mostra — conferir)' : '0')],
-           ['Rendimento', x.rendimento ? x.rendimento + ' canecas/barril (meta ' + CANECAS() + ')' : '—']].map(function (l) {
-            // white-space:normal: o valor da diferença é uma frase; travado numa linha só ele
-            // empurrava a Home da loja pra 637 px numa tela de 360 (print do dono, 26/11).
-            return '<tr><td style="' + tdS + ';text-align:left;white-space:normal">' + l[0] + '</td><td style="' + tdS + ';font-weight:800;white-space:normal">' + l[1] + '</td></tr>'; }).join('') + '</table>';
+        // Em canecas, dia a dia, igual à Coca (26/11/2026) — o mesmo detalhe do Painel › Barris
+        // e do app Lojas (gnChoppControle.detalheHtml).
+        if (!window.gnChoppControle.detalheHtml) return '';
+        return '<div style="font-size:11px;font-weight:800;color:var(--t2,#334155);margin:2px 0">' + rot + '</div>' +
+          '<div style="margin-bottom:8px">' + window.gnChoppControle.detalheHtml(x, { rotIni: 'Contagem de segunda (' + br(fimIni[0]) + ')', rotFim: fimIni[1] }) + '</div>';
       };
       var ch = p.chopp || {};
-      return cab + jan(ch.fechada, 'Semana fechada ' + br(res.W1) + ' → ' + br(res.W)) + jan(ch.acomp, 'Acompanhamento ' + br(res.W) + ' → ' + br(res.QUI) + ' (indicativo)') +
+      return cab + jan(ch.fechada, 'Semana fechada ' + br(res.W1) + ' → ' + br(res.W), [res.W1, 'Contagem da segunda seguinte (' + br(res.W) + ')']) + jan(ch.acomp, 'Acompanhamento ' + br(res.W) + ' → ' + br(res.QUI) + ' (indicativo)', [res.W, 'Contagem de quinta (' + br(res.QUI) + ')']) +
         '<div style="font-size:9.5px;color:var(--t3,#64748b)">Cada barril vale ' + CANECAS() + ' canecas (meta). Barril pela contagem: cheio 1 · na linha cheio 1 · metade ½ · abaixo da metade ¼ · vazio 0 — o barril pela metade na linha não vira falta.</div>';
     }
     if (it.tipo === 'coca') {

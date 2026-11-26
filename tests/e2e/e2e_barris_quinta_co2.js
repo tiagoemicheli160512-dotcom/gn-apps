@@ -122,10 +122,12 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
     const out = { bangu: card('Bangu'), caxias: card('Caxias'), segBangu: d.BANGU.atual, rel: _barrisSemRelatorioTexto().msg };
     h.remove(); return out;
   });
-  check('Painel › Bangu: "Contagem de quinta (19/11): 🍺 1 · 🍷 0 com chopp ✅ Neto" e CO2 de quinta "2 cheios · 1 vazio"',
-    /Contagem de quinta \(19\/11\): 🍺 1 · 🍷 0 com chopp/.test(painel.bangu || '') && /✅ Neto/.test(painel.bangu) && /CO2: 2 cheios · 1 vazio \(contagem de quinta\)/.test(painel.bangu), painel.bangu);
+  // 26/11/2026: a de quinta mostra as linhas (status + validade), igual à de segunda.
+  check('Painel › Bangu: "Contagem de quinta (19/11): 🍺 Claro 1 · 🍷 Vinho 0 com chopp ✅ Neto" + as linhas, e CO2 de quinta "2 cheios · 1 vazio"',
+    /Contagem de quinta \(19\/11\): 🍺 Claro 1 · 🍷 Vinho 0 com chopp · ✅ Neto 🍺 1× Cheio venc\. 30\/11 🍺 1× Vazio/.test(painel.bangu || '') && /✅ Neto/.test(painel.bangu) && /CO2: 2 cheios · 1 vazio \(contagem de quinta\)/.test(painel.bangu), painel.bangu);
   check('…a contagem de segunda continua a de sempre (Claro 1, sem misturar a de quinta nem o CO2)', painel.segBangu.CLARO === 1 && painel.segBangu.VINHO === 0, painel.segBangu);
   check('Caxias: "Contagem de quinta (19/11) pendente" e CO2 da segunda "0 cheios · 1 vazio"', /Contagem de quinta \(19\/11\) pendente/.test(painel.caxias || '') && /CO2: 0 cheios · 1 vazio \(contagem de segunda\)/.test(painel.caxias), painel.caxias);
+  check('relatório leva as linhas da quinta (não só o total)', /Contagem de quinta: Claro 1 · Vinho 0 com chopp \(Neto\)\n    Claro:\n    - 1x Cheio \(venc\. 30\/11\)\n    - 1x Vazio/.test(painel.rel), painel.rel);
   check('relatório leva a quinta e o CO2', /Contagem de quinta: Claro 1 · Vinho 0 com chopp \(Neto\)/.test(painel.rel) && /CO2: 2 cheios · 1 vazio/.test(painel.rel) && /Contagem de quinta: PENDENTE/.test(painel.rel), painel.rel);
   todos.push(...erros2); await c2.close();
 

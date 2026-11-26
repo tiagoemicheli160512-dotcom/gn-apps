@@ -126,7 +126,10 @@ const RECEB = [{ id: 'pv1', catalogo_id: 'c-sec', data_entrega: '2026-11-23', fo
   check('a hora da conferência vem dos recebimentos das carnes da semana', /gn_recebimentos!inner\(qtd_recebida,validado_em\)/.test(m.horaUrl) && /c-sec/.test(m.horaUrl), m.horaUrl);
 
   // ══ 2. Saldo agora + o que está a chegar ═════════════════════════════════════════════
-  check('saldo agora da picanha: última contagem quinta 60 → deve ter 60', /60,0 \(Qui\)/.test(m.prevPic || '') && /\+0,0 −0,0 60,0/.test(m.prevPic), m.prevPic);
+  // 26/11/2026: nada depois da contagem de hoje sai "—" (era "+0,0 −0,0", que parecia entrega
+  // sumida), com a nota de que as entregas da semana já estão dentro da contagem.
+  check('saldo agora da picanha: última contagem quinta 60 → deve ter 60 (chegou/vendido "—")', /60,0 \(Qui\)/.test(m.prevPic || '') && /\(Qui\) — — 60,0/.test(m.prevPic), m.prevPic);
+  check('…e a nota explica que as entregas da semana já estão na contagem de hoje', /já estão dentro dela/.test(m.prevTxt), m.prevTxt.slice(-500));
   check('carne de sol: quarta 170 + 28,2 (30 − 6%) − vendido (quarta sem lançamento avisada)', /170,0 \(Qua\) \+28,2/.test(m.prevSol || '') && /sem Qua/.test(m.prevSol), m.prevSol);
   check('a chegar: pedido de picanha com data passada aparece como atrasado; camarão com a data', /15,0 kg · 24\/11 ⚠ atrasada/.test(m.prevTxt) && /10,0 kg · 28\/11/.test(m.prevTxt) && /falta confirmar na aba Entrega/.test(m.prevTxt), m.prevTxt.slice(0, 500));
   check('a previsão lê só o que está "aguardando", dos itens de carne', /status=eq\.AGUARDANDO/.test(m.provUrl) && /c-pic/.test(m.provUrl) && /s-pic/.test(m.provUrl), m.provUrl);

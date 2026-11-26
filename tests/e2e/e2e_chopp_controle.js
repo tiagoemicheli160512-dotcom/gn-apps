@@ -103,11 +103,13 @@ const VEND = [
   }, { CONT, ENT, VEND });
   check('o painel de Barris ganha a seção do controle do chopp', p.temSecao);
   check('semana fechada 23/11 → 30/11 da Pedreira: 3,5 + 2 chegaram − 1,5 = 4 barris usados, 4 vendidos (512 canecas) → bate',
-    /Semana fechada 23\/11 → 30\/11/.test(p.ped) && /usados 4 barril \(3,5 \+ 2 chegaram − 1,5\)/.test(p.ped) && /vendidos 4 \(512 canecas\)/.test(p.ped) && p.dados.fechada.CLARO.status === 'ok', { txt: p.ped, d: p.dados.fechada.CLARO });
+    /Semana fechada 23\/11 → 30\/11/.test(p.ped) && /início 448 \+ chegou 256 \(2 barris\) − vendeu 512 = deveria ter 192 · contou 192 canecas/.test(p.ped) && p.dados.fechada.CLARO.status === 'ok', { txt: p.ped, d: p.dados.fechada.CLARO });
   check('o barril que chegou ANTES da contagem de segunda não soma de novo (2 entradas, não 3)', p.dados.fechada.CLARO.entradas === 2, p.dados.fechada.CLARO);
   check('vinho: ½ barril usado sem venda nenhuma → perda', p.dados.fechada.VINHO.status === 'perda', p.dados.fechada.VINHO);
-  check('…e o texto diz "dentro da meta" com o rendimento (128)', /✓ bate — 128 canecas\/barril, dentro da meta/.test(p.ped), p.ped);
-  check('Bangu: vendeu ~1 barril sem barril usado na contagem → "conferir a contagem ou barril que entrou sem registro"', /vendeu 0,98 barril a mais do que usou/.test(p.ban) && /conferir/.test(p.ban), p.ban);
+  check('…e o texto diz "dentro da meta" com o rendimento (128)', /✓ bate — rendeu 128 canecas por barril \(meta 128\), dentro da meta/.test(p.ped), p.ped);
+  check('dia a dia em canecas: 3 cheios + 1 na linha pela metade = 384 + 64 = 448; a semana linha a linha até a contagem seguinte',
+    /Contagem de segunda \(23\/11\): 3 cheios \+ 1 na linha pela metade = 384 \+ 64 = 448 canecas/.test(p.ped) && /seg 23\/11/.test(p.ped) && /dom 29\/11/.test(p.ped) && /Contagem da segunda seguinte \(30\/11\)/.test(p.ped), p.ped);
+  check('Bangu: vendeu ~1 barril sem barril usado na contagem → "conferir a contagem ou barril que entrou sem registro"', /sobram 126 canecas — vendeu mais do que os barris mostram/.test(p.ban) && /conferir/.test(p.ban), p.ban);
   check('acompanhamento segunda → quinta com quarta sem vendidos: sem veredito ainda', /Acompanhamento 30\/11 → 03\/12/.test(p.ped) && p.dados.acomp.CLARO.status === 'parcial' && /vendidos incompletos/.test(p.ped), p.dados.acomp);
   check('lê as três contagens (seg passada, seg, qui), só chopp; entradas e vendidos desde a segunda passada',
     /semana_inicio=in\.\(2026-11-23,2026-11-30,2026-12-03\)/.test(p.urls['chopp:contagens']) && /tipo=in\.\(CLARO,VINHO\)/.test(p.urls['chopp:contagens'])
