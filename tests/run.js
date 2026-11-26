@@ -34,16 +34,19 @@ const REGUAS = [
   // Usada por e2e_tema_app.js com APP=gn-rh (modelo parametrizado, roda à mão).
   ['_base_gn-rh.html',        'gn-rh.html'],
 ];
-if (args.includes('--reguas')) {
+function gerarRegua(alvo, fonte) {
   const { execFileSync } = require('child_process');
+  // maxBuffer explícito: gn-checklist.html passa de 1 MB e estourava o padrão de 1 MB
+  // do execFileSync com ENOBUFS — um erro que não diz nada sobre o que aconteceu.
+  fs.writeFileSync(CAMINHOS.pub(alvo),
+    execFileSync('git', ['-C', CAMINHOS.RAIZ, 'show', 'origin/main:public/' + fonte],
+                 { maxBuffer: 256 * 1024 * 1024 }));
+}
+if (args.includes('--reguas')) {
   let ruim = 0;
   for (const [alvo, fonte] of REGUAS) {
     try {
-      // maxBuffer explícito: gn-checklist.html passa de 1 MB e estourava o padrão de 1 MB
-      // do execFileSync com ENOBUFS — um erro que não diz nada sobre o que aconteceu.
-      fs.writeFileSync(CAMINHOS.pub(alvo),
-        execFileSync('git', ['-C', CAMINHOS.RAIZ, 'show', 'origin/main:public/' + fonte],
-                     { maxBuffer: 256 * 1024 * 1024 }));
+      gerarRegua(alvo, fonte);
       console.log('✓ ' + alvo.padEnd(24) + ' de origin/main:public/' + fonte);
     } catch (e) { ruim++; console.log('✗ ' + alvo.padEnd(24) + String(e.message).split('\n')[0]); }
   }
@@ -75,11 +78,21 @@ if (paralelo > Math.max(1, Math.floor(nucleos / 2))) {
   console.log('  por disputa de CPU, não por defeito. Confirme qualquer vermelha rodando a');
   console.log('  suíte sozinha antes de investigar.\n');
 }
+// Faltando arquivo de comparação, gera aqui mesmo (do origin/main) e apaga no fim — só os
+// que este corredor criou. Antes só avisava, e esquecer o --reguas virava 5 vermelhas
+// falsas na bateria (aconteceu três vezes em 26/11/2026). Apagar no fim evita o outro
+// erro: um _base_ velho, de um main antigo, medindo regressão contra a versão errada.
+const reguasCriadas = [];
 const semRegua = REGUAS.filter(([alvo]) => !fs.existsSync(CAMINHOS.pub(alvo)));
-if (semRegua.length) {
-  console.log('· faltam ' + semRegua.length + ' arquivo(s) de comparação: ' + semRegua.map(r => r[0]).join(', '));
-  console.log('  as suítes que medem regressão vão falhar. Gere todos com:  node tests/run.js --reguas\n');
-}
+semRegua.forEach(([alvo, fonte]) => {
+  try { gerarRegua(alvo, fonte); reguasCriadas.push(alvo); }
+  catch (e) { console.log('· sem ' + alvo + ' (' + String(e.message).split('\n')[0] + ') — as suítes que medem regressão contra ele vão falhar'); }
+});
+if (reguasCriadas.length) console.log('· arquivos de comparação gerados do origin/main pra esta corrida: ' + reguasCriadas.join(', ') + '\n');
+const limparReguas = () => reguasCriadas.forEach(a => { try { fs.unlinkSync(CAMINHOS.pub(a)); } catch (e) {} });
+process.on('exit', limparReguas);
+process.on('SIGINT', () => process.exit(130));
+process.on('SIGTERM', () => process.exit(143));
 
 const inicio = Date.now();
 const resultados = [];
