@@ -465,6 +465,7 @@
 <script src="gn-utensilios-acesso.js"></script>
 <script src="gn-utensilios-quebras.js"></script>
 <script src="gn-carnes-diario.js"></script>
+<script src="gn-chopp-controle.js"></script>
 <script src="gn-semlanc-acesso.js"></script>
 <script src="gn-avaliacoes-pesos.js"></script>
 <script src="gn-comissoes-calendario.js"></script>
@@ -16632,6 +16633,107 @@ function _barrisQuintaCo2Html(d, g) {
   return h;
 }
 
+/* ── 🍺 Controle do chopp: barris consumidos × canecas vendidas (Etapa 2, 26/11/2026) ──
+   Cálculo em gn-chopp-controle.js. Aqui só se junta a entrada: as contagens semanais
+   (segunda passada, segunda, quinta), os barris que chegaram entre as duas contagens
+   (gn_barris_validade, qualquer status — um barril que chegou e já acabou também entrou)
+   e o chopp vendido em litros (gn_vendidos_diario). Duas janelas:
+     • semana fechada: segunda passada → segunda (vendidos de segunda a domingo);
+     • acompanhamento: segunda → quinta (vendidos de segunda a quarta), indicativo — com
+       poucos dias, ¼ de barril de diferença na leitura pesa muito. */
+let _choppData = null, _choppLoading = false;
+async function _loadChoppControle() {
+  if (_choppLoading) return;
+  _choppLoading = true;
+  try {
+    const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+    const lojas = _lojasFatConsolidado(LOJAS_LISTA);
+    const slugs = lojas.map(k => LOJA_SLUG_HOME[k]).filter(Boolean);
+    const W = _weekRange(0).dates[0], W1 = _weekRange(-1).dates[0], QUI = _weekRange(0).dates[3];
+    const dia = (iso, n) => { const d = new Date(iso + 'T12:00:00'); d.setDate(d.getDate() + n); return _carnesISO(d); };
+    const [cont, ent, vend] = await Promise.all([
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_barris_semanal_contagem?loja_slug=in.(${slugs.join(',')})&semana_inicio=in.(${W1},${W},${QUI})&tipo=in.(CLARO,VINHO)&select=loja_slug,semana_inicio,tipo,status,criado_em`, H, 'chopp:contagens', null),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_barris_validade?loja_slug=in.(${slugs.join(',')})&criado_em=gte.${W1}T00:00:00-03:00&select=loja_slug,catalogo_id,produto,criado_em`, H, 'chopp:entradas', null),
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_vendidos_diario?data=gte.${W1}&data=lte.${dia(QUI, -1)}&select=loja,data,totais`, H, 'chopp:vendidos', null),
+    ]);
+    if (!cont || !ent || !vend) { _choppData = { erro: true }; return; }
+    const G = window.gnChoppControle;
+    const inicio = (window.gnVendidos && window.gnVendidos.INICIO) || '2026-11-23';
+    const porLoja = {};
+    lojas.forEach(k => {
+      const slug = LOJA_SLUG_HOME[k];
+      const rows = cont.filter(r => r.loja_slug === slug);
+      const daSemana = s => rows.filter(r => r.semana_inicio === s);
+      const quando = rs => rs.reduce((m, r) => (r.criado_em > m ? r.criado_em : m), '');
+      const janela = (sIni, sFim, dias) => {
+        const a = daSemana(sIni), b = daSemana(sFim);
+        if (!a.length || !b.length) return { semContagem: !a.length ? sIni : sFim };
+        if (dias[0] < inicio && dias[dias.length - 1] < inicio) return { antesDosVendidos: true };
+        const tA = quando(a), tB = quando(b);
+        const out = {};
+        ['CLARO', 'VINHO'].forEach(tipo => {
+          const entradas = ent.filter(e => e.loja_slug === slug && _tipoBarrilEntrega(e) === tipo && e.criado_em > tA && e.criado_em <= tB).length;
+          const vRows = vend.filter(v => _normLoja(v.loja) === k && dias.includes(String(v.data).slice(0, 10)));
+          const litros = vRows.reduce((s, v) => s + (+((v.totais || {})[tipo === 'CLARO' ? 'chopp_l_claro' : 'chopp_l_vinho']) || 0), 0);
+          out[tipo] = G.fechar({ ini: a.filter(r => r.tipo === tipo).map(r => r.status), fim: b.filter(r => r.tipo === tipo).map(r => r.status),
+                                 entradas, litros, diasVend: vRows.length, diasTotal: dias.length });
+        });
+        return out;
+      };
+      porLoja[k] = {
+        fechada: janela(W1, W, [0, 1, 2, 3, 4, 5, 6].map(n => dia(W1, n))),
+        acomp: janela(W, QUI, [0, 1, 2].map(n => dia(W, n))),
+      };
+    });
+    _choppData = { porLoja, W, W1, QUI };
+  } catch (e) {
+    window.gnLogError && window.gnLogError('chopp:controle', e);
+    _choppData = { erro: true };
+  } finally {
+    _choppLoading = false;
+    if (_dashTab === 'barris') renderDashboard();
+  }
+}
+function _choppCelulaHtml(r, emoji) {
+  const n = v => Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  if (!r) return '';
+  if (!r.iniEq && !r.fimEq && !r.entradas && !r.litros) return '';
+  const cor = r.status === 'ok' ? 'var(--txt-green)' : r.status === 'perda' ? 'var(--txt-red)' : r.status === 'conferir' ? 'var(--txt-amber)' : 'var(--t3)';
+  const veredito = r.status === 'ok'
+      ? (r.rendimento && r.rendimento >= window.gnChoppControle.CANECAS_META ? `✓ bate — ${r.rendimento} canecas/barril, dentro da meta`
+         : `✓ bate dentro da precisão da contagem (¼ de barril) — pouco volume pra medir rendimento`)
+    : r.status === 'perda' ? `⚠ ${r.rendimento} canecas/barril — usou ${n(r.dif)} barril a mais que as vendas (perda de ${Math.round(r.perda * 100)}%, limite 10%)`
+    : r.status === 'conferir' ? `⚠ vendeu ${n(-r.dif)} barril a mais do que usou — conferir a contagem ou barril que entrou sem registro`
+    : r.status === 'sem_consumo' ? 'sem consumo' : 'vendidos incompletos — sem comparação ainda';
+  return `<div class="chopp-cel" data-status="${r.status}" style="font-size:10px;line-height:1.4;font-variant-numeric:tabular-nums;color:var(--t2)">
+    ${emoji} usados <b>${n(r.consumido)}</b> barril (${n(r.iniEq)} + ${n(r.entradas)} chegaram − ${n(r.fimEq)}) · vendidos <b>${n(r.vendidoBarris)}</b> (${r.canecas} canecas)
+    <div style="font-weight:800;color:${cor}">${veredito}</div></div>`;
+}
+function _choppControleHtml() {
+  if (!window.gnChoppControle) return '';
+  if (!_choppData) { if (!_choppLoading) _loadChoppControle(); return ''; }
+  if (_choppData.erro) return `<div style="font-size:11px;color:var(--txt-amber);margin-bottom:10px">⚠ Não deu pra carregar o controle do chopp agora.</div>`;
+  const { porLoja, W, W1, QUI } = _choppData;
+  const dm = iso => iso.slice(8, 10) + '/' + iso.slice(5, 7);
+  const bloco = (j, rot) => {
+    if (!j) return '';
+    if (j.semContagem) return `<div style="font-size:10px;color:var(--t4)">${rot}: sem a contagem de ${dm(j.semContagem)}</div>`;
+    if (j.antesDosVendidos) return `<div style="font-size:10px;color:var(--t4)">${rot}: antes dos vendidos (lançados desde 23/11)</div>`;
+    const c = _choppCelulaHtml(j.CLARO, '🍺') + _choppCelulaHtml(j.VINHO, '🍷');
+    return c ? `<div style="margin-top:3px"><div style="font-size:9.5px;color:var(--t3);font-weight:700">${rot}</div>${c}</div>` : '';
+  };
+  const linhas = Object.keys(porLoja).sort((a, b) => (LOJA_DISPLAY[a] || a).localeCompare(LOJA_DISPLAY[b] || b)).map(k => {
+    const p = porLoja[k];
+    const corpo = bloco(p.fechada, `Semana fechada ${dm(W1)} → ${dm(W)}`) + bloco(p.acomp, `Acompanhamento ${dm(W)} → ${dm(QUI)} (indicativo)`);
+    return `<div class="chopp-loja" data-loja="${k}" style="padding:6px 0;border-top:1px dashed rgba(0,0,0,.1)"><div style="font-size:11.5px;font-weight:800;color:var(--t1)">${LOJA_DISPLAY[k] || k}</div>${corpo}</div>`;
+  }).join('');
+  const G = window.gnChoppControle;
+  return `<div class="chopp-controle" style="background:var(--s2);border:1px solid var(--b1);border-left:3px solid #d97706;border-radius:12px;padding:11px 14px;margin-bottom:12px">
+    <div style="font-size:12px;font-weight:800;color:var(--t1)">🍺 Controle do chopp — barris usados × canecas vendidas</div>
+    <div style="font-size:9.5px;color:var(--t3);line-height:1.45;margin:2px 0 4px">Barril vale pela contagem: cheio 1 · na linha cheio 1 · na linha metade ½ · abaixo da metade ¼ · vazio 0 — o barril pela metade na linha não vira falta. Usados = início + chegaram − fim. Vendidos = canecas (${G.CANECA_L * 1000} ml) ÷ ${G.CANECAS_META}. Meta: ${G.CANECAS_META} canecas por barril (teórico ${G.CANECAS_TEORICO}, perda até ${G.PERDA_MAX * 100}%). A contagem mede de ¼ em ¼ de barril: diferença de até ¼ é precisão da leitura.</div>
+    ${linhas}
+  </div>`;
+}
 function _buildBarrisSemanalPanel(){
   const reportBtns = _reportBtnsRowHtml('Barris');
   if (!_barrisSemGerenciaLoaded || !_barrisSemGerenciaData) return reportBtns + _skelPanel(4);
@@ -16699,7 +16801,7 @@ function _buildBarrisSemanalPanel(){
   return _barrisSemLojaFiltroHtml(porLoja) + reportBtns + `<div style="font-size:11px;color:var(--t4);margin-bottom:12px">
       Contagem semanal de barris (${fmtSemana(semanaAtualIni)}) vs semana passada (${fmtSemana(semanaAnteriorIni)}) — preenchida pelo estoquista na aba Pedido do app Lojas.<br>
       📦 As entradas de chopp com validade lançadas na aba Barris do app Lojas depois da contagem já entram somadas aqui, cada barril cheio trocando um casco vazio.</div>
-    ${linhas}`;
+    ${_choppControleHtml()}${linhas}`;
 }
 
 
@@ -22903,6 +23005,7 @@ function _setDashTab(t){
   if(t==='ferias'&&!_dashEquipeUsuarios) _loadFeriasEquipe();
   if(t==='xadrez'&&!_xadrezMovsLoaded) _loadXadrezPendente();
   if(t==='barris'&&!_barrisSemGerenciaLoaded) _loadBarrisSemanalGerencia();
+  if(t==='barris'&&!_choppData) _loadChoppControle();
   if(t==='carnes'&&!_carnesGerLoaded) _loadCarnesGerencia();
   if(t==='vendidos'&&!_vendGerLoaded) _loadVendidosGerencia();
   if(t==='trios'&&!_triosGerLoaded) _loadTriosGerencia();
