@@ -1081,9 +1081,9 @@ function _dashSemanaOff() {
   }
   return 0;
 }
-// A meta cadastrada é UM número por loja, comparado com a semana e com o mês. Contra um
-// dia ou um trimestre ela não quer dizer nada — nesses dois a comparação não aparece.
-function _dashMetaDe(k) { return (_dashPer === 'sem' || _dashPer === 'mes') ? (_dashMetas[k] || 0) : 0; }
+// A meta cadastrada é MENSAL (26/11/2026); a do período navegado é proporcional aos dias
+// dele (_metaMensalPara) — dia, semana, mês, trimestre e período livre.
+function _dashMetaDe(k) { return _metaMensalPara(_dashMetas[k] || 0, (_dashRangeOf(_dashOff()) || {}).dates); }
 let _dashFat     = null; // {lojaKey: total} for selected period
 let _dashFatPrev = null; // {lojaKey: total} for previous period
 let _dashFatPrevParcial = false; // true quando _dashFatPrev foi cortado nos mesmos dias já decorridos do período atual
@@ -12431,39 +12431,66 @@ async function _visProvCriarPlano(loja, semIdx) {
 
 function _p2(n){ return String(n).padStart(2,'0'); }
 
+/* ── METAS (Etapa 4, 26/11/2026) ───────────────────────────────────────────────────────
+   "Na aba Metas, o valor cadastrado deve ser sempre considerado como meta MENSAL. Quando
+    selecionarmos semana, dia ou trimestre, o sistema faz o cálculo proporcional."
+   • Um cadastro só pra rede (gn_metas_lojas). Antes cada gestor tinha o seu, gravado no
+     próprio usuário — e o Painel comparava o mesmo número (mensal) com a semana.
+   • Proporcional por DIA do calendário: cada dia do período vale meta ÷ dias daquele mês.
+     Semana que atravessa dois meses soma a fração de cada um; trimestre = 3 meses inteiros.
+   • Quem altera: só o mestre (mesma regra das outras correções do Painel). */
+// Chamada em TODO renderDashboard: só lê o cache (sem rede). A busca no banco fica em
+// _syncMetas, no máximo uma vez por minuto, e só redesenha se algo mudou — chamar a rede
+// daqui e redesenhar no fim fazia o Painel se redesenhar sem parar.
 function _loadMetas() {
-  try { _dashMetas = JSON.parse(localStorage.getItem('gn_home_metas')||'{}'); } catch(e) { _dashMetas={}; }
-  // Merge with Supabase-persisted metas from session (fills in missing keys)
-  const supaMetas = session && session.permissoes && session.permissoes.dashboard_metas;
-  if (supaMetas && typeof supaMetas === 'object') {
-    let changed = false;
-    Object.keys(supaMetas).forEach(k => { if (!_dashMetas[k]) { _dashMetas[k] = supaMetas[k]; changed = true; } });
-    if (changed) try { localStorage.setItem('gn_home_metas', JSON.stringify(_dashMetas)); } catch(e) {}
+  if (!_dashMetasCarregadas) {
+    try { _dashMetas = JSON.parse(localStorage.getItem('gn_home_metas_v2') || '{}'); } catch (e) { _dashMetas = {}; }
+    _dashMetasCarregadas = true;
   }
+  if (Date.now() - _dashMetasSyncEm > 60000) _syncMetas();
 }
-
-let _metasSaveTimer = null;
-function _saveMeta(loja, val) {
-  _dashMetas[loja] = parseFloat(val)||0;
-  try { localStorage.setItem('gn_home_metas', JSON.stringify(_dashMetas)); } catch(e) {}
-  if (_metasSaveTimer) clearTimeout(_metasSaveTimer);
-  _metasSaveTimer = setTimeout(_saveMetasToSupa, 1500);
-}
-
-async function _saveMetasToSupa() {
-  if (!session || !session.id) return;
-  const updated = Object.assign({}, session.permissoes || {}, { dashboard_metas: _dashMetas });
+let _dashMetasCarregadas = false, _dashMetasSyncEm = 0;
+async function _syncMetas() {
+  _dashMetasSyncEm = Date.now();
   try {
-    const res = await fetch(`${SB_URL}/rest/v1/gn_usuarios?id=eq.${session.id}`, {
-      method: 'PATCH',
-      headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-      body: JSON.stringify({ permissoes: updated })
-    });
-    if (res.ok) {
-      session.permissoes = updated;
-      try { localStorage.setItem(SESSION_KEY, JSON.stringify(session)); } catch(e) {}
-    }
-  } catch(e) {}
+    const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_metas_lojas?select=loja,meta_mensal,atualizado_por,atualizado_em`,
+      { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY }, 'metas:lojas', null);
+    if (!rows) return;
+    const m = {}; const info = {};
+    rows.forEach(r => { m[r.loja] = parseFloat(r.meta_mensal) || 0; info[r.loja] = { por: r.atualizado_por, em: r.atualizado_em }; });
+    _dashMetasInfo = info;
+    const mudou = JSON.stringify(m) !== JSON.stringify(_dashMetas);
+    _dashMetas = m;
+    try { localStorage.setItem('gn_home_metas_v2', JSON.stringify(m)); } catch (e) {}
+    if (mudou && typeof renderDashboard === 'function') renderDashboard();
+  } catch (e) { window.gnLogError && window.gnLogError('metas:load', e); }
+}
+let _dashMetasInfo = {};
+// Meta do período = soma, dia a dia, de meta mensal ÷ dias daquele mês.
+function _metaMensalPara(metaMensal, dates) {
+  if (!(metaMensal > 0) || !Array.isArray(dates)) return 0;
+  return dates.reduce((s2, d) => { const [y, mo] = String(d).split('-').map(Number); return s2 + metaMensal / new Date(y, mo, 0).getDate(); }, 0);
+}
+const _metasSaveTimers = {};
+function _saveMeta(loja, val) {
+  if (!_dreRedeMestreLogado()) return;
+  _dashMetas[loja] = parseFloat(String(val).replace(',', '.')) || 0;
+  try { localStorage.setItem('gn_home_metas_v2', JSON.stringify(_dashMetas)); } catch (e) {}
+  clearTimeout(_metasSaveTimers[loja]);
+  _metasSaveTimers[loja] = setTimeout(() => _saveMetaSupa(loja), 1200);
+}
+async function _saveMetaSupa(loja) {
+  if (!_dreRedeMestreLogado()) return;
+  try {
+    const res = await fetch(`${SB_URL}/rest/v1/gn_metas_lojas?on_conflict=loja`, { method: 'POST',
+      headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify({ loja, meta_mensal: _dashMetas[loja] || 0, atualizado_por: (session && session.nome) || 'Mestre', atualizado_em: new Date().toISOString() }) });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    _dashMetasInfo[loja] = { por: (session && session.nome) || 'Mestre', em: new Date().toISOString() };
+  } catch (e) {
+    window.gnLogError && window.gnLogError('metas:save', e);
+    alert('⚠ Não gravou a meta de ' + (LOJA_DISPLAY[loja] || loja) + '. Tente de novo.');
+  }
 }
 
 function _weekRange(off) {
@@ -22932,17 +22959,22 @@ function renderDashboard() {
     content = _buildDreRedePanel();
 
   } else { // ⚙ Metas
-    const perLabel=_dashPer==='sem'?'semana':'mês';
+    const pode=_dreRedeMestreLogado();
+    const rg=_dashRangeOf(_dashOff())||{dates:[]};
+    const perTxt=({dia:'no dia',sem:'na semana',mes:'no mês',tri3:'no trimestre',livre:'no período'})[_dashPer]||'no período';
     content=`
-      <div style="font-size:11px;color:var(--t4);margin-bottom:12px">
-        Meta de faturamento por loja (${perLabel}) — aparece como barra de progresso nos cards.</div>
+      <div class="metas-explica" style="font-size:11px;color:var(--t3);margin-bottom:12px;line-height:1.5">
+        <b>Meta MENSAL</b> de faturamento por loja — vale pra rede toda (um cadastro só). No dia, na semana e no trimestre o Painel calcula a parte proporcional aos dias do período.${pode?'':' <b>Só o mestre altera.</b>'}</div>
       ${LOJAS_LISTA.map(k=>`
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;background:var(--s2);border:1px solid rgba(0,0,0,.08);border-left:3px solid ${COR_LOJA[k]||'#F97316'};border-radius:11px;padding:10px 12px;box-shadow:0 1px 3px rgba(0,0,0,.06)">
           <span style="width:8px;height:8px;border-radius:50%;background:${COR_LOJA[k]||'#888'};flex-shrink:0;display:inline-block"></span>
           <span style="font-size:12px;font-weight:700;color:var(--t2);flex:1">${LOJA_DISPLAY[k]||k}</span>
-          <input type="number" value="${_dashMetas[k]||''}" placeholder="Meta R$"
-            style="width:110px;background:var(--s1);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 10px;font-size:12px;font-weight:700;color:var(--t1);font-family:inherit;text-align:right;outline:none"
+          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px">
+          <input class="meta-input" data-loja="${k}" type="number" value="${_dashMetas[k]||''}" placeholder="Meta mensal R$" ${pode?'':'disabled'}
+            style="width:120px;background:var(--s1);border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:6px 10px;font-size:12px;font-weight:700;color:var(--t1);font-family:inherit;text-align:right;outline:none"
             oninput="_saveMeta('${k}',this.value)">
+          ${_dashMetas[k]>0 && _dashPer!=='mes'?`<span class="meta-periodo" style="font-size:10px;color:var(--t3)">≈ ${_fmtBRL(_metaMensalPara(_dashMetas[k], rg.dates))} ${perTxt}</span>`:''}
+          </div>
         </div>`).join('')}`;
   }
 
@@ -23403,7 +23435,7 @@ async function _relCarregarPeriodo(per) {
   lojasFiltro.forEach(k => {
     const v     = fat[k]||0;
     const vP    = fatPrev?.[k]||0;
-    const meta  = _dashMetas[k]||0;
+    const meta  = _metaMensalPara(_dashMetas[k]||0, range.dates);   // mensal → proporcional ao período do relatório
     const manut = _dashManut?(_dashManut[k]||0):0;
     const chkOk = _dashChk?_dashChk.has(k):null;
     // Funcionários vêm da escala da semana ATUAL (_dashFuncCount) — não varia por período
