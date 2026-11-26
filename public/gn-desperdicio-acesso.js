@@ -311,6 +311,9 @@
     return buscarDeclarados(sess.loja, _addDias(hoje, -JANELA_DIAS), hoje).then(function (rows) {
       var pend = calcularPendencias(sess.loja, agora, rows);
       var atrasado = pend.some(function (p) { return p.atrasado; });
+      // Registro dos bloqueios (ranking do Painel, 26/11/2026): trava = atrasado sem liberação.
+      if (window.gnTravasRegistro) window.gnTravasRegistro('desperdicio', sess.loja, ['desperdicio'],
+        atrasado && !_liberado(sess, hoje) ? [{ tipo: 'desperdicio', detalhe: pend.filter(function (p) { return p.atrasado; }).map(function (p) { return p.data + ' ' + (ROTULO[p.tipo] || p.tipo); }).join(', ') }] : []);
       if (!pend.length) { fechar(); return pend; }
       if (atrasado && _liberado(sess, hoje)) return pend;
       if (!atrasado && _adiado()) return pend;

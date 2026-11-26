@@ -171,6 +171,10 @@
         if (!res) return livre;
         var pend = pendentes(res);
         var bloq = deveTravar(res, sess.cargo, hoje);
+        // Registro dos bloqueios (Painel, 26/11/2026): a decisão ANTES da exceção abaixo — no
+        // app onde se resolve a tela abre, mas a loja continua travada nos outros.
+        if (window.gnTravasRegistro) window.gnTravasRegistro('semlanc', sess.loja, ['semlanc'],
+          bloq ? [{ tipo: 'semlanc', detalhe: pend.map(function (t) { return TIPOS[t].nome; }).join(', ') }] : []);
         // No app onde se resolve uma das pendências, não trava: senão não há como lançar.
         if (bloq && pend.some(function (t) { return app.indexOf(TIPOS[t].app) >= 0; })) bloq = false;
         if (!bloq) _cacheGravar(chave); else _cacheLimpar();

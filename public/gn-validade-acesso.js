@@ -356,6 +356,10 @@
     var sess = _lerSessao();
     if (!sess) { fechar(); return; }
     verificar(sess, forcar ? { semCache: true } : {}).then(function (res) {
+      // Registro dos bloqueios (Painel, 26/11/2026): só avaliação de verdade (com `hoje`, ou o
+      // cache do "nada a fazer") — o "livre" de cargo não cobrado/erro não pode dar baixa.
+      if (window.gnTravasRegistro && res && (res.hoje || res.doCache)) window.gnTravasRegistro('validade', sess.loja, ['validade'],
+        res.bloqueado ? [{ tipo: 'validade', detalhe: (res.vencidos || []).length + ' item(ns) vencido(s)' }] : []);
       if (res.bloqueado) { fecharAviso(); mostrar(sess, res); return; }
       fechar();
       if (res.avisos && res.avisos.length && !_avisoAdiado()) { if (!_aviso) mostrarAviso(sess, res); }

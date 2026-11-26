@@ -547,13 +547,20 @@
     return buscarLancamentos(sess.loja, _addDias(hoje, -JANELA_DIAS), hoje).then(function (rows) {
       var pend = calcularPendencias(sess.loja, agora, rows);
       var atrasado = pend.some(function (p) { return p.atrasado; });
-      if (!pend.length) { if (_estado && _estado.origem === 'guardiao') fechar(); return pend; }
+      if (!pend.length) {
+        if (window.gnTravasRegistro) window.gnTravasRegistro('vendidos', sess.loja, ['vendidos'], []);
+        if (_estado && _estado.origem === 'guardiao') fechar(); return pend;
+      }
       // Liberação da supervisão vem do banco (vale pra loja toda, em qualquer aparelho).
       // Sem conseguir ler, não trava — falha aberto, como o resto.
       var libsP = atrasado ? buscarLiberacoes(sess.loja, hoje).catch(function (e) { _log('vendidos:liberacoes', e); return null; }) : Promise.resolve([]);
       return libsP.then(function (libs) {
         if (libs === null) return pend;
         var lib = aplicarLiberacoes(pend, libs);
+        // Registro dos bloqueios (ranking do Painel, 26/11/2026): trava = dia em atraso sem a
+        // liberação de acesso (a liberação do lançamento não destrava: a loja ainda tem que lançar).
+        if (window.gnTravasRegistro) window.gnTravasRegistro('vendidos', sess.loja, ['vendidos'],
+          atrasado && !lib.acesso ? [{ tipo: 'vendidos', detalhe: pend.filter(function (p) { return p.atrasado; }).map(function (p) { return p.data; }).join(', ') }] : []);
         if (atrasado && lib.acesso) { if (_estado && _estado.origem === 'guardiao') fechar(); return pend; }
         if (!atrasado && _adiado()) return pend;
         if (_overlay) {
