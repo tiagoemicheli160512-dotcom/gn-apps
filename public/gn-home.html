@@ -1111,6 +1111,8 @@ let _dashComDiaLoja = null;   // {lojaKey: Array(7)} — mesmo valor do repique 
 // gn_comissoes.brutos[dia] É o repique do dia, não precisa de uma segunda linha "Rep"
 // duplicando o mesmo número — ver onRepiqueChange() em gn-checklist.html.
 let _dashXmlPendentes = null; // Set de lojas sem o XML fiscal do mês confirmado (ver _mesRefPendenteXmlHome)
+// 🧾 Recebido × NF lançada na semana fechada (Etapa 6, 26/11/2026) — ver _nfSemanaAlertas.
+let _dashNfSemana = null;
 let _dashBuffet = null;       // {lojaKey: {feijoadaQtd, rodizioQtd, feijoada, rodizio, total, feijoadaLancada, rodizioLancado}} no período selecionado
                               // (as flags separam "lançou 0" de "não lançou" — qtd 0 nos dois casos)
 let _dashVisitasAndamento = null; // {lojaKey: [{nome, origem, horaChegada}]} — visitas ainda sem hora_saida hoje
@@ -13430,6 +13432,8 @@ async function _loadDashAll() {
       if((lr.all_data||{}).xml_enviado_mes !== mesRefXml) xmlPend.add(mk);
     });
     _dashXmlPendentes = xmlPend;
+    // Recebido × NF lançada da semana fechada — complemento: falhou, o feed segue sem ele.
+    _dashNfSemana = await _loadNfSemana();
     window._chipDetail.dashXml = { title: '📄 Lojas sem XML do mês enviado',
       lines: [...xmlPend].map(l=>({ nome: LOJA_DISPLAY[l] || l })) };
 
@@ -20929,6 +20933,44 @@ async function enviarPDFXadrezWpp() {
   await _pdfWppComo(gerarPDFXadrez);
 }
 
+/* 🧾 Loja que recebe mercadoria e não lança a NF (Etapa 6, 26/11/2026). A cobrança de nota
+   ficou desligada desde 09/09 (casava o fornecedor do Pedido, "AMBEV", com a razão social da
+   nota e virava pendência falsa em massa — ver _computePendenciasEssenciais). Aqui não se
+   casa fornecedor: por loja, o valor que ela CONFIRMOU ter recebido na semana fechada (aba
+   Entrega) contra o das NF que LANÇOU (aba Entradas), somados no banco (rpc gn_nf_semana).
+   Medido em 16/11: Norte Shopping R$ 37,6 mil recebidos e R$ 0 em NF; Nova Iguaçu 26,8 mil
+   e 0; Boulevard 22,1 mil e 0; Caxias 19,9 mil e 0; Guarulhos e Itaquera sem nada; Campo
+   Grande com NF e nenhuma entrega confirmada. NF abaixo da metade do recebido é o corte:
+   nota e recebimento nunca batem centavo a centavo (compra direta com nota, item sem
+   provisão), mas metade já não é diferença de lançamento, é nota faltando. */
+const NF_SEMANA_MINIMO = 0.5;
+function _nfSemanaIni() { const d = new Date(); d.setHours(12, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() + 6) % 7) - 7); return _carnesISO(d); }
+async function _loadNfSemana() {
+  const sem = _nfSemanaIni();
+  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/rpc/gn_nf_semana`,
+    { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' }, 'dash:nfSemana', null,
+    { method: 'POST', body: JSON.stringify({ p_semana: sem }) });
+  if (!rows) return null;
+  const rec = {}, nf = {};
+  rows.forEach(r => { if (r.tipo === 'rec') rec[r.chave] = r; else if (r.tipo === 'nf') nf[_normLoja(r.chave)] = r; });
+  return { sem, rec, nf };
+}
+function _nfSemanaAlertas(k, nome) {
+  const d = _dashNfSemana;
+  if (!d || k === 'MAGLIA') return [];
+  const r = d.rec[LOJA_SLUG_HOME[k]] || { n: 0, valor: 0 }, n = d.nf[k] || { n: 0, valor: 0 };
+  const recV = Number(r.valor) || 0, nfV = Number(n.valor) || 0, dm = d.sem.slice(8, 10) + '/' + d.sem.slice(5, 7);
+  const onde = 'App Lojas: confirmar o que chega na aba Entrega e lançar as notas na aba Entradas';
+  if (recV > 0 && nfV < recV * NF_SEMANA_MINIMO)
+    return [{ sev: 1, cor: '#ef4444', ico: '🧾', loja: k, tipo: 'nf',
+      msg: nfV > 0 ? `${nome} lançou só ${_fmtBRLs(nfV)} de NF pra ${_fmtBRLs(recV)} recebidos (semana de ${dm})` : `${nome} sem NF lançada na semana de ${dm} — recebeu ${_fmtBRLs(recV)}`,
+      sub: `${r.n} item(ns) confirmado(s) na Entrega · ${n.n} linha(s) de NF nas Entradas` }];
+  if (recV === 0 && nfV === 0)
+    return [{ sev: 2, cor: '#f59e0b', ico: '🧾', loja: k, tipo: 'nf', msg: `${nome} sem entrega confirmada nem NF lançada na semana de ${dm}`, sub: onde }];
+  if (recV === 0 && nfV > 0)
+    return [{ sev: 3, cor: '#f59e0b', ico: '📦', loja: k, tipo: 'nf', msg: `${nome} lançou ${_fmtBRLs(nfV)} de NF mas não confirmou nenhuma entrega na semana de ${dm}`, sub: 'Sem a confirmação, a entrega fica "aguardando" e o estoque não fecha' }];
+  return [];
+}
 function _computeAlertas() {
   const fat=_dashFat, fatP=_dashFatPrev, metas=_dashMetas;
   const alerts=[];
@@ -20944,6 +20986,7 @@ function _computeAlertas() {
     if(_dashChk&&!_dashChk.has(k))alerts.push({sev:2,cor:'#60a5fa',ico:'📋',msg:`${nome} sem checklist hoje`,sub:'Checklist do dia não enviado',loja:k});
     if(!v)alerts.push({sev:3,cor:'var(--t4)',ico:'⚠️',msg:`${nome} sem faturamento no período`,sub:'Dados não enviados',loja:k});
     if(_dashXmlPendentes&&_dashXmlPendentes.has(k)) alerts.push({sev:2,cor:'#ef4444',ico:'📄',msg:`${nome} sem XML do mês enviado`,sub:'Pendente pra contabilidade',loja:k});
+    alerts.push(..._nfSemanaAlertas(k, nome));
     const visitasLoja=_dashVisitasAndamento?(_dashVisitasAndamento[k]||[]):[];
     if(visitasLoja.length){
       // Visita em andamento há 10h+ (seguidas, mesmo dia) vira alerta urgente em vez do
