@@ -458,6 +458,7 @@
   </style>
 <script src="gn-armazenamento.js"></script>
 <script src="gn-lojas-config.js"></script>
+<script src="gn-travas-registro.js"></script>
 <script src="gn-escala-acesso.js"></script>
 <script src="gn-desperdicio-acesso.js"></script>
 <script src="gn-vendidos.js"></script>
@@ -7086,10 +7087,12 @@ async function _verificarBloqueioCaixaOntem(sess, isMaster) {
       H, 'bloqueioCaixaOntem:juntos', []),
   ]);
   if (rows === null) return; // falha de rede — não bloqueia por erro de conexão
+  // Registro dos bloqueios (ranking do Painel, 26/11/2026) — só depois da leitura dar certo.
+  const _regCx = (ativa, det) => { if (window.gnTravasRegistro) window.gnTravasRegistro('home_caixa', sess.loja, ['caixa'], ativa ? [{ tipo: 'caixa', detalhe: det }] : []); };
   // [].every(...) dá true num array vazio — por isso o "rs.length &&" na frente,
   // senão "nenhum caixa aberto no dia" passaria como liberado.
   const _tudoFechado = rs => !!(rs && rs.length && rs.every(r => r.status==='FECHADO'));
-  if (_tudoFechado(rows)) return; // todo turno aberto foi fechado — liberado
+  if (_tudoFechado(rows)) { _regCx(false); return; } // todo turno aberto foi fechado — liberado
 
   // DIAS JUNTOS — a loja lançou o movimento de ontem dentro do caixa de outro dia (ex.:
   // Nova América, 16 e 17/09 num caixa só). Esse dia nunca vai ter caixa próprio, então
@@ -7103,7 +7106,7 @@ async function _verificarBloqueioCaixaOntem(sess, isMaster) {
       `${SB_URL}/rest/v1/gn_caixa_fechamento?loja=eq.${encodeURIComponent(sess.loja)}&data=eq.${junto.com}&select=turno,status`,
       H, 'bloqueioCaixaOntem:junto', null);
     if (rowsCom === null) return;      // falha de rede — não bloqueia por erro de conexão
-    if (_tudoFechado(rowsCom)) return; // o movimento de ontem está no caixa daquele dia
+    if (_tudoFechado(rowsCom)) { _regCx(false); return; } // o movimento de ontem está no caixa daquele dia
   }
 
   const abertos = (rows||[]).filter(r => r.status !== 'FECHADO').map(r => r.turno);
@@ -7111,6 +7114,7 @@ async function _verificarBloqueioCaixaOntem(sess, isMaster) {
   const msg = abertos.length
     ? `O turno <b>${abertos.join(' e ')}</b> de ontem ainda está aberto.`
     : `Nenhum caixa foi aberto ontem.`;
+  _regCx(true, 'caixa de ' + dataDisp + (abertos.length ? ' — turno ' + abertos.join(' e ') + ' aberto' : ' — nenhum caixa aberto'));
   const overlay = document.createElement('div');
   overlay.id = 'caixa-bloqueio-overlay';
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:99998;display:flex;align-items:center;justify-content:center;padding:20px';
@@ -22993,6 +22997,9 @@ function renderDashboard() {
   } else if (_dashTab==='acomp') {
     content = _buildAcompPanel();
 
+  } else if (_dashTab==='bloqueios') {
+    content = _buildBloqueiosPanel();
+
   } else if (_dashTab==='carnes') {
     content = _buildCarnesPanel();
 
@@ -23189,6 +23196,126 @@ function _dashTabsDepoisDeDesenhar() {
 // app Lojas mostra pra cada loja. O Painel redesenha a aba de tempos em tempos; o bloco
 // fica guardado e é recolocado no lugar, pra não ir ao banco (nem perder o quadradinho
 // aberto) a cada redesenho.
+
+/* ── 🔒 BLOQUEIOS — ranking das lojas que mais travaram (26/11/2026) ──────────────────────
+   "Quero uma aba no Painel onde mostre o ranking das lojas com mais caso de bloqueio — dia,
+    semana, mensal e trimestral — isso mostra o quanto a loja faz e os que só fazem por
+    obrigação, sem respeitar os prazos. Do maior pro menor."
+   Fonte: gn_travas_registro (cada trava de cada app grava, via gn-travas-registro.js). 1 caso =
+   1 tipo de trava num dia; o tempo travada vai da 1ª vez que um app viu a trava naquele dia até
+   a hora em que viu que ela saiu (ou a meia-noite, ou agora, se ainda está travada). Registro
+   começou em 26/11/2026 — antes disso não existe dado (decisão do dono: não reconstruir).
+   Usa o seletor de período do Painel. Maglia fora (não citada; o banco nem grava). */
+const BLOQ_DESDE = '2026-11-26';
+let _bloqDados = null, _bloqCarregando = '', _bloqAberta = null;
+function _bloqFimDia(dia) { const d = new Date(dia + 'T00:00:00'); d.setDate(d.getDate() + 1); return d.getTime(); }
+async function _loadBloqueios(ini, fim) {
+  const chave = ini + '|' + fim;
+  if (_bloqCarregando === chave) return;
+  _bloqCarregando = chave;
+  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_travas_registro?dia=gte.${ini}&dia=lte.${fim}&select=loja,tipo,dia,hard,detalhe,primeiro_em,ultimo_visto_em,resolvido_em&order=dia.asc`,
+    { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY }, 'bloqueios:registro', null);
+  _bloqDados = { chave, rows, em: Date.now() };
+  _bloqCarregando = '';
+  if (_dashTab === 'bloqueios') renderDashboard();
+}
+// Minutos travada de UMA linha: da 1ª vez vista até resolver (ou meia-noite do dia, ou agora).
+function _bloqMinutos(r, agoraMs) {
+  const ini = new Date(r.primeiro_em).getTime();
+  const fim = r.resolvido_em ? new Date(r.resolvido_em).getTime() : Math.min(agoraMs, _bloqFimDia(r.dia));
+  return Math.max(0, Math.round((fim - ini) / 60000));
+}
+function _bloqTempoTxt(min) {
+  if (!min) return '0 min';
+  const d = Math.floor(min / 1440), h = Math.floor((min % 1440) / 60), m = min % 60;
+  return d ? `${d}d ${h}h` : h ? `${h}h${m ? ' ' + String(m).padStart(2, '0') + 'min' : ''}` : `${m} min`;
+}
+function _bloqRanking(rows, agoraMs) {
+  const lojas = _lojasFatConsolidado(LOJAS_LISTA);
+  const por = {};
+  lojas.forEach(k => { por[k] = { k, nome: LOJA_DISPLAY[k] || k, casos: 0, min: 0, hard: 0, dias: new Set(), abertas: 0, tipos: {} }; });
+  (rows || []).forEach(r => {
+    const p = por[_normLoja(r.loja)]; if (!p) return;
+    const m = _bloqMinutos(r, agoraMs);
+    p.casos++; p.min += m; if (r.hard) p.hard++; p.dias.add(r.dia);
+    if (!r.resolvido_em && r.dia === _carnesISO(new Date(agoraMs))) p.abertas++;
+    const t = p.tipos[r.tipo] = p.tipos[r.tipo] || { tipo: r.tipo, casos: 0, min: 0, dias: [] };
+    t.casos++; t.min += m; t.dias.push(r.dia);
+  });
+  return Object.values(por).sort((a, b) => b.casos - a.casos || b.min - a.min || a.nome.localeCompare(b.nome));
+}
+function _bloqRotulo(t) { return (window.GN_TRAVAS_ROTULOS || {})[t] || t; }
+function _bloqToggle(k) { _bloqAberta = _bloqAberta === k ? null : k; renderDashboard(); }
+function _buildBloqueiosPanel() {
+  const range = _dashRangeOf(_dashOff()) || {};
+  const ds = range.dates || [];
+  if (!ds.length) return '<div style="padding:16px;font-size:12px;color:var(--t3)">Período sem dias.</div>';
+  const ini = ds[0], fim = ds[ds.length - 1], chave = ini + '|' + fim;
+  // Recarrega a cada 2 min no mesmo período (as travas mudam durante o dia).
+  if (!_bloqDados || _bloqDados.chave !== chave || Date.now() - _bloqDados.em > 120000) _loadBloqueios(ini, fim);
+  if (!_bloqDados || _bloqDados.chave !== chave) return _skelPanel(4);
+  if (_bloqDados.rows === null) return '<div style="padding:16px;font-size:12px;color:var(--txt-red)">Não deu pra carregar o registro de bloqueios agora.</div>';
+  const rk = _bloqRanking(_bloqDados.rows, Date.now());
+  const comCaso = rk.filter(x => x.casos), sem = rk.filter(x => !x.casos);
+  const max = Math.max(1, ...rk.map(x => x.casos));
+  const totCasos = comCaso.reduce((t, x) => t + x.casos, 0), totMin = comCaso.reduce((t, x) => t + x.min, 0);
+  const antesDoRegistro = fim < BLOQ_DESDE;
+  const aviso = ini < BLOQ_DESDE
+    ? `<div class="bloq-aviso" style="font-size:10.5px;color:var(--txt-amber);background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.25);border-radius:9px;padding:7px 10px;margin-bottom:10px">O registro dos bloqueios começou em ${_carnesDM(BLOQ_DESDE)} — ${antesDoRegistro ? 'este período é anterior e não tem dado.' : 'os dias antes disso não entram.'}</div>` : '';
+  const linhas = comCaso.map((x, i) => {
+    const ab = _bloqAberta === x.k;
+    const tipos = Object.values(x.tipos).sort((a, b) => b.casos - a.casos || b.min - a.min);
+    return `<div class="bloq-loja" data-loja="${x.k}" style="border-top:1px solid var(--b1)">
+      <div onclick="_bloqToggle('${x.k}')" style="display:flex;align-items:center;gap:10px;padding:9px 2px;cursor:pointer">
+        <div style="width:24px;text-align:center;font-size:12px;font-weight:900;color:${i < 3 ? 'var(--txt-red)' : 'var(--t3)'}">${i + 1}º</div>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
+            <span style="font-size:12.5px;font-weight:800;color:var(--t1)">${window.escapeHtml(x.nome)}${x.abertas ? ' <span class="bloq-agora" style="font-size:9.5px;font-weight:800;color:#fff;background:#dc2626;border-radius:6px;padding:1px 6px;margin-left:4px">travada agora</span>' : ''}</span>
+            <span class="bloq-casos" style="font-size:13px;font-weight:900;color:var(--txt-red);white-space:nowrap">${x.casos} caso${x.casos === 1 ? '' : 's'}</span>
+          </div>
+          <div style="height:6px;background:var(--fill-sutil);border-radius:4px;margin:4px 0 3px;overflow:hidden"><div style="height:100%;width:${Math.round(x.casos / max * 100)}%;background:#dc2626;border-radius:4px"></div></div>
+          <div style="font-size:10.5px;color:var(--t3)">⏱ ${_bloqTempoTxt(x.min)} travada · ${x.dias.size} dia${x.dias.size === 1 ? '' : 's'} com bloqueio${x.hard ? ` · ${x.hard} bloqueio${x.hard === 1 ? '' : 's'} total` : ''} · ${tipos.length} tipo${tipos.length === 1 ? '' : 's'}</div>
+        </div>
+        <span style="color:var(--t3);font-size:12px">${ab ? '▾' : '▸'}</span>
+      </div>
+      ${ab ? `<div class="bloq-tipos" style="padding:0 4px 10px 36px">${tipos.map(t => `<div style="display:flex;justify-content:space-between;gap:8px;font-size:11px;padding:3px 0;border-bottom:1px dashed var(--b1)">
+          <span style="color:var(--t1)">${_bloqRotulo(t.tipo)}</span><span style="color:var(--t2);white-space:nowrap"><b>${t.casos}</b> · ${_bloqTempoTxt(t.min)}</span></div>`).join('')}</div>` : ''}
+    </div>`;
+  }).join('');
+  return _reportBtnsRowHtml('Bloqueios') + aviso +
+    `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:12px 14px;margin-bottom:12px">
+      <div style="font-size:13px;font-weight:800;color:var(--t1)">🔒 Ranking de bloqueios · ${window.escapeHtml(range.label || '')}</div>
+      <div style="font-size:10.5px;color:var(--t3);line-height:1.5;margin:2px 0 8px">Da loja que mais travou pra que menos travou. 1 caso = 1 tipo de trava num dia (prazo perdido: Vendidos, carnes, check-list, NF, entrega, caixa…). Tempo travada = do momento em que a trava apareceu até ser resolvida. Toque na loja pra ver por tipo.</div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:11.5px;color:var(--t2);margin-bottom:4px"><span><b style="color:var(--txt-red)">${totCasos}</b> casos na rede</span><span>⏱ <b>${_bloqTempoTxt(totMin)}</b> travadas</span><span><b>${comCaso.length}</b> de ${rk.length} lojas</span></div>
+      ${linhas || `<div style="font-size:12px;color:var(--txt-green);padding:10px 0">${antesDoRegistro ? '—' : '✓ Nenhuma loja travou no período.'}</div>`}
+      ${sem.length && comCaso.length ? `<div class="bloq-sem" style="font-size:10.5px;color:var(--txt-green);border-top:1px solid var(--b1);padding-top:8px;margin-top:2px">✓ Sem bloqueio no período: ${sem.map(x => window.escapeHtml(x.nome)).join(' · ')}</div>` : ''}
+    </div>`;
+}
+function _bloqRelatorioTexto(wpp) {
+  const range = _dashRangeOf(_dashOff()) || {};
+  if (!_bloqDados || !_bloqDados.rows) return null;
+  const rk = _bloqRanking(_bloqDados.rows, Date.now()), b = t => wpp ? '*' + t + '*' : t;
+  const comCaso = rk.filter(x => x.casos);
+  let msg = `${wpp ? '🔒 ' : ''}${b('RANKING DE BLOQUEIOS — REDE')}\n${range.label || ''}\n(1 caso = 1 tipo de trava num dia; maior → menor)\n`;
+  comCaso.forEach((x, i) => {
+    msg += `\n${b((i + 1) + 'º ' + x.nome)} — ${x.casos} caso${x.casos === 1 ? '' : 's'} · ${_bloqTempoTxt(x.min)} travada${x.abertas ? ' · travada agora' : ''}\n`;
+    Object.values(x.tipos).sort((a, c) => c.casos - a.casos).forEach(t => { msg += `   ${_bloqRotulo(t.tipo)}: ${t.casos} · ${_bloqTempoTxt(t.min)}\n`; });
+  });
+  const sem = rk.filter(x => !x.casos);
+  if (sem.length) msg += `\n${b('Sem bloqueio')}: ${sem.map(x => x.nome).join(', ')}\n`;
+  if ((range.dates || [])[0] < BLOQ_DESDE) msg += `\nRegistro dos bloqueios desde ${_carnesDM(BLOQ_DESDE)}.\n`;
+  return { msg, titulo: 'Bloqueios — ' + (range.label || ''), rk };
+}
+function gerarWppBloqueios() { const r = _bloqRelatorioTexto(true); if (!r) { alert('Aguarde os dados carregarem.'); return; } window.open('https://wa.me/?text=' + encodeURIComponent(r.msg), '_blank'); }
+function gerarPDFBloqueios() {
+  const r = _bloqRelatorioTexto(false); if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  const comCaso = r.rk.filter(x => x.casos), tot = comCaso.reduce((t, x) => t + x.casos, 0), min = comCaso.reduce((t, x) => t + x.min, 0);
+  window.gnRelatorioPDF({ titulo: r.titulo, texto: r.msg.split('\n').slice(1).join('\n'),
+    kpis: [{ label: 'Casos na rede', valor: String(tot), sub: comCaso.length + ' de ' + r.rk.length + ' lojas' },
+           { label: 'Tempo travado', valor: _bloqTempoTxt(min) },
+           { label: 'Mais travou', valor: comCaso[0] ? comCaso[0].nome : '—', sub: comCaso[0] ? comCaso[0].casos + ' casos' : '' }] });
+}
+async function enviarPDFBloqueiosWpp() { await _pdfWppComo(gerarPDFBloqueios); }
 let _acompNode = null;
 // Home da loja (25–26/11/2026, "a home que falo é essa das lojas"): gerentes e subgerentes
 // acompanham a própria unidade; o mestre, a loja que está navegando. Mesma tela e mesma
@@ -23223,7 +23350,7 @@ const DASH_GRUPOS = [
   { g: 'vendas',   rot: '📈 Vendas',   abas: [['fat', '↓ Faturamento'], ['att', '⚠ Atenção'], ['bi', '📊 BI'], ['metas', '⚙ Metas']] },
   { g: 'caixa',    rot: '🧾 Caixa',    abas: [['cancel', '🧾 Cancel. e transf.'], ['sem10', '💸 Sem 10%']] },
   { g: 'equipe',   rot: '👥 Equipe',   abas: [['presenca', '👤 Presença'], ['folgas', '📅 Folgas'], ['ocorr', '⚠ Ocorrências'], ['ferias', '🏖 Férias'], ['xadrez', '🔀 Xadrez'], ['banco', '⏱ Banco'], ['extra', '👷 Extra']] },
-  { g: 'operacao', rot: '🛠 Operação', abas: [['acomp', '📊 Acompanhamento'], ['barris', '🍺 Barris'], ['carnes', '🥩 Carnes'], ['vendidos', '🧾 Vendidos'], ['avarias', '⚠️ Avarias'], ['trios', '🎵 Trios'], ['semlanc', '✅ Validações'], ['utensent', '🍴 Utensílios'], ['emprest', '⇄ Transferências']] },
+  { g: 'operacao', rot: '🛠 Operação', abas: [['acomp', '📊 Acompanhamento'], ['bloqueios', '🔒 Bloqueios'], ['barris', '🍺 Barris'], ['carnes', '🥩 Carnes'], ['vendidos', '🧾 Vendidos'], ['avarias', '⚠️ Avarias'], ['trios', '🎵 Trios'], ['semlanc', '✅ Validações'], ['utensent', '🍴 Utensílios'], ['emprest', '⇄ Transferências']] },
   { g: 'dre',      rot: '💰 DRE',      abas: [['dre', '💰 DRE']] },
 ];
 const _dashGrupoUltima = {};

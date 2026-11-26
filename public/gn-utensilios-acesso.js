@@ -149,7 +149,13 @@
   function _rodada(forcar) {
     var sess = _lerSessao();
     if (!sess) { fechar(); return; }
-    verificar(sess, forcar ? { semCache: true } : {}).then(function (r) { if (r.bloqueado) mostrar(sess, r); else fechar(); });
+    verificar(sess, forcar ? { semCache: true } : {}).then(function (r) {
+      // Registro dos bloqueios (Painel, 26/11/2026): só quando houve contagem de verdade (`n`) —
+      // cargo não cobrado ou erro devolvem "livre" sem `n` e não podem dar baixa no caso.
+      if (window.gnTravasRegistro && r && r.n !== undefined) window.gnTravasRegistro('utensilios', sess.loja, ['utensilios'],
+        r.bloqueado ? [{ tipo: 'utensilios', detalhe: (r.n || 0) + ' peças cadastradas' }] : []);
+      if (r.bloqueado) mostrar(sess, r); else fechar();
+    });
   }
   function _iniciar() {
     _rodada();
