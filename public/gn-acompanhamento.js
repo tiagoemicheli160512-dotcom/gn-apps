@@ -245,13 +245,17 @@
     if (item.tipo === 'carne') {
       var c = p.carnes[item.key];
       if (!c) return { status: 'sem_dado', texto: '—', motivo: 'sem contagem de carnes na semana' };
-      var rs = c.resumo;
-      // Falta e sobra na mesma semana: mostra as duas — só a falta esconderia metade da história.
-      if (rs.falta && rs.sobra) return { status: 'falta', valor: -Math.abs(rs.kgFalta), un: 'kg', texto: '−' + fmt(Math.abs(rs.kgFalta), 1) + ' kg', texto2: '+' + fmt(rs.kgSobra, 1) };
-      if (rs.falta) return { status: 'falta', valor: -Math.abs(rs.kgFalta), un: 'kg', texto: '−' + fmt(Math.abs(rs.kgFalta), 1) + ' kg' };
-      if (rs.sobra) return { status: 'sobra', valor: rs.kgSobra, un: 'kg', texto: '+' + fmt(rs.kgSobra, 1) + ' kg' };
-      if (rs.ok || rs.compensados) return { status: 'ok', valor: 0, un: 'kg', texto: '✓' };
-      return { status: 'sem_dado', texto: '—', motivo: 'sem contagem ou vendidos pra comparar' };
+      // O número grande é o SALDO DA SEMANA: a soma das diferenças dos dias. Cada dia compara
+      // com a contagem anterior, então a soma "telescopa" — sobra a última contagem contra a
+      // primeira, com o que chegou e o vendido no meio (26/11, pedido do dono: "quando tem dois
+      // números no mesmo item, − e +, como interpretar?"). Falta num dia e sobra no outro é,
+      // quase sempre, carne contada um dia depois; os dias aparecem embaixo, pequenos.
+      var sd = saldoSemana(c);
+      if (!sd.dias) return { status: 'sem_dado', texto: '—', motivo: 'sem contagem ou vendidos pra comparar' };
+      var mg = (window.gnCarnesDiario || {}).MARGEM_KG || 1;
+      var dias = sd.falta && sd.sobra ? 'dias ' + '−' + fmt(sd.falta, 1) + ' · +' + fmt(sd.sobra, 1) : null;
+      if (Math.abs(sd.saldo) <= mg) return { status: 'ok', valor: sd.saldo, un: 'kg', texto: '✓', texto2: dias, saldo: sd.saldo };
+      return { status: sd.saldo < 0 ? 'falta' : 'sobra', valor: sd.saldo, un: 'kg', texto: (sd.saldo < 0 ? '−' : '+') + fmt(Math.abs(sd.saldo), 1) + ' kg', texto2: dias, saldo: sd.saldo };
     }
     if (item.tipo === 'chopp') {
       var j = p.chopp ? (res.vigente ? p.chopp.acomp : p.chopp.fechada) : null;
@@ -260,9 +264,12 @@
       if (!x || x.status === 'parcial') return { status: 'sem_dado', texto: '—', motivo: 'vendidos incompletos' };
       if (x.status === 'sem_consumo') return { status: 'ok', valor: 0, un: 'barril', texto: '✓' };
       if (x.status === 'ok') return { status: 'ok', valor: 0, un: 'barril', texto: '✓' };
+      // Em CANECAS (26/11, pedido do dono: "o número do barril é confuso, tem como
+      // transformar em caneca?"): a diferença em barris × 128 canecas da meta.
       // perda: usou mais barril do que as vendas explicam = falta de chopp.
-      return x.status === 'perda' ? { status: 'falta', valor: -x.dif, un: 'barril', texto: '−' + fmt(x.dif, 2) + ' bar.' }
-                                  : { status: 'sobra', valor: -x.dif, un: 'barril', texto: '+' + fmt(-x.dif, 2) + ' bar.' };
+      var can = Math.round(Math.abs(x.dif) * CANECAS());
+      return x.status === 'perda' ? { status: 'falta', valor: -can, un: 'caneca', texto: '−' + fmt(can, 0) + ' can.' }
+                                  : { status: 'sobra', valor: can, un: 'caneca', texto: '+' + fmt(can, 0) + ' can.' };
     }
     if (item.tipo === 'coca') {
       var bases = Object.keys(p.coca || {});
@@ -279,6 +286,19 @@
       return { status: 'sem_dado', texto: '—', motivo: 'sem as duas contagens ou vendidos incompletos' };
     }
     return { status: 'sem_dado', texto: '—' };
+  }
+  function CANECAS() { return (window.gnChoppControle || {}).CANECAS_META || 128; }
+  // Soma das diferenças de cada dia da semana (kg): o saldo da semana. Também devolve quanto
+  // foi falta e quanto foi sobra nos dias (fora da margem), pra mostrar quando oscilou.
+  function saldoSemana(c) {
+    var r = { saldo: 0, falta: 0, sobra: 0, dias: 0 };
+    (c.dias || []).forEach(function (x) {
+      if (x.dif === null || x.dif === undefined) return;
+      r.dias++; r.saldo += x.dif;
+      if (x.status === 'falta') r.falta += Math.abs(x.dif); else if (x.status === 'sobra') r.sobra += x.dif;
+    });
+    r.saldo = Math.round(r.saldo * 1000) / 1000;
+    return r;
   }
   var ITENS = CARNES.map(function (c) { return { tipo: 'carne', key: c.key, label: c.label, curto: c.curto }; }).concat([
     { tipo: 'chopp', key: 'CLARO', label: 'Chopp claro', curto: 'Chopp' },
@@ -322,10 +342,9 @@
         ITENS.map(function (it, i) {
           var c = celula(res, p, it), cor = COR[c.status] || COR.sem_dado;
           if (cont[c.status] != null) cont[c.status]++;
-          if (c.texto2) cont.sobra++;
           var sel = st.sel && st.sel.k === k && st.sel.i === i;
           return '<td style="padding:2px"><button class="acomp-cel" data-k="' + esc(k) + '" data-i="' + i + '" data-status="' + c.status + '" title="' + esc(c.motivo || '') + '" ' +
-            'style="width:100%;min-width:52px;border:' + (sel ? '2px solid var(--t1,#111)' : '1px solid rgba(0,0,0,.06)') + ';border-radius:8px;padding:7px 2px;background:' + cor.bg + ';color:' + cor.fg + ';font-size:11px;font-weight:800;font-family:inherit;cursor:pointer;white-space:nowrap;font-variant-numeric:tabular-nums;line-height:1.2">' + esc(c.texto) + (c.texto2 ? '<div class="acomp-t2" style="font-size:9.5px;color:' + COR.sobra.fg + '">' + esc(c.texto2) + '</div>' : '') + '</button></td>';
+            'style="width:100%;min-width:52px;border:' + (sel ? '2px solid var(--t1,#111)' : '1px solid rgba(0,0,0,.06)') + ';border-radius:8px;padding:7px 2px;background:' + cor.bg + ';color:' + cor.fg + ';font-size:11px;font-weight:800;font-family:inherit;cursor:pointer;white-space:nowrap;font-variant-numeric:tabular-nums;line-height:1.2">' + esc(c.texto) + (c.texto2 ? '<div class="acomp-t2" style="font-size:9px;font-weight:700;color:var(--t2,#334155)">' + esc(c.texto2) + '</div>' : '') + '</button></td>';
         }).join('') + '</tr>';
     }).join('');
     var periodo = res.vigente ? 'Semana atual · ' + br(res.iniISO) + ' a hoje (em curso)' : 'Semana fechada · ' + br(res.iniISO) + ' a ' + br(res.fimISO);
@@ -344,7 +363,7 @@
         (res.erros.length ? '<div style="font-size:10.5px;color:' + COR.falta.fg + ';margin-bottom:6px">Parte dos dados não carregou (' + esc(res.erros.join(', ')) + ') — o que falta aparece como "sem dado".</div>' : '') +
         (so1 ? gradeUmaLoja(res, ks[0], st) : '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table style="border-collapse:collapse;width:100%">' + cab + linhas + '</table></div>') +
         '<div class="acomp-detalhe" style="margin-top:10px">' + (st.sel ? detalhe(res, res.porLoja[st.sel.k], ITENS[st.sel.i]) : '') + '</div>' +
-        '<div style="font-size:9.5px;color:var(--t3,#64748b);margin-top:8px;line-height:1.5">Carnes: margem de ' + ((window.gnCarnesDiario || {}).MARGEM_KG || 1) + ' kg, entrada já sem a perda da salga; falta e sobra iguais em dias seguidos (contagem atrasada) não contam. Chopp: barris usados × canecas vendidas ÷ ' + ((window.gnChoppControle || {}).CANECAS_META || 128) + ', tolerância de ¼ de barril. Coca: fecha na segunda, com a contagem nova (até 6 un ou 5% é "bate"). Os mesmos números das abas Carnes, Barris e Vendidos do Painel.</div>' +
+        '<div style="font-size:9.5px;color:var(--t3,#64748b);margin-top:8px;line-height:1.5">Carnes: o número grande é o saldo da semana (a soma das diferenças dos dias), com margem de ' + ((window.gnCarnesDiario || {}).MARGEM_KG || 1) + ' kg e entrada já sem a perda da salga; "dias −x · +y" embaixo = faltou num dia e sobrou no outro, quase sempre carne contada um dia depois. Chopp em canecas: canecas que os barris usados renderiam (' + CANECAS() + ' por barril) × canecas vendidas, tolerância de ¼ de barril (' + Math.round(CANECAS() / 4) + ' canecas). Coca: fecha na segunda, com a contagem nova (até 6 un ou 5% é "bate"). Os mesmos números das abas Carnes, Barris e Vendidos do Painel.</div>' +
       '</div>';
     el.querySelectorAll('.acomp-per').forEach(function (b) { b.onclick = function () { st.off = +b.dataset.off; st.sel = null; render(el); }; });
     el.querySelectorAll('.acomp-cel').forEach(function (b) { b.onclick = function () {
@@ -365,7 +384,7 @@
         'style="min-width:0;border:' + (sel ? '2px solid var(--t1,#111)' : '1px solid rgba(0,0,0,.06)') + ';border-radius:10px;padding:7px 3px;background:' + cor.bg + ';color:' + cor.fg + ';font-family:inherit;cursor:pointer;line-height:1.25;font-variant-numeric:tabular-nums">' +
         '<div style="font-size:9.5px;font-weight:700;color:var(--t2,#334155);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(it.curto) + '</div>' +
         '<div style="font-size:12px;font-weight:800;white-space:nowrap">' + esc(c.texto) + '</div>' +
-        (c.texto2 ? '<div class="acomp-t2" style="font-size:9.5px;font-weight:800;color:' + COR.sobra.fg + '">' + esc(c.texto2) + '</div>' : '') + '</button>';
+        (c.texto2 ? '<div class="acomp-t2" style="font-size:9px;font-weight:700;color:var(--t2,#334155)">' + esc(c.texto2) + '</div>' : '') + '</button>';
     }).join('') + '</div>';
   }
 
@@ -393,6 +412,7 @@
           '<td style="' + tdS + ';font-weight:800;color:' + corDe(x.compensa ? 'sem_dado' : x.status) + '">' + difTxt + '</td></tr>';
       }).join('');
       return cab + '<div style="font-size:10.5px;color:var(--t3,#64748b);margin-bottom:4px">Estoque inicial (contagem de segunda): <b>' + kg(c.contagens[0]) + ' kg</b>. Cada linha: contagem anterior + o que chegou − vendidos = o que deveria ter; contado; diferença.</div>' +
+        (function () { var sd = saldoSemana(c); return sd.dias ? '<div class="acomp-saldo" style="font-size:12px;font-weight:800;color:' + corDe(Math.abs(sd.saldo) <= ((window.gnCarnesDiario || {}).MARGEM_KG || 1) ? 'ok' : sd.saldo < 0 ? 'falta' : 'sobra') + ';margin-bottom:6px">Saldo da semana: ' + (sd.saldo > 0 ? '+' : sd.saldo < 0 ? '−' : '') + fmt(Math.abs(sd.saldo), 1) + ' kg <span style="font-weight:400;color:var(--t3,#64748b);font-size:10.5px">(a soma da coluna Diferença' + (sd.falta && sd.sobra ? ' — falta num dia e sobra no outro costuma ser carne contada um dia depois' : '') + ')</span></div>' : ''; })() +
         '<div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;min-width:430px"><tr><th style="' + thS + ';text-align:left">Dia</th><th style="' + thS + '">Anterior</th><th style="' + thS + '">Entrou</th><th style="' + thS + '">Vendido</th><th style="' + thS + '">Teórico</th><th style="' + thS + '">Físico</th><th style="' + thS + '">Diferença</th></tr>' + linhas + '</table></div>' +
         '<div style="font-size:9.5px;color:var(--t3,#64748b);margin-top:4px">"Seg seg." é o fechamento: a contagem da segunda seguinte. ↔ falta e sobra do mesmo tamanho em dias seguidos: contagem atrasada, não é perda.</div>';
     }
@@ -404,15 +424,16 @@
         var x = j[it.key]; if (!x) return '';
         var dif = x.dif == null ? null : x.dif;
         return '<div style="font-size:11px;font-weight:800;color:var(--t2,#334155);margin:2px 0">' + rot + '</div><table style="border-collapse:collapse;width:100%;margin-bottom:6px">' +
-          [['Barris no início', fmt(x.iniEq, 2)], ['+ chegaram', fmt(x.entradas, 0)], ['− barris no fim', fmt(x.fimEq, 2)], ['= usados (físico)', fmt(x.consumido, 2)],
-           ['Vendido: ' + fmt(x.canecas, 0) + ' canecas (' + fmt(x.litros, 1) + ' L) = barris (teórico)', fmt(x.vendidoBarris, 2)],
-           ['Diferença', dif === null ? (x.completo ? '—' : 'vendidos incompletos') : (dif > 0 ? '−' + fmt(dif, 2) + ' (usou mais)' : dif < 0 ? '+' + fmt(-dif, 2) + ' (conferir)' : '0')],
-           ['Rendimento', x.rendimento ? x.rendimento + ' canecas/barril' : '—']].map(function (l) {
+          [['Barris no início', fmt(x.iniEq, 2)], ['+ chegaram', fmt(x.entradas, 0)], ['− barris no fim', fmt(x.fimEq, 2)],
+           ['= barris usados (pela contagem)', fmt(x.consumido, 2) + ' ≈ ' + fmt(Math.round(x.consumido * CANECAS()), 0) + ' canecas'],
+           ['Canecas vendidas (' + fmt(x.litros, 1) + ' L)', fmt(x.canecas, 0)],
+           ['Diferença', dif === null ? (x.completo ? '—' : 'vendidos incompletos') : (dif > 0 ? '−' + fmt(Math.round(dif * CANECAS()), 0) + ' canecas (usou mais chopp do que vendeu)' : dif < 0 ? '+' + fmt(Math.round(-dif * CANECAS()), 0) + ' canecas (vendeu mais do que a contagem de barris mostra — conferir)' : '0')],
+           ['Rendimento', x.rendimento ? x.rendimento + ' canecas/barril (meta ' + CANECAS() + ')' : '—']].map(function (l) {
             return '<tr><td style="' + tdS + ';text-align:left">' + l[0] + '</td><td style="' + tdS + ';font-weight:800">' + l[1] + '</td></tr>'; }).join('') + '</table>';
       };
       var ch = p.chopp || {};
       return cab + jan(ch.fechada, 'Semana fechada ' + br(res.W1) + ' → ' + br(res.W)) + jan(ch.acomp, 'Acompanhamento ' + br(res.W) + ' → ' + br(res.QUI) + ' (indicativo)') +
-        '<div style="font-size:9.5px;color:var(--t3,#64748b)">Barril pela contagem: cheio 1 · na linha cheio 1 · metade ½ · abaixo da metade ¼ · vazio 0 — o barril pela metade na linha não vira falta.</div>';
+        '<div style="font-size:9.5px;color:var(--t3,#64748b)">Cada barril vale ' + CANECAS() + ' canecas (meta). Barril pela contagem: cheio 1 · na linha cheio 1 · metade ½ · abaixo da metade ¼ · vazio 0 — o barril pela metade na linha não vira falta.</div>';
     }
     if (it.tipo === 'coca') {
       var bases = Object.keys(p.coca || {});
