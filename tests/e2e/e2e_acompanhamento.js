@@ -76,7 +76,9 @@ const lerGrade = (page, sel) => page.evaluate((sel) => [...document.querySelecto
     renderDashboard(); await new Promise(r => setTimeout(r, 300));
     const depois = (window.__CONSULTAS || []).length;
     return { grupo: grupo.grupo, nLojas, recarregou: depois !== antes, aindaLa: !!document.querySelector('#acomp-painel .acomp-cel'),
-      semInput: !document.querySelector('#acomp-painel input, #acomp-painel select, #acomp-painel textarea') };
+      // As caixinhas de lojas do relatório (26/11) só escolhem o que entra no WhatsApp/PDF — não
+      // alteram dado nenhum; qualquer outro campo continua proibido.
+      semInput: !document.querySelector('#acomp-painel input:not(.acomp-rel-loja), #acomp-painel select, #acomp-painel textarea') };
   });
   check('Painel › Operação › 📊 Acompanhamento: grade com as 11 lojas (Maglia fora)', painel.grupo === 'operacao' && painel.nLojas === 11, painel);
   check('só consulta: nenhum campo editável', painel.semInput);
