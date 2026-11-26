@@ -7311,7 +7311,7 @@ async function carregarHortifruti() {
       const pedidoHoje = pedidos && pedidos[0];
       if (pedidoHoje) {
         const itens = await sbRequest(
-          'gn_pedido_itens?pedido_id=eq.' + pedidoHoje.id + '&loja_slug=eq.' + slug + '&qtd_pedida=gt.0&select=catalogo_id,qtd_pedida,unidade',
+          'gn_pedido_itens?pedido_id=eq.' + pedidoHoje.id + '&loja_slug=eq.' + slug + '&qtd_pedida=gt.0&select=catalogo_id,qtd_pedida,unidade,variante',
           { method: 'GET' }
         );
         if (itens && itens.length > 0) {
@@ -7322,7 +7322,7 @@ async function carregarHortifruti() {
               // Unidade do catálogo na frente da gravada: pedidos antigos foram enviados
               // quando a tela só oferecia KG/UND, e mostrar aquilo aqui divergiria do que
               // o Estoque e Pedido exibe pro mesmo item.
-              return { catalogo_id: it.catalogo_id, qtd_pedida: it.qtd_pedida, produto: prod ? prod.produto : '—', und: prod ? _hortifrutiUnd(prod) : (it.unidade || '') };
+              return { catalogo_id: it.catalogo_id, qtd_pedida: it.qtd_pedida, produto: (prod ? prod.produto : '—') + (it.variante ? ' (' + _hortiVarianteRotulo(it.variante).toLowerCase() + ')' : ''), und: prod ? _hortifrutiUnd(prod) : (it.unidade || '') };
             }),
           };
         }
@@ -7336,6 +7336,17 @@ async function carregarHortifruti() {
     render();
   }
 }
+
+/* ── Tipo da banana (Etapa 4, 26/11/2026) ─────────────────────────────────────────────
+   "Na aba Hortifruti, incluir três opções para a descrição da banana — verde, madura, de
+    vez — e isso aparecer no relatório do WhatsApp e no PDF, pro fornecedor saber qual tipo
+    está sendo solicitado." Vale pros itens de banana do Hortifruti (d'água e da terra).
+   Pedindo banana, escolher o tipo é obrigatório: sem ele o fornecedor manda o que tiver. */
+const HORTI_VARIANTES = [['VERDE', 'Verde'], ['MADURA', 'Madura'], ['DE_VEZ', 'De vez']];
+let hortifrutiVariante = {};   // catalogo_id -> 'VERDE' | 'MADURA' | 'DE_VEZ'
+function _hortiTemVariante(p) { return /banana/i.test((p && p.produto) || ''); }
+function _hortiVarianteRotulo(v) { const x = HORTI_VARIANTES.find(o => o[0] === v); return x ? x[1] : ''; }
+function setHortifrutiVariante(catalogoId, v) { hortifrutiVariante[catalogoId] = v; render(); }
 
 function setHortifrutiQtd(catalogoId, val) {
   hortifrutiQtd[catalogoId] = Math.max(0, parseFloat(val) || 0);
@@ -7354,7 +7365,7 @@ function _hortifrutiUndCor(und) { return HORTI_UND_COR[und] || 'var(--t2)'; }
 function _hortifrutiItensParaEnviar() {
   return hortifrutiCatalogo.reduce(function(itens, p) {
     const q = hortifrutiQtd[p.id] || 0;
-    if (q > 0) itens.push({ catalogo_id: p.id, qtd_pedida: q, unidade: _hortifrutiUnd(p) });
+    if (q > 0) itens.push({ catalogo_id: p.id, qtd_pedida: q, unidade: _hortifrutiUnd(p), variante: _hortiTemVariante(p) ? (hortifrutiVariante[p.id] || null) : null });
     return itens;
   }, []);
 }
@@ -7393,6 +7404,8 @@ async function enviarPedidoHortifruti() {
   if (!slug) { showToast('⚠️ Loja sem slug de pedido configurado.'); return; }
   const itensParaEnviar = _hortifrutiItensParaEnviar();
   if (itensParaEnviar.length === 0) { showToast('⚠️ Digite a quantidade de pelo menos um item.'); return; }
+  const semTipo = itensParaEnviar.filter(it => { const p = hortifrutiCatalogo.find(x => x.id === it.catalogo_id); return _hortiTemVariante(p) && !it.variante; });
+  if (semTipo.length) { showToast('⚠️ Escolha o tipo da banana (verde, madura ou de vez) antes de enviar.'); return; }
 
   const provAntMap = await _buscarProvAntHortifruti(slug);
   const zerados = hortifrutiCatalogo
@@ -7468,7 +7481,7 @@ async function _confirmarEnviarHortifruti() {
     if (!pedidoHoje) throw new Error('Não foi possível criar o pedido de Hortifruti.');
 
     const body = itensParaEnviar.map(function(it) {
-      return { pedido_id: pedidoHoje.id, catalogo_id: it.catalogo_id, loja_slug: slug, qtd_pedida: it.qtd_pedida, unidade: it.unidade };
+      return { pedido_id: pedidoHoje.id, catalogo_id: it.catalogo_id, loja_slug: slug, qtd_pedida: it.qtd_pedida, unidade: it.unidade, variante: it.variante || null };
     });
     await sbRequest('gn_pedido_itens?on_conflict=pedido_id,catalogo_id,loja_slug', {
       method: 'POST',
@@ -11582,6 +11595,11 @@ function render() {
                 <label style="font-size:9px;color:${_hortifrutiUndCor(_und)};font-weight:700;text-transform:uppercase">Quantidade em ${_und}</label>
                 ${campoComBadgeSemAutoSave(_hq||'', _und, _hortifrutiUndCor(_und), "oninput=\"setHortifrutiQtd('"+p.id+"',this.value)\"")}
               </div>
+              ${_hortiTemVariante(p) ? `<div class="horti-variante" data-id="${p.id}" style="width:100%">
+                <label style="font-size:9px;color:var(--t2);font-weight:700;text-transform:uppercase">Tipo da banana *</label>
+                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:3px">${HORTI_VARIANTES.map(([v, rot]) => { const on = hortifrutiVariante[p.id] === v;
+                  return `<button type="button" onclick="setHortifrutiVariante('${p.id}','${v}')" style="padding:7px 4px;border-radius:9px;font-size:12px;font-weight:800;font-family:inherit;border:1.5px solid ${on ? '#059669' : 'rgba(0,0,0,.15)'};background:${on ? '#059669' : 'var(--s2)'};color:${on ? '#fff' : 'var(--t2)'}">${rot}</button>`; }).join('')}</div>
+              </div>` : ''}
             </div>`;
           }).join('')}
         </div>

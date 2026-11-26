@@ -30,7 +30,9 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n); c ?
     document.getElementById('dash-section').style.display = 'block';
     const fat = {}, prev = {}; _lojasFatConsolidado().forEach(k => { fat[k] = 46000; prev[k] = 50000; });   // −8%
     _dashFat = fat; _dashFatPrev = prev; _dashTab = 'fat';
-    const m = {}; if (metas) _lojasFatConsolidado().forEach(k => { m[k] = 40000; }); localStorage.setItem('gn_home_metas', JSON.stringify(m));   // renderDashboard relê daqui
+    // Desde 26/11/2026 as metas vêm do cadastro único (gn_metas_lojas), sincronizado no máximo
+    // 1×/min — o teste põe direto na memória e marca a sincronia como recente.
+    const m = {}; if (metas) _lojasFatConsolidado().forEach(k => { m[k] = 40000; }); _dashMetas = m; _dashMetasCarregadas = true; _dashMetasSyncEm = Date.now();
     renderDashboard();
     const tiles = [...document.querySelectorAll('#dash-section .kpi-tile')].map(e => e.innerText.replace(/\s+/g, ' ').trim());
     const aviso = document.querySelector('.kpi-meta-aviso');
