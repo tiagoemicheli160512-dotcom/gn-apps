@@ -4310,8 +4310,18 @@ async function carregarDivergencias() {
   } catch(e) { console.error('carregarDivergencias:', e); }
 }
 
+// Etapa 5 (26/11/2026) — revisão do fluxo de estoque. Medido no banco: nas 11 lojas a
+// última venda por prato lançada aqui é de junho e a última contagem física de agosto (a
+// venda por prato do Check-list está vazia desde que o Vendidos substituiu o contador).
+// Sem as duas, o Relatório (teórico × contado) não calcula nada e a Home cobrava toda
+// semana três passos que ninguém faz. Decisão do dono: enxugar — Vendas, Contagem e
+// Relatório saem da Home e do menu da loja; as abas e os dados continuam pro mestre.
+// Teórico × físico de carnes e bebidas (onde há dado confiável) fica no Painel.
+const ABAS_FLUXO_ANTIGO = ['vendas', 'contagem', 'relatorio'];
+function _fluxoAntigoVisivel() { return !!usuarioAtual && usuarioAtual.cargo === 'mestre'; }
 function goTab(t) {
   if (t !== 'guia' && abasPermitidas && !abasPermitidas.includes(t)) return;
+  if (ABAS_FLUXO_ANTIGO.includes(t) && !_fluxoAntigoVisivel()) return;
   // Bloqueio ESCALADO — pelo menos 1 nota fiscal ficou 1 dia inteiro sem lançar (ver
   // `hard`). Diferente do bloqueio soft, aqui NENHUMA troca de aba é permitida — nem pra
   // Entradas explicitamente (já é pra lá que _renderTravaNotaFiscal() força sozinho) nem
@@ -5964,8 +5974,8 @@ const GUIA_SECOES = [
     resumo:'Painel inicial da loja — visão geral da semana e atalhos pro fluxo de trabalho.',
     corpo: _guiaCallout('info','ℹ️','Tudo aqui é só leitura e atalho — nada é preenchido nessa tela.')
       + _guiaSteps([
-        'Cards do topo mostram Insumos preenchidos, Vendas lançadas, itens Contados e Alertas da semana.',
-        '"Fluxo da semana" lista os passos em ordem (Estoque → Vendas → Entradas → Contagem → Relatório), com ✓ no que já foi feito — toque pra ir direto na aba.',
+        'Cards do topo mostram Insumos com estoque, itens que Entraram na semana e Alertas de estoque.',
+        '"Fluxo da semana" mostra o que a loja alimenta toda semana — Estoque inicial (a contagem do Pedido de segunda) e Entradas de mercadoria —, com ✓ no que já foi feito; toque pra ir direto na aba.',
         'Atalhos pra Fichas Técnicas/CMV e Avarias/Desperdício ficam logo abaixo.',
       ])
   },
@@ -5993,11 +6003,11 @@ const GUIA_SECOES = [
         'Insumo abaixo do mínimo configurado é destacado como alerta.',
       ]) + _guiaCallout('tip','⚙️','Botão <span class="guia-ui">⚙️ Mínimos</span> (só gestão) configura o estoque mínimo de cada insumo — abaixo dele, o item entra no alerta.')
   },
-  { id:'vendas', num:'06', titulo:'Vendas', roles:['loja','gestao','master'],
+  { id:'vendas', num:'06', titulo:'Vendas', roles:['master'],
     resumo:'Mostra os pratos vendidos na semana, usados pra calcular o consumo teórico de insumos.',
     corpo: _guiaCallout('info','ℹ️','Somente leitura aqui — quem lança a venda de verdade é o app Check-list; essa aba só espelha o que já foi salvo lá.')
   },
-  { id:'contagem', num:'07', titulo:'Contagem', roles:['loja','gestao','master'],
+  { id:'contagem', num:'07', titulo:'Contagem', roles:['master'],
     resumo:'Compara o estoque teórico (calculado pelas fichas técnicas) com o que foi contado fisicamente — a contagem da segunda-feira seguinte.',
     corpo: _guiaSteps([
       'Pra cada insumo, o teórico já vem calculado sozinho.',
@@ -6044,7 +6054,7 @@ const GUIA_SECOES = [
         'Registra quando um item recebido precisa voltar pro fornecedor (errado, avariado, etc.) — fica com data e motivo.',
       ])
   },
-  { id:'relatorio', num:'12', titulo:'Relatório', roles:['loja','gestao','master'],
+  { id:'relatorio', num:'12', titulo:'Relatório', roles:['master'],
     resumo:'Fechamento da semana — CMV, diferenças de contagem, ranking de insumos com maior perda, e exportação pra WhatsApp/JSON.',
     corpo: _guiaPlain([
       'CMV da semana calculado automaticamente.',
@@ -10112,11 +10122,15 @@ function render() {
   if (sidebarFichas) sidebarFichas.style.display = _fichasOk ? "" : "none";
   const navGestao = document.getElementById("nav-gestao");
   if (navGestao) navGestao.style.display = _fichasOk ? "" : "none";
+  ABAS_FLUXO_ANTIGO.forEach(function(tid) {
+    const nb = document.getElementById('nav-' + tid);
+    if (nb) nb.style.display = _fluxoAntigoVisivel() ? '' : 'none';
+  });
   // Tab permissions
   if (abasPermitidas) {
     ['home','pedido','hortifruti','fichas','gestao','estoque','vendas','contagem','entradas','vinculos','transf','entrega','notas','barris','avarias','relatorio'].forEach(function(tid) {
       const nb = document.getElementById('nav-' + tid);
-      if (nb) nb.style.display = abasPermitidas.includes(tid) ? '' : 'none';
+      if (nb) nb.style.display = abasPermitidas.includes(tid) && (!ABAS_FLUXO_ANTIGO.includes(tid) || _fluxoAntigoVisivel()) ? '' : 'none';
       const sb = document.getElementById('sidebar-' + tid);
       if (sb) sb.style.display = abasPermitidas.includes(tid) ? '' : 'none';
     });
@@ -10127,17 +10141,18 @@ function render() {
   /* Conteúdo */
   const c = document.getElementById("content");
 
+  if (ABAS_FLUXO_ANTIGO.includes(tab) && !_fluxoAntigoVisivel()) tab = "home";
   if (tab === "home") {
+    const _entSem = (entradasAll[lojaKey()] || []).length;
     c.innerHTML = `
     <div class="section">
       <div class="hero" style="background:${heroBg}">
         <div style="font-size:11px;font-weight:700;color:rgba(0,0,0,.6);text-transform:uppercase;margin-bottom:2px">Loja</div>
         <div style="${heroTitleStyle}">${lojaDisp(loja)}</div>
         <div style="font-size:11px;color:rgba(0,0,0,.5);margin-bottom:10px">Semana ${fmt(semana)} a ${fmt(dom)}</div>
-        <div class="stats-grid">
+        <div class="stats-grid" style="grid-template-columns:repeat(3,1fr)">
           <div class="stat-box"><div class="stat-num" style="font-size:16px">${preenchidos}/${SEED.insumos.length}</div><div class="stat-lbl">Insumos</div></div>
-          <div class="stat-box"><div class="stat-num">${tv}</div><div class="stat-lbl">Vendas</div></div>
-          <div class="stat-box"><div class="stat-num">${qc}</div><div class="stat-lbl">Contados</div></div>
+          <div class="stat-box"><div class="stat-num">${_entSem}</div><div class="stat-lbl">Entradas</div></div>
           <div class="stat-box"><div class="stat-num" style="color:${qa>0?"#B91C1C":"#fff"}">${qa}</div><div class="stat-lbl">Alertas</div></div>
         </div>
       </div>
@@ -10153,11 +10168,8 @@ function render() {
         <div class="sec-label">Fluxo da semana</div>
         <div style="display:flex;flex-direction:column;gap:7px">
           ${[
-            ["1","📦","Estoque Inicial","Saldo de cada insumo na segunda","estoque", preenchidos>0],
-            ["2","💰","Vendas do Período","Pratos vendidos de seg a dom","vendas", tv>0],
-            ["3","📥","Entradas de Mercadoria","Notas fiscais e recebimentos","entradas", Object.keys(entradasAll[lojaKey()]||{}).length>0],
-            ["4","🔢","Contagem Física","Contagem na segunda seguinte","contagem", qc>0],
-            ["5","📊","Relatório","Diferenças e fechamento","relatorio", qd===0&&qc>0]
+            ["1","📦","Estoque Inicial","Contagem do Pedido de segunda","estoque", preenchidos>0],
+            ["2","📥","Entradas de Mercadoria","Notas fiscais e recebimentos","entradas", _entSem>0]
           ].map(([num,ic,title,sub,dest,done]) => `
             <button class="flow-btn ${done?"done":""}" onclick="goTab('${dest}')">
               <div class="flow-num ${done?"done":""}">${done?"✓":num}</div>
@@ -10167,6 +10179,7 @@ function render() {
               </div>
               <span style="color:var(--t2)">›</span>
             </button>`).join("")}
+          ${_fluxoAntigoVisivel() ? `<div class="fluxo-antigo-mestre" style="font-size:10.5px;color:var(--t3);line-height:1.5;padding:2px 4px">Só mestre (fora da rotina das lojas desde a revisão de 26/11): <a href="#" onclick="goTab('vendas');return false" style="color:var(--t2)">Vendas</a> · <a href="#" onclick="goTab('contagem');return false" style="color:var(--t2)">Contagem</a> · <a href="#" onclick="goTab('relatorio');return false" style="color:var(--t2)">Relatório</a></div>` : ''}
           <button class="flow-btn" onclick="goTab('fichas')" style="border-color:rgba(59,130,246,.25);background:rgba(59,130,246,.06)"><div class="flow-num" style="background:rgba(59,130,246,.2);color:var(--txt-blue)">📋</div><div style="flex:1;min-width:0"><div class="flow-title">📋 Fichas Técnicas / CMV</div><div class="flow-sub">Ver fichas e custo dos pratos</div></div><span style="color:var(--t2)">›</span></button>
           ${(function(){ const _avPnd=(avariasAll[loja]||[]).filter(a=>a.status!=='finalizado'); return `<button class="flow-btn" onclick="goTab('avarias')" style="border-color:rgba(239,68,68,.25);background:rgba(239,68,68,.06)"><div class="flow-num" style="background:rgba(239,68,68,.2);color:var(--txt-red)">⚠️</div><div style="flex:1;min-width:0"><div class="flow-title">⚠️ Avarias / Desperdício</div><div class="flow-sub">${_avPnd.length>0?_avPnd.length+' pendente'+ (_avPnd.length>1?'s':''):'Registrar saída por avaria'}</div></div><span style="color:var(--t2)">›</span></button>`; })()}
         </div>
@@ -10188,7 +10201,8 @@ function render() {
         if (!al.length) return '';
         return `<div style="background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:14px;padding:14px">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:6px">
-            <div style="font-size:13px;font-weight:800;color:var(--txt-red)">🚨 Estoque Crítico (${al.length})</div>
+            <div><div style="font-size:13px;font-weight:800;color:var(--txt-red)">🚨 Estoque Crítico (${al.length})</div>
+            <div class="estoque-critico-base" style="font-size:10px;color:var(--t3);margin-top:2px">Saldo de segunda + entradas da semana — não desconta o que já foi consumido.</div></div>
             <button onclick="dispararAlertasWpp()" style="background:rgba(37,211,102,.15);border:1px solid rgba(37,211,102,.4);border-radius:10px;padding:6px 12px;color:var(--txt-green);font-size:11px;font-weight:800;cursor:pointer;white-space:nowrap">${alertasWpp.length ? '📲 Disparar ('+alertasWpp.length+')' : '📲 WhatsApp'}</button>
           </div>
           ${al.slice(0,6).map(a=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid rgba(239,68,68,.15)">
