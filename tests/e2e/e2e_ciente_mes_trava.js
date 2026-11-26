@@ -157,9 +157,14 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   const fila = await page.evaluate(async () => {
     LOJAS_LISTA = ['BANGU']; masterLoja = null; _cienteAllData = null;
     session = { nome: 'Ana', loja: 'BANGU', cargo: 'gerente', permissoes: {} };
+    // A trava da semana aqui é simulada (_gateAtivo na mão). Um render da Home ainda em voo
+    // termina chamando _gateReavaliar(), que reavalia de verdade, não acha trava da semana e
+    // solta a simulada no meio do passo — corrida do teste, não do app (1 em ~12 sob carga).
+    const reavaliar = _gateReavaliar; _gateReavaliar = () => {};
     _gateAtivo = true;
     await _renderMesAnteriorHome(true, session, false);
     const comSemana = !!document.getElementById('gate-ciente-mes');
+    _gateReavaliar = reavaliar;
     _gateLiberar();
     return { comSemana, depois: !!document.getElementById('gate-ciente-mes') };
   });

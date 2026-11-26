@@ -61,6 +61,8 @@ const ROWS = [
     lojas[0].querySelector('[onclick]').click();
     out.tipos = [...document.querySelectorAll('.bloq-loja[data-loja="CAXIAS"] .bloq-tipos > div')].map(d => d.textContent.replace(/\s+/g, ' ').trim());
     // Sem estouro horizontal no celular.
+    out.tendSetas = document.querySelectorAll('.bloq-tend').length;
+    out.tendInfo = (document.querySelector('.bloq-tend-info') || {}).textContent || '';
     out.estouro = [...document.querySelectorAll('.bloq-loja')].filter(e => e.getBoundingClientRect().right > window.innerWidth + 1).length;
     // Relatórios.
     gerarWppBloqueios(); out.wpp = abertos.pop() || '';
@@ -80,12 +82,73 @@ const ROWS = [
   check('Maglia fora do ranking', !r.maglia);
   check('detalhe por tipo: Vendidos 2 casos 6h30, Carnes 1 caso 2h', r.tipos.length === 2 && /Vendidos.*2 · 6h 30min/.test(r.tipos[0]) && /carnes.*1 · 2h/i.test(r.tipos[1]), r.tipos);
   check('seletor Dia/Semana/Mês/Trimestre aparece na aba', r.temSeletor);
-  check('query da semana pede 23/11 a 29/11', /dia=gte\.2026-11-23&dia=lte\.2026-11-29/.test(r.urls[0] || ''), r.urls);
-  check('trocar pra Mês refaz a busca com novembro inteiro', /dia=gte\.2026-11-01&dia=lte\.2026-11-30/.test(r.urls[1] || ''), r.urls);
+  check('query da semana pede a semana anterior junto (16/11 a 29/11) — uma busca só', /dia=gte\.2026-11-16&dia=lte\.2026-11-29/.test(r.urls[0] || ''), r.urls);
+  check('trocar pra Mês refaz a busca (outubro + novembro)', /dia=gte\.2026-10-01&dia=lte\.2026-11-30/.test(r.urls[1] || ''), r.urls);
+  check('sem período anterior registrado: nenhuma seta de tendência, e a tela explica por quê', r.tendSetas === 0 && /aparece quando o período anterior inteiro estiver registrado/.test(r.tendInfo), r);
   check('no mês aparece o aviso de que o registro começou em 26/11', /começou em 26\/11/.test(r.aviso), r.aviso);
   check('nada estoura a tela do celular', r.estouro === 0, r.estouro);
   check('WhatsApp: ranking com 1º Caxias e tipos', /1º Caxias\* — 3 casos/.test(r.wpp) && /Vendidos do dia: 2/.test(r.wpp) && /Sem bloqueio/.test(r.wpp), r.wpp);
   check('PDF: KPIs de casos, tempo e quem mais travou', r.pdf && r.pdf.kpis[0].valor === '7' && r.pdf.kpis[2].valor === 'Caxias', r.pdf && r.pdf.kpis);
+
+  // ── Tendência: 09/12 (semana de 07/12 × semana de 30/11, as duas dentro do registro) ──
+  const ctx2 = await browser.newContext({ viewport: { width: 360, height: 900 }, timezoneId: 'America/Sao_Paulo' });
+  await CAMINHOS.fixarRelogio(ctx2, '2026-12-09T15:00:00-03:00');
+  await ctx2.route('**/rest/v1/**', r => r.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
+  const p2 = await ctx2.newPage(); p2.on('pageerror', e => erros.push(String(e.message)));
+  for (let t = 1; ; t++) {
+    await p2.goto('file://' + HOME);
+    try { await p2.waitForFunction(() => { try { return typeof _buildBloqueiosPanel === 'function'; } catch (e) { return false; } }, null, { timeout: 25000 }); break; }
+    catch (e) { if (t >= 4) throw new Error('a Home não carregou (2)'); }
+  }
+  const R = (loja, tipo, dia) => ({ loja, tipo, dia, hard: false, primeiro_em: T(dia, '10:00'), resolvido_em: T(dia, '11:00') });
+  const ROWS2 = [
+    // semana anterior (30/11–06/12): Caxias 1, Bangu 4, Pedreira 2
+    R('CAXIAS', 'vendidos', '2026-12-01'),
+    R('BANGU', 'vendidos', '2026-11-30'), R('BANGU', 'vendidos', '2026-12-01'), R('BANGU', 'carnes', '2026-12-02'), R('BANGU', 'caixa', '2026-12-03'),
+    R('PEDREIRA', 'abertura', '2026-12-02'), R('PEDREIRA', 'abertura', '2026-12-03'),
+    // semana atual (07/12–): Caxias 3 (piorou +2), Bangu 1 (melhorou −3), Pedreira 0 (tinha 2)
+    R('CAXIAS', 'vendidos', '2026-12-07'), R('CAXIAS', 'vendidos', '2026-12-08'), R('CAXIAS', 'vendidos', '2026-12-09'),
+    R('BANGU', 'nota_fiscal', '2026-12-07'),
+    // Itaquera: 2 e 2 → igual
+    R('ITAQUERA', 'entrega', '2026-12-01'), R('ITAQUERA', 'entrega', '2026-12-04'), R('ITAQUERA', 'entrega', '2026-12-07'), R('ITAQUERA', 'carnes', '2026-12-08'),
+  ];
+  const t2 = await p2.evaluate(async (ROWS2) => {
+    const out = { urls: [] }; const abertos = [];
+    window.gnFetchJson = async (url, h, nome, fb) => { out.urls.push(nome + ' ' + url); return nome.startsWith('bloqueios:') ? JSON.parse(JSON.stringify(ROWS2)) : (fb === undefined ? [] : fb); };
+    window.open = (u) => { abertos.push(decodeURIComponent(String(u).split('text=')[1] || '')); return null; };
+    session = { id: 1, nome: 'Tiago', cargo: 'mestre', loja: 'GERAL', permissoes: { master: true } };
+    document.getElementById('home-screen').style.display = 'block';
+    document.getElementById('dash-section').style.display = 'block';
+    _dashPer = 'sem'; _dashWoff = 0; _setDashTab('bloqueios');
+    for (let i = 0; i < 40 && !document.querySelector('.bloq-loja'); i++) await new Promise(r => setTimeout(r, 100));
+    out.lin = [...document.querySelectorAll('.bloq-loja')].map(l => l.dataset.loja + ':' + l.querySelector('.bloq-casos').textContent.trim() + ':' + ((l.querySelector('.bloq-tend') || {}).textContent || ''));
+    out.sem = (document.querySelector('.bloq-sem') || {}).textContent || '';
+    out.info = (document.querySelector('.bloq-tend-info') || {}).textContent || '';
+    out.estouro = [...document.querySelectorAll('.bloq-loja')].filter(e => e.getBoundingClientRect().right > window.innerWidth + 1).length;
+    gerarWppBloqueios(); out.wpp = abertos.pop() || '';
+    // Alerta "3 dias seguidos" no Painel › Atenção.
+    _dashBloqSeguidos = await _loadBloqSeguidos();
+    out.urlSeg = out.urls.find(u => u.startsWith('bloqueios:seguidos')) || '';
+    out.seq = JSON.parse(JSON.stringify(_dashBloqSeguidos));
+    out.alertas = _computeAlertas().filter(a => a.tipo === 'bloqueio').map(a => a.loja + ' | ' + a.msg + ' | ' + a.sub);
+    out.ligadoNoLoad = String(_loadDashAll).includes('_loadBloqSeguidos()');
+    // Sequência que terminou anteontem (não é mais "seguido") e Maglia não alertam.
+    out.seqVelha = _bloqSequencias([{ loja: 'BANGU', tipo: 'carnes', dia: '2026-12-05' }, { loja: 'BANGU', tipo: 'carnes', dia: '2026-12-06' }, { loja: 'BANGU', tipo: 'carnes', dia: '2026-12-07' },
+      { loja: 'MAGLIA', tipo: 'carnes', dia: '2026-12-07' }, { loja: 'MAGLIA', tipo: 'carnes', dia: '2026-12-08' }, { loja: 'MAGLIA', tipo: 'carnes', dia: '2026-12-09' },
+      { loja: 'PEDREIRA', tipo: 'carnes', dia: '2026-12-06' }, { loja: 'PEDREIRA', tipo: 'carnes', dia: '2026-12-07' }, { loja: 'PEDREIRA', tipo: 'carnes', dia: '2026-12-08' }], new Date());
+    return out;
+  }, ROWS2);
+  check('tendência: Caxias ▲ +2 (1 → 3), Itaquera = igual, Bangu ▼ −3 (4 → 1)', t2.lin.join(',') === 'CAXIAS:3 casos:▲ +2,ITAQUERA:2 casos:= igual,BANGU:1 caso:▼ -3', t2.lin);
+  check('loja que zerou aparece no "sem bloqueio" com "▼ tinha 2"', /Pedreira \(▼ tinha 2\)/.test(t2.sem), t2.sem);
+  check('a tela diz com qual período está comparando', /comparado com/.test(t2.info) && /30\/11/.test(t2.info), t2.info);
+  check('WhatsApp leva a tendência', /3 casos · 3h travada \(▲ \+2 vs anterior\)/.test(t2.wpp) && /Tendência comparada com/.test(t2.wpp), t2.wpp);
+  check('nada estoura a tela de 360px com as setas', t2.estouro === 0, t2.estouro);
+  check('alerta busca os últimos 7 dias (desde 02/12)', /dia=gte\.2026-12-02/.test(t2.urlSeg), t2.urlSeg);
+  check('Caxias com Vendidos 07, 08 e 09/12 → alerta no Atenção "3 dias seguidos"', t2.alertas.length === 1 && /^CAXIAS \| Caxias travou em Vendidos do dia 3 dias seguidos \| 07\/12 a 09\/12/.test(t2.alertas[0]), t2.alertas);
+  check('Itaquera (entrega em dias soltos) e Bangu não alertam', !t2.alertas.some(a => /ITAQUERA|BANGU/.test(a)), t2.alertas);
+  check('o alerta é carregado junto com o Painel', t2.ligadoNoLoad);
+  check('sequência que acabou anteontem não alerta; terminando ontem alerta; Maglia nunca', !t2.seqVelha.BANGU && !t2.seqVelha.MAGLIA && t2.seqVelha.PEDREIRA && t2.seqVelha.PEDREIRA[0].n === 3, t2.seqVelha);
+  await ctx2.close();
   check('nenhum erro de JavaScript', erros.length === 0, erros.join(' | '));
   console.log(`\n${ok} OK, ${falhou} falhou`); await browser.close(); process.exit(falhou ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });
