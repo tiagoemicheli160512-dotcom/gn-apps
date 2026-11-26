@@ -47,6 +47,37 @@
     r.status = dif > TOLERANCIA ? 'perda' : dif < -TOLERANCIA ? 'conferir' : 'ok';
     return r;
   }
-  window.gnChoppControle = { FRACAO: FRACAO, CANECA_L: CANECA_L, CANECAS_META: CANECAS_META, CANECAS_TEORICO: CANECAS_TEORICO,
+  // As duas janelas de UMA loja, a partir das linhas cruas do banco — o mesmo código no
+  // Painel (todas as lojas) e no app Lojas (a própria loja).
+  //   o.cont: gn_barris_semanal_contagem (semana_inicio, tipo, status, criado_em) da loja
+  //   o.ent:  gn_barris_validade da loja (criado_em) · o.tipoDe(linha) → 'CLARO'|'VINHO'
+  //   o.vend: gn_vendidos_diario da loja (data, totais)
+  //   o.W1 / o.W / o.QUI: segunda passada, segunda, quinta ('YYYY-MM-DD') · o.inicio: 1º dia dos vendidos
+  function isoMais(iso, n) { var d = new Date(iso + 'T12:00:00'); d.setDate(d.getDate() + n);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+  function janelasLoja(o) {
+    var daSemana = function (s) { return (o.cont || []).filter(function (r) { return r.semana_inicio === s; }); };
+    var quando = function (rs) { return rs.reduce(function (m, r) { return r.criado_em > m ? r.criado_em : m; }, ''); };
+    var janela = function (sIni, sFim, dias) {
+      var a = daSemana(sIni), b = daSemana(sFim);
+      if (!a.length || !b.length) return { semContagem: !a.length ? sIni : sFim };
+      if (dias[dias.length - 1] < o.inicio) return { antesDosVendidos: true };
+      var tA = quando(a), tB = quando(b), out = {};
+      ['CLARO', 'VINHO'].forEach(function (tipo) {
+        var entradas = (o.ent || []).filter(function (e) { return o.tipoDe(e) === tipo && e.criado_em > tA && e.criado_em <= tB; }).length;
+        var vRows = (o.vend || []).filter(function (v) { return dias.indexOf(String(v.data).slice(0, 10)) >= 0; });
+        var litros = vRows.reduce(function (s2, v) { return s2 + (+((v.totais || {})[tipo === 'CLARO' ? 'chopp_l_claro' : 'chopp_l_vinho']) || 0); }, 0);
+        out[tipo] = fechar({ ini: a.filter(function (r) { return r.tipo === tipo; }).map(function (r) { return r.status; }),
+                             fim: b.filter(function (r) { return r.tipo === tipo; }).map(function (r) { return r.status; }),
+                             entradas: entradas, litros: litros, diasVend: vRows.length, diasTotal: dias.length });
+      });
+      return out;
+    };
+    return {
+      fechada: janela(o.W1, o.W, [0, 1, 2, 3, 4, 5, 6].map(function (n) { return isoMais(o.W1, n); })),
+      acomp: janela(o.W, o.QUI, [0, 1, 2].map(function (n) { return isoMais(o.W, n); })),
+    };
+  }
+  window.gnChoppControle = { janelasLoja: janelasLoja, isoMais: isoMais, FRACAO: FRACAO, CANECA_L: CANECA_L, CANECAS_META: CANECAS_META, CANECAS_TEORICO: CANECAS_TEORICO,
     PERDA_MAX: PERDA_MAX, BARRIL_L: BARRIL_L, TOLERANCIA: TOLERANCIA, equivalente: equivalente, fechar: fechar };
 })();
