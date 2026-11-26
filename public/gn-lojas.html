@@ -2225,6 +2225,85 @@ async function _calcularNotasFiscaisPendentes() {
   return pendencias;
 }
 
+/* ── PRAZO DE CONFIRMAÇÃO DA ENTREGA (26/11/2026) ──────────────────────────────────────
+   "Se houve um pedido com previsão de entrega durante determinada semana, ao passar esse
+    período, até a sexta-feira seguinte, deverá aparecer um aviso para o estoquista
+    confirmar se a mercadoria chegou ou não."
+
+   Medido antes: 1.957 itens "aguardando" na rede, ~1.160 com mais de 7 dias — e tudo o
+   que usa o "chegou" (carnes, Coca, barris) acusava falta onde só faltou confirmar.
+
+   Regra: a entrega prevista numa semana tem até a SEXTA da semana seguinte pra ser
+   confirmada — chegou, chegou em parte, ou ❌ não chegou (que encerra na hora). Passou a
+   sexta, o app só libera a aba Entrega até resolver (mesmo padrão da trava de nota fiscal).
+   Pedido de exclusão já feito não trava (a loja já agiu; o setor de Pedidos decide).
+   Vale das provisões de 16/11/2026 em diante — as anteriores foram encerradas como
+   SEM_CONFIRMACAO por decisão do dono (backup em gn_backup_ajustes). Maglia fora (não citada).
+   Falha de rede não trava (mesmo princípio das outras travas). */
+const ENTREGA_PRAZO_DESDE = '2026-11-16';
+let _entregasVencidasAtivas = [];
+// Sexta da semana SEGUINTE à da data prevista (a do fim do período, quando há período).
+function _entregaPrazoSexta(p) {
+  const dtRef = p && (p.data_entrega_fim || p.data_entrega);
+  if (!dtRef) return null;
+  const seg = getMonday(new Date(dtRef + 'T12:00:00'));
+  return wkKey(addDays(seg, 11));
+}
+function _entregaPrazoVencido(p, hojeISO) {
+  const dtRef = p && (p.data_entrega_fim || p.data_entrega);
+  if (!dtRef || dtRef < ENTREGA_PRAZO_DESDE || p.exclusao_solicitada_em) return false;
+  const sexta = _entregaPrazoSexta(p);
+  return !!sexta && (hojeISO || wkKey(new Date())) > sexta;
+}
+async function _calcularEntregasVencidas() {
+  if (!usuarioAtual) return [];
+  if (CARGOS_MASTER_EQUIV.includes(usuarioAtual.cargo)) return [];
+  if (loja === 'MAGLIA') return [];
+  if (abasPermitidas && !abasPermitidas.includes('entrega')) return [];   // sem acesso pra resolver, não trava
+  const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+  let rows;
+  try {
+    rows = await sbRequest('gn_provisoes?loja_slug=eq.' + slug + '&status=eq.AGUARDANDO&exclusao_solicitada_em=is.null&data_entrega=gte.' + addDaysISO(ENTREGA_PRAZO_DESDE, -31) +
+      '&select=id,fornecedor,data_entrega,data_entrega_fim,exclusao_solicitada_em', { method: 'GET' });
+  } catch (e) { return []; }
+  const hoje = wkKey(new Date());
+  return (rows || []).filter(p => _entregaPrazoVencido(p, hoje));
+}
+function addDaysISO(iso, n) { return wkKey(addDays(new Date(iso + 'T12:00:00'), n)); }
+async function _atualizarTravaEntregas() {
+  try { _entregasVencidasAtivas = await _calcularEntregasVencidas(); }
+  catch (e) { _entregasVencidasAtivas = []; }
+  _renderTravaEntregas();
+}
+function _renderTravaEntregas(forcarExibicao) {
+  const idEl = 'entrega-prazo-overlay';
+  let el = document.getElementById(idEl);
+  if (!_entregasVencidasAtivas.length || (!forcarExibicao && tab === 'entrega')) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = idEl;
+    el.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:9998;display:flex;align-items:center;justify-content:center;padding:20px;box-sizing:border-box';
+    document.body.appendChild(el);
+  }
+  const porForn = {};
+  _entregasVencidasAtivas.forEach(p => { const f = (p.fornecedor || 'Sem fornecedor').trim(); porForn[f] = (porForn[f] || 0) + 1; });
+  const itensHtml = Object.entries(porForn).sort((a, b) => b[1] - a[1]).map(([f, n]) => `
+    <div style="display:flex;justify-content:space-between;background:var(--fill-sutil);border-radius:10px;padding:9px 12px;margin-bottom:6px;text-align:left">
+      <span style="font-weight:800;font-size:13px;color:var(--t1)">${escapeHtml(f)}</span><span style="font-size:12px;color:var(--t3)">${n} ite${n === 1 ? 'm' : 'ns'}</span></div>`).join('');
+  const n = _entregasVencidasAtivas.length;
+  el.innerHTML = `
+    <div class="entrega-prazo-trava" style="background:var(--s2);border-radius:18px;padding:24px 20px;width:100%;max-width:380px;text-align:center;max-height:90vh;overflow:auto">
+      <div style="font-size:38px;margin-bottom:8px">📦</div>
+      <div style="font-size:16px;font-weight:800;color:var(--t1);margin-bottom:8px">Confirme as entregas atrasadas</div>
+      <div style="font-size:13px;color:var(--t2);line-height:1.5;margin-bottom:14px">
+        ${n} ite${n === 1 ? 'm' : 'ns'} com o prazo de confirmação vencido (a sexta da semana seguinte à prevista).
+        Diga se <b>chegou</b>, <b>chegou em parte</b> ou <b>não chegou</b>. O app libera as outras abas quando acabar.
+      </div>
+      ${itensHtml}
+      <button onclick="goTab('entrega')" style="display:block;width:100%;background:#E8580A;border:none;border-radius:10px;color:#fff;padding:13px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;margin-top:8px">📦 Ir para Entrega</button>
+    </div>`;
+}
+
 async function _atualizarTravaNotaFiscal() {
   try { _notaFiscalPendenciasAtivas = await _calcularNotasFiscaisPendentes(); }
   catch (e) { _notaFiscalPendenciasAtivas = []; }
@@ -4242,6 +4321,8 @@ function goTab(t) {
   // boot própria: o overlay reaparece por cima da aba atual em vez de deixar sair dela.
   // forcarExibicao=true porque essa troca está sendo BARRADA aqui mesmo (`tab` não muda).
   if (_notaFiscalPendenciasAtivas.length && t !== 'entradas' && t !== 'guia') { _renderTravaNotaFiscal(true); return; }
+  // Entrega com prazo de confirmação vencido: só a aba Entrega (e o Guia) até resolver.
+  if (_entregasVencidasAtivas.length && t !== 'entrega' && t !== 'guia') { _renderTravaEntregas(true); return; }
   // Contagem semanal de barris pendente (só cargo Estoquista) — trava qualquer troca de
   // aba que não seja pro próprio Pedido (onde o overlay de contagem já aparece por cima)
   // ou pro Guia, mesmo princípio das outras pendências essenciais.
@@ -4267,6 +4348,7 @@ function goTab(t) {
   if (t === 'notas') carregarNotasEntrega(true);
   if (t === 'barris') carregarBarris(true);
   _renderTravaNotaFiscal();
+  _renderTravaEntregas();   // na aba Entrega o aviso sai da frente; fora dela, volta
   // foco automático na busca se a aba tem campo de busca
   if (["estoque","vendas","contagem"].includes(t)) {
     setTimeout(() => {
@@ -8644,6 +8726,7 @@ async function confirmarLogin() {
     // dele. Passava direto, sem erro. Era corrida: quem logava antes de os dados chegarem era
     // cobrado, quem logava depois não. Se o sbPull ainda não terminou, ele roda de novo no fim.
     _atualizarTravaNotaFiscal();
+    _atualizarTravaEntregas();
     _checarBarrisSemanalPendencia();
     _checarUrgenciaPendencia();
     loadChecklistFat(); // Carrega faturamento/vendas do check-list após login para home mostrar correto
@@ -11630,7 +11713,8 @@ function render() {
               </button>
               ${prov.parcial_origem?`<button onclick="encerrarRestanteEntrega('${prov.id}')" style="width:100%;background:rgba(217,119,6,.08);border:1px solid rgba(217,119,6,.35);border-radius:13px;padding:9px;color:var(--txt-amber);font-weight:800;font-size:12px;margin-top:8px">🏁 Finalizar — o restante não vai chegar</button>`:''}
               ${_epGrupoSubst(prov.fornecedor, prov)?`<button onclick="abrirTrocaFornecedorEntrega('${prov.id}')" style="width:100%;background:none;border:1px dashed rgba(124,58,237,.4);border-radius:11px;padding:8px;color:var(--txt-purple);font-weight:700;font-size:11px;margin-top:8px">🔁 ${prov.fornecedor_entregue?'Trocar de novo o fornecedor':'Veio por outro fornecedor?'}</button>`:''}
-              ${atrasadaParaExclusao?`<button onclick="solicitarExclusaoEntrega('${prov.id}')" style="width:100%;background:rgba(220,38,38,.08);border:1px solid rgba(220,38,38,.35);border-radius:13px;padding:9px;color:var(--txt-red);font-weight:800;font-size:12px;margin-top:8px">🗑️ Solicitar exclusão</button>`:''}
+              ${atrasadaParaExclusao?`<button class="ep-nao-chegou" onclick="naoChegouEntrega('${prov.id}')" style="width:100%;background:rgba(220,38,38,.08);border:1px solid rgba(220,38,38,.35);border-radius:13px;padding:9px;color:var(--txt-red);font-weight:800;font-size:12px;margin-top:8px">❌ Não chegou</button>`:''}
+              ${_entregaPrazoVencido(prov)?`<div class="ep-prazo-vencido" style="font-size:10px;color:var(--txt-red);font-weight:800;margin-top:6px;text-align:center">⛔ Prazo de confirmação vencido (sexta ${_entregaPrazoSexta(prov).slice(8,10)}/${_entregaPrazoSexta(prov).slice(5,7)}) — o app fica travado até confirmar</div>`:''}
             </div>`;
           }).join('');
           const finalizado=pendentesNoGrupo===0;
@@ -13280,6 +13364,13 @@ async function carregarEntregas(silent) {
     if(dot) dot.classList.toggle('hidden',provisoesEntrega.length===0&&_devPend===0);
     if(!silent||tab==='entrega') render();
     _verificarAutoAlertaEntregas();
+    // A lista acabou de vir do banco: a trava do prazo se refaz por ela (confirmou o último
+    // atrasado → o app libera na hora, sem esperar recarregar).
+    if (_entregasVencidasAtivas.length) {
+      const hojeT = wkKey(new Date());
+      _entregasVencidasAtivas = provisoesEntrega.filter(p => _entregaPrazoVencido(p, hojeT));
+      _renderTravaEntregas();
+    }
   }catch(e){
     // Sem isso, uma falha de rede deixava a lista de entregas travada num snapshot antigo
     // sem ninguém saber — agravando o risco de confirmar recebimento de um item que outra
@@ -14014,6 +14105,31 @@ function _epMarcaParcialHist(prov, rec) {
 // divergência." Só existe no RESTANTE de uma entrega parcial: a parte que chegou já está
 // recebida na outra linha; esta fecha com zero recebido e a falta registrada como
 // divergência. Não pede nota — não chegou mercadoria, não há nota pra ela.
+// "❌ Não chegou" (26/11/2026, decisão do dono: encerra na hora, sem passar pelo setor de
+// Pedidos). Fecha a entrega com zero recebido e a falta inteira como DIVERGÊNCIA — mesmo
+// caminho do "restante não chegou" da entrega parcial. Se a mercadoria aparecer depois,
+// entra pela nota fiscal na aba Entradas. Só existe para entrega cuja semana já passou.
+function naoChegouEntrega(id) {
+  const prov = provisoesEntrega.find(p => p.id === id);
+  if (!prov || !_entregaSemanaProvisaoPassada(prov)) return;
+  const produtoNome = prov.gn_catalogo?.produto || 'este item';
+  const und = prov.gn_catalogo?.und || '';
+  const qtdPrev = parseFloat(prov.qtd_prevista) || 0;
+  if (!confirm(`"${produtoNome}" (${prov.fornecedor || '—'}) NÃO chegou?\n\nA entrega é encerrada agora: ${qtdPrev} ${und} ficam registrados como DIVERGÊNCIA (não entregue).\nSe chegar depois, lance pela nota fiscal na aba Entradas.`)) return;
+  const validado_por = (usuarioAtual && usuarioAtual.nome) || loja;
+  if (!_epFilaPendente[loja]) _epFilaPendente[loja] = [];
+  _epFilaPendente[loja] = _epFilaPendente[loja].filter(x => x.id !== id);
+  _epFilaPendente[loja].push({ id, qtdRec: 0, valRec: 0, diff: -qtdPrev, status: 'DIVERGENCIA', validado_por,
+    notaNumero: '', notaValor: null,
+    obs: _epObsJuntar(`NÃO CHEGOU: ${qtdPrev} ${und}`.trim() + ' — informado por ' + validado_por, _epRessalvaForn(prov) ? 'FORNECEDOR TROCADO: ' + _epRessalvaForn(prov) : null),
+    parcial: null, novaData: null, ts: Date.now(), prov });
+  _epFilaSalvar();
+  _epConfirmadosSessao[id] = { ...prov, _statusFinal: 'DIVERGENCIA', _qtdRec: 0, _valRec: 0, _syncPendente: true, _encerrado: true };
+  showToast('❌ Registrado: não chegou. Sincronizando…');
+  render();
+  _epProcessarFila();
+}
+
 function encerrarRestanteEntrega(id) {
   const prov = provisoesEntrega.find(p => p.id === id);
   if (!prov || !prov.parcial_origem) return;
@@ -14394,6 +14510,7 @@ sbPull(false).then(() => {
   // Carrega dados do check-list (faturamento + vendas por produto) em background para home já mostrar correto
   loadChecklistFat();
   _atualizarTravaNotaFiscal();
+  _atualizarTravaEntregas();
   _checarBarrisSemanalPendencia();
   // Depois do sbPull: urgenciaTemplate só existe a partir daí (vem de gn_lojas.all_data).
   _checarUrgenciaPendencia();
