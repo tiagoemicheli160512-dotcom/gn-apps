@@ -146,6 +146,32 @@
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return corpo; });
   }
 
+  // Liberação da supervisão (26/11/2026). Ficava só no aparelho de quem digitou a senha
+  // (localStorage, presa ao usuário logado): liberava num celular e o resto da loja
+  // continuava travado — foi o caso da São Gonçalo. Agora fica no banco, por loja e dia, e
+  // vale em qualquer aparelho da loja. Vale no dia em que foi dada.
+  //   LANCAMENTO (data_venda): qualquer gerente/sub da loja lança aquele dia atrasado.
+  //   ACESSO: libera o acesso da loja hoje sem lançar (o dia continua pendente).
+  function buscarLiberacoes(lojaKey, hoje) {
+    return _fetch(SB_URL + '/rest/v1/gn_vendidos_liberacao?select=tipo,data_venda,liberado_por,liberado_em&loja=eq.' +
+      encodeURIComponent(lojaKey) + '&dia=eq.' + hoje + '&order=liberado_em.desc').then(_json);
+  }
+  function registrarLiberacao(lojaKey, tipo, dataVenda, por) {
+    return _fetch(SB_URL + '/rest/v1/gn_vendidos_liberacao', { method: 'POST', headers: { Prefer: 'return=minimal' },
+      body: JSON.stringify({ loja: lojaKey, tipo: tipo, data_venda: dataVenda || null, dia: _iso(new Date()), liberado_por: por }) })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return true; });
+  }
+  // Marca nas pendências quem liberou o lançamento de cada dia; diz se o acesso foi liberado.
+  function aplicarLiberacoes(pend, libs) {
+    var acesso = null, porDia = {};
+    (libs || []).forEach(function (l) {
+      if (l.tipo === 'ACESSO') { if (!acesso) acesso = l.liberado_por; }
+      else if (l.tipo === 'LANCAMENTO' && l.data_venda && !porDia[String(l.data_venda).slice(0, 10)]) porDia[String(l.data_venda).slice(0, 10)] = l.liberado_por;
+    });
+    (pend || []).forEach(function (p) { if (p.atrasado && porDia[p.data]) p.liberado_por = porDia[p.data]; });
+    return { acesso: acesso, porDia: porDia };
+  }
+
   // ── Sessão (mesma normalização do gn-escala-acesso / gn-desperdicio-acesso) ─
   var SESS_KEY = (document.currentScript && document.currentScript.getAttribute('data-sessao')) || 'gn_session_v1', TTL = 43200000;
   function _lerSessao() {
@@ -161,10 +187,7 @@
            CARGOS_COBRADOS.indexOf(String(sess.cargo || '').toLowerCase()) >= 0;
   }
 
-  var LIB_KEY = 'gn_vend_liberacao', ADIA_KEY = 'gn_vend_adiado';
-  function _liberado(sess, hoje) {
-    try { var l = JSON.parse(localStorage.getItem(LIB_KEY) || 'null'); return !!l && l.dia === hoje && String(l.uid) === String(sess.id); } catch (_) { return false; }
-  }
+  var ADIA_KEY = 'gn_vend_adiado';
   function _adiado() { try { return Number(localStorage.getItem(ADIA_KEY) || 0) > Date.now(); } catch (_) { return false; } }
 
   // Gerente/sub da própria loja, ou supervisor/mestre.
@@ -192,6 +215,7 @@
 
   function fechar() { if (_overlay) { _overlay.remove(); _overlay = null; document.body.style.overflow = ''; } }
   function _montar(html) {
+    if (_estado) _estado.tela = null;
     if (!_overlay) {
       _overlay = document.createElement('div');
       _overlay.id = 'gn-vend-overlay';
@@ -209,12 +233,14 @@
   // Tela 1 (guardião): o que está pendente.
   function _telaLista() {
     var st = _estado, atrasado = st.pend.some(function (p) { return p.atrasado; });
+    var semLib = st.pend.some(function (p) { return p.atrasado && !p.liberado_por; });
     var linhas = st.pend.map(function (p, i) {
       return '<div style="border:1px solid ' + (p.atrasado ? 'rgba(248,113,113,.45)' : 'rgba(255,255,255,.12)') + ';border-radius:12px;padding:11px;margin-bottom:9px">' +
         '<div style="font-size:13px;font-weight:800">🧾 Vendidos de ' + _esc(_brDia(p.data)) + '</div>' +
         '<div style="font-size:11.5px;margin-top:2px;color:' + (p.atrasado ? '#f87171' : 'rgba(232,234,237,.6)') + '">' +
           (p.atrasado ? 'em atraso — o prazo era ' + _br(_addDias(p.data, 1)) + ' às ' + PRAZO_H + 'h' : 'prazo: hoje até ' + PRAZO_H + 'h') + '</div>' +
-        (p.atrasado ? '' : '<button class="gn-vend-lancar" data-i="' + i + '" style="' + CSS_BTN + ';background:#facc15;color:#1a1d23;padding:10px;margin-top:9px">Lançar agora</button>') +
+        (p.atrasado && p.liberado_por ? '<div class="gn-vend-liberado" style="font-size:11.5px;margin-top:3px;color:#facc15">🔓 liberado por <b>' + _esc(p.liberado_por) + '</b> — pode lançar</div>' : '') +
+        (p.atrasado && !p.liberado_por ? '' : '<button class="gn-vend-lancar" data-i="' + i + '" style="' + CSS_BTN + ';background:#facc15;color:#1a1d23;padding:10px;margin-top:9px">Lançar agora</button>') +
       '</div>';
     }).join('');
     _montar(
@@ -223,15 +249,17 @@
       '<div style="font-size:12px;color:rgba(232,234,237,.55);margin-bottom:12px">' + _esc(st.sess.nome || '') + ' · ' + _esc(st.sess.loja || '') + '</div>' +
       '<div style="font-size:12.5px;line-height:1.55;color:rgba(232,234,237,.82);margin-bottom:14px">' +
         (atrasado
-          ? 'Passou das ' + PRAZO_H + 'h sem o lançamento dos vendidos (pratos com carne, Coca-Cola e chopp). O acesso aos apps fica fechado até a <b>supervisão</b> liberar.'
+          ? (semLib ? 'Passou das ' + PRAZO_H + 'h sem o lançamento dos vendidos (pratos com carne, Coca-Cola e chopp). O acesso aos apps fica fechado até a <b>supervisão</b> liberar.'
+                    : 'A supervisão liberou o lançamento atrasado. Lance agora — vale em qualquer aparelho da loja, por qualquer gerente ou sub.')
           : 'Todo dia a gerência lança quanto vendeu no dia anterior de cada prato com carne ou camarão, de Coca-Cola e de chopp. Prazo: <b>até ' + PRAZO_H + 'h</b> — depois trava.') +
       '</div>' + linhas +
-      (atrasado
+      (semLib
         ? '<button id="gn-vend-sup" style="' + CSS_BTN2 + ';border:1px solid rgba(255,255,255,.12);margin-top:4px">🔑 Supervisão</button>'
-        : '<button id="gn-vend-depois" style="' + CSS_BTN + ';background:none;color:rgba(232,234,237,.55);margin-top:2px">Lembrar daqui a ' + ADIA_MIN + ' min</button>'));
+        : atrasado ? '' : '<button id="gn-vend-depois" style="' + CSS_BTN + ';background:none;color:rgba(232,234,237,.55);margin-top:2px">Lembrar daqui a ' + ADIA_MIN + ' min</button>'));
     _overlay.querySelectorAll('.gn-vend-lancar').forEach(function (b) {
-      b.onclick = function () { _abrirForm(st.pend[+b.dataset.i].data, {}); };
+      b.onclick = function () { var p = st.pend[+b.dataset.i]; _abrirForm(p.data, p.atrasado ? { atrasado: true, liberado_por: p.liberado_por } : {}); };
     });
+    st.tela = 'lista';
     var dep = _overlay.querySelector('#gn-vend-depois');
     if (dep) dep.onclick = function () { try { localStorage.setItem(ADIA_KEY, String(Date.now() + ADIA_MIN * 60000)); } catch (_) {} fechar(); };
     var sup = _overlay.querySelector('#gn-vend-sup');
@@ -260,15 +288,26 @@
         return v.u;
       }).catch(function () { err.textContent = 'Erro de conexão.'; return null; });
     };
+    // As duas liberações vão pro banco: valem pra loja toda, em qualquer aparelho.
     _overlay.querySelector('#gv-lancar').onclick = function () {
-      checar().then(function (u) { if (u) _abrirForm(atrasados[0].data, { atrasado: true, liberado_por: u.nome }); });
+      checar().then(function (u) {
+        if (!u) return;
+        return Promise.all(atrasados.map(function (p) { return registrarLiberacao(_estado.loja, 'LANCAMENTO', p.data, u.nome); }))
+          .catch(function (e) { _log('vendidos:liberar', e); })
+          .then(function () {
+            atrasados.forEach(function (p) { p.liberado_por = u.nome; });
+            (_estado.pend || []).forEach(function (p) { if (p.atrasado) p.liberado_por = p.liberado_por || u.nome; });
+            if (typeof _estado.aoSalvar === 'function' && _estado.origem === 'manual') { try { _estado.aoSalvar(); } catch (_) {} }
+            _abrirForm(atrasados[0].data, { atrasado: true, liberado_por: u.nome });
+          });
+      });
     };
     var ac = _overlay.querySelector('#gv-acesso');
     if (ac) ac.onclick = function () {
       checar().then(function (u) {
         if (!u) return;
-        try { localStorage.setItem(LIB_KEY, JSON.stringify({ uid: _estado.sess.id, dia: _iso(new Date()), por: u.nome, ts: Date.now() })); } catch (_) {}
-        fechar();
+        return registrarLiberacao(_estado.loja, 'ACESSO', null, u.nome).then(fechar)
+          .catch(function (e) { _log('vendidos:liberar', e); err.textContent = 'Erro de conexão — a liberação não foi gravada. Tente de novo.'; });
       });
     };
   }
@@ -415,8 +454,9 @@
   }
 
   // Abre o formulário à mão (aba Vendidos do Check-list). libera: {atrasado, liberado_por}.
-  function abrirLancamento(lojaKey, dataISO, sess, aoSalvar) {
+  function abrirLancamento(lojaKey, dataISO, sess, aoSalvar, libera) {
     _estado = { sess: sess || { nome: '', loja: lojaKey }, loja: lojaKey, origem: 'manual', aoSalvar: aoSalvar, pend: [] };
+    if (!dentroDoPrazo(dataISO) && libera && libera.liberado_por) return _abrirForm(dataISO, { atrasado: true, liberado_por: libera.liberado_por });
     if (!dentroDoPrazo(dataISO)) {
       _telaSupervisao([{ data: dataISO, atrasado: true }], fechar);
       return;
@@ -431,9 +471,11 @@
     var agora = new Date(), hoje = _iso(agora);
     var desde = _addDias(hoje, -JANELA_DIAS);
     el.innerHTML = '<div style="padding:20px;text-align:center;font-size:12px;color:var(--t2)">Carregando…</div>';
-    return buscarLancamentos(lojaKey, desde, hoje).then(function (rows) {
+    return Promise.all([buscarLancamentos(lojaKey, desde, hoje), buscarLiberacoes(lojaKey, hoje).catch(function () { return []; })]).then(function (rr) {
+      var rows = rr[0];
       var por = {}; (rows || []).forEach(function (r) { por[String(r.data).slice(0, 10)] = r; });
       var pend = calcularPendencias(lojaKey, agora, rows);
+      var lib = aplicarLiberacoes(pend, rr[1]);
       var dias = [];
       for (var k = 0; k <= JANELA_DIAS; k++) { var d = _addDias(hoje, -k); if (d >= INICIO || por[d]) dias.push(d); }
       var linha = function (d) {
@@ -449,6 +491,9 @@
         } else if (dentro) {
           status = '<span style="color:var(--txt-amber,#b45309);font-weight:700">⏳ pendente — prazo hoje às ' + PRAZO_H + 'h</span>'; cor = 'rgba(245,158,11,.35)';
           btn = '<button class="gv-aba-btn" data-d="' + d + '" style="border:none;background:var(--gn,#e8580a);color:#fff;border-radius:8px;padding:7px 12px;font-size:11.5px;font-weight:800;cursor:pointer;font-family:inherit">Lançar</button>';
+        } else if (lib.porDia[d]) {
+          status = '<span style="color:var(--txt-amber,#b45309);font-weight:700">🔓 liberado por ' + _esc(lib.porDia[d]) + ' — pode lançar (fica marcado como atrasado)</span>'; cor = 'rgba(245,158,11,.35)';
+          btn = '<button class="gv-aba-btn" data-d="' + d + '" data-lib="' + _esc(lib.porDia[d]) + '" style="border:none;background:var(--gn,#e8580a);color:#fff;border-radius:8px;padding:7px 12px;font-size:11.5px;font-weight:800;cursor:pointer;font-family:inherit">Lançar</button>';
         } else {
           status = '<span style="color:var(--txt-red,#dc2626);font-weight:700">🔒 não lançado — prazo encerrou</span>'; cor = 'rgba(239,68,68,.3)';
           btn = '<button class="gv-aba-btn" data-d="' + d + '" style="border:1px solid rgba(239,68,68,.4);background:none;border-radius:8px;padding:6px 10px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--txt-red,#dc2626)">🔑 Supervisão</button>';
@@ -467,7 +512,7 @@
         (pend.length ? '<div style="font-size:11.5px;font-weight:800;color:var(--txt-amber,#b45309);margin-bottom:8px">' + pend.length + ' dia' + (pend.length > 1 ? 's' : '') + ' sem lançamento</div>' : '') +
         (dias.length ? dias.map(linha).join('') : '<div class="gv-aba-inicio" style="background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.3);border-radius:12px;padding:10px 12px;font-size:12px;color:var(--t1);line-height:1.5;margin-bottom:10px">⏳ Começa com as vendas de <b>' + _brDia(INICIO) + '</b> — o primeiro lançamento é até <b>' + _br(_addDias(INICIO, 1)) + ' às ' + PRAZO_H + 'h</b>. Abaixo, o que vai ser pedido.</div><div class="gv-aba-itens" style="font-size:12px;color:var(--t2)">Carregando os itens…</div>');
       el.querySelectorAll('.gv-aba-btn').forEach(function (b) {
-        b.onclick = function () { abrirLancamento(lojaKey, b.dataset.d, sess, function () { renderAba(el, lojaKey, sess); }); };
+        b.onclick = function () { abrirLancamento(lojaKey, b.dataset.d, sess, function () { renderAba(el, lojaKey, sess); }, b.dataset.lib ? { liberado_por: b.dataset.lib } : null); };
       });
       // Antes do início, a aba ficava só com o texto e parecia quebrada (print do dono,
       // 19/11). Mostra o que a gerência vai lançar, pra ela já conhecer o formulário.
@@ -503,12 +548,30 @@
       var pend = calcularPendencias(sess.loja, agora, rows);
       var atrasado = pend.some(function (p) { return p.atrasado; });
       if (!pend.length) { if (_estado && _estado.origem === 'guardiao') fechar(); return pend; }
-      if (atrasado && _liberado(sess, hoje)) return pend;
-      if (!atrasado && _adiado()) return pend;
-      if (_overlay) return pend;   // já aberto (não atropela quem está preenchendo)
-      _estado = { sess: sess, loja: sess.loja, pend: pend, origem: 'guardiao' };
-      _telaLista();
-      return pend;
+      // Liberação da supervisão vem do banco (vale pra loja toda, em qualquer aparelho).
+      // Sem conseguir ler, não trava — falha aberto, como o resto.
+      var libsP = atrasado ? buscarLiberacoes(sess.loja, hoje).catch(function (e) { _log('vendidos:liberacoes', e); return null; }) : Promise.resolve([]);
+      return libsP.then(function (libs) {
+        if (libs === null) return pend;
+        var lib = aplicarLiberacoes(pend, libs);
+        if (atrasado && lib.acesso) { if (_estado && _estado.origem === 'guardiao') fechar(); return pend; }
+        if (!atrasado && _adiado()) return pend;
+        if (_overlay) {
+          // Já aberto: não atropela quem está preenchendo. Mas se a supervisão liberou em
+          // outro aparelho enquanto a lista estava na tela, redesenha com o botão de lançar.
+          if (_estado && _estado.origem === 'guardiao' && _estado.tela === 'lista') {
+            var mudou = pend.length !== _estado.pend.length || pend.some(function (p) {
+              var q = _estado.pend.find(function (x) { return x.data === p.data; });
+              return !q || (q.liberado_por || null) !== (p.liberado_por || null);
+            });
+            if (mudou) { _estado.pend = pend; _telaLista(); }
+          }
+          return pend;
+        }
+        _estado = { sess: sess, loja: sess.loja, pend: pend, origem: 'guardiao' };
+        _telaLista();
+        return pend;
+      });
     }).catch(function (e) { _log('vendidos:verificar', e); return []; })
       .then(function (r) { _rodando = false; return r; });
   }
@@ -528,6 +591,7 @@
     prazoDe: prazoDe, dentroDoPrazo: dentroDoPrazo, calcularPendencias: calcularPendencias,
     calcTotais: calcTotais, montarItens: montarItens,
     buscarCadastro: buscarCadastro, buscarLancamentos: buscarLancamentos, salvar: salvar,
+    buscarLiberacoes: buscarLiberacoes, registrarLiberacao: registrarLiberacao, aplicarLiberacoes: aplicarLiberacoes,
     abrirLancamento: abrirLancamento, renderAba: renderAba, verificarAgora: verificarAgora, fechar: fechar,
   };
 })();
