@@ -1,6 +1,6 @@
 // Acompanhamento diário de carnes e bebidas (25–26/11/2026).
 // "Painel de Gestão (acompanhamento gerencial) e App Lojas Home (gerentes e subgerentes da
-//  própria unidade). Mesmas informações nos dois ambientes; estoque inicial, entradas,
+//  própria unidade)." — a "home das lojas" é a Home da loja no Painel (print do dono, 26/11). Mesmas informações nos dois ambientes; estoque inicial, entradas,
 //  saídas e saldo; fechamento após a segunda contagem; faltas e sobras visíveis; sem
 //  lançamento. Os dois ambientes consultam a mesma base." + "num olhar".
 // O banco é o mesmo nos dois apps (gnFetchJson simulado por nome de consulta), e a prova
@@ -8,7 +8,6 @@
 const CAMINHOS = require('../_env');
 const { chromium } = require('playwright');
 const HOME = process.env.ARQ_HOME || CAMINHOS.pub('gn-home.html');
-const LOJAS = process.env.ARQ_LOJAS || CAMINHOS.pub('gn-lojas.html');
 let ok = 0, falhou = 0;
 const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c || extra === undefined ? '' : ' → ' + JSON.stringify(extra).slice(0, 700))); c ? ok++ : falhou++; };
 
@@ -103,25 +102,26 @@ const lerGrade = (page, sel) => page.evaluate((sel) => [...document.querySelecto
   check('toque abre o dia a dia: estoque inicial, anterior, entrou, vendido, teórico, físico, diferença',
     /Estoque inicial \(contagem de segunda\): 50,0 kg/.test(det.t) && /Anterior Entrou Vendido Teórico Físico Diferença/.test(det.t) && /Qua 40,0 \+9,4 −6,0 43,4 42,0 −1,4/.test(det.t), det.t);
   check('dias que ainda não chegaram ficam em branco (·), não "sem dado"', det.linhas.filter(s => s === 'futuro').length === 4 && det.linhas[0] === 'ok' && det.linhas[1] === 'falta', det.linhas);
-  erros.push(...page.__erros); await ctx.close();
 
-  // ── App Lojas (Home) ──
-  ({ ctx, page } = await abrir(browser, LOJAS, () => { try { return typeof render === 'function' && typeof goTab === 'function'; } catch (e) { return false; } }, true));
-  await page.evaluate(BANCO_JS);
-  const home = (cargo, lojaK) => page.evaluate(async ({ cargo, lojaK }) => {
-    _notaFiscalPendenciasAtivas = []; _entregasVencidasAtivas = []; _barrisSemPendente = false;
-    loja = lojaK; usuarioAtual = { nome: 'Ana', cargo, loja: lojaK }; abasPermitidas = null;
-    tab = 'home'; render();
-    for (let i = 0; i < 40 && !document.querySelector('#acomp-home .acomp-cel'); i++) await new Promise(r => setTimeout(r, 100));
-    return { tem: !!document.querySelector('#acomp-home .acomp-cel'), uma: !!document.querySelector('#acomp-home .acomp-uma'),
-      lojas: [...new Set([...document.querySelectorAll('#acomp-home .acomp-cel')].map(b => b.dataset.k))] };
-  }, { cargo, lojaK });
+  // ── Home da loja no Painel (a "home das lojas" — print do dono, 26/11) ──
+  const home = (cargo, lojaK, mestre) => page.evaluate(async ({ cargo, lojaK, mestre }) => {
+    const sess = mestre ? { id: 1, nome: 'Tiago', cargo: 'mestre', loja: 'GERAL', permissoes: { master: true }, ts: Date.now() }
+                        : { id: 7, nome: 'Ana', cargo, loja: lojaK, permissoes: {}, ts: Date.now() };
+    session = sess; masterLoja = mestre ? lojaK : '';
+    try { showHome(sess); } catch (e) { window.__errShow = String(e); }
+    for (let i = 0; i < 40 && !document.querySelector('#acomp-home-loja .acomp-cel'); i++) await new Promise(r => setTimeout(r, 100));
+    const el = document.getElementById('acomp-home-loja');
+    return { tem: !!el && el.style.display !== 'none' && !!el.querySelector('.acomp-cel'), uma: !!(el && el.querySelector('.acomp-uma')),
+      lojas: el ? [...new Set([...el.querySelectorAll('.acomp-cel')].map(b => b.dataset.k))] : [],
+      depoisDoResultado: !!el && !!document.getElementById('home-sec-resultado') && !!(document.getElementById('home-sec-resultado').compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) };
+  }, { cargo, lojaK, mestre });
   const ger = await home('gerente', 'PEDREIRA');
-  check('Home do app Lojas, gerente: o acompanhamento só da própria loja, em quadrados que cabem na tela', ger.tem && ger.uma && ger.lojas.join() === 'PEDREIRA', ger);
-  const gL = await lerGrade(page, '#acomp-home');
-  check('MESMOS quadradinhos do Painel (mesma leitura, mesma conta)', JSON.stringify(gL.map(c => [c.i, c.st])) === JSON.stringify(gP.map(c => [c.i, c.st])) &&
+  check('Home da loja (Painel), gerente: o acompanhamento só da própria loja, em quadrados que cabem na tela, logo depois de "Como a loja está"', ger.tem && ger.uma && ger.lojas.join() === 'PEDREIRA' && ger.depoisDoResultado, ger);
+  const gL = await lerGrade(page, '#acomp-home-loja');
+  check('MESMOS quadradinhos da aba Operação › Acompanhamento (mesma leitura, mesma conta)', JSON.stringify(gL.map(c => [c.i, c.st])) === JSON.stringify(gP.map(c => [c.i, c.st])) &&
     gL.every(c => { const p = cel(gP, c.i); return c.t.replace(/^\S+ /, '').includes(p.t.split(' ')[0]); }), { home: gL, painel: gP });
   check('sub-gerente também vê', (await home('sub_gerente', 'PEDREIRA')).tem);
+  check('mestre navegando na loja também vê (a da loja escolhida)', (await home(null, 'PEDREIRA', true)).lojas.join() === 'PEDREIRA');
   const est = await home('estoquista', 'PEDREIRA');
   check('estoquista não vê (pedido: gerentes e subgerentes)', !est.tem, est);
   const mag = await home('gerente', 'MAGLIA');
