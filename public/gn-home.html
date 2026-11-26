@@ -1114,6 +1114,8 @@ let _dashComDiaLoja = null;   // {lojaKey: Array(7)} — mesmo valor do repique 
 let _dashXmlPendentes = null; // Set de lojas sem o XML fiscal do mês confirmado (ver _mesRefPendenteXmlHome)
 // 🧾 Recebido × NF lançada na semana fechada (Etapa 6, 26/11/2026) — ver _nfSemanaAlertas.
 let _dashNfSemana = null;
+let _dashBloqSeguidos = null; // {loja: [{tipo, n, ini, fim}]} — ver _bloqSeguidosAlertas
+
 let _dashBuffet = null;       // {lojaKey: {feijoadaQtd, rodizioQtd, feijoada, rodizio, total, feijoadaLancada, rodizioLancado}} no período selecionado
                               // (as flags separam "lançou 0" de "não lançou" — qtd 0 nos dois casos)
 let _dashVisitasAndamento = null; // {lojaKey: [{nome, origem, horaChegada}]} — visitas ainda sem hora_saida hoje
@@ -13438,6 +13440,8 @@ async function _loadDashAll() {
     _dashXmlPendentes = xmlPend;
     // Recebido × NF lançada da semana fechada — complemento: falhou, o feed segue sem ele.
     _dashNfSemana = await _loadNfSemana();
+    // Mesma trava 3 dias seguidos (registro dos bloqueios) — também complemento.
+    _dashBloqSeguidos = await _loadBloqSeguidos();
     window._chipDetail.dashXml = { title: '📄 Lojas sem XML do mês enviado',
       lines: [...xmlPend].map(l=>({ nome: LOJA_DISPLAY[l] || l })) };
 
@@ -20991,6 +20995,7 @@ function _computeAlertas() {
     if(!v)alerts.push({sev:3,cor:'var(--t4)',ico:'⚠️',msg:`${nome} sem faturamento no período`,sub:'Dados não enviados',loja:k});
     if(_dashXmlPendentes&&_dashXmlPendentes.has(k)) alerts.push({sev:2,cor:'#ef4444',ico:'📄',msg:`${nome} sem XML do mês enviado`,sub:'Pendente pra contabilidade',loja:k});
     alerts.push(..._nfSemanaAlertas(k, nome));
+    alerts.push(..._bloqSeguidosAlertas(k, nome));
     const visitasLoja=_dashVisitasAndamento?(_dashVisitasAndamento[k]||[]):[];
     if(visitasLoja.length){
       // Visita em andamento há 10h+ (seguidas, mesmo dia) vira alerta urgente em vez do
@@ -23244,18 +23249,73 @@ function _bloqRanking(rows, agoraMs) {
   });
   return Object.values(por).sort((a, b) => b.casos - a.casos || b.min - a.min || a.nome.localeCompare(b.nome));
 }
+// Período escolhido + o anterior (mesma regra do Painel: no Dia, o mesmo dia da semana passada;
+// nos outros, o período imediatamente antes). Uma busca só cobre os dois.
+function _bloqPeriodos() {
+  const off = _dashOff(), range = _dashRangeOf(off) || {};
+  const prev = _dashPer === 'livre' ? null : (_dashPer === 'dia' ? _dashRangeOf(off - 7) : _dashRangeOf(off - 1));
+  const ds = range.dates || [], pd = (prev && prev.dates) || [];
+  if (!ds.length) return { range, prev, ds };
+  const ini = pd.length && pd[0] < ds[0] ? pd[0] : ds[0], fim = ds[ds.length - 1];
+  // Tendência só quando o período anterior está INTEIRO dentro do registro — comparar com um
+  // período sem dado faria toda loja "piorar".
+  const tendOk = pd.length > 0 && pd[0] >= BLOQ_DESDE;
+  return { range, prev, ds, pd, ini, fim, chave: ini + '|' + fim, tendOk };
+}
+function _bloqRankingsDe(per, rows, agoraMs) {
+  const cur = new Set(per.ds), ant = new Set(per.pd || []);
+  const rk = _bloqRanking((rows || []).filter(r => cur.has(r.dia)), agoraMs);
+  const rkPrev = per.tendOk ? _bloqRanking((rows || []).filter(r => ant.has(r.dia)), agoraMs) : null;
+  if (rkPrev) { const pc = Object.fromEntries(rkPrev.map(x => [x.k, x.casos])); rk.forEach(x => { x.antes = pc[x.k] || 0; x.delta = x.casos - x.antes; }); }
+  return rk;
+}
+// ▲ piorou (mais casos que o período anterior) · ▼ melhorou · = igual.
+function _bloqTendHtml(x) {
+  if (x.delta === undefined) return '';
+  const [cor, txt] = x.delta > 0 ? ['var(--txt-red)', `▲ +${x.delta}`] : x.delta < 0 ? ['var(--txt-green)', `▼ ${x.delta}`] : ['var(--t3)', '= igual'];
+  return `<span class="bloq-tend" data-delta="${x.delta}" style="font-size:10px;font-weight:800;color:${cor};white-space:nowrap;margin-left:6px">${txt}</span>`;
+}
+function _bloqTendTxt(x) { return x.delta === undefined ? '' : x.delta > 0 ? ` (▲ +${x.delta} vs anterior)` : x.delta < 0 ? ` (▼ ${x.delta} vs anterior)` : ' (= igual ao anterior)'; }
+/* Alerta no Painel › Atenção (26/11/2026): mesma loja travando no MESMO tipo 3 dias seguidos
+   (sequência que termina hoje ou ontem). Prazo perdido repetido é hábito, não imprevisto. */
+const BLOQ_SEGUIDOS_MIN = 3;
+async function _loadBloqSeguidos() {
+  const d = new Date(); d.setHours(12, 0, 0, 0); d.setDate(d.getDate() - 7);
+  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_travas_registro?dia=gte.${_carnesISO(d)}&select=loja,tipo,dia`,
+    { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY }, 'bloqueios:seguidos', null);
+  return rows ? _bloqSequencias(rows, new Date()) : null;
+}
+// {loja: [{tipo, n, ini, fim}]} — só sequências de BLOQ_SEGUIDOS_MIN+ dias terminando hoje/ontem.
+function _bloqSequencias(rows, agora) {
+  const dias = {}; (rows || []).forEach(r => { const k = _normLoja(r.loja) + '|' + r.tipo; (dias[k] = dias[k] || new Set()).add(r.dia); });
+  const dia = off => { const d = new Date(agora); d.setHours(12, 0, 0, 0); d.setDate(d.getDate() - off); return _carnesISO(d); };
+  const out = {};
+  Object.entries(dias).forEach(([k, set]) => {
+    const [loja, tipo] = k.split('|');
+    if (loja === LOJA_FORA_CONSOLIDADO) return;
+    const start = set.has(dia(0)) ? 0 : set.has(dia(1)) ? 1 : -1; if (start < 0) return;
+    let n = 0; while (set.has(dia(start + n))) n++;
+    if (n >= BLOQ_SEGUIDOS_MIN) (out[loja] = out[loja] || []).push({ tipo, n, ini: dia(start + n - 1), fim: dia(start) });
+  });
+  return out;
+}
+function _bloqSeguidosAlertas(k, nome) {
+  const lista = (_dashBloqSeguidos || {})[k] || [];
+  return lista.map(s => ({ sev: 1, cor: '#dc2626', ico: '🔒', loja: k, tipo: 'bloqueio',
+    msg: `${nome} travou em ${_bloqRotulo(s.tipo).replace(/^\S+\s/, '')} ${s.n} dias seguidos`,
+    sub: `${_carnesDM(s.ini)} a ${_carnesDM(s.fim)} · prazo perdido repetido — ver Operação › 🔒 Bloqueios` }));
+}
 function _bloqRotulo(t) { return (window.GN_TRAVAS_ROTULOS || {})[t] || t; }
 function _bloqToggle(k) { _bloqAberta = _bloqAberta === k ? null : k; renderDashboard(); }
 function _buildBloqueiosPanel() {
-  const range = _dashRangeOf(_dashOff()) || {};
-  const ds = range.dates || [];
+  const per = _bloqPeriodos(), range = per.range, ds = per.ds;
   if (!ds.length) return '<div style="padding:16px;font-size:12px;color:var(--t3)">Período sem dias.</div>';
-  const ini = ds[0], fim = ds[ds.length - 1], chave = ini + '|' + fim;
+  const ini = ds[0], fim = ds[ds.length - 1], chave = per.chave;
   // Recarrega a cada 2 min no mesmo período (as travas mudam durante o dia).
-  if (!_bloqDados || _bloqDados.chave !== chave || Date.now() - _bloqDados.em > 120000) _loadBloqueios(ini, fim);
+  if (!_bloqDados || _bloqDados.chave !== chave || Date.now() - _bloqDados.em > 120000) _loadBloqueios(per.ini, per.fim);
   if (!_bloqDados || _bloqDados.chave !== chave) return _skelPanel(4);
   if (_bloqDados.rows === null) return '<div style="padding:16px;font-size:12px;color:var(--txt-red)">Não deu pra carregar o registro de bloqueios agora.</div>';
-  const rk = _bloqRanking(_bloqDados.rows, Date.now());
+  const rk = _bloqRankingsDe(per, _bloqDados.rows, Date.now());
   const comCaso = rk.filter(x => x.casos), sem = rk.filter(x => !x.casos);
   const max = Math.max(1, ...rk.map(x => x.casos));
   const totCasos = comCaso.reduce((t, x) => t + x.casos, 0), totMin = comCaso.reduce((t, x) => t + x.min, 0);
@@ -23271,7 +23331,7 @@ function _buildBloqueiosPanel() {
         <div style="flex:1;min-width:0">
           <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
             <span style="font-size:12.5px;font-weight:800;color:var(--t1)">${window.escapeHtml(x.nome)}${x.abertas ? ' <span class="bloq-agora" style="font-size:9.5px;font-weight:800;color:#fff;background:#dc2626;border-radius:6px;padding:1px 6px;margin-left:4px">travada agora</span>' : ''}</span>
-            <span class="bloq-casos" style="font-size:13px;font-weight:900;color:var(--txt-red);white-space:nowrap">${x.casos} caso${x.casos === 1 ? '' : 's'}</span>
+            <span style="white-space:nowrap"><span class="bloq-casos" style="font-size:13px;font-weight:900;color:var(--txt-red)">${x.casos} caso${x.casos === 1 ? '' : 's'}</span>${_bloqTendHtml(x)}</span>
           </div>
           <div style="height:6px;background:var(--fill-sutil);border-radius:4px;margin:4px 0 3px;overflow:hidden"><div style="height:100%;width:${Math.round(x.casos / max * 100)}%;background:#dc2626;border-radius:4px"></div></div>
           <div style="font-size:10.5px;color:var(--t3)">⏱ ${_bloqTempoTxt(x.min)} travada · ${x.dias.size} dia${x.dias.size === 1 ? '' : 's'} com bloqueio${x.hard ? ` · ${x.hard} bloqueio${x.hard === 1 ? '' : 's'} total` : ''} · ${tipos.length} tipo${tipos.length === 1 ? '' : 's'}</div>
@@ -23286,23 +23346,25 @@ function _buildBloqueiosPanel() {
     `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:12px 14px;margin-bottom:12px">
       <div style="font-size:13px;font-weight:800;color:var(--t1)">🔒 Ranking de bloqueios · ${window.escapeHtml(range.label || '')}</div>
       <div style="font-size:10.5px;color:var(--t3);line-height:1.5;margin:2px 0 8px">Da loja que mais travou pra que menos travou. 1 caso = 1 tipo de trava num dia (prazo perdido: Vendidos, carnes, check-list, NF, entrega, caixa…). Tempo travada = do momento em que a trava apareceu até ser resolvida. Toque na loja pra ver por tipo.</div>
+      <div class="bloq-tend-info" style="font-size:10px;color:var(--t3);margin:-4px 0 8px">${per.tendOk ? `Tendência: ▲ piorou · ▼ melhorou, comparado com ${window.escapeHtml(per.prev.label || 'o período anterior')}.` : per.prev ? `A tendência (▲ piorou · ▼ melhorou) aparece quando o período anterior inteiro estiver registrado (registro desde ${_carnesDM(BLOQ_DESDE)}).` : ''}</div>
       <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:11.5px;color:var(--t2);margin-bottom:4px"><span><b style="color:var(--txt-red)">${totCasos}</b> casos na rede</span><span>⏱ <b>${_bloqTempoTxt(totMin)}</b> travadas</span><span><b>${comCaso.length}</b> de ${rk.length} lojas</span></div>
       ${linhas || `<div style="font-size:12px;color:var(--txt-green);padding:10px 0">${antesDoRegistro ? '—' : '✓ Nenhuma loja travou no período.'}</div>`}
-      ${sem.length && comCaso.length ? `<div class="bloq-sem" style="font-size:10.5px;color:var(--txt-green);border-top:1px solid var(--b1);padding-top:8px;margin-top:2px">✓ Sem bloqueio no período: ${sem.map(x => window.escapeHtml(x.nome)).join(' · ')}</div>` : ''}
+      ${sem.length && comCaso.length ? `<div class="bloq-sem" style="font-size:10.5px;color:var(--txt-green);border-top:1px solid var(--b1);padding-top:8px;margin-top:2px">✓ Sem bloqueio no período: ${sem.map(x => window.escapeHtml(x.nome) + (x.antes ? ` <span style="font-weight:800">(▼ tinha ${x.antes})</span>` : '')).join(' · ')}</div>` : ''}
     </div>`;
 }
 function _bloqRelatorioTexto(wpp) {
-  const range = _dashRangeOf(_dashOff()) || {};
-  if (!_bloqDados || !_bloqDados.rows) return null;
-  const rk = _bloqRanking(_bloqDados.rows, Date.now()), b = t => wpp ? '*' + t + '*' : t;
+  const per = _bloqPeriodos(), range = per.range;
+  if (!_bloqDados || !_bloqDados.rows || _bloqDados.chave !== per.chave) return null;
+  const rk = _bloqRankingsDe(per, _bloqDados.rows, Date.now()), b = t => wpp ? '*' + t + '*' : t;
   const comCaso = rk.filter(x => x.casos);
   let msg = `${wpp ? '🔒 ' : ''}${b('RANKING DE BLOQUEIOS — REDE')}\n${range.label || ''}\n(1 caso = 1 tipo de trava num dia; maior → menor)\n`;
   comCaso.forEach((x, i) => {
-    msg += `\n${b((i + 1) + 'º ' + x.nome)} — ${x.casos} caso${x.casos === 1 ? '' : 's'} · ${_bloqTempoTxt(x.min)} travada${x.abertas ? ' · travada agora' : ''}\n`;
+    msg += `\n${b((i + 1) + 'º ' + x.nome)} — ${x.casos} caso${x.casos === 1 ? '' : 's'} · ${_bloqTempoTxt(x.min)} travada${x.abertas ? ' · travada agora' : ''}${_bloqTendTxt(x)}\n`;
     Object.values(x.tipos).sort((a, c) => c.casos - a.casos).forEach(t => { msg += `   ${_bloqRotulo(t.tipo)}: ${t.casos} · ${_bloqTempoTxt(t.min)}\n`; });
   });
   const sem = rk.filter(x => !x.casos);
-  if (sem.length) msg += `\n${b('Sem bloqueio')}: ${sem.map(x => x.nome).join(', ')}\n`;
+  if (sem.length) msg += `\n${b('Sem bloqueio')}: ${sem.map(x => x.nome + (x.antes ? ` (▼ tinha ${x.antes})` : '')).join(', ')}\n`;
+  if (per.tendOk) msg += `\nTendência comparada com ${per.prev.label || 'o período anterior'}.\n`;
   if ((range.dates || [])[0] < BLOQ_DESDE) msg += `\nRegistro dos bloqueios desde ${_carnesDM(BLOQ_DESDE)}.\n`;
   return { msg, titulo: 'Bloqueios — ' + (range.label || ''), rk };
 }
