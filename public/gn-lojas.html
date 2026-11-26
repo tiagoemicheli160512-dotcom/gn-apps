@@ -2157,74 +2157,47 @@ const NOTA_TRAVA_DESDE = '2026-09-06'; // dia do deploy — nunca cobra pendênc
 let _notaFiscalPendenciasAtivas = [];
 
 async function _calcularNotasFiscaisPendentes() {
-  // DESATIVADA (09/09/2026, a pedido do usuário) — o comparativo "fornecedor previsto no
-  // Pedido" (nome curto, ex.: AMBEV, CASA NORDESTINA) x "fornecedor lançado na Entrada"
-  // (razão social da nota fiscal de verdade, ex.: CRBS SA - CDD NITEROI, FAIFS MARICULTURA
-  // LTDA — texto livre, vindo do XML ou digitado à mão) quase nunca bate, mesmo quando a
-  // loja lançou a nota certinha (confirmado com dados reais: Campo Grande e São Gonçalo
-  // travadas mesmo com a nota já lançada, valor batendo). Ninguém consegue resolver essa
-  // pendência lançando de novo — o bug está na comparação, não no lançamento. Precisa de
-  // um jeito melhor de casar fornecedor (ou ignorar o nome e olhar só o valor) antes de
-  // reativar. Até lá, sempre retorna vazio — nenhuma loja trava por isso.
-  return [];
+  // RELIGADA (26/11/2026) com outra regra. A antiga (desligada em 09/09) casava o
+  // fornecedor do Pedido ("AMBEV") com a razão social da nota e travava loja que já tinha
+  // lançado. Esta não casa fornecedor: na SEMANA FECHADA (segunda a domingo passados),
+  // soma o que a loja CONFIRMOU ter recebido na aba Entrega e o que LANÇOU de NF na aba
+  // Entradas. NF abaixo da metade do recebido trava — leve: só Entradas (e Guia) até lançar.
+  // A NF conta pela DATA DA NOTA: lançada hoje com data da semana passada, vale pra semana
+  // passada (cargo de loja só vê a semana atual, então era o único jeito de destravar).
+  // Mesma conta do aviso do Painel › Atenção (rpc gn_nf_semana). Decisões do dono:
+  // começa pela semana de 23/11 (primeira cobrança na segunda 30/11) e é só leve.
+  // Medido em 16/11: Norte Shopping, Nova Iguaçu, Boulevard e Caxias receberam R$ 106 mil
+  // e lançaram R$ 0. Falha de rede não trava (como as outras).
   if (!usuarioAtual) return [];
-  // Mestre/supervisor/administrador/compras nunca travam por pendência de loja — mesmo
-  // bypass de acesso já usado em outras partes do app (CARGOS_MASTER_EQUIV, ver GN RH/
-  // Manutenção em gn-lojas-config.js). Sem isso, esses cargos ficavam travados igual
-  // usuário de loja (normalmente têm acesso a todas as abas, então o carve-out de "sem
-  // acesso pra resolver" abaixo nunca os isentava).
   if (CARGOS_MASTER_EQUIV.includes(usuarioAtual.cargo)) return [];
-  if (loja === 'Maglia') return []; // Maglia fora por padrão (CLAUDE.md) — só entra se citada
+  if (String(loja || '').toUpperCase() === 'MAGLIA') return [];  // Maglia fora (não citada)
   if (abasPermitidas && !abasPermitidas.includes('entradas')) return []; // sem acesso pra resolver, não trava
-  const hoje = wkKey(new Date());
-  if (NOTA_TRAVA_DESDE > hoje) return [];
+  const semIni = wkKey(addDays(getMonday(new Date()), -7));        // segunda passada
+  if (semIni < NF_TRAVA_SEMANA_DESDE) return [];
+  const semFim = wkKey(addDays(new Date(semIni + 'T12:00:00'), 6));
   const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
   let rows;
   try {
-    rows = await sbRequest(
-      'gn_provisoes?loja_slug=eq.' + slug + '&status=in.(RECEBIDO_OK,DIVERGENCIA)&atualizado_em=gte.' + NOTA_TRAVA_DESDE + 'T00:00:00&select=fornecedor,valor_previsto,atualizado_em',
-      { method: 'GET' }
-    );
-  } catch (e) { return []; } // falha de rede não trava — mesmo princípio do bloqueio de Caixa
-
-  const _inicioHoje = new Date(); _inicioHoje.setHours(0,0,0,0);
-  const inicioHojeISO = _inicioHoje.toISOString();
-  const confirmadasAntesDeHoje = (rows || []).filter(p => p.atualizado_em && p.atualizado_em < inicioHojeISO);
-  if (!confirmadasAntesDeHoje.length) return [];
-
-  // "hard": a confirmação já estava sem nota desde ANTES de ontem — ficou 1 dia inteiro
-  // sem resolver (mesmo critério das outras pendências essenciais). Não precisa de um
-  // corte de retroatividade próprio como Carnes/Banda/Escala: NOTA_TRAVA_DESDE (dia do
-  // deploy do bloqueio soft original) já garante que nenhuma linha buscada é anterior a
-  // ele, então no 1º dia depois do deploy desse hard é matematicamente impossível achar
-  // uma linha "antes de ontem" — o corte já dá a folga de 1 dia sozinho, sem query extra
-  // (confirmado no banco: nenhuma loja tem confirmação pendente desde o deploy do soft).
-  const _inicioOntem = new Date(); _inicioOntem.setDate(_inicioOntem.getDate() - 1); _inicioOntem.setHours(0,0,0,0);
-  const inicioOntemISO = _inicioOntem.toISOString();
-
-  const grupos = {};
-  confirmadasAntesDeHoje.forEach(p => {
-    const fornDisp = (p.fornecedor || 'Sem fornecedor').trim();
-    const key = fornDisp.toUpperCase();
-    if (!grupos[key]) grupos[key] = { fornecedor: fornDisp, valorPrevisto: 0, semanas: new Set(), hard: false };
-    grupos[key].valorPrevisto += parseFloat(p.valor_previsto) || 0;
-    grupos[key].semanas.add(wkKey(getMonday(new Date(p.atualizado_em))));
-    if (p.atualizado_em < inicioOntemISO) grupos[key].hard = true;
-  });
-
-  const pendencias = [];
-  Object.values(grupos).forEach(g => {
-    let lancado = 0;
-    g.semanas.forEach(semKey => {
-      const ent = entradasAll[loja + '|' + semKey] || [];
-      lancado += ent
-        .filter(e => (e.fornecedor || '').trim().toUpperCase() === g.fornecedor.toUpperCase())
-        .reduce((s, e) => s + (parseFloat(e.qtd) || 0) * (parseFloat(e.custoUnit) || 0), 0);
-    });
-    if (lancado === 0) pendencias.push({ fornecedor: g.fornecedor, valorPrevisto: g.valorPrevisto, hard: g.hard });
-  });
-  return pendencias;
+    rows = await sbRequest('rpc/gn_nf_semana', { method: 'POST', body: JSON.stringify({ p_semana: semIni }) });
+  } catch (e) { return []; }
+  if (!Array.isArray(rows)) return [];
+  const rec = rows.find(r => r.tipo === 'rec' && r.chave === slug);
+  const recebido = rec ? Number(rec.valor) || 0 : 0;
+  if (!(recebido > 0)) return [];
+  const nfServidor = Number((rows.find(r => r.tipo === 'nf' && String(r.chave || '').toUpperCase() === String(loja).toUpperCase()) || {}).valor) || 0;
+  // O que está neste aparelho pode estar à frente da nuvem (nota acabou de ser lançada).
+  const val = e => (parseFloat(e.qtd) || 0) * (parseFloat(e.custoUnit) || 0);
+  const noDaSemana = entradasAll[loja + '|' + semIni] || [];
+  const proxSemana = (entradasAll[loja + '|' + wkKey(addDays(new Date(semIni + 'T12:00:00'), 7))] || [])
+    .filter(e => { const d = String(e.dataNF || '').slice(0, 10); return d >= semIni && d <= semFim; });
+  const nfLocal = noDaSemana.concat(proxSemana).reduce((s, e) => s + val(e), 0);
+  const lancado = Math.max(nfServidor, nfLocal);
+  if (lancado >= recebido * NF_TRAVA_MINIMO) return [];
+  return [{ fornecedor: 'Semana de ' + semIni.slice(8, 10) + '/' + semIni.slice(5, 7) + ' a ' + semFim.slice(8, 10) + '/' + semFim.slice(5, 7),
+            valorPrevisto: recebido, lancado, itens: rec.n || 0, semIni, semFim, hard: false }];
 }
+const NF_TRAVA_SEMANA_DESDE = '2026-11-23';  // primeira semana cobrada (cobra a partir de 30/11)
+const NF_TRAVA_MINIMO = 0.5;                  // NF abaixo da metade do recebido trava
 
 /* ── PRAZO DE CONFIRMAÇÃO DA ENTREGA (26/11/2026) ──────────────────────────────────────
    "Se houve um pedido com previsão de entrega durante determinada semana, ao passar esse
@@ -2373,18 +2346,23 @@ function _renderTravaNotaFiscal(forcarExibicao) {
     el.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;box-sizing:border-box';
     document.body.appendChild(el);
   }
+  const rs = v => 'R$ ' + Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const itensHtml = _notaFiscalPendenciasAtivas.map(p => `
-    <div style="background:var(--fill-sutil);border-radius:10px;padding:10px 12px;margin-bottom:8px;text-align:left">
+    <div class="nf-trava-item" style="background:var(--fill-sutil);border-radius:10px;padding:10px 12px;margin-bottom:8px;text-align:left">
       <div style="font-weight:800;font-size:13px;color:var(--t1)">${p.fornecedor}</div>
-      <div style="font-size:11px;color:var(--t3)">Previsto: R$ ${p.valorPrevisto.toFixed(2).replace('.',',')}</div>
+      ${p.lancado != null
+        ? `<div style="font-size:11.5px;color:var(--t2);margin-top:3px">Recebido (confirmado na Entrega): <b>${rs(p.valorPrevisto)}</b>${p.itens ? ' · ' + p.itens + ' itens' : ''}</div>
+           <div style="font-size:11.5px;color:var(--txt-red);margin-top:1px">NF lançada: <b>${rs(p.lancado)}</b> — mínimo pra liberar: ${rs(p.valorPrevisto * NF_TRAVA_MINIMO)}</div>`
+        : `<div style="font-size:11px;color:var(--t3)">Previsto: ${rs(p.valorPrevisto)}</div>`}
     </div>`).join('');
   el.innerHTML = `
     <div style="background:var(--s2);border-radius:18px;padding:26px 22px;width:100%;max-width:380px;text-align:center">
       <div style="font-size:38px;margin-bottom:10px">🧾</div>
       <div style="font-size:16px;font-weight:800;color:var(--t1);margin-bottom:8px">Nota fiscal pendente</div>
       <div style="font-size:13px;color:var(--t2);line-height:1.5;margin-bottom:14px">
-        Entrega já confirmada sem a nota do fornecedor lançada até hoje. O app fica travado
-        nas outras abas até isso ser resolvido.
+        As entregas confirmadas na semana passada não têm as notas fiscais lançadas. Lance as
+        notas dessa semana na aba Entradas, <b>com a data da nota</b> — o app libera as outras
+        abas quando o lançado chegar à metade do recebido.
       </div>
       ${itensHtml}
       <button onclick="goTab('entradas')" style="display:block;width:100%;background:#E8580A;border:none;border-radius:10px;color:#fff;padding:13px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;margin-top:8px">🧾 Lançar Nota</button>
@@ -3756,6 +3734,7 @@ function confirmarMatchNF() {
   } else {
     showToast('⚠️ Nenhum item selecionado para importar.');
   }
+  _atualizarTravaNotaFiscal();
 }
 
 function totalVendas() { return Object.values(getVendas()).reduce((s,v) => s + (v||0), 0); }
@@ -4017,6 +3996,7 @@ function addEntrada(insumo, dataNF, nf, fornecedor, qtd, custoUnit, fotoBase64, 
   autoSave();
   showToast("✅ Entrada lançada: " + insumo);
   render();
+  _atualizarTravaNotaFiscal();
 }
 // ─── RELATÓRIO DE VENCIMENTOS ───────────────────────────────────────────────
 let _showVencimentos = false;
@@ -8547,6 +8527,7 @@ function delEntrada(id) {
   autoSave();
   render();
   showToast('🗑 Entrada removida e estoque revertido.');
+  _atualizarTravaNotaFiscal();
 }
 
 
