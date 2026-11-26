@@ -357,6 +357,15 @@
         '<div style="font-size:14px;font-weight:800;color:var(--t1,#111)">' + esc(st.opts.titulo || '📊 Acompanhamento diário — carnes e bebidas') + '</div>' +
         '<div style="font-size:10.5px;color:var(--t3,#64748b);margin:2px 0 8px;line-height:1.45">Só consulta. Contado × o que deveria ter (estoque inicial + entradas − vendidos). Toque num quadradinho pra ver o dia a dia.</div>' +
         '<div style="display:flex;gap:6px;margin-bottom:8px">' + bt(0, 'Semana atual') + bt(-1, 'Semana passada') + '</div>' +
+        '<div class="acomp-rel" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">' +
+          '<button class="acomp-rel-wpp" style="background:rgba(37,211,102,.12);border:1px solid rgba(37,211,102,.3);border-radius:6px;padding:5px 10px;color:var(--txt-green,#15803d);font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">📲 WhatsApp</button>' +
+          '<button class="acomp-rel-pdf" style="background:rgba(192,57,43,.12);border:1px solid rgba(192,57,43,.3);border-radius:6px;padding:5px 10px;color:var(--txt-red,#b91c1c);font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">📄 PDF</button>' +
+          '<button class="acomp-rel-pdfwpp" title="Enviar PDF pelo WhatsApp" style="background:rgba(37,211,102,.12);border:1px solid rgba(37,211,102,.3);border-radius:6px;padding:5px 10px;color:var(--txt-green,#15803d);font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">📄📲 PDF no Whats</button>' +
+        '</div>' +
+        (so1 ? '' : '<details class="acomp-rel-filtro" style="margin-bottom:8px"' + ((st.filtro || []).length ? ' open' : '') + '><summary style="font-size:10.5px;color:var(--t3,#64748b);font-weight:700;cursor:pointer">Relatório de: ' + ((st.filtro || []).length ? esc((st.filtro || []).map(function (k) { return (res.porLoja[k] || {}).nome || k; }).join(', ')) : 'todas as lojas') + ' (marque 1+ pro individual)</summary>' +
+          '<div style="display:flex;flex-wrap:wrap;gap:6px 14px;padding:8px 10px;margin-top:4px;border:1px solid rgba(0,0,0,.08);border-radius:8px">' +
+          ks.map(function (k) { return '<label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--t2,#334155);cursor:pointer"><input type="checkbox" class="acomp-rel-loja" value="' + esc(k) + '"' + ((st.filtro || []).indexOf(k) >= 0 ? ' checked' : '') + '>' + esc(res.porLoja[k].nome) + '</label>'; }).join('') +
+          '</div></details>') +
         '<div style="font-size:11px;color:var(--t2,#334155);margin-bottom:6px"><b>' + periodo + '</b> · <span class="acomp-resumo">' + resumoTxt + '</span></div>' +
         '<div style="display:flex;flex-wrap:wrap;gap:8px;font-size:10px;color:var(--t3,#64748b);margin-bottom:6px">' +
           ['ok:✓ bate', 'falta:− falta', 'sobra:+ sobra', 'sem_dado:— sem dado'].map(function (x) { var q = x.split(':'); return '<span><span style="display:inline-block;width:10px;height:10px;border-radius:3px;background:' + COR[q[0]].bg + ';border:1px solid rgba(0,0,0,.1);vertical-align:-1px;margin-right:3px"></span>' + q[1] + '</span>'; }).join('') + '</div>' +
@@ -365,6 +374,13 @@
         '<div class="acomp-detalhe" style="margin-top:10px">' + (st.sel ? detalhe(res, res.porLoja[st.sel.k], ITENS[st.sel.i]) : '') + '</div>' +
         '<div style="font-size:9.5px;color:var(--t3,#64748b);margin-top:8px;line-height:1.5">Carnes: o número grande é o saldo da semana (a soma das diferenças dos dias), com margem de ' + ((window.gnCarnesDiario || {}).MARGEM_KG || 1) + ' kg e entrada já sem a perda da salga; "dias −x · +y" embaixo = faltou num dia e sobrou no outro, quase sempre carne contada um dia depois. Chopp em canecas: canecas que os barris usados renderiam (' + CANECAS() + ' por barril) × canecas vendidas, tolerância de ¼ de barril (' + Math.round(CANECAS() / 4) + ' canecas). Coca: fecha na segunda, com a contagem nova (até 6 un ou 5% é "bate"). Os mesmos números das abas Carnes, Barris e Vendidos do Painel.</div>' +
       '</div>';
+    var q = function (sel, fn) { var x = el.querySelector(sel); if (x) x.onclick = function () { fn(el); }; };
+    q('.acomp-rel-wpp', relWpp); q('.acomp-rel-pdf', relPdf); q('.acomp-rel-pdfwpp', relPdfWpp);
+    el.querySelectorAll('.acomp-rel-loja').forEach(function (c) { c.onchange = function () {
+      st.filtro = (st.filtro || []).filter(function (k) { return k !== c.value; }); if (c.checked) st.filtro.push(c.value);
+      var sm = el.querySelector('.acomp-rel-filtro summary');
+      if (sm) sm.textContent = 'Relatório de: ' + (st.filtro.length ? st.filtro.map(function (k) { return (res.porLoja[k] || {}).nome || k; }).join(', ') : 'todas as lojas') + ' (marque 1+ pro individual)';
+    }; });
     el.querySelectorAll('.acomp-per').forEach(function (b) { b.onclick = function () { st.off = +b.dataset.off; st.sel = null; render(el); }; });
     el.querySelectorAll('.acomp-cel').forEach(function (b) { b.onclick = function () {
       var k = b.dataset.k, i = +b.dataset.i;
@@ -452,6 +468,74 @@
     }
     return '';
   }
+
+  // ── Relatórios: WhatsApp e PDF, da rede ou das lojas marcadas (26/11/2026) ──────────
+  // "Preciso que tenha opção de gerar relatórios desse controle, por WhatsApp, PDF, mesmo
+  // esquema por loja e todos." Mesmo padrão das outras abas do Painel (Avarias, Sem 10%):
+  // nenhuma loja marcada = rede; marcadas = só elas. Na Home da loja sai só a loja dela.
+  // Os números são os dos quadradinhos (celula) — nada recalculado de outro jeito.
+  function periodoTxt(res) { return res.vigente ? 'Semana atual · ' + br(res.iniISO) + ' a hoje (em curso)' : 'Semana fechada · ' + br(res.iniISO) + ' a ' + br(res.fimISO); }
+  function textoCelula(c) { return String(c.texto || '').replace(/ can\.$/, ' canecas'); }
+  function lojasDoRelatorio(res, filtro) {
+    var ks = Object.keys(res.porLoja).sort(function (a, b) { return res.porLoja[a].nome.localeCompare(res.porLoja[b].nome); });
+    var f = (filtro || []).filter(function (k) { return ks.indexOf(k) >= 0; });
+    return f.length ? ks.filter(function (k) { return f.indexOf(k) >= 0; }) : ks;
+  }
+  function relatorio(res, filtro, wpp) {
+    var ks = lojasDoRelatorio(res, filtro), b = function (t) { return wpp ? '*' + t + '*' : t; };
+    var todas = Object.keys(res.porLoja).length, nomes = ks.map(function (k) { return res.porLoja[k].nome; });
+    var alvo = ks.length === todas && todas > 1 ? 'Rede' : nomes.join(', ');
+    var cont = { falta: 0, sobra: 0, ok: 0 };
+    var blocos = ks.map(function (k) {
+      var p = res.porLoja[k], fal = [], sob = [], okk = [], sem = [];
+      ITENS.forEach(function (it) {
+        var c = celula(res, p, it), extra = c.texto2 ? ' (' + c.texto2 + ')' : '';
+        if (c.status === 'falta') { cont.falta++; fal.push(it.label + ': ' + textoCelula(c) + extra); }
+        else if (c.status === 'sobra') { cont.sobra++; sob.push(it.label + ': ' + textoCelula(c) + extra); }
+        else if (c.status === 'ok') { cont.ok++; okk.push(it.label + (c.texto2 ? ' (' + c.texto2 + ')' : '')); }
+        else sem.push(it.label + (c.status === 'futuro' ? ' (em curso)' : c.motivo ? ' (' + c.motivo + ')' : ''));
+      });
+      var t = '\n' + (wpp ? '🏪 ' : '') + b(p.nome) + '\n';
+      fal.forEach(function (x) { t += '  ' + (wpp ? '🔴 ' : 'FALTA · ') + x + '\n'; });
+      sob.forEach(function (x) { t += '  ' + (wpp ? '🔵 ' : 'SOBRA · ') + x + '\n'; });
+      if (okk.length) t += '  ' + (wpp ? '✅ ' : 'Bate: ') + (wpp ? 'Bate: ' : '') + okk.join(' · ') + '\n';
+      if (sem.length) t += '  ' + (wpp ? '⚪ ' : '') + 'Sem dado: ' + sem.join(' · ') + '\n';
+      return t;
+    }).join('');
+    var msg = (wpp ? '📊 ' : '') + b('ACOMPANHAMENTO — CARNES E BEBIDAS — ' + alvo.toUpperCase()) + '\n' + periodoTxt(res) + '\n' +
+      '\nResumo: ' + cont.falta + ' com falta · ' + cont.sobra + ' com sobra · ' + cont.ok + ' batendo\n' + blocos +
+      '\nComo ler: carnes = saldo da semana em kg (dias = faltou num dia e sobrou no outro, quase sempre contagem atrasada); chopp em canecas (' + CANECAS() + ' por barril); Coca em unidades, fecha na segunda.\n';
+    return { msg: msg, titulo: 'Acompanhamento — ' + alvo, cont: cont, ks: ks };
+  }
+  // A grade pro papel: as mesmas cores da tela, em hexa (o PDF não tem as variáveis do tema).
+  var COR_PDF = { ok: ['#dcfce7', '#166534'], falta: ['#fee2e2', '#b91c1c'], sobra: ['#dbeafe', '#1d4ed8'], sem_dado: ['#f3f4f6', '#6b7280'], futuro: ['#f3f4f6', '#6b7280'] };
+  function gradePdf(res, ks) {
+    var th = 'padding:5px 4px;font-size:8pt;font-weight:800;color:#555;text-align:center;border-bottom:2px solid #c8a14a';
+    return '<div><table style="border-collapse:separate;border-spacing:3px;width:100%"><tr><th style="' + th + ';text-align:left">Loja</th>' +
+      ITENS.map(function (it) { return '<th style="' + th + '">' + esc(it.curto) + '</th>'; }).join('') + '</tr>' +
+      ks.map(function (k) { var p = res.porLoja[k];
+        return '<tr><td style="padding:5px 4px;font-size:9pt;font-weight:800;white-space:nowrap">' + esc(p.nome) + '</td>' + ITENS.map(function (it) {
+          var c = celula(res, p, it), cor = COR_PDF[c.status] || COR_PDF.sem_dado;
+          return '<td style="padding:5px 3px;text-align:center;border-radius:5px;background:' + cor[0] + ';color:' + cor[1] + ';font-size:8.5pt;font-weight:800;white-space:nowrap">' + esc(c.texto) +
+            (c.texto2 ? '<div style="font-size:7pt;font-weight:700;color:#555">' + esc(c.texto2) + '</div>' : '') + '</td>'; }).join('') + '</tr>'; }).join('') +
+      '</table></div>';
+  }
+  function opcoesPdf(res, filtro) {
+    var r = relatorio(res, filtro, false);
+    // Sem a 1ª linha (o título): o PDF já tem o título no topo.
+    return { titulo: r.titulo, tituloDoc: r.titulo + ' — ' + br(res.iniISO), texto: r.msg.split('\n').slice(1).join('\n'),
+      kpis: [{ label: 'Período', valor: res.vigente ? 'Semana atual' : 'Semana fechada', sub: periodoTxt(res).replace(/^Semana (atual|fechada) · /, '') },
+             { label: 'Com falta', valor: String(r.cont.falta), sub: r.ks.length + ' loja' + (r.ks.length === 1 ? '' : 's') },
+             { label: 'Com sobra', valor: String(r.cont.sobra), sub: r.cont.ok + ' batendo' }],
+      visual: '<div class="pdf-vis">' + gradePdf(res, r.ks) + '</div>' };
+  }
+  function relWpp(el) { var st = _estado.get(el); if (!st || !st.res) return; window.open('https://wa.me/?text=' + encodeURIComponent(relatorio(st.res, st.filtro, true).msg), '_blank'); }
+  function relPdf(el) { var st = _estado.get(el); if (!st || !st.res || !window.gnRelatorioPDF) return; window.gnRelatorioPDF(opcoesPdf(st.res, st.filtro)); }
+  function relPdfWpp(el) {
+    var st = _estado.get(el); if (!st || !st.res) return;
+    if (window.gnRelatorioPDFCompartilhar) return window.gnRelatorioPDFCompartilhar(opcoesPdf(st.res, st.filtro));
+    relPdf(el);
+  }
   window.gnAcomp = { carregar: carregar, celula: celula, cocaSemana: cocaSemana, cocaStatus: cocaStatus, tipoBarril: tipoBarril,
-    ITENS: ITENS, CARNES: CARNES, render: render, detalhe: detalhe, segunda: segunda, isoMais: isoMais, norm: norm, fmt: fmt, br: br, esc: esc, r1: r1 };
+    ITENS: ITENS, CARNES: CARNES, render: render, detalhe: detalhe, relatorio: relatorio, opcoesPdf: opcoesPdf, segunda: segunda, isoMais: isoMais, norm: norm, fmt: fmt, br: br, esc: esc, r1: r1 };
 })();
