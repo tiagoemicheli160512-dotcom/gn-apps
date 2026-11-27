@@ -32,6 +32,7 @@
     carnes: '🥩 Contagem de carnes', abertura: '☀️ Check-list de abertura', operacional: '⚙️ Check-list operacional',
     banda: '🎵 Banda', escala_chk: '📅 Escala (Check-list)', banco_horas: '⏱ Banco de horas', salario: '💰 Salário',
     cadastro: '🪪 Cadastro de funcionário',
+    emprestimo: '⇄ Empréstimo sem confirmar (3 dias)',
   };
 
   function userKey(loja) {

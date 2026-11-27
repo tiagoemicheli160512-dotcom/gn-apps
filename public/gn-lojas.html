@@ -1246,7 +1246,7 @@ const TRANSFER_FLAGS_MONOTONICOS = ['confirmadoOrigem','confirmadoDestino','pagD
 // Campos de empréstimo que nascem vazios e depois recebem um valor definitivo: se uma das
 // cópias ainda não tem (ou tem null), vale a que tem. Sem isso, a cópia mais atrasada
 // apagava a data de quitação ou o vínculo com o pagamento em dinheiro.
-const TRANSFER_CAMPOS_PRESERVADOS = ['dataQuitacao','formaQuitacao','pagDinheiroAvariaId'];
+const TRANSFER_CAMPOS_PRESERVADOS = ['dataQuitacao','formaQuitacao','pagDinheiroAvariaId','confirmadoDestinoEm','confirmadoOrigemEm','contestacao'];
 
 // Mescla dois registros do MESMO id de empréstimo (cópia local + cópia da nuvem): em vez
 // de um lado descartar o outro por completo, os campos de confirmação avançam por OR —
@@ -2266,9 +2266,99 @@ async function _atualizarTravaEntregas() {
 function _registrarTravaLojas(app, tipo, ativa, detalhe) {
   if (!window.gnTravasRegistro || !usuarioAtual || CARGOS_MASTER_EQUIV.includes(usuarioAtual.cargo)) return;
   // Quem não tem a aba que resolve não vê a trava — e não pode dar baixa no caso dos outros.
-  const aba = { nota_fiscal: 'entradas', entrega: 'entrega' }[tipo];
+  const aba = { nota_fiscal: 'entradas', entrega: 'entrega', emprestimo: 'transf' }[tipo];
   if (aba && abasPermitidas && !abasPermitidas.includes(aba)) return;
   window.gnTravasRegistro(app, loja, [tipo], ativa ? [{ tipo, detalhe }] : []);
+}
+// ── Empréstimo: prazo de 3 dias pra confirmar a devolução (27/11/2026) ───────────────────
+// "Quando a loja sinalizar que devolveu, a outra loja tem que ter um prazo de até 3 dias pra
+// confirmar que de fato recebeu, pois se não nunca é confirmado." O Painel mostrava casos
+// parados há 22, 39, 45 dias. Decisão do dono: passou o prazo, o app da loja que deve a
+// confirmação TRAVA (como a das Entregas) e só libera a aba Empréstimos até ela responder —
+// "recebi" ou "não recebi" (a contestação vai pra gestão). Vale nos dois sentidos: uma loja
+// marcou a parte dela, a outra tem 3 dias. Os casos que já estavam esperando não têm a data
+// da marcação: ganham 3 dias a partir de EMPREST_PRAZO_DESDE. Maglia fora (não citada).
+const EMPREST_PRAZO_DIAS = 3;
+const EMPREST_PRAZO_DESDE = '2026-11-27';
+let _emprestVencidosAtivos = [];
+function _emprestIsoDia(iso) {
+  const d = new Date(iso); if (isNaN(d)) return null;
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+// Se ESTA loja deve uma confirmação nesse empréstimo: {limite:'AAAA-MM-DD', outra, acao} ou null.
+function _emprestPrazoDe(t, lojaK) {
+  if (!t || t.quitado || t.contestacao || t.pagDinheiroAvariaId || t.pagDinheiroOrigem || t.pagDinheiroDestino) return null;
+  const souOrigem = t.origem === lojaK, souDestino = t.destino === lojaK;
+  if (!souOrigem && !souDestino) return null;
+  const meuOk = souOrigem ? t.confirmadoOrigem : t.confirmadoDestino;
+  const outroOk = souOrigem ? t.confirmadoDestino : t.confirmadoOrigem;
+  if (meuOk || !outroOk) return null;
+  const marcadoEm = souOrigem ? t.confirmadoDestinoEm : t.confirmadoOrigemEm;
+  let ini = (marcadoEm && _emprestIsoDia(marcadoEm)) || EMPREST_PRAZO_DESDE;
+  if (ini < EMPREST_PRAZO_DESDE) ini = EMPREST_PRAZO_DESDE;
+  return { limite: addDaysISO(ini, EMPREST_PRAZO_DIAS), outra: souOrigem ? t.destino : t.origem,
+           acao: souOrigem ? 'confirmar que recebeu de volta' : 'confirmar a devolução' };
+}
+function _emprestPrazoTxt(pz) {
+  if (!pz) return '';
+  const dm = pz.limite.slice(8, 10) + '/' + pz.limite.slice(5, 7);
+  return _carneObrigHojeISO() > pz.limite ? '🔒 prazo venceu em ' + dm + ' — o app fica travado até você responder' : '⏳ responda até ' + dm;
+}
+function _calcularEmprestimosVencidos() {
+  if (!usuarioAtual || CARGOS_MASTER_EQUIV.includes(usuarioAtual.cargo)) return [];
+  if (loja === 'MAGLIA') return [];
+  if (abasPermitidas && !abasPermitidas.includes('transf')) return [];
+  const hoje = _carneObrigHojeISO(), tf = getTransfPorLoja(), out = [];
+  tf.enviadas.concat(tf.recebidas).forEach(t => { const pz = _emprestPrazoDe(t, loja); if (pz && hoje > pz.limite) out.push(Object.assign({ t }, pz)); });
+  return out;
+}
+function _atualizarTravaEmprestimos() {
+  try { reconciliarTransferAll(); _emprestVencidosAtivos = _calcularEmprestimosVencidos(); } catch (e) { _emprestVencidosAtivos = []; }
+  _renderTravaEmprestimos();
+  _registrarTravaLojas('lojas_emprestimo', 'emprestimo', _emprestVencidosAtivos.length, _emprestVencidosAtivos.length + ' empréstimo(s) sem confirmar há mais de ' + EMPREST_PRAZO_DIAS + ' dias');
+}
+function _renderTravaEmprestimos(forcarExibicao) {
+  const idEl = 'emprest-prazo-overlay';
+  let el = document.getElementById(idEl);
+  if (!_emprestVencidosAtivos.length || (!forcarExibicao && tab === 'transf')) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement('div'); el.id = idEl;
+    el.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:9998;display:flex;align-items:center;justify-content:center;padding:20px;box-sizing:border-box';
+    document.body.appendChild(el);
+  }
+  const n = _emprestVencidosAtivos.length;
+  const itens = _emprestVencidosAtivos.map(v => `
+    <div style="background:var(--fill-sutil);border-radius:10px;padding:9px 12px;margin-bottom:6px;text-align:left">
+      <div style="font-weight:800;font-size:13px;color:var(--t1)">${escapeHtml(v.t.insumo || '')}</div>
+      <div style="font-size:11px;color:var(--t3)">${escapeHtml(lojaDisp(v.outra))} já marcou a parte dela — falta você ${v.acao} · prazo ${v.limite.slice(8, 10)}/${v.limite.slice(5, 7)}</div></div>`).join('');
+  el.innerHTML = `
+    <div class="emprest-prazo-trava" style="background:var(--s2);border-radius:18px;padding:24px 20px;width:100%;max-width:380px;text-align:center;max-height:90vh;overflow:auto">
+      <div style="font-size:38px;margin-bottom:8px">⇄</div>
+      <div style="font-size:16px;font-weight:800;color:var(--t1);margin-bottom:8px">Confirme os empréstimos devolvidos</div>
+      <div style="font-size:13px;color:var(--t2);line-height:1.5;margin-bottom:14px">
+        ${n} empréstimo${n === 1 ? '' : 's'} em que a outra loja já marcou a parte dela há mais de ${EMPREST_PRAZO_DIAS} dias e falta a sua resposta.
+        Responda <b>recebi</b> ou <b>não recebi</b>. O app libera as outras abas quando acabar.
+      </div>
+      ${itens}
+      <button onclick="goTab('transf')" style="display:block;width:100%;background:#E8580A;border:none;border-radius:10px;color:#fff;padding:13px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;margin-top:8px">Abrir Empréstimos</button>
+    </div>`;
+}
+// "Não recebi" / "Não devolvi": a loja contesta a marcação da outra. Sai da trava e vai pra
+// gestão resolver (Painel › Transferências mostra a contestação). Ninguém é forçado a
+// confirmar o que não aconteceu. Se depois chegar, o botão de confirmar continua lá.
+function contestarDevolucao(id) {
+  const found = transfPorId(id);
+  if (!found || found.quitado) { showToast('⚠️ Empréstimo não encontrado.'); return; }
+  const souOrigem = found.origem === loja;
+  const motivo = prompt(souOrigem ? 'Não recebeu de volta? Conte o que aconteceu (vai pra gestão):' : 'Não devolveu? Conte o que aconteceu (vai pra gestão):', '');
+  if (motivo === null) return;
+  found.contestacao = { loja, em: new Date().toISOString(), por: (usuarioAtual && usuarioAtual.nome) || '', motivo: String(motivo).trim().slice(0, 200) };
+  _transfGarantirCopias(found);
+  autoSave();
+  sbPushLoja(souOrigem ? found.destino : found.origem).catch(() => {});
+  showToast('⚠️ Contestação registrada — a gestão vai resolver com as duas lojas.');
+  _atualizarTravaEmprestimos();
+  render();
 }
 function _renderTravaEntregas(forcarExibicao) {
   const idEl = 'entrega-prazo-overlay';
@@ -4665,6 +4755,8 @@ function goTab(t) {
   if (_notaFiscalPendenciasAtivas.length && t !== 'entradas' && t !== 'guia') { _renderTravaNotaFiscal(true); return; }
   // Entrega com prazo de confirmação vencido: só a aba Entrega (e o Guia) até resolver.
   if (_entregasVencidasAtivas.length && t !== 'entrega' && t !== 'guia') { _renderTravaEntregas(true); return; }
+  // Empréstimo com a confirmação da devolução vencida (3 dias): só Empréstimos (e o Guia).
+  if (_emprestVencidosAtivos.length && t !== 'transf' && t !== 'guia') { _renderTravaEmprestimos(true); return; }
   // Contagem semanal de barris pendente (só cargo Estoquista) — trava qualquer troca de
   // aba que não seja pro próprio Pedido (onde o overlay de contagem já aparece por cima)
   // ou pro Guia, mesmo princípio das outras pendências essenciais.
@@ -4691,6 +4783,7 @@ function goTab(t) {
   if (t === 'barris') { carregarBarris(true); _carregarBarrisVisao(); }
   _renderTravaNotaFiscal();
   _renderTravaEntregas();   // na aba Entrega o aviso sai da frente; fora dela, volta
+  _renderTravaEmprestimos();
   // foco automático na busca se a aba tem campo de busca
   if (["estoque","vendas","contagem"].includes(t)) {
     setTimeout(() => {
@@ -9016,6 +9109,7 @@ async function confirmarLogin() {
     // cobrado, quem logava depois não. Se o sbPull ainda não terminou, ele roda de novo no fim.
     _atualizarTravaNotaFiscal();
     _atualizarTravaEntregas();
+    _atualizarTravaEmprestimos();
     _checarBarrisSemanalPendencia();
     _checarBarrisRespostaDiaria();
     _checarUrgenciaPendencia();
@@ -9490,6 +9584,10 @@ async function quitarEmprestimo(id) {
   // (ver reconciliarTransferAll), então uma atribuição vale pelas duas pontas.
   if (isDestino) found.confirmadoDestino = true;  // credora: "devolvi"
   if (isOrigem)  found.confirmadoOrigem  = true;  // devedora: "recebi de volta"
+  // Quando confirmou (27/11/2026): é daqui que conta o prazo de 3 dias da OUTRA loja.
+  const _agoraIso = new Date().toISOString();
+  if (isDestino && !found.confirmadoDestinoEm) found.confirmadoDestinoEm = _agoraIso;
+  if (isOrigem  && !found.confirmadoOrigemEm)  found.confirmadoOrigemEm  = _agoraIso;
 
   const outraLoja = isOrigem ? found.destino : found.origem;
   _transfGarantirCopias(found);
@@ -9556,6 +9654,7 @@ async function quitarEmprestimo(id) {
       showToast("✅ Registrado localmente — sincronize para atualizar a outra loja.");
     });
   }
+  _atualizarTravaEmprestimos();
   render();
 }
 
@@ -10315,6 +10414,9 @@ function irParaBarrisPeloAviso() {
 
 /* ═══════════ RENDER ═══════════ */
 function render() {
+  // Prazo dos empréstimos: recalcula a cada redesenho (os dados chegam pelo poll de 20s e
+  // pelos botões) — a outra loja confirmou, ou esta respondeu, e a trava sai na hora.
+  if (usuarioAtual) _atualizarTravaEmprestimos();
   mostrarAvisoGuiaSeNecessario();
   mostrarAvisoHortifrutiSeNecessario();
   mostrarAvisoBarrisSeNecessario();
@@ -11253,8 +11355,13 @@ function render() {
                   return '<div style="font-size:10px;color:var(--txt-purple);font-weight:700;flex-shrink:0">💵 Você confirmou dinheiro<br><span style=\'color:var(--t3)\'>Aguard. '+outraLoja+'</span></div>';
                 }
                 const label = isDestino ? '✅ Devolvi' : '✅ Recebi de volta';
+                if (t.contestacao) return '<div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0;align-items:flex-end"><div style="font-size:10px;color:var(--txt-red);font-weight:700;text-align:right">⚠️ Contestado<br><span style=\'color:var(--t3)\'>a gestão vai resolver</span></div>' +
+                  '<button onclick="quitarEmprestimo(\'' + t.id + '\')" style="background:#16a34a;border:none;border-radius:10px;padding:6px 10px;color:#fff;font-size:11px;font-weight:700">' + label + '</button></div>';
+                const _pz = _emprestPrazoDe(t, loja);
                 return '<div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">' +
+                  (_pz ? '<div class="emprest-prazo" style="font-size:10px;font-weight:800;color:var(--txt-amber);max-width:150px;text-align:right">' + escapeHtml(lojaDisp(outraLoja)) + ' já marcou · ' + _emprestPrazoTxt(_pz) + '</div>' : '') +
                   '<button onclick="quitarEmprestimo(\'' + t.id + '\')" style="background:#16a34a;border:none;border-radius:10px;padding:6px 10px;color:#fff;font-size:11px;font-weight:700">' + label + '</button>' +
+                  (_pz ? '<button class="emprest-contestar" onclick="contestarDevolucao(\'' + t.id + '\')" style="background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.4);border-radius:10px;padding:6px 10px;color:var(--txt-red);font-size:11px;font-weight:700">❌ Não devolvi</button>' : '') +
                   '<button onclick="marcarPagamentoDinheiro(\'' + t.id + '\')" style="background:rgba(167,139,250,.15);border:1px solid rgba(167,139,250,.4);border-radius:10px;padding:6px 10px;color:var(--txt-purple);font-size:11px;font-weight:700">💵 Pagar em Dinheiro</button>' +
                 '</div>';
               })()}
@@ -11277,7 +11384,8 @@ function render() {
                 <span style="font-weight:700;font-size:12px;color:var(--t1)">${t.insumo}</span>
                 <div style="font-size:10px;color:var(--t2)">→ ${t.destino} · <span style="color:var(--txt-red)">-${(t.qtdOriginal!=null?t.qtdOriginal:t.qtd).toFixed(3)} ${t.unidade||'UN'}</span>${t.motivo?" · "+t.motivo:""}</div>
                 ${t.pagDinheiroAvariaId?`<div style="font-size:10px;color:var(--txt-purple);font-weight:700">⏳ Aguardando ${_statusAvariaTransf(t)==='loja_confirmou'?'Financeiro':'Compras'} validar pagamento em dinheiro</div>`
-                  :outroOk&&!meuOk?`<div style="font-size:10px;color:var(--txt-amber);font-weight:700">⚡ ${t.destino} confirmou! Confirme o recebimento.</div>`
+                  :t.contestacao?`<div style="font-size:10px;color:var(--txt-red);font-weight:700">⚠️ Contestado por ${escapeHtml(lojaDisp(t.contestacao.loja))}${t.contestacao.motivo?' — '+escapeHtml(t.contestacao.motivo):''} · a gestão vai resolver</div>`
+                  :outroOk&&!meuOk?`<div class="emprest-prazo" style="font-size:10px;color:var(--txt-amber);font-weight:700">⚡ ${t.destino} confirmou! Confirme o recebimento. ${_emprestPrazoTxt(_emprestPrazoDe(t, loja))}</div>`
                   :meuOk&&!outroOk?`<div style="font-size:10px;color:var(--t2)">Aguardando ${t.destino} confirmar devolução...</div>`
                   :outroPagOk&&!meuPagOk?`<div style="font-size:10px;color:var(--txt-purple);font-weight:700">💵 ${t.destino} quer pagar em dinheiro! Confirme.</div>`
                   :meuPagOk&&!outroPagOk?`<div style="font-size:10px;color:var(--t2)">Aguardando ${t.destino} confirmar valor em dinheiro...</div>`
@@ -11290,6 +11398,7 @@ function render() {
                   : meuPagOk
                   ? `<div style="font-size:10px;color:var(--txt-purple);font-weight:700">💵 Você confirmou dinheiro</div>`
                   : `<button onclick="quitarEmprestimo('${t.id}')" style="background:${outroOk?'#D97706':'#374151'};border:none;border-radius:10px;padding:6px 10px;color:${outroOk?'#000':'#fff'};font-size:11px;font-weight:800">✅ Recebi de volta</button>
+                     ${outroOk&&!t.contestacao?`<button class="emprest-contestar" onclick="contestarDevolucao('${t.id}')" style="background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.4);border-radius:10px;padding:6px 10px;color:var(--txt-red);font-size:11px;font-weight:700">❌ Não recebi</button>`:''}
                      <button onclick="marcarPagamentoDinheiro('${t.id}')" style="background:${outroPagOk?'#7c3aed':'rgba(167,139,250,.15)'};border:1px solid rgba(167,139,250,.4);border-radius:10px;padding:6px 10px;color:${outroPagOk?'#fff':'#6D28D9'};font-size:11px;font-weight:700">💵 Pagar em Dinheiro</button>`
                 }
                 ${!t.pagDinheiroAvariaId?`<button onclick="delTransferencia('${t.id}')" style="background:rgba(239,68,68,.15);border:none;border-radius:8px;padding:4px 8px;color:var(--txt-red);font-size:10px;font-weight:700">✖ Cancelar</button>`:''}
@@ -14992,6 +15101,7 @@ sbPull(false).then(() => {
   loadChecklistFat();
   _atualizarTravaNotaFiscal();
   _atualizarTravaEntregas();
+  _atualizarTravaEmprestimos();
   _checarBarrisSemanalPendencia();
   _checarBarrisRespostaDiaria();
   // Depois do sbPull: urgenciaTemplate só existe a partir daí (vem de gn_lojas.all_data).
