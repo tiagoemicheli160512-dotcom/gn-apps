@@ -310,8 +310,20 @@ const HOJE = '2026-11-05';
   const gPe = await gravado();
   check('…grava "entregue por NOGMIX - JBS" mantendo o pedido na Saudali', gPe.length && gPe[gPe.length - 1].corpo.fornecedor_entregue === 'NOGMIX - JBS'
     && await page.evaluate(() => /Pedido em SAUDALI\/CIACARNE · entregue por NOGMIX - JBS/.test(_epRessalvaForn(provisoesEntrega[0]))), JSON.stringify(gPe[gPe.length - 1]));
-  check('lombo, costela, calabresa, paio e orelha da Saudali também; em SP casam pela origem (calabresa 1397)',
-    await page.evaluate(() => [395, 396, 397, 398, 501].every(i => (_epGrupoSubst('SAUDALI/CIACARNE', { gn_catalogo: { item_id: i } }) || {}).tipo === 'Suínos salgados (Saudali/Ciacarne ↔ Nogmix)')
+  // 27/11/2026: "o paio veio pela Seara e no app estava pela Saudali" — o paio ganha a Seara
+  // (e mantém a Nogmix); os outros suínos não, e os outros itens da Seara também não.
+  const opPaio = await page.evaluate(() => { provisoesEntrega = [Object.assign({}, provisoesEntrega[0], { id: 'paio', fornecedor: 'SAUDALI/CIACARNE', fornecedor_entregue: null, gn_catalogo: { produto: 'PAIO', und: 'KG', item_id: 398, origem_item_id: null } })]; abrirTrocaFornecedorEntrega('paio'); const m = document.getElementById('modalTrocaForn'); const o = Array.from(m.querySelectorAll('button[data-forn]')).map(b => b.dataset.forn); m.remove(); return o; });
+  check('paio da SAUDALI/CIACARNE pode virar SEARA (e continua podendo ir pra Nogmix)', JSON.stringify(opPaio) === JSON.stringify(['SEARA', 'NOGMIX - JBS', 'NOGMIX', 'JBS']), JSON.stringify(opPaio));
+  await page.evaluate(async () => { window.__gravado = []; await _epAplicarTrocaForn('paio', 'SEARA'); });
+  const gPaio = await gravado();
+  check('…grava "entregue por SEARA" mantendo o pedido na Saudali', gPaio.length && gPaio[gPaio.length - 1].corpo.fornecedor_entregue === 'SEARA'
+    && await page.evaluate(() => /Pedido em SAUDALI\/CIACARNE · entregue por SEARA/.test(_epRessalvaForn(provisoesEntrega[0]))), JSON.stringify(gPaio[gPaio.length - 1]));
+  check('…em SP o paio (1398) casa pela origem; os outros suínos e os outros itens da Seara NÃO ganham a Seara',
+    await page.evaluate(() => (_epGrupoSubst('SAUDALI/CIACARNE', { gn_catalogo: { item_id: 1398, origem_item_id: 398 } }) || {}).tipo === 'Paio (Saudali/Ciacarne ↔ Seara ↔ Nogmix)'
+      && [395, 396, 397, 501, 505].every(i => !(_epGrupoSubst('SAUDALI/CIACARNE', { gn_catalogo: { item_id: i } }) || { fornecedores: [] }).fornecedores.includes('SEARA'))
+      && !_epGrupoSubst('SEARA', { gn_catalogo: { item_id: 777 } })));
+  check('lombo, costela, calabresa e orelha da Saudali também; em SP casam pela origem (calabresa 1397)',
+    await page.evaluate(() => [395, 396, 397, 501].every(i => (_epGrupoSubst('SAUDALI/CIACARNE', { gn_catalogo: { item_id: i } }) || {}).tipo === 'Suínos salgados (Saudali/Ciacarne ↔ Nogmix)')
       && !!_epGrupoSubst('SAUDALI/CIACARNE', { gn_catalogo: { item_id: 1397, origem_item_id: 397 } })));
   check('carne bovina da Nogmix continua no grupo Carnes (troca com JBS/Nogmix Matheus, nunca com a Saudali)',
     await page.evaluate(() => { const g = _epGrupoSubst('NOGMIX - JBS', { gn_catalogo: { item_id: 999 } }); return g && g.tipo === 'Carnes (JBS/Nogmix)' && !g.fornecedores.includes('SAUDALI/CIACARNE'); }));
