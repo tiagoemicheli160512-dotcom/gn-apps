@@ -1467,12 +1467,42 @@ function getSaidasWD(wd){
   if(parseFloat(wd.saldoSaida)>0) return [{valor:parseFloat(wd.saldoSaida)||0,motivo:wd.motivo||'',data:''}];
   return [];
 }
+// Saldo do pool semana a semana (mesma conta da aba Saldo Pool e de getSaldoAntes).
+function _saldoPoolPorSemana(){
+  let s=0;
+  return CAL.map((w,i)=>{
+    const wd=getWD(i); const c=calcSemana(wd,s);
+    const totalSaidas=getSaidasWD(wd).reduce((t,x)=>t+(parseFloat(x.valor)||0),0);
+    const sApos=c.retido-totalSaidas; s=sApos;
+    return {retido:c.retido,totalSaidas,sApos};
+  });
+}
+// Quanto ainda dá pra tirar de saída na semana i sem mexer no rateio de ninguém (27/11/2026).
+// Uma saída na semana i diminui o "saldo anterior" de TODAS as semanas seguintes. Até aqui o
+// app aceitava qualquer valor: o que passava do retido saía do pool da semana seguinte — do
+// rateio dos funcionários (Bangu S35: saída de R$ 300 com R$ 90 retidos). E uma saída lançada
+// numa semana antiga, cujo saldo já tinha sido distribuído depois, refazia o rateio de semanas
+// já pagas. Limite = o menor "saldo após saídas" da semana i até a semana atual: é o dinheiro
+// que continuou retido o tempo todo e ainda não foi pra ninguém.
+function _saidaMaxima(i,linhas){
+  linhas=linhas||_saldoPoolPorSemana();
+  const fim=Math.min(Math.max(i,calcSemIdxAtual()),linhas.length-1);
+  let m=Infinity;
+  for(let j=i;j<=fim;j++) m=Math.min(m,linhas[j].sApos);
+  return Math.max(0,Math.round(m*100)/100);
+}
 function confirmarSaida(i){
   const valEl=document.getElementById('sv-'+i);
   const motEl=document.getElementById('sm-'+i);
   const obsEl=document.getElementById('sob-'+i);
   const val=parseBRL(valEl.value);
   if(!val||val<=0){showToast('⚠ Valor inválido');return;}
+  const max=_saidaMaxima(i);
+  if(val>max+0.005){
+    showToast(max>0?'⚠ Saída maior que o saldo retido disponível ('+fmtBRL(max)+')':'⚠ Esta semana não tem saldo retido disponível pra saída');
+    const av=document.getElementById('sav-'+i); if(av){ av.style.color='var(--rd2)'; av.style.fontWeight='800'; }
+    return;
+  }
   const wd=getWD(i);
   const saidas=getSaidasWD(wd).slice();
   const hoje=new Date().toLocaleDateString('pt-BR');
@@ -1496,21 +1526,25 @@ function removeSaida(i,idx){
 
 // ── TAB SALDO POOL ────────────────────────────────────────────────────────
 function renderSaldo(ct){
-  let sAcum=0,totalSaidasGlobal=0;
+  let totalSaidasGlobal=0;
+  const linhas=_saldoPoolPorSemana();
   const rows=CAL.map((w,i)=>{
-    const wd=getWD(i);const c=calcSemana(wd,sAcum);
+    const wd=getWD(i);
     const saidas=getSaidasWD(wd);
-    const totalSaidasSem=saidas.reduce((s,x)=>s+(parseFloat(x.valor)||0),0);
-    const sApos=c.retido-totalSaidasSem;
+    const {retido,totalSaidas:totalSaidasSem,sApos}=linhas[i];
     totalSaidasGlobal+=totalSaidasSem;
-    sAcum=sApos;
-    return {w,i,wd,retido:c.retido,saidas,totalSaidasSem,sApos};
+    return {w,i,wd,retido,saidas,totalSaidasSem,sApos};
   });
-  const saldoAtual=sAcum;
+  // Saldo de AGORA = o que sobrou depois da semana atual (27/11/2026). Antes era o saldo
+  // depois da ÚLTIMA semana do calendário: as semanas futuras, ainda vazias, nascem com
+  // "Distribuir SIM / tudo" e zeravam a conta — o quadro mostrava R$ 0,00 com dinheiro retido.
+  const iAtual=Math.min(calcSemIdxAtual(),linhas.length-1);
+  const saldoAtual=linhas[iAtual]?linhas[iAtual].sApos:0;
   const kpiHtml=`<div class="saldo-kpi-bar">
     <div class="saldo-kpi-item">
-      <div class="saldo-kpi-label">Saldo acumulado atual</div>
-      <div class="saldo-kpi-val" style="color:${saldoAtual>0?'var(--gr2)':saldoAtual<0?'var(--rd2)':'var(--gy)'}">${fmtBRL(saldoAtual)}</div>
+      <div class="saldo-kpi-label">Saldo retido atual</div>
+      <div class="saldo-kpi-val" id="saldo-kpi-atual" style="color:${saldoAtual>0?'var(--gr2)':saldoAtual<0?'var(--rd2)':'var(--gy)'}">${fmtBRL(saldoAtual)}</div>
+      <div style="font-size:10px;color:var(--gy);margin-top:2px">até a S${String(CAL[iAtual]?.num||'?').padStart(2,'0')} (semana atual)</div>
     </div>
     <div class="saldo-kpi-item">
       <div class="saldo-kpi-label">Total retirado</div>
@@ -1530,7 +1564,9 @@ function renderSaldo(ct){
         </div>
         <button class="btn-rem-saida" onclick="removeSaida(${i},${idx})">✕</button>
       </div>`).join('')}</div>`:'';
+    const dispSaida=podeAdicionar?_saidaMaxima(i,linhas):0;
     const formHtml=podeAdicionar?`<div class="saida-form">
+      <div id="sav-${i}" style="font-size:11px;color:var(--gy);margin-bottom:6px">Disponível pra saída: <b>${fmtBRL(dispSaida)}</b>${dispSaida<=0&&retido>0?' — este saldo já foi distribuído numa semana seguinte':''}</div>
       <div class="saida-form-row">
         <div><label>Valor (R$)</label><input class="sin" type="text" inputmode="decimal" placeholder="0,00" id="sv-${i}" onfocus="this.select()"></div>
         <div><label>Motivo</label><input style="background:var(--bg5);border:1px solid var(--bd2);color:var(--txt);padding:6px 9px;border-radius:7px;width:100%;font-size:12px;margin-top:2px" type="text" placeholder="Ex: Pagamento" id="sm-${i}"></div>
