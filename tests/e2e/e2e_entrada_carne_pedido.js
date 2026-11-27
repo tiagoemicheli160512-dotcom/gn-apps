@@ -47,7 +47,9 @@ const PED = { id: 'prov-cam', pedido_id: 'ped-1', catalogo_id: 'c-cam', loja_slu
     addEntrada(cfg.insumo, cfg.dataNF || '2026-11-23', '268978', 'FAIFS MARICULTURA LTDA', cfg.qtd || 24, 67.5);
     for (let i = 0; i < 20 && !document.getElementById('modalEntregaCarneNF'); i++) await new Promise(r => setTimeout(r, 100));
     const m = document.getElementById('modalEntregaCarneNF');
-    return { modal: m ? m.innerText.replace(/\s+/g, ' ') : null, consultouPedidos: window.__consultas.some(r => /gn_provisoes/.test(r)) };
+    return { modal: m ? m.innerText.replace(/\s+/g, ' ') : null, consultouPedidos: window.__consultas.some(r => /gn_provisoes\?loja_slug=eq\.bangu&status=eq\.AGUARDANDO&catalogo_id/.test(r)) };
+    // (só a consulta da pergunta da carne — a aba Entradas também consulta os recebidos por nota
+    //  pras sugestões de item do Pedido, e isso não é a pergunta)
   }, { cfg, PED });
 
   const cam = await lancar({ insumo: 'CAMARÃO SEM CABEÇA 61/70' });

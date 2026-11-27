@@ -3615,6 +3615,98 @@ function abrirImportXMLNF() {
   inp.click();
 }
 
+/* ── Nome da nota → item do catálogo do Pedido (27/11/2026) ───────────────────────────────
+   "Os produtos, ao chegar, têm nome diferente — usar o item base, que é o do catálogo do app
+    Pedido, e casar, pra ter um nome único… já fiz o vínculo manual, mas sempre aparecem novos."
+   Duas pistas, nesta ordem:
+     1. A NOTA: quando a loja confirma a entrega na aba Entrega, ela digita o número da nota —
+        e cada pedido aponta pro item do catálogo. Mesma nota = os itens dela são esses.
+        (Bangu, semana de 23/11: das notas lançadas, várias já tinham a entrega confirmada com
+        o mesmo número — ex.: NF 31420, 5 linhas e 5 itens recebidos.)
+     2. O NOME: palavras em comum com o nome do item no catálogo (sem unidade/embalagem).
+   O nome usado é o do item no Pedido (_nomeInsumoDoProduto — o mesmo do Estoque e do
+   empréstimo). Sugestão pela nota vira vínculo; pelo nome, só com quem pode vincular. */
+const _NF_SUG_DESCARTA = new Set(['KG','KGS','G','GR','ML','L','LT','LTS','UN','UND','UNDS','UNID','CX','C','CC','PCT','PC','PCTS','FD','DE','DA','DO','DAS','DOS','COM','SEM','E','P','X','EM','TP','N']);
+function _nfTokens(nome) {
+  return String(nome || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase()
+    .replace(/[^A-Z0-9]+/g, ' ').split(' ')
+    .filter(t => t.length >= 2 && !_NF_SUG_DESCARTA.has(t) && !/^\d+$/.test(t) && !/^\d+(KG|G|ML|L|UN|X\d*)$/.test(t));
+}
+function _nfSimilar(a, b) {
+  const A = _nfTokens(a), B = _nfTokens(b);
+  if (!A.length || !B.length) return 0;
+  const casa = (t, lista) => lista.some(u => u === t || (t.length >= 4 && u.length >= 4 && (u.startsWith(t) || t.startsWith(u))));
+  const n = A.filter(t => casa(t, B)).length;
+  return (2 * n) / (A.length + B.length);
+}
+// Itens do Pedido desta loja, cada um com o nome único (o do Estoque) e o catalogo_id.
+function _itensCatalogoLoja() {
+  const vistos = new Set(), out = [];
+  getProdutosPedidoOrdenados().forEach(p => {
+    const nome = _nomeInsumoDoProduto(p);
+    if (!nome || vistos.has(nome)) return;
+    vistos.add(nome);
+    out.push({ nome, produto: (p.produto || '').trim().toUpperCase(), cid: _resolverCatalogoId(p) || null });
+  });
+  return out;
+}
+// Itens do catálogo recebidos (aba Entrega) com estes números de nota, nesta loja.
+// { digitosDaNota: [{ cid, qtd }] } — complemento: sem rede, sai vazio e fica só o nome.
+async function _recebidosPorNota(numeros) {
+  const dig = [...new Set((numeros || []).map(n => String(n || '').replace(/\D/g, '')).filter(Boolean))];
+  if (!dig.length) return {};
+  try {
+    const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+    const desde = wkKey(addDays(new Date(), -60));
+    const rows = await sbRequest('gn_provisoes?loja_slug=eq.' + encodeURIComponent(slug) + '&data_entrega=gte.' + desde
+      + '&select=catalogo_id,gn_recebimentos!inner(nota_numero,qtd_recebida)', { method: 'GET' });
+    const out = {};
+    (rows || []).forEach(p => (Array.isArray(p.gn_recebimentos) ? p.gn_recebimentos : [p.gn_recebimentos]).forEach(r => {
+      const d = String((r && r.nota_numero) || '').replace(/\D/g, '');
+      if (!d || !dig.includes(d)) return;
+      (out[d] = out[d] || []).push({ cid: p.catalogo_id, qtd: parseFloat(r.qtd_recebida) || 0 });
+    }));
+    return out;
+  } catch (e) { return {}; }
+}
+// linhas: [{ chave, desc, qtd, nf }] → { chave: { nome, origem: 'nota'|'nome', score } }
+// Pela nota: os itens recebidos com aquele número são distribuídos entre as linhas, do par
+// mais parecido pro menos (quantidade igual ajuda); cada item vale pra uma linha só.
+function _sugerirItensCatalogo(linhas, recPorNota) {
+  const itens = _itensCatalogoLoja(), porCid = {};
+  itens.forEach(i => { if (i.cid) porCid[i.cid] = i; });
+  const out = {};
+  const porNota = {};
+  linhas.forEach(l => { const d = String(l.nf || '').replace(/\D/g, ''); if (d && (recPorNota || {})[d]) (porNota[d] = porNota[d] || []).push(l); });
+  Object.keys(porNota).forEach(d => {
+    const cands = recPorNota[d].map(r => ({ r, item: porCid[r.cid] })).filter(x => x.item);
+    const pares = [];
+    porNota[d].forEach(l => cands.forEach((c, ci) => {
+      const nomeSim = Math.max(_nfSimilar(l.desc, c.item.produto), _nfSimilar(l.desc, c.item.nome));
+      const mesmaQtd = !!(l.qtd && c.r.qtd && Math.abs(l.qtd - c.r.qtd) < 0.01);
+      pares.push({ l, ci, sc: nomeSim + (mesmaQtd ? 0.35 : 0), nomeSim, mesmaQtd, item: c.item });
+    }));
+    pares.sort((a, b) => b.sc - a.sc);
+    const usadoL = new Set(), usadoC = new Set();
+    pares.forEach(p => {
+      if (usadoL.has(p.l.chave) || usadoC.has(p.ci)) return;
+      // Pela nota basta um sinal (nome parecido OU mesma quantidade) — o item tem que ser desta nota.
+      if (p.sc < 0.3) return;
+      usadoL.add(p.l.chave); usadoC.add(p.ci);
+      // Forte = mesma nota E nome parecido. Só a quantidade igual (ex.: maionese × Knorr na
+      // mesma nota, Bangu) é fraca: aparece pra conferir, nunca vira vínculo sozinha.
+      out[p.l.chave] = { nome: p.item.nome, origem: p.nomeSim >= 0.5 ? 'nota' : 'nota_fraca', score: p.sc, nomeSim: p.nomeSim };
+    });
+  });
+  linhas.forEach(l => {
+    if (out[l.chave]) return;
+    let best = null;
+    itens.forEach(i => { const sc = Math.max(_nfSimilar(l.desc, i.produto), _nfSimilar(l.desc, i.nome)); if (!best || sc > best.sc) best = { sc, i }; });
+    if (best && best.sc >= 0.6) out[l.chave] = { nome: best.i.nome, origem: 'nome', score: best.sc, nomeSim: best.sc };
+  });
+  return out;
+}
+
 function abrirModalMatchNF(itens, nfNum, fornecedor, dataNF, vencBoletoArr) {
   const linhas = itens.map((it, idx) => {
     const mapeado = nfMapeamentos[it.xProd] || '';
@@ -3642,7 +3734,8 @@ function abrirModalMatchNF(itens, nfNum, fornecedor, dataNF, vencBoletoArr) {
               <div style="font-size:10px;color:var(--t3);margin-bottom:5px">${it.qCom} ${it.uCom}${it.vUnCom > 0 ? ' · R$ ' + it.vUnCom.toFixed(4) + '/' + (it.uCom||'un') : ''}${fator > 1 ? ' → <b style="color:#34d399">' + (+(it.qCom * fator).toFixed(3)) + ' UN</b> (fator ×' + fator + ' já cadastrado' + (it.vUnCom > 0 ? ' · R$ ' + (it.vUnCom / fator).toFixed(2) + '/UN' : '') + ')' : ''}</div>
               ${mapeado
                 ? '<div style="font-size:10px;color:#818cf8;font-weight:700">⇄ Vinculado a: ' + mapeado + '</div>'
-                : '<div style="font-size:10px;color:#f59e0b;font-weight:700">⚠️ Ainda não vinculado — entra como "' + it.xProd + '" até um responsável vincular na aba Vínculos ou corrigir com senha mestre</div>'}
+                : '<div class="nf-sug" data-idx="' + idx + '"><div class="nf-sug-txt" style="font-size:10px;color:#f59e0b;font-weight:700">⚠️ Ainda não vinculado — procurando o item no catálogo do Pedido…</div>'
+                  + '<input class="nf-sug-inp inp-full" list="dlNfSugInsumos" data-idx="' + idx + '" placeholder="Item do Pedido (deixe vazio pra entrar com o nome da nota)" oninput="this.dataset.editado=1" style="font-size:11px;padding:5px 8px;margin-top:4px;background:#2b2b2b;color:#e2e8f0;border:1px solid rgba(245,158,11,.35);border-radius:8px;width:100%;box-sizing:border-box"/></div>'}
             </div>
           </div>
         </div>`).join('')}
@@ -3661,7 +3754,29 @@ function abrirModalMatchNF(itens, nfNum, fornecedor, dataNF, vencBoletoArr) {
       <button onclick="document.getElementById('modalMatchNF').remove()" style="width:100%;background:rgba(255,255,255,.06);border:none;border-radius:13px;padding:12px 0;color:var(--t4);font-weight:700;font-size:12px;margin-top:8px;cursor:pointer">Cancelar</button>
     </div>`;
   overlay._nfData = { linhas, nfNum, fornecedor, dataNF };
+  const dl = document.createElement('datalist'); dl.id = 'dlNfSugInsumos';
+  dl.innerHTML = _insumosCadastrados().sort().map(n => '<option value="' + String(n).replace(/"/g, '&quot;') + '">').join('');
+  overlay.appendChild(dl);
   document.body.appendChild(overlay);
+  _preencherSugestoesModalNF(overlay);
+}
+async function _preencherSugestoesModalNF(overlay) {
+  const { linhas, nfNum } = overlay._nfData;
+  const sem = linhas.filter(l => !l.mapeado);
+  if (!sem.length) return;
+  const rec = await _recebidosPorNota([nfNum]);
+  const sug = _sugerirItensCatalogo(sem.map(l => ({ chave: l.idx, desc: l.it.xProd, qtd: l.it.qCom * (l.fator || 1), nf: nfNum })), rec);
+  sem.forEach(l => {
+    const box = overlay.querySelector('.nf-sug[data-idx="' + l.idx + '"]');
+    if (!box) return;
+    const inp = box.querySelector('.nf-sug-inp'), txt = box.querySelector('.nf-sug-txt'), s = sug[l.idx];
+    // A fraca (mesma nota, nome diferente) não é preenchida: só aparece como "talvez".
+    if (s && s.origem !== 'nota_fraca' && inp && !inp.dataset.editado) { inp.value = s.nome; inp.dataset.origem = s.origem; }
+    if (txt) txt.innerHTML = !s ? '⚠️ Não achei no Pedido — escolha o item abaixo ou deixe vazio (entra com o nome da nota)'
+      : s.origem === 'nota' ? '<span style="color:#34d399">📦 Pela entrega desta nota: é este item do Pedido</span>'
+      : s.origem === 'nota_fraca' ? '<span style="color:#fbbf24">🤔 Talvez: ' + escapeHtml(s.nome) + ' (está nesta nota, mas o nome é diferente — confira e escolha abaixo)</span>'
+      : '<span style="color:#fbbf24">🔎 Nome parecido no Pedido — confira</span>';
+  });
 }
 
 function addVencimentoNoModal() {
@@ -3708,13 +3823,23 @@ function confirmarMatchNF() {
   const k = lojaKey();
   if (!entradasAll[k]) entradasAll[k] = [];
   if (!estIniAll[k])   estIniAll[k]   = {};
-  let adicionados = 0;
+  let adicionados = 0, vinculosNovos = 0;
+  const carnesLancadas = [];
 
   linhas.forEach(({ it, idx }) => {
     const chk = document.getElementById('nfChk_' + idx);
     if (!chk || !chk.checked) return;
     const nfDesc = it.xProd; // chave original da nota, usada pra criar o vínculo depois
-    const insumo = nfMapeamentos[nfDesc] || nfDesc.trim().toUpperCase();
+    let insumo = nfMapeamentos[nfDesc] || nfDesc.trim().toUpperCase();
+    // Item do Pedido escolhido/sugerido na linha (27/11/2026): entra com o nome único do
+    // catálogo. Vira vínculo pras próximas notas (todas as lojas) quando veio da própria nota
+    // (entrega confirmada com o mesmo número) ou quando quem lança pode vincular.
+    const sugInp = !nfMapeamentos[nfDesc] ? modal.querySelector('.nf-sug-inp[data-idx="' + idx + '"]') : null;
+    const escolhido = sugInp ? (sugInp.value || '').trim().toUpperCase() : '';
+    if (escolhido && _insumosCadastrados().includes(escolhido)) {
+      insumo = escolhido;
+      if ((sugInp.dataset.origem === 'nota' && !sugInp.dataset.editado) || _podeLancarSemCadastro()) { nfMapeamentos[nfDesc] = escolhido; vinculosNovos++; }
+    }
     // a NF declara a quantidade na unidade comercial (ex.: 1 "UND" que na verdade é
     // 1 caixa com 12 latas) — aplicamos o fator de conversão já cadastrado pra esse
     // insumo (o mesmo usado no lançamento manual) pra entrar no estoque na quantidade
@@ -3733,9 +3858,13 @@ function confirmarMatchNF() {
     if (fator > 1) entry.fator = fator;
     entradasAll[k].push(entry);
     adicionados++;
+    carnesLancadas.push(entry);
   });
 
   modal.remove();
+  if (vinculosNovos) sbPushMasterConfig();
+  // A nota do XML também pergunta "essa carne é de um pedido?" (Bangu, 23/11, foi por aqui).
+  carnesLancadas.forEach(e => _sugerirEntregaCarne(e.insumo, e.qtd, e.nf, e.dataNF));
   if (adicionados > 0) {
     const elNF   = document.getElementById('entNF');
     const elForn = document.getElementById('entFornecedor');
@@ -3908,6 +4037,39 @@ function _insumosCadastrados() {
 // contorna o bloqueio de "item não cadastrado" no formulário de Nova Nota Fiscal. A
 // quantidade continua somando em estIniAll (addEntrada não distingue), mas fica sob um
 // nome que a tela de Estoque nunca lista — daí o insumo "sumir" mesmo tendo entrada.
+// Sugestões do painel "não aparecem no Estoque" (27/11/2026): por nome lançado, o item do
+// Pedido pela nota (entrega confirmada com o mesmo número) ou pelo nome. Calculado uma vez
+// por loja+semana e redesenha quando chega.
+let _naoRecSug = { chave: '', sug: null, carregando: false };
+async function _carregarSugestoesNaoRec(naoRec) {
+  const chave = lojaKey() + '|' + Object.keys(naoRec).sort().join('§');
+  if (_naoRecSug.chave === chave && (_naoRecSug.sug || _naoRecSug.carregando)) return;
+  _naoRecSug = { chave, sug: null, carregando: true };
+  const linhas = [];
+  Object.keys(naoRec).forEach(nome => naoRec[nome].itens.forEach((e, i) => linhas.push({ chave: nome + '#' + i, nome, desc: e.nfDesc || e.insumo, qtd: e.qtd, nf: e.nf })));
+  const rec = await _recebidosPorNota(linhas.map(l => l.nf));
+  const s = _sugerirItensCatalogo(linhas, rec), porNome = {};
+  const forca = o => o === 'nota' ? 3 : o === 'nome' ? 2 : 1;
+  linhas.forEach(l => { const x = s[l.chave]; if (x && (!porNome[l.nome] || forca(x.origem) > forca(porNome[l.nome].origem))) porNome[l.nome] = x; });
+  if (_naoRecSug.chave !== chave) return;
+  _naoRecSug = { chave, sug: porNome, carregando: false };
+  if (tab === 'entradas') render();
+}
+function _usarSugestaoNaoRec(nome) {
+  const x = ((_naoRecSug.sug) || {})[nome]; if (!x) return;
+  const fazer = () => _corrigirEntradasPorNome(nome, x.nome);
+  if (_podeLancarSemCadastro()) fazer(); else pedirSenhaMestre(fazer);
+}
+function _aplicarSugestoesNotaNaoRec() {
+  const sug = _naoRecSug.sug || {};
+  const nomes = Object.keys(sug).filter(n => sug[n].origem === 'nota');
+  if (!nomes.length) return;
+  const fazer = () => {
+    let n = 0; nomes.forEach(nome => { n += _corrigirEntradasPorNome(nome, sug[nome].nome, true) || 0; });
+    showToast('✅ ' + n + ' lançamento(s) ligados ao item do Pedido pela entrega da nota — vínculos salvos pras próximas notas');
+  };
+  if (_podeLancarSemCadastro()) fazer(); else pedirSenhaMestre(fazer);
+}
 function _entradasNaoReconhecidas() {
   const cadastrados = new Set(_insumosCadastrados());
   const porInsumo = {};
@@ -8955,6 +9117,18 @@ let _contagemPedidoSaldo = null;
 function _nomeInsumoDoProduto(prod) {
   return mapeamentoPedido[String(prod.item)] || (prod.produto || '').trim().toUpperCase();
 }
+// Nome único de um item (27/11/2026): "se não selecionar o item certo, o empréstimo aparece
+// vazio". O saldo é guardado no nome do item no Pedido (_nomeInsumoDoProduto); quem digitava
+// o nome cru do catálogo ou o da nota caía num nome sem saldo nenhum. Aqui os dois apontam
+// pro nome único.
+function _nomeUnicoInsumo(nome) {
+  const u = String(nome || '').trim().toUpperCase();
+  if (!u) return u;
+  const vinc = nfMapeamentos[nome] || nfMapeamentos[u];
+  if (vinc) return String(vinc).trim().toUpperCase();
+  const p = getProdutosPedidoOrdenados().find(x => (x.produto || '').trim().toUpperCase() === u);
+  return p ? _nomeInsumoDoProduto(p) : u;
+}
 
 // Redesenha o rótulo "Saldo: X UN" com o valor atual, sem a pessoa precisar redigitar o
 // nome do insumo. Necessário porque o cache chega depois da tela montar: sem isto, quem já
@@ -8964,7 +9138,7 @@ function _atualizarRotuloSaldo() {
   [['tfInsumo', 'tfSaldoInfo'], ['stInsumo', 'stSaldoInfo']].forEach(([inpId, lblId]) => {
     const inp = document.getElementById(inpId), el = document.getElementById(lblId);
     if (!inp || !el) return;
-    const n = (inp.value || '').trim().toUpperCase();
+    const n = _nomeUnicoInsumo(inp.value || '');
     if (!n) { el.textContent = ''; return; }
     const f = getFator(n), sd = saldoDisponivelInsumo(n);
     el.textContent = 'Saldo: ' + sd.saldo.toFixed(3) + ' UN' + (f > 1 ? ' (fator ×' + f + ')' : '')
@@ -9406,7 +9580,7 @@ function delTransferencia(id) {
 }
 
 function submitTransf() {
-  const insumo  = ((document.getElementById("tfInsumo")||{}).value||"").trim().toUpperCase();
+  const insumo  = _nomeUnicoInsumo((document.getElementById("tfInsumo")||{}).value||"");
   const destino = (document.getElementById("tfDestino")||{}).value||"";
   const unidade = (document.getElementById("tfUnidade")||{}).value||"UN";
   const qtd     = (document.getElementById("tfQtd")||{}).value;
@@ -9513,7 +9687,7 @@ function atualizarPreviewSaidaTerceiro() {
 }
 
 function submitSaidaTerceiro() {
-  const insumo   = ((document.getElementById('stInsumo')||{}).value||'');
+  const insumo   = _nomeUnicoInsumo((document.getElementById('stInsumo')||{}).value||'');
   const unidade  = ((document.getElementById('stUnidade')||{}).value||'UN');
   const qtd      = (document.getElementById('stQtd')||{}).value;
   const fator    = (document.getElementById('stFator')||{}).value;
@@ -10657,21 +10831,30 @@ function render() {
     const dlId = 'dlEntInsumo';
     const naoRec = _entradasNaoReconhecidas();
     const naoRecNomes = Object.keys(naoRec);
+    if (naoRecNomes.length) _carregarSugestoesNaoRec(naoRec);
+    const sugNR = (_naoRecSug.sug) || {};
+    const nSugNota = naoRecNomes.filter(n => sugNR[n] && sugNR[n].origem === 'nota').length;
 
     c.innerHTML = `
     <div class="section">
       ${naoRecNomes.length ? `
       <div class="alert-box alert-red" style="padding:12px">
         <div style="font-weight:800;margin-bottom:4px">⚠️ ${naoRecNomes.length} produto${naoRecNomes.length>1?'s':''} da Entrada não aparece${naoRecNomes.length>1?'m':''} no Estoque</div>
-        <div style="font-size:11px;color:var(--t2);margin-bottom:8px">O nome lançado na nota não bate com nenhum insumo cadastrado — a quantidade fica "perdida", somada por baixo dos panos mas sem aparecer em nenhuma linha do Estoque. Vincule ao insumo certo pra corrigir.</div>
+        <div style="font-size:11px;color:var(--t2);margin-bottom:8px">O nome lançado na nota não bate com nenhum insumo cadastrado — a quantidade fica "perdida", somada por baixo dos panos mas sem aparecer em nenhuma linha do Estoque. Vincule ao insumo certo pra corrigir. ${_naoRecSug.carregando ? '<b>Procurando os itens no catálogo do Pedido…</b>' : 'Onde aparece 📦, o item do Pedido veio da entrega confirmada com a mesma nota.'}</div>
+        ${nSugNota ? `<button class="naorec-aplicar" onclick="_aplicarSugestoesNotaNaoRec()" style="width:100%;background:#047857;border:none;border-radius:10px;color:#fff;font-size:12px;font-weight:800;padding:9px;margin-bottom:8px;cursor:pointer;font-family:inherit">✅ Ligar ${nSugNota} ao item do Pedido pela nota</button>` : ''}
         ${naoRecNomes.map(nome => {
-          const d = naoRec[nome];
-          return `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;background:rgba(0,0,0,.18);border-radius:10px;padding:7px 10px;margin-bottom:5px">
+          const d = naoRec[nome], sg = sugNR[nome];
+          const nomeJs = nome.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+          return `<div class="naorec-linha" data-nome="${escapeHtml(nome)}" style="display:flex;align-items:center;justify-content:space-between;gap:8px;background:rgba(0,0,0,.18);border-radius:10px;padding:7px 10px;margin-bottom:5px">
             <div style="min-width:0">
               <div style="font-size:12px;font-weight:700;color:var(--txt-amber);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${nome}</div>
               <div style="font-size:10px;color:var(--t2)">+${d.qtd.toFixed(3)} em ${d.itens.length} lançamento${d.itens.length>1?'s':''}</div>
+              ${sg ? `<div class="naorec-sug" data-origem="${sg.origem}" style="font-size:10.5px;font-weight:800;color:${sg.origem==='nota'?'var(--txt-green)':sg.origem==='nota_fraca'?'var(--txt-amber)':'var(--txt-blue)'};margin-top:2px">${sg.origem==='nota'?'📦 Pela entrega da nota':sg.origem==='nota_fraca'?'🤔 Na mesma nota, nome diferente — confira':'🔎 Parecido'}: ${escapeHtml(sg.nome)}</div>` : ''}
             </div>
-            <button onclick="pedirCorrecaoEntradaPorNome('${nome.replace(/'/g,"\\'")}')" style="background:none;border:1px solid #B45309;border-radius:6px;color:var(--txt-amber);font-size:11px;padding:5px 10px;cursor:pointer;flex-shrink:0;white-space:nowrap">✏️ Corrigir</button>
+            <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
+              ${sg ? `<button class="naorec-usar" onclick="_usarSugestaoNaoRec('${nomeJs}')" style="background:${sg.origem==='nota'?'#047857':'none'};border:1px solid ${sg.origem==='nota'?'#047857':'var(--txt-blue)'};border-radius:6px;color:${sg.origem==='nota'?'#fff':'var(--txt-blue)'};font-size:11px;font-weight:700;padding:5px 10px;cursor:pointer;white-space:nowrap">✅ Usar</button>` : ''}
+              <button onclick="pedirCorrecaoEntradaPorNome('${nomeJs}')" style="background:none;border:1px solid #B45309;border-radius:6px;color:var(--txt-amber);font-size:11px;padding:5px 10px;cursor:pointer;white-space:nowrap">✏️ Corrigir</button>
+            </div>
           </div>`;
         }).join('')}
       </div>` : ''}
@@ -10932,9 +11115,11 @@ function render() {
     // Empréstimo/Saída pra Terceiros precisa oferecer TODO item que dá pra pedir na aba
     // Pedido (ex.: sacola, embalagens), não só insumo de ficha técnica/bebida — sem isso,
     // um item comprado (não usado em receita) não aparecia pra emprestar.
+    // Cada item do Pedido entra com o nome ÚNICO (o mesmo do saldo/Estoque), não com o nome
+    // cru do catálogo — antes os dois apareciam na lista e só um tinha saldo.
     const allInsumosT = [...new Set([
       ...SEED.insumos, ...(SEED.bebidas_insumos||[]),
-      ...PRODUTOS_PEDIDO.map(p=>(p.produto||'').trim().toUpperCase()).filter(Boolean),
+      ...getProdutosPedidoOrdenados().map(p=>_nomeInsumoDoProduto(p)).filter(Boolean),
     ])].sort();
     c.innerHTML = `
     <div class="section">
@@ -11033,7 +11218,7 @@ function render() {
             <label style="font-size:10px;color:var(--t3);font-weight:700;text-transform:uppercase">Insumo ou Bebida *</label>
             <input id="tfInsumo" class="inp-full" list="dlTfInsumos" type="text" placeholder="Digite o insumo" autocomplete="off"
               oninput="(function(){
-                const n=(document.getElementById('tfInsumo').value||'').trim().toUpperCase();
+                const n=_nomeUnicoInsumo(document.getElementById('tfInsumo').value||'');
                 const f=getFator(n);
                 // Mesmo número que a trava de saída usa (contagem do Pedido + movimentos
                 // posteriores) — o rótulo e a validação têm que contar a mesma história.
@@ -11093,7 +11278,7 @@ function render() {
             <label style="font-size:10px;color:var(--t3);font-weight:700;text-transform:uppercase">Insumo ou Bebida *</label>
             <input id="stInsumo" class="inp-full" list="dlTfInsumos" type="text" placeholder="Digite o insumo" autocomplete="off"
               oninput="(function(){
-                const n=(document.getElementById('stInsumo').value||'').trim().toUpperCase();
+                const n=_nomeUnicoInsumo(document.getElementById('stInsumo').value||'');
                 const f=getFator(n);
                 // Mesmo número que a trava de saída usa (contagem do Pedido + movimentos
                 // posteriores) — o rótulo e a validação têm que contar a mesma história.
@@ -14878,6 +15063,17 @@ function confirmarCorrecao() {
     const nomeErrado = _correcaoNome;
     _correcaoNome = null;
     if (novoNome === nomeErrado) { fecharCorrecaoModal(); return; }
+    fecharCorrecaoModal();
+    _corrigirEntradasPorNome(nomeErrado, novoNome);
+    return;
+  }
+  _confirmarCorrecaoUnica(k, novoNome);
+}
+// Troca o nome de todas as entradas da semana que estão com `nomeErrado` e grava o vínculo
+// da descrição da nota (vale pras próximas notas, em todas as lojas).
+function _corrigirEntradasPorNome(nomeErrado, novoNome, silencioso) {
+  const k = lojaKey();
+  {
     const afetadas = (entradasAll[k]||[]).filter(e => e.insumo === nomeErrado);
     let totalQtd = 0, vinculoNovo = false;
     afetadas.forEach(e => {
@@ -14895,13 +15091,13 @@ function confirmarCorrecao() {
       if (estIniAll[k][nomeErrado] !== undefined) estIniAll[k][nomeErrado] = Math.max(0, (estIniAll[k][nomeErrado]||0) - totalQtd);
       estIniAll[k][novoNome] = (estIniAll[k][novoNome]||0) + totalQtd;
     }
-    fecharCorrecaoModal();
     if (vinculoNovo) sbPushMasterConfig();
     autoSave(); render();
-    showToast('✅ ' + afetadas.length + ' lançamento(s) corrigido(s) para "' + novoNome + '"' + (vinculoNovo ? ' — vínculo salvo pras próximas notas em todas as lojas' : ''));
-    return;
+    if (!silencioso) showToast('✅ ' + afetadas.length + ' lançamento(s) corrigido(s) para "' + novoNome + '"' + (vinculoNovo ? ' — vínculo salvo pras próximas notas em todas as lojas' : ''));
+    return afetadas.length;
   }
-
+}
+function _confirmarCorrecaoUnica(k, novoNome) {
   const ent = (entradasAll[k]||[]).find(e => e.id === _correcaoId);
   if (!ent) { fecharCorrecaoModal(); return; }
   if (novoNome === ent.insumo) { fecharCorrecaoModal(); return; }
