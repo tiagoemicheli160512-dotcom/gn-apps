@@ -23065,6 +23065,9 @@ function renderDashboard() {
   } else if (_dashTab==='bloqueios') {
     content = _buildBloqueiosPanel();
 
+  } else if (_dashTab==='vinculos') {
+    content = _buildVinculosNFPanel();
+
   } else if (_dashTab==='carnes') {
     content = _buildCarnesPanel();
 
@@ -23438,6 +23441,75 @@ function gerarPDFBloqueios() {
            { label: 'Mais travou', valor: comCaso[0] ? comCaso[0].nome : '—', sub: comCaso[0] ? comCaso[0].casos + ' casos' : '' }] });
 }
 async function enviarPDFBloqueiosWpp() { await _pdfWppComo(gerarPDFBloqueios); }
+
+/* ── 🔗 VÍNCULOS NF — conferência do Compras (27/11/2026) ─────────────────────────────────
+   O app Lojas agora casa o nome da nota com o item do catálogo do Pedido sozinho (pela entrega
+   confirmada com o mesmo número de nota) e pelas revisões da loja. Aqui o Compras vê o que foi
+   ligado no período e desfaz o que estiver errado (rpc gn_nf_vinculo_desfazer: tira o vínculo
+   da config e deixa a marca pros aparelhos não o trazerem de volta). Desfazer vale pras
+   PRÓXIMAS notas; o que já entrou com o nome do item continua — corrige-se na aba Entradas. */
+const VINC_ORIGEM = { nota: ['📦 Pela nota (automático)', '#047857'], lote_nota: ['📦 Pela nota (em lote)', '#047857'],
+  sugestao: ['✅ Sugestão aceita', '#2563eb'], revisao: ['📋 Revisão por fornecedor', '#b45309'], xml_manual: ['✏️ Escolhido na nota', '#7c3aed'], correcao: ['✏️ Correção manual', '#64748b'] };
+let _vincDados = null, _vincCarregando = '', _vincFiltro = 'todos';
+async function _loadVinculosNF(ini, fim) {
+  const chave = ini + '|' + fim;
+  if (_vincCarregando === chave) return;
+  _vincCarregando = chave;
+  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_nf_vinculos_log?criado_em=gte.${ini}T00:00:00-03:00&criado_em=lte.${fim}T23:59:59-03:00&select=*&order=criado_em.desc`,
+    { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY }, 'vinculos:log', null);
+  _vincDados = { chave, rows, em: Date.now() };
+  _vincCarregando = '';
+  if (_dashTab === 'vinculos') renderDashboard();
+}
+function _vincSetFiltro(f) { _vincFiltro = f; renderDashboard(); }
+async function _vincDesfazer(id) {
+  const r = (_vincDados && _vincDados.rows || []).find(x => x.id === id);
+  if (!r || !confirm(`Desfazer o vínculo?\n\n"${r.descricao}" → ${r.insumo}\n\nAs próximas notas com esse nome voltam a pedir o item. O que já entrou continua com o nome do item (corrija na aba Entradas do app Lojas, se precisar).`)) return;
+  try {
+    const res = await fetch(`${SB_URL}/rest/v1/rpc/gn_nf_vinculo_desfazer`, { method: 'POST',
+      headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ p_id: id, p_por: (session && session.nome) || 'Painel' }) });
+    const out = res.ok ? await res.json() : null;
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    (_vincDados.rows || []).forEach(x => { if (x.descricao === r.descricao && x.insumo === r.insumo && !x.desfeito_em) { x.desfeito_em = new Date().toISOString(); x.desfeito_por = (session && session.nome) || 'Painel'; } });
+    renderDashboard();
+    alert(out === 'ja_mudou' ? 'Registro marcado como desfeito — o vínculo já tinha sido trocado por outro item depois.' : '↩️ Vínculo desfeito. As próximas notas com esse nome voltam a pedir o item.');
+  } catch (e) { alert('Não deu pra desfazer agora. Tente de novo.'); }
+}
+function _buildVinculosNFPanel() {
+  const range = _dashRangeOf(_dashOff()) || {}, ds = range.dates || [];
+  if (!ds.length) return '<div style="padding:16px;font-size:12px;color:var(--t3)">Período sem dias.</div>';
+  const ini = ds[0], fim = ds[ds.length - 1], chave = ini + '|' + fim;
+  if (!_vincDados || _vincDados.chave !== chave || Date.now() - _vincDados.em > 120000) _loadVinculosNF(ini, fim);
+  if (!_vincDados || _vincDados.chave !== chave) return _skelPanel(4);
+  if (_vincDados.rows === null) return '<div style="padding:16px;font-size:12px;color:var(--txt-red)">Não deu pra carregar os vínculos agora.</div>';
+  const todos = _vincDados.rows.filter(r => !/^MAGLIA$/i.test(r.loja || ''));
+  const auto = r => r.origem === 'nota' || r.origem === 'lote_nota';
+  const lista = todos.filter(r => _vincFiltro === 'todos' || (_vincFiltro === 'auto' ? auto(r) : !auto(r)));
+  const ativos = todos.filter(r => !r.desfeito_em).length;
+  const chip = (f, rot, n) => `<button class="vinc-filtro${_vincFiltro === f ? ' on' : ''}" onclick="_vincSetFiltro('${f}')" style="border:1px solid ${_vincFiltro === f ? '#2563eb' : 'var(--b2)'};background:${_vincFiltro === f ? 'rgba(37,99,235,.12)' : 'none'};color:var(--t1);border-radius:999px;padding:4px 10px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">${rot} · ${n}</button>`;
+  const quando = iso => { const d = new Date(iso); return String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
+  const linhas = lista.map(r => {
+    const o = VINC_ORIGEM[r.origem] || [r.origem, '#64748b'];
+    return `<div class="vinc-linha" data-id="${r.id}" style="border-top:1px solid var(--b1);padding:8px 2px;${r.desfeito_em ? 'opacity:.55' : ''}">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start">
+        <div style="min-width:0;flex:1">
+          <div style="font-size:11.5px;color:var(--t2);word-break:break-word">${window.escapeHtml(r.descricao)}</div>
+          <div style="font-size:12.5px;font-weight:800;color:var(--t1);word-break:break-word">→ ${window.escapeHtml(r.insumo)}</div>
+          <div style="font-size:10px;color:var(--t3);margin-top:2px"><span style="color:${o[1]};font-weight:800">${o[0]}</span> · ${window.escapeHtml(LOJA_DISPLAY[_normLoja(r.loja)] || r.loja || '—')}${r.nf ? ' · NF ' + window.escapeHtml(r.nf) : ''}${r.fornecedor ? ' · ' + window.escapeHtml(r.fornecedor) : ''} · ${window.escapeHtml(r.por || '—')} · ${quando(r.criado_em)}</div>
+          ${r.desfeito_em ? `<div style="font-size:10px;color:var(--txt-red);font-weight:800">↩️ Desfeito por ${window.escapeHtml(r.desfeito_por || '—')} em ${quando(r.desfeito_em)}</div>` : ''}
+        </div>
+        ${r.desfeito_em ? '' : `<button class="vinc-desfazer" onclick="_vincDesfazer('${r.id}')" style="flex-shrink:0;background:none;border:1px solid var(--txt-red);color:var(--txt-red);border-radius:8px;padding:5px 9px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">↩️ Desfazer</button>`}
+      </div></div>`;
+  }).join('');
+  return `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:12px 14px;margin-bottom:12px">
+    <div style="font-size:13px;font-weight:800;color:var(--t1)">🔗 Vínculos de nota criados · ${window.escapeHtml(range.label || '')}</div>
+    <div style="font-size:10.5px;color:var(--t3);line-height:1.5;margin:2px 0 8px">O app Lojas liga o nome que vem na nota ao item do catálogo do Pedido — sozinho, quando a entrega foi confirmada com o mesmo número de nota, ou quando a loja aceita uma sugestão / revisa por fornecedor. Confira e desfaça o que estiver errado: as próximas notas com aquele nome voltam a pedir o item. O que já entrou com o nome do item continua (corrige-se na aba Entradas do app Lojas).</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">${chip('todos', 'Todos', todos.length)}${chip('auto', '📦 Automáticos', todos.filter(auto).length)}${chip('loja', '✏️ Pela loja', todos.filter(r => !auto(r)).length)}</div>
+    <div style="font-size:11px;color:var(--t2);margin-bottom:4px"><b>${ativos}</b> ativo${ativos === 1 ? '' : 's'} · <b>${todos.length - ativos}</b> desfeito${todos.length - ativos === 1 ? '' : 's'}</div>
+    ${linhas || '<div style="font-size:12px;color:var(--t3);padding:10px 0">Nenhum vínculo criado no período.</div>'}
+  </div>`;
+}
 let _acompNode = null;
 // Home da loja (25–26/11/2026, "a home que falo é essa das lojas"): gerentes e subgerentes
 // acompanham a própria unidade; o mestre, a loja que está navegando. Mesma tela e mesma
@@ -23472,7 +23544,7 @@ const DASH_GRUPOS = [
   { g: 'vendas',   rot: '📈 Vendas',   abas: [['fat', '↓ Faturamento'], ['att', '⚠ Atenção'], ['bi', '📊 BI'], ['metas', '⚙ Metas']] },
   { g: 'caixa',    rot: '🧾 Caixa',    abas: [['cancel', '🧾 Cancel. e transf.'], ['sem10', '💸 Sem 10%']] },
   { g: 'equipe',   rot: '👥 Equipe',   abas: [['presenca', '👤 Presença'], ['folgas', '📅 Folgas'], ['ocorr', '⚠ Ocorrências'], ['ferias', '🏖 Férias'], ['xadrez', '🔀 Xadrez'], ['banco', '⏱ Banco'], ['extra', '👷 Extra']] },
-  { g: 'operacao', rot: '🛠 Operação', abas: [['acomp', '📊 Acompanhamento'], ['bloqueios', '🔒 Bloqueios'], ['barris', '🍺 Barris'], ['carnes', '🥩 Carnes'], ['vendidos', '🧾 Vendidos'], ['avarias', '⚠️ Avarias'], ['trios', '🎵 Trios'], ['semlanc', '✅ Validações'], ['utensent', '🍴 Utensílios'], ['emprest', '⇄ Transferências']] },
+  { g: 'operacao', rot: '🛠 Operação', abas: [['acomp', '📊 Acompanhamento'], ['bloqueios', '🔒 Bloqueios'], ['vinculos', '🔗 Vínculos NF'], ['barris', '🍺 Barris'], ['carnes', '🥩 Carnes'], ['vendidos', '🧾 Vendidos'], ['avarias', '⚠️ Avarias'], ['trios', '🎵 Trios'], ['semlanc', '✅ Validações'], ['utensent', '🍴 Utensílios'], ['emprest', '⇄ Transferências']] },
   { g: 'dre',      rot: '💰 DRE',      abas: [['dre', '💰 DRE']] },
 ];
 const _dashGrupoUltima = {};

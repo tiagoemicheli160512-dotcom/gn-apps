@@ -38,8 +38,9 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
     loja = 'BANGU'; usuarioAtual = { nome: 'Neto', cargo: 'gerente', loja }; abasPermitidas = null;
     _entregasVencidasAtivas = []; _notaFiscalPendenciasAtivas = []; _barrisSemPendente = false;
     window.__consultas = [];
-    sbRequest = async (rota) => { window.__consultas.push(rota); return /^gn_provisoes\?loja_slug=eq\.bangu&data_entrega=gte/.test(rota) ? JSON.parse(JSON.stringify(window.__REC)) : []; };
-    autoSave = () => {}; sbPushMasterConfig = async () => { window.__pushCfg = (window.__pushCfg || 0) + 1; };
+    window.__rpcLog = [];
+    sbRequest = async (rota, opt) => { window.__consultas.push(rota); if (/rpc\/gn_nf_vinculo_registrar/.test(rota)) { window.__rpcLog.push(...JSON.parse(opt.body).p_itens); return 1; } return /^gn_provisoes\?loja_slug=eq\.bangu&data_entrega=gte/.test(rota) ? JSON.parse(JSON.stringify(window.__REC)) : []; };
+    autoSave = () => {}; window.__pushOrig = sbPushMasterConfig; sbPushMasterConfig = async () => { window.__pushCfg = (window.__pushCfg || 0) + 1; };
     _atualizarTravaNotaFiscal = async () => {};
     return { parm: _nomeInsumoDoProduto(parm), outro: _nomeInsumoDoProduto(outro), parmItem: parm.item };
   });
@@ -104,6 +105,64 @@ const check = (n, c, extra) => { console.log((c ? 'OK: ' : 'FALHOU: ') + n + (c 
   }, base);
   check('empréstimo: a lista mostra o nome único do item (e não o nome cru do catálogo junto)', t.temCanon && !t.temCru, t);
   check('empréstimo: digitar o nome cru do catálogo mostra o saldo do item (10), não vazio', /^Saldo: 10\.000 UN$/.test(t.saldo) && t.unico === 'PARMESAO RALADO TESTE', t);
+
+  // ── 4) Registro pra conferência do Compras (gn_nf_vinculos_log) ──
+  await page.waitForTimeout(1000);
+  const log = await page.evaluate(() => window.__rpcLog.map(x => x.origem + '|' + x.descricao + '|' + x.insumo + '|' + x.loja));
+  check('cada vínculo criado vai pro registro com a origem (lote pela nota no painel, nota no XML)',
+    log.some(l => l.startsWith('lote_nota|PARMESAO - 003|' + base.parm + '|BANGU')) && log.some(l => l.startsWith('nota|PARMESAO - 003|' + base.parm)) && !log.some(l => /MAIONESE/.test(l)), log);
+
+  // ── 5) Vínculo desfeito no Painel não volta pela cópia do aparelho ──
+  const tomb = await page.evaluate(async () => {
+    nfMapeamentos['NOME ERRADO X'] = 'ITEM Y'; nfMapeamentos['OUTRO OK'] = 'ITEM Z';
+    const antes = sbRequest;
+    sbRequest = async (rota, opt) => /^gn_lojas\?select/.test(rota) ? [{ loja: 'MASTER_CONFIG', all_data: { nfMapeamentos: { 'OUTRO OK': 'ITEM Z' }, nfMapeamentosRemovidos: { 'NOME ERRADO X': 'ITEM Y' } } }]
+      : /MASTER_CONFIG/.test(rota) ? (window.__payload = JSON.parse(opt.body).all_data, []) : [];
+    try { await sbPull(true); } catch (e) {}
+    const out = { tem: 'NOME ERRADO X' in nfMapeamentos, ok: nfMapeamentos['OUTRO OK'] };
+    await window.__pushOrig();
+    out.payloadMarca = (window.__payload || {}).nfMapeamentosRemovidos;
+    out.payloadTem = 'NOME ERRADO X' in ((window.__payload || {}).nfMapeamentos || {});
+    // refazer de propósito o mesmo vínculo tira a marca
+    _criarVinculoNF('NOME ERRADO X', 'ITEM Y', 'correcao');
+    out.marcaDepois = 'NOME ERRADO X' in nfMapeamentosRemovidos;
+    sbRequest = antes;
+    return out;
+  });
+  check('vínculo desfeito no Painel sai da cópia do aparelho ao sincronizar (e os outros ficam)', !tomb.tem && tomb.ok === 'ITEM Z', tomb);
+  check('…e o aparelho não o devolve ao salvar a config (a marca vai junto)', !tomb.payloadTem && tomb.payloadMarca && tomb.payloadMarca['NOME ERRADO X'] === 'ITEM Y', tomb);
+  check('…refazer de propósito o mesmo vínculo tira a marca', !tomb.marcaDepois, tomb);
+
+  // ── 6) Revisão por fornecedor ──
+  const rv = await page.evaluate(async (base) => {
+    const k = lojaKey(); window.__rpcLog = [];
+    entradasAll[k] = [
+      { id: 'h1', insumo: 'TOMATE CARMEM', nfDesc: 'TOMATE CARMEM', nf: '1315', fornecedor: 'HORTI SILVA', dataNF: '2026-11-23', qtd: 100 },
+      { id: 'h2', insumo: 'COENTRO MOLHO', nfDesc: 'COENTRO MOLHO', nf: '1315', fornecedor: 'HORTI SILVA', dataNF: '2026-11-23', qtd: 7 },
+      { id: 'b1', insumo: 'FILE MEIO PEITO BELLO', nfDesc: 'FILE MEIO PEITO BELLO', nf: '1358444', fornecedor: 'BELLO ALIMENTOS', dataNF: '2026-11-24', qtd: 1 },
+    ];
+    _naoRecSug = { chave: '', sug: null, carregando: false };
+    tab = 'entradas'; render();
+    await new Promise(r => setTimeout(r, 300));
+    document.querySelector('.naorec-revisar').click();
+    const m = document.getElementById('modalRevForn');
+    const grupos = [...m.querySelectorAll('.revf-grupo')].map(g => g.dataset.forn + ':' + g.querySelectorAll('.revf-inp').length);
+    const g = [...m.querySelectorAll('.revf-grupo')].find(x => x.dataset.forn === 'HORTI SILVA');
+    const inps = g.querySelectorAll('.revf-inp');
+    inps[0].value = 'PARMESAO RALADO TESTE';   // nome único do parmesão (mapeado na parte 3)
+    inps[1].value = 'COISA QUE NAO EXISTE';
+    g.querySelector('.revf-salvar').click();
+    const invalidoMarcado = inps[1].style.borderColor !== '';
+    const antesValido = entradasAll[k].find(e => e.id === 'h1').insumo;
+    inps[1].value = '';
+    g.querySelector('.revf-salvar').click();
+    await new Promise(r => setTimeout(r, 1000));
+    return { grupos, invalidoMarcado, antesValido, depois: entradasAll[k].map(e => e.insumo), vinc: nfMapeamentos['TOMATE CARMEM'], log: window.__rpcLog.map(x => x.origem + '|' + x.descricao) };
+  }, base);
+  check('revisão: agrupa por fornecedor (o com mais nomes primeiro)', rv.grupos.join() === 'HORTI SILVA:2,BELLO ALIMENTOS:1', rv.grupos);
+  check('revisão: com um nome que não é item cadastrado, NADA do fornecedor é salvo (nem o válido)', rv.invalidoMarcado && rv.antesValido === 'TOMATE CARMEM', rv);
+  check('revisão: "Salvar" do fornecedor liga o que foi escolhido, deixa o vazio como estava e registra (origem revisao)',
+    rv.depois[0] === 'PARMESAO RALADO TESTE' && rv.depois[1] === 'COENTRO MOLHO' && rv.vinc === 'PARMESAO RALADO TESTE' && rv.log.includes('revisao|TOMATE CARMEM'), rv);
   check('nenhum erro de JavaScript', erros.length === 0, erros);
   console.log(`\n${ok} OK, ${falhou} falhou`); await browser.close(); process.exit(falhou ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

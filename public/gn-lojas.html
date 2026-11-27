@@ -1070,6 +1070,10 @@ let fichasRemoved = [];  // lista de codigos removidos
 let insumosCustom = [];  // novos insumos adicionados pelo master
 let alertasWpp    = [];  // [{nome, numero}] — contatos que recebem alerta de estoque
 let nfMapeamentos    = {};  // { "DESCRICAO NF-e": "NOME INSUMO APP" } — mapeamentos permanentes
+// Vínculos desfeitos pelo Compras no Painel (27/11/2026): { descricao: insumo }. Os aparelhos
+// têm o nfMapeamentos em memória; sem esta marca, o próximo que salvasse a config devolveria o
+// vínculo desfeito. Ver gn_nf_vinculo_desfazer.
+let nfMapeamentosRemovidos = {};
 let fichasMapeamentos = {}; // { "NOME FICHA ERRADO": "NOME CANÔNICO" } — de-para ingredientes de fichas
 let lookup     = Object.assign({}, SEED.ficha_lookup);
 
@@ -1568,6 +1572,8 @@ async function sbPull(silent) {
           }
           if (Array.isArray(d.alertasWpp)) alertasWpp = d.alertasWpp;
           if (d.nfMapeamentos    && typeof d.nfMapeamentos    === 'object') Object.assign(nfMapeamentos,    d.nfMapeamentos);
+          if (d.nfMapeamentosRemovidos && typeof d.nfMapeamentosRemovidos === 'object') Object.assign(nfMapeamentosRemovidos, d.nfMapeamentosRemovidos);
+          Object.keys(nfMapeamentosRemovidos).forEach(k => { if (nfMapeamentos[k] === nfMapeamentosRemovidos[k]) delete nfMapeamentos[k]; });
           if (d.fichasMapeamentos && typeof d.fichasMapeamentos === 'object') Object.assign(fichasMapeamentos, d.fichasMapeamentos);
           return;
         }
@@ -3615,6 +3621,27 @@ function abrirImportXMLNF() {
   inp.click();
 }
 
+// Cria/atualiza um vínculo nome-da-nota → item e registra pra conferência do Compras no
+// Painel (gn_nf_vinculos_log). origem: nota | lote_nota | sugestao | revisao | xml_manual |
+// correcao. Devolve true se o vínculo mudou.
+let _vincLogFila = [], _vincLogTimer = null;
+function _criarVinculoNF(desc, insumo, origem, extra) {
+  if (!desc || !insumo || nfMapeamentos[desc] === insumo) return false;
+  nfMapeamentos[desc] = insumo;
+  // Refazer de propósito um vínculo que o Compras tinha desfeito tira a marca.
+  if (nfMapeamentosRemovidos[desc] === insumo) delete nfMapeamentosRemovidos[desc];
+  _vincLogFila.push(Object.assign({ descricao: desc, insumo, origem, loja, por: (usuarioAtual && usuarioAtual.nome) || loja }, extra || {}));
+  clearTimeout(_vincLogTimer);
+  _vincLogTimer = setTimeout(_enviarLogVinculos, 800);
+  return true;
+}
+async function _enviarLogVinculos() {
+  const lote = _vincLogFila; _vincLogFila = [];
+  if (!lote.length) return;
+  try { await sbRequest('rpc/gn_nf_vinculo_registrar', { method: 'POST', body: JSON.stringify({ p_itens: lote }) }); }
+  catch (e) { /* o registro é pra conferência — o vínculo em si já foi salvo na config */ }
+}
+
 /* ── Nome da nota → item do catálogo do Pedido (27/11/2026) ───────────────────────────────
    "Os produtos, ao chegar, têm nome diferente — usar o item base, que é o do catálogo do app
     Pedido, e casar, pra ter um nome único… já fiz o vínculo manual, mas sempre aparecem novos."
@@ -3838,7 +3865,8 @@ function confirmarMatchNF() {
     const escolhido = sugInp ? (sugInp.value || '').trim().toUpperCase() : '';
     if (escolhido && _insumosCadastrados().includes(escolhido)) {
       insumo = escolhido;
-      if ((sugInp.dataset.origem === 'nota' && !sugInp.dataset.editado) || _podeLancarSemCadastro()) { nfMapeamentos[nfDesc] = escolhido; vinculosNovos++; }
+      const daNota = sugInp.dataset.origem === 'nota' && !sugInp.dataset.editado;
+      if ((daNota || _podeLancarSemCadastro()) && _criarVinculoNF(nfDesc, escolhido, daNota ? 'nota' : 'xml_manual', { nf: nfNumFinal, fornecedor: fornFinal })) vinculosNovos++;
     }
     // a NF declara a quantidade na unidade comercial (ex.: 1 "UND" que na verdade é
     // 1 caixa com 12 latas) — aplicamos o fator de conversão já cadastrado pra esse
@@ -4057,7 +4085,7 @@ async function _carregarSugestoesNaoRec(naoRec) {
 }
 function _usarSugestaoNaoRec(nome) {
   const x = ((_naoRecSug.sug) || {})[nome]; if (!x) return;
-  const fazer = () => _corrigirEntradasPorNome(nome, x.nome);
+  const fazer = () => _corrigirEntradasPorNome(nome, x.nome, false, 'sugestao');
   if (_podeLancarSemCadastro()) fazer(); else pedirSenhaMestre(fazer);
 }
 function _aplicarSugestoesNotaNaoRec() {
@@ -4065,10 +4093,69 @@ function _aplicarSugestoesNotaNaoRec() {
   const nomes = Object.keys(sug).filter(n => sug[n].origem === 'nota');
   if (!nomes.length) return;
   const fazer = () => {
-    let n = 0; nomes.forEach(nome => { n += _corrigirEntradasPorNome(nome, sug[nome].nome, true) || 0; });
+    let n = 0; nomes.forEach(nome => { n += _corrigirEntradasPorNome(nome, sug[nome].nome, true, 'lote_nota') || 0; });
     showToast('✅ ' + n + ' lançamento(s) ligados ao item do Pedido pela entrega da nota — vínculos salvos pras próximas notas');
   };
   if (_podeLancarSemCadastro()) fazer(); else pedirSenhaMestre(fazer);
+}
+// ── Revisão por fornecedor (27/11/2026) ──────────────────────────────────────────────
+// O que não tem entrega confirmada com nota (hortifruti, Mister, Bello…) não ganha sugestão
+// forte. Em vez de corrigir item por item, uma tela com tudo que ficou de fora agrupado por
+// fornecedor: cada nome com o campo do item do Pedido (já preenchido quando há sugestão), e
+// um "Salvar" por fornecedor. Cada um vira vínculo pras próximas notas (todas as lojas).
+function abrirRevisaoFornecedor() {
+  const abrir = () => _renderRevisaoFornecedor();
+  if (_podeLancarSemCadastro()) abrir(); else pedirSenhaMestre(abrir);
+}
+function _renderRevisaoFornecedor() {
+  document.getElementById('modalRevForn')?.remove();
+  const naoRec = _entradasNaoReconhecidas(), sug = _naoRecSug.sug || {};
+  const grupos = {};
+  Object.keys(naoRec).forEach(nome => {
+    const f = ((naoRec[nome].itens[0] || {}).fornecedor || 'SEM FORNECEDOR').trim().toUpperCase();
+    (grupos[f] = grupos[f] || []).push(nome);
+  });
+  const fornecedores = Object.keys(grupos).sort((a, b) => grupos[b].length - grupos[a].length || a.localeCompare(b));
+  const esc = v => escapeHtml(String(v == null ? '' : v));
+  const m = document.createElement('div');
+  m.id = 'modalRevForn';
+  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:10000;overflow-y:auto;padding:14px;box-sizing:border-box';
+  m.innerHTML = '<div style="max-width:560px;margin:0 auto;padding-bottom:30px">'
+    + '<div style="font-size:14px;font-weight:800;color:#fff">📋 Revisar por fornecedor</div>'
+    + '<div style="font-size:11px;color:#cbd5e1;margin:3px 0 12px;line-height:1.45">Nomes da nota que não estão no Estoque, agrupados por fornecedor. Escolha o item do Pedido de cada um (o que já veio preenchido é sugestão — confira) e salve o fornecedor. O vínculo vale pras próximas notas, em todas as lojas. Deixe vazio o que não é item do Pedido.</div>'
+    + '<datalist id="dlRevForn">' + _insumosCadastrados().sort().map(n => '<option value="' + esc(n) + '">').join('') + '</datalist>'
+    + (fornecedores.length ? fornecedores.map((f, gi) => '<div class="revf-grupo" data-forn="' + esc(f) + '" style="background:#1f1f1f;border:1px solid #333;border-radius:12px;padding:10px;margin-bottom:10px">'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><div style="font-size:12.5px;font-weight:800;color:#fbbf24">' + esc(f) + '</div><div style="font-size:10.5px;color:#94a3b8">' + grupos[f].length + ' nome' + (grupos[f].length > 1 ? 's' : '') + '</div></div>'
+      + grupos[f].map((nome, ri) => { const sg = sug[nome], forte = sg && sg.origem !== 'nota_fraca';
+          return '<div class="revf-linha" style="border-top:1px dashed #333;padding:6px 0">'
+            + '<div style="font-size:11px;color:#e2e8f0;font-weight:700;word-break:break-word">' + esc(nome) + ' <span style="font-weight:400;color:#94a3b8">+' + (naoRec[nome].qtd || 0).toLocaleString('pt-BR', { maximumFractionDigits: 3 }) + '</span></div>'
+            + (sg && !forte ? '<div style="font-size:10px;color:#fbbf24">🤔 Talvez: ' + esc(sg.nome) + '</div>' : sg ? '<div style="font-size:10px;color:#34d399">' + (sg.origem === 'nota' ? '📦 Pela entrega da nota' : '🔎 Nome parecido') + '</div>' : '')
+            + '<input class="revf-inp" data-nome="' + esc(nome) + '" list="dlRevForn" value="' + (forte ? esc(sg.nome) : '') + '" placeholder="Item do Pedido (vazio = deixar como está)" style="width:100%;box-sizing:border-box;margin-top:4px;background:#2b2b2b;color:#e2e8f0;border:1px solid #444;border-radius:8px;padding:6px 8px;font-size:11.5px"/>'
+            + '</div>'; }).join('')
+      + '<button class="revf-salvar" onclick="_salvarRevisaoFornecedor(this.closest(\'.revf-grupo\'))" style="width:100%;margin-top:6px;background:#047857;border:none;border-radius:10px;color:#fff;font-weight:800;font-size:12px;padding:9px;cursor:pointer;font-family:inherit">💾 Salvar ' + esc(f) + '</button>'
+      + '</div>').join('') : '<div style="color:#34d399;font-size:12px">✓ Nada pendente nesta semana.</div>')
+    + '<button onclick="document.getElementById(\'modalRevForn\').remove()" style="width:100%;background:rgba(255,255,255,.08);border:none;border-radius:12px;padding:11px;color:#cbd5e1;font-weight:700;font-size:12px;cursor:pointer;font-family:inherit">Fechar</button>'
+    + '</div>';
+  document.body.appendChild(m);
+}
+function _salvarRevisaoFornecedor(grupo) {
+  if (!grupo) return;
+  const validos = new Set(_insumosCadastrados());
+  // Confere o fornecedor inteiro antes de gravar qualquer coisa: com um nome inválido no meio,
+  // nada é salvo (senão metade ficava gravada e metade não, dependendo da ordem).
+  const pares = [], invalidos = [];
+  grupo.querySelectorAll('.revf-inp').forEach(inp => {
+    const nome = inp.dataset.nome, v = (inp.value || '').trim().toUpperCase();
+    inp.style.borderColor = '';
+    if (!v || v === nome) return;
+    if (!validos.has(v)) { invalidos.push(v); inp.style.borderColor = '#dc2626'; return; }
+    pares.push([nome, v]);
+  });
+  if (invalidos.length) { showToast('⚠️ Não é item cadastrado: ' + invalidos.slice(0, 2).join(', ') + (invalidos.length > 2 ? '…' : '') + ' — escolha da lista. Nada foi salvo.'); return; }
+  let feitos = 0;
+  pares.forEach(([nome, v]) => { feitos += _corrigirEntradasPorNome(nome, v, true, 'revisao') || 0; });
+  showToast(feitos ? '✅ ' + feitos + ' lançamento(s) ligados ao item do Pedido — vínculos salvos pras próximas notas' : 'Nada pra salvar neste fornecedor.');
+  _renderRevisaoFornecedor();
 }
 function _entradasNaoReconhecidas() {
   const cadastrados = new Set(_insumosCadastrados());
@@ -6068,7 +6155,7 @@ function adicionarInsumoCustom(nome) {
    numa linha especial "MASTER_CONFIG" que todas as lojas leem no pull */
 async function sbPushMasterConfig() {
   try {
-    const payload = { fichasCustom, fichasRemoved, insumosCustom, alertasWpp, nfMapeamentos, fichasMapeamentos };
+    const payload = { fichasCustom, fichasRemoved, insumosCustom, alertasWpp, nfMapeamentos, fichasMapeamentos, nfMapeamentosRemovidos };
     await sbRequest("gn_lojas?loja=eq.MASTER_CONFIG", {
       method: "PATCH",
       headers: { "Prefer": "return=minimal" },
@@ -8743,10 +8830,7 @@ function _continuarSalvarNota(dataNF, nf, fornecedor, vencimentos, itensValidos)
     if (item.unidade === 'CX' && fator !== (getFator(item.insumo) || 1)) {
       fatoresConversao[item.insumo] = fator;
     }
-    if (item.codForn && nfMapeamentos[item.codForn] !== item.insumo) {
-      nfMapeamentos[item.codForn] = item.insumo;
-      mapeamentosNovos = true;
-    }
+    if (item.codForn && _criarVinculoNF(item.codForn, item.insumo, 'correcao', { nf: nf || 'S/N', fornecedor: fornecedor.trim().toUpperCase() })) mapeamentosNovos = true;
     salvos++;
   });
   if (mapeamentosNovos) sbPushMasterConfig();
@@ -10841,6 +10925,7 @@ function render() {
       <div class="alert-box alert-red" style="padding:12px">
         <div style="font-weight:800;margin-bottom:4px">⚠️ ${naoRecNomes.length} produto${naoRecNomes.length>1?'s':''} da Entrada não aparece${naoRecNomes.length>1?'m':''} no Estoque</div>
         <div style="font-size:11px;color:var(--t2);margin-bottom:8px">O nome lançado na nota não bate com nenhum insumo cadastrado — a quantidade fica "perdida", somada por baixo dos panos mas sem aparecer em nenhuma linha do Estoque. Vincule ao insumo certo pra corrigir. ${_naoRecSug.carregando ? '<b>Procurando os itens no catálogo do Pedido…</b>' : 'Onde aparece 📦, o item do Pedido veio da entrega confirmada com a mesma nota.'}</div>
+        <button class="naorec-revisar" onclick="abrirRevisaoFornecedor()" style="width:100%;background:none;border:1px solid var(--txt-amber);border-radius:10px;color:var(--txt-amber);font-size:12px;font-weight:800;padding:8px;margin-bottom:8px;cursor:pointer;font-family:inherit">📋 Revisar por fornecedor</button>
         ${nSugNota ? `<button class="naorec-aplicar" onclick="_aplicarSugestoesNotaNaoRec()" style="width:100%;background:#047857;border:none;border-radius:10px;color:#fff;font-size:12px;font-weight:800;padding:9px;margin-bottom:8px;cursor:pointer;font-family:inherit">✅ Ligar ${nSugNota} ao item do Pedido pela nota</button>` : ''}
         ${naoRecNomes.map(nome => {
           const d = naoRec[nome], sg = sugNR[nome];
@@ -15071,7 +15156,7 @@ function confirmarCorrecao() {
 }
 // Troca o nome de todas as entradas da semana que estão com `nomeErrado` e grava o vínculo
 // da descrição da nota (vale pras próximas notas, em todas as lojas).
-function _corrigirEntradasPorNome(nomeErrado, novoNome, silencioso) {
+function _corrigirEntradasPorNome(nomeErrado, novoNome, silencioso, origem) {
   const k = lojaKey();
   {
     const afetadas = (entradasAll[k]||[]).filter(e => e.insumo === nomeErrado);
@@ -15082,10 +15167,7 @@ function _corrigirEntradasPorNome(nomeErrado, novoNome, silencioso) {
       // Mesmo vínculo global gravado na correção de item único — sem isso, a mesma
       // descrição de NF-e volta a cair como "não reconhecido" nas outras lojas (e nesta
       // também, na próxima nota), exigindo corrigir de novo toda semana em cada loja.
-      if (e.nfDesc && nfMapeamentos[e.nfDesc] !== novoNome) {
-        nfMapeamentos[e.nfDesc] = novoNome;
-        vinculoNovo = true;
-      }
+      if (e.nfDesc && _criarVinculoNF(e.nfDesc, novoNome, origem || 'correcao', { nf: e.nf, fornecedor: e.fornecedor })) vinculoNovo = true;
     });
     if (estIniAll[k]) {
       if (estIniAll[k][nomeErrado] !== undefined) estIniAll[k][nomeErrado] = Math.max(0, (estIniAll[k][nomeErrado]||0) - totalQtd);
@@ -15107,11 +15189,7 @@ function _confirmarCorrecaoUnica(k, novoNome) {
     estIniAll[k][novoNome] = (estIniAll[k][novoNome]||0) + (ent.qtd||0);
   }
   ent.insumo = novoNome;
-  let vinculoNovo = false;
-  if (ent.nfDesc && nfMapeamentos[ent.nfDesc] !== novoNome) {
-    nfMapeamentos[ent.nfDesc] = novoNome;
-    vinculoNovo = true;
-  }
+  const vinculoNovo = !!(ent.nfDesc && _criarVinculoNF(ent.nfDesc, novoNome, 'correcao', { nf: ent.nf, fornecedor: ent.fornecedor }));
   _correcaoId = null;
   fecharCorrecaoModal();
   if (vinculoNovo) sbPushMasterConfig();
