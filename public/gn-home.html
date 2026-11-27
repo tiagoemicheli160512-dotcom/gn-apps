@@ -17102,7 +17102,7 @@ async function _carnesBuscarSemana(off) {
       // entrada vai pra contagem seguinte (o caso normal, entrega à tarde).
       window.gnFetchJson(
         `${SB_URL}/rest/v1/gn_provisoes?catalogo_id=in.(${ids.join(',')})&data_entrega=gte.${_carnesISO(new Date(ini.getTime() - 7 * 864e5))}&data_entrega=lte.${fimISO}` +
-        `&select=loja_slug,catalogo_id,gn_recebimentos!inner(qtd_recebida,validado_em)`,
+        `&select=loja_slug,catalogo_id,data_entrega,gn_recebimentos!inner(qtd_recebida,validado_em)`,
         H, 'carnesGerencia:recebHora', null),
     ]) : [[], []];
   }
@@ -17145,6 +17145,12 @@ async function _carnesBuscarSemana(off) {
     if (!k || !porLoja[k] || !corte) return;
     (Array.isArray(p.gn_recebimentos) ? p.gn_recebimentos : [p.gn_recebimentos]).forEach(r => {
       if (!r || !r.validado_em) return;
+      // Recebido CONFIRMADO de pedido desta semana (mesma regra da entrada automática do
+      // Check-list): o que entrou na carne além disso veio pela nota da aba Entradas.
+      if (p.data_entrega >= iniISO && p.data_entrega <= fimISO) {
+        const rs = porLoja[k].recebSem = porLoja[k].recebSem || {};
+        rs[corte] = (rs[corte] || 0) + (parseFloat(r.qtd_recebida) || 0);
+      }
       const dt = new Date(r.validado_em);
       if (dt.getHours() >= horaCont) return;
       const di = _carnesDiaIdx(ini, _carnesISO(dt));
@@ -17706,21 +17712,44 @@ function _carnesDiarioHtml(k, d, vigente) {
     <div style="font-size:9px;color:var(--t4);margin-top:3px;line-height:1.45">Entrada já descontada da salga (carne de sol −${G.PERDA_SALGA.carne_sol * 100}%, carne seca −${G.PERDA_SALGA.carne_seca * 100}%). A carne entra na primeira contagem depois que chegou: conferida antes das 11h já está na contagem do dia; depois, na do dia seguinte. A que chega na segunda sempre fica pra terça. "Seg seg." é o fechamento: a contagem da segunda seguinte. Dia sem vendidos lançados não é comparado.</div>
   </div>`;
 }
+// Pedido "aguardando" cuja carne JÁ entrou pela nota (27/11/2026 — Bangu: NF 268978 de 24 kg de
+// camarão lançada nas Entradas em 23/11, e o pedido de 24 kg nunca confirmado na Entrega; a
+// tabela de cima mostrava +24 e o "A chegar" dizia "atrasada"). A entrada da semana do corte
+// (ent_*, que a automação do Check-list preenche pela entrega confirmada OU pela nota) menos o
+// recebido confirmado = o que veio só pela nota. Esse excedente cobre os pedidos aguardando,
+// do mais antigo pro mais novo, quando chega a pelo menos 80% do previsto.
+function _carnesMarcarViaNF(d) {
+  // Só pedido já vencido (data de entrega até hoje): pedido de data futura continua "a chegar".
+  const hoje = _carnesISO(new Date());
+  const sobra = {};
+  CARNES_DEF_HOME.forEach(c => {
+    const car = (d.carnes || {})[c.key] || {};
+    const ent = ['seg', 'ter', 'qua', 'qui', 'sex', 'sab', 'dom'].reduce((t, x) => t + (parseFloat(car['ent_' + x]) || 0), 0);
+    sobra[c.key] = Math.max(0, ent - (((d.recebSem || {})[c.key]) || 0));
+  });
+  (d.provAg || []).slice().sort((a, b) => String(a.data_entrega).localeCompare(String(b.data_entrega))).forEach(p => {
+    const q = parseFloat(p.qtd_prevista) || 0;
+    p.viaNF = q > 0 && String(p.data_entrega) <= hoje && (sobra[p.corte] || 0) >= q * 0.8;
+    if (p.viaNF) sobra[p.corte] -= Math.min(q, sobra[p.corte]);
+  });
+}
 // Semana em andamento: o que deveria ter agora (antes da venda de hoje) e o que está a chegar.
 function _carnesPrevisaoHtml(k, d, vigente) {
   const G = window.gnCarnesDiario;
   if (!G) return '';
   const kg = _carnesKg1;
   const hojeISO = _carnesISO(new Date());
+  _carnesMarcarViaNF(d);
   const ag = (d.provAg || []);
   const aChegar = corte => ag.filter(p => p.corte === corte);
   const aChegarTxt = corte => aChegar(corte).map(p => {
+    if (p.viaNF) return `<span class="carnes-prev-vianf" style="white-space:nowrap;color:var(--txt-amber);font-weight:800">${kg(parseFloat(p.qtd_prevista) || 0)} kg · ${_carnesDM(p.data_entrega)} 📄 chegou pela NF</span><div style="font-size:8.5px;color:var(--txt-amber)">falta confirmar na Entrega</div>`;
     const lim = p.data_entrega_fim || p.data_entrega;
     const atras = lim < hojeISO;
     return `<span style="white-space:nowrap;${atras ? 'color:var(--txt-red);font-weight:800' : ''}">${kg(parseFloat(p.qtd_prevista) || 0)} kg · ${_carnesDM(p.data_entrega)}${atras ? ' ⚠ atrasada' : ''}</span>`;
   }).join('<br>') || '<span style="color:var(--t4)">nenhum pedido</span>';
   if (!vigente) {
-    const atrasadas = ag.filter(p => (p.data_entrega_fim || p.data_entrega) < hojeISO);
+    const atrasadas = ag.filter(p => !p.viaNF && (p.data_entrega_fim || p.data_entrega) < hojeISO);
     if (!atrasadas.length) return '';
     return `<div class="carnes-prev-atrasada" style="margin-top:6px;font-size:9.5px;color:var(--txt-red);font-weight:700;line-height:1.4">⚠ Entrega de carne desta semana ainda "aguardando" no recebimento: ${atrasadas.map(p => `${(CARNES_DEF_HOME.find(c => c.key === p.corte) || {}).label || p.corte} ${kg(parseFloat(p.qtd_prevista) || 0)} kg (${_carnesDM(p.data_entrega)})`).join(' · ')} — se chegou e não foi confirmada, a conta acusa falta que não existe.</div>`;
   }
@@ -17750,7 +17779,8 @@ function _carnesPrevisaoHtml(k, d, vigente) {
       ${linhas}
     </table></div>
     ${contHoje ? `<div class="carnes-prev-nota" style="font-size:9.5px;color:var(--t3);margin-top:3px;line-height:1.45">A última contagem é a de <b>hoje (${G.DIAS_LABEL[hojeIdx]})</b>: as entregas da semana (o +N verde da tabela de cima) <b>já estão dentro dela</b>. Por isso Chegou e Vendido aparecem vazios — aqui só entra o que chegar depois da contagem, e a venda de hoje entra quando o dia fechar. "A chegar" é pedido ainda aguardando no recebimento; "nenhum pedido" = não há carne pedida a caminho.</div>` : ''}
-    ${ag.some(p => (p.data_entrega_fim || p.data_entrega) < hojeISO) ? `<div style="font-size:9.5px;color:var(--txt-red);font-weight:700;margin-top:3px">⚠ Pedido com data já passada e ainda "aguardando" no recebimento — se chegou, falta confirmar na aba Entrega do app Lojas.</div>` : ''}
+    ${ag.some(p => p.viaNF) ? `<div class="carnes-prev-vianf-nota" style="font-size:9.5px;color:var(--txt-amber);font-weight:700;margin-top:3px">📄 Chegou pela nota: a carne já entrou (NF lançada na aba Entradas — é o +N da tabela de cima), mas o pedido não foi confirmado na aba Entrega do app Lojas e segue "aguardando". Confirmar lá tira o pedido daqui.</div>` : ''}
+    ${ag.some(p => !p.viaNF && (p.data_entrega_fim || p.data_entrega) < hojeISO) ? `<div style="font-size:9.5px;color:var(--txt-red);font-weight:700;margin-top:3px">⚠ Pedido com data já passada e ainda "aguardando" no recebimento — se chegou, falta confirmar na aba Entrega do app Lojas.</div>` : ''}
   </div>`;
 }
 
