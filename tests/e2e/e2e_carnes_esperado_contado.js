@@ -132,6 +132,21 @@ const RECEB = [{ id: 'pv1', catalogo_id: 'c-sec', data_entrega: '2026-11-23', fo
   check('…e a nota explica que as entregas da semana já estão na contagem de hoje', /já estão dentro dela/.test(m.prevTxt), m.prevTxt.slice(-500));
   check('carne de sol: quarta 170 + 28,2 (30 − 6%) − vendido (quarta sem lançamento avisada)', /170,0 \(Qua\) \+28,2/.test(m.prevSol || '') && /sem Qua/.test(m.prevSol), m.prevSol);
   check('a chegar: pedido de picanha com data passada aparece como atrasado; camarão com a data', /15,0 kg · 24\/11 ⚠ atrasada/.test(m.prevTxt) && /10,0 kg · 28\/11/.test(m.prevTxt) && /falta confirmar na aba Entrega/.test(m.prevTxt), m.prevTxt.slice(0, 500));
+  // 27/11/2026 — caso real de Bangu: a NF de 24 kg de camarão foi lançada nas Entradas (a
+  // entrada automática pôs +24 na segunda) e o pedido de 24 kg ficou "aguardando" na Entrega.
+  const nf = await page.evaluate(() => {
+    const base = { inicial: 10, ter: 9.85, qua: 30.65, qui: 39.25 };
+    const html = (recebSem, extraProv) => { const d = { carnes: { camarao: Object.assign({ ent_seg: 24 }, base), carne_sol: { inicial: 157, ter: 145, qua: 134, qui: 128 }, picanha: { inicial: 30, qui: 65 }, carne_seca: { inicial: 20, qui: 19.7 } },
+        recebSem, provAg: [{ corte: 'camarao', data_entrega: '2026-11-24', qtd_prevista: '24.000' }, { corte: 'carne_sol', data_entrega: '2026-11-24', qtd_prevista: '100.000' }].concat(extraProv || []) };
+      const el = document.createElement('div'); el.innerHTML = _carnesPrevisaoHtml('BANGU', d, true); document.body.appendChild(el);
+      const t = el.innerText.replace(/\s+/g, ' '); el.remove(); return t; };
+    return { soNF: html({}), confirmada: html({ camarao: 24 }), futuro: html({}, [{ corte: 'camarao', data_entrega: '2026-11-30', qtd_prevista: '20' }]) };
+  });
+  check('Bangu: carne entrou pela NF e o pedido segue "aguardando" → "chegou pela NF — falta confirmar na Entrega", não "atrasada"',
+    /24,0 kg · 24\/11 📄 chegou pela NF falta confirmar na Entrega/.test(nf.soNF) && !/24,0 kg · 24\/11 ⚠ atrasada/.test(nf.soNF) && /Chegou pela nota/.test(nf.soNF), nf.soNF);
+  check('…a carne de sol sem nota nem entrega continua "atrasada" (não chegou mesmo)', /100,0 kg · 24\/11 ⚠ atrasada/.test(nf.soNF), nf.soNF);
+  check('…se a entrada veio de entrega confirmada, ela não cobre outro pedido aguardando (segue atrasado)', /24,0 kg · 24\/11 ⚠ atrasada/.test(nf.confirmada) && !/chegou pela NF/.test(nf.confirmada), nf.confirmada);
+  check('…pedido de data futura continua "a chegar", mesmo com sobra de nota', /20,0 kg · 30\/11/.test(nf.futuro) && !/20,0 kg · 30\/11 📄/.test(nf.futuro), nf.futuro);
   check('a previsão lê só o que está "aguardando", dos itens de carne', /status=eq\.AGUARDANDO/.test(m.provUrl) && /c-pic/.test(m.provUrl) && /s-pic/.test(m.provUrl), m.provUrl);
 
   // ══ 3. Correção só do mestre ═════════════════════════════════════════════════════════
