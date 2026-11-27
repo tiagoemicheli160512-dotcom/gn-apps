@@ -4013,6 +4013,98 @@ function addEntrada(insumo, dataNF, nf, fornecedor, qtd, custoUnit, fotoBase64, 
   showToast("✅ Entrada lançada: " + insumo);
   render();
   _atualizarTravaNotaFiscal();
+  _sugerirEntregaCarne(insumo, entry.qtd, nf, dataNF);
+}
+
+/* ── Nota de carne × pedido "aguardando" (27/11/2026) ─────────────────────────────────────
+   Bangu, 23/11: a NF de 24 kg de camarão foi lançada aqui nas Entradas e o pedido de 24 kg
+   ficou "aguardando" na Entrega — a carne entrou na conta, mas o Painel via o pedido como
+   atrasado. Ao lançar uma nota de uma das 4 carnes controladas, se houver pedido dela
+   aguardando (±7 dias da data da nota), o app pergunta se é o mesmo e leva pra Entrega com a
+   quantidade da nota já no campo. Nada é confirmado sozinho: a confirmação continua a da
+   Entrega (nota, quantidade, "tem certeza"). Mesmas regras de nome do Check-list
+   (CARNES_ENTRADA_MATCH em gn-checklist.html — e2e_entrada_carne_pedido confere que batem). */
+const CARNES_NF_MATCH = {
+  carne_sol:  { inc:[/CARNE\s*DE\s*SOL/], exc:[] },
+  carne_seca: { inc:[/CARNE\s*SECA/],     exc:[] },
+  picanha:    { inc:[/PICANHA/],          exc:[/SU[IÍ]NA/] },
+  camarao:    { inc:[/CAMAR[AÃ]O/],       exc:[/XIQUE/] },
+};
+const CARNES_NF_ROTULO = { carne_sol: '🥩 Carne de sol', carne_seca: '🥩 Carne seca', picanha: '🥩 Picanha', camarao: '🦐 Camarão' };
+function _carneDoInsumo(nome) {
+  const n = String(nome || '').toUpperCase();
+  return Object.keys(CARNES_NF_MATCH).find(k => CARNES_NF_MATCH[k].inc.some(re => re.test(n)) && !CARNES_NF_MATCH[k].exc.some(re => re.test(n))) || null;
+}
+let _sugEntCarne = [], _sugEntCarneTimer = null;
+function _sugerirEntregaCarne(insumo, qtd, nf, dataNF) {
+  const corte = _carneDoInsumo(insumo);
+  if (!corte || !(qtd > 0)) return;
+  // Quem não confirma entrega não recebe a pergunta (não teria o que fazer com ela).
+  if (abasPermitidas && !abasPermitidas.includes('entrega')) return;
+  _sugEntCarne.push({ corte, qtd, nf: nf || 'S/N', dataNF: dataNF || wkKey(new Date()) });
+  // Uma nota com várias carnes lança item por item: junta tudo numa pergunta só.
+  clearTimeout(_sugEntCarneTimer);
+  _sugEntCarneTimer = setTimeout(_mostrarSugestaoEntregaCarne, 400);
+}
+async function _mostrarSugestaoEntregaCarne() {
+  const lancadas = _sugEntCarne; _sugEntCarne = [];
+  try {
+    const mapa = await _carnesChkResolverIds();
+    const cortes = [...new Set(lancadas.map(x => x.corte))];
+    const ids = Object.keys(mapa).filter(id => cortes.includes(mapa[id]));
+    if (!ids.length) return;
+    const slug = LOJA_SLUG[loja] || loja.toLowerCase().replace(/ /g, '_');
+    const rows = await sbRequest('gn_provisoes?loja_slug=eq.' + slug + '&status=eq.AGUARDANDO&catalogo_id=in.(' + ids.join(',') + ')'
+      + '&select=id,catalogo_id,data_entrega,qtd_prevista,fornecedor,fornecedor_entregue&order=data_entrega', { method: 'GET' });
+    const dias = (a, b) => Math.abs((new Date(a + 'T12:00:00') - new Date(b + 'T12:00:00')) / 864e5);
+    const usados = new Set();
+    const pares = lancadas.map(l => {
+      const ped = (rows || []).find(r => mapa[r.catalogo_id] === l.corte && !usados.has(r.id) && r.data_entrega && dias(r.data_entrega, l.dataNF) <= 7);
+      if (ped) usados.add(ped.id);
+      return ped ? { l, ped } : null;
+    }).filter(Boolean);
+    if (!pares.length) return;
+    const dm = iso => iso ? iso.slice(8, 10) + '/' + iso.slice(5, 7) : '';
+    const kg = v => (parseFloat(v) || 0).toLocaleString('pt-BR', { maximumFractionDigits: 2 });
+    document.getElementById('modalEntregaCarneNF')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'modalEntregaCarneNF';
+    modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10001;display:flex;align-items:center;justify-content:center;padding:18px;box-sizing:border-box';
+    modal.innerHTML = '<div style="background:var(--s1);border-radius:16px;padding:16px;max-width:380px;width:100%;box-shadow:0 10px 30px rgba(0,0,0,.35)">'
+      + '<div style="font-size:14px;font-weight:800;color:var(--t1);text-align:center">📦 Essa carne é de um pedido?</div>'
+      + '<div style="font-size:11.5px;color:var(--t2);text-align:center;line-height:1.45;margin:6px 0 12px">Tem pedido aguardando na <b>Entrega</b>. Se a carne desta nota é dele, confirme a entrega também — senão o pedido fica como <b>atrasado</b> no Painel.</div>'
+      + pares.map(({ l, ped }) => '<div class="ecnf-item" data-prov="' + ped.id + '" style="border:1px solid var(--b2);border-radius:12px;padding:10px;margin-bottom:8px">'
+        + '<div style="font-size:12.5px;font-weight:800;color:var(--t1)">' + CARNES_NF_ROTULO[l.corte] + '</div>'
+        + '<div style="font-size:11px;color:var(--t2);margin:2px 0 8px">Nota ' + escapeHtml(String(l.nf)) + ': <b>' + kg(l.qtd) + ' kg</b> · Pedido: <b>' + kg(ped.qtd_prevista) + ' kg</b> · ' + dm(ped.data_entrega) + ' · ' + escapeHtml(_epForn(ped)) + '</div>'
+        + '<button class="ecnf-ir" onclick="_irConfirmarEntregaCarne(\'' + ped.id + '\',' + (parseFloat(l.qtd) || 0) + ',\'' + escapeHtml(_epForn(ped)).replace(/'/g, '') + '\')" style="width:100%;background:#047857;border:none;border-radius:10px;color:#fff;padding:9px;font-size:12px;font-weight:800;font-family:inherit;cursor:pointer">✅ É esse pedido — confirmar na Entrega</button></div>').join('')
+      + '<button class="ecnf-nao" onclick="document.getElementById(\'modalEntregaCarneNF\').remove()" style="width:100%;background:none;border:1px solid var(--b2);border-radius:10px;color:var(--t2);font-weight:700;font-size:12px;padding:9px;font-family:inherit;cursor:pointer">Não é de pedido (compra avulsa)</button>'
+      + '</div>';
+    modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+    document.body.appendChild(modal);
+  } catch (e) { /* a pergunta é ajuda, nunca trava o lançamento da nota */ }
+}
+// Vai pra Entrega com o pedido aberto, a quantidade da nota no campo e o item em destaque.
+// A confirmação é a de sempre (pede a nota, mostra o "tem certeza").
+function _irConfirmarEntregaCarne(id, qtd, forn) {
+  document.getElementById('modalEntregaCarneNF')?.remove();
+  _epGruposAbertos.add('ep_pend_' + String(forn || '').replace(/[^a-z0-9]/gi, '_'));
+  goTab('entrega');
+  if (tab !== 'entrega') return;   // alguma trava não deixou trocar de aba
+  let n = 0;
+  const tentar = () => {
+    const el = document.getElementById('ep_qtd_' + id);
+    if (!el) { if (++n < 40) setTimeout(tentar, 150); else showToast('⚠️ O pedido não apareceu na Entrega — toque em ↻ Atualizar.'); return; }
+    const p = (provisoesEntrega || []).find(x => x.id === id);
+    if (p) _epGruposAbertos.add('ep_pend_' + _epForn(p).replace(/[^a-z0-9]/gi, '_'));
+    const grupo = el.closest('.ep-grupo'); if (grupo && !grupo.classList.contains('aberto')) grupo.classList.add('aberto');
+    el.value = qtd;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    const card = el.closest('div[style*="border-bottom"]') || el.parentElement;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (card) { card.style.transition = 'box-shadow .3s'; card.style.boxShadow = '0 0 0 2px #047857'; setTimeout(() => { card.style.boxShadow = ''; }, 2500); }
+    showToast('📦 Quantidade da nota já no campo — confira e confirme a entrega.');
+  };
+  setTimeout(tentar, 100);
 }
 // ─── RELATÓRIO DE VENCIMENTOS ───────────────────────────────────────────────
 let _showVencimentos = false;
