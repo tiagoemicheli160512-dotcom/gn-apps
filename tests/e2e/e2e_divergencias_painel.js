@@ -78,6 +78,8 @@ const FECH = [
     out.casosBangu = [...document.querySelectorAll('.div-loja[data-loja="BANGU"] .div-caso')].map(c => c.textContent.replace(/\s+/g, ' ').trim());
     const sec = document.getElementById('dash-section');
     out.largura = [document.documentElement.scrollWidth, window.innerWidth];
+    // Alerta do Painel › Atenção: só o que passou de 7 dias, um por loja.
+    out.alertas = _computeAlertas().filter(a => a.tipo === 'diverg').map(a => a.loja + ' | ' + a.msg + ' | ' + a.sub);
     gerarWppDiverg();
     out.wpp = abertos[0] || '';
     return out;
@@ -92,6 +94,10 @@ const FECH = [
   check('Bangu aberta: da mais antiga (05/10) pra mais nova (26/11), com o item e a diferença', r.casosBangu.length === 3 && /^05\/10/.test(r.casosBangu[0]) && /^01\/11/.test(r.casosBangu[1]) && /^26\/11 · NOITE\s*ontem/.test(r.casosBangu[2]) && /Visa Crédito\s*-R\$ 50,00/.test(r.casosBangu[0]) && /Visa Crédito\s*\+R\$ 30,00/.test(r.casosBangu[1]) && !/Total Real/.test(r.casosBangu.join('')), r.casosBangu);
   check('cabe em 360 px sem rolagem de lado', r.largura[0] <= r.largura[1], r.largura);
   check('WhatsApp: lista as lojas, cada caixa e como tirar da lista', /1º Bangu\* — 3 pendentes/.test(r.wpp) && /02\/09 NOITE: Visa Crédito -R\$ 20,00/.test(r.wpp) && /Marcar como identificado/.test(r.wpp) && !/Maglia/.test(r.wpp), r.wpp);
+  check('Atenção: alerta pra Bangu (2 com mais de 7 dias; a de ontem não conta) e Caxias (1; a de 3 dias não conta)',
+    r.alertas.length === 2 && r.alertas.some(a => /^BANGU \| Bangu com 2 divergências de caixa sem identificar há mais de 7 dias \| Mais antiga 05\/10 \(há 53 dias\) · R\$ 80,00/.test(a))
+      && r.alertas.some(a => /^CAXIAS \| Caxias com 1 divergência de caixa sem identificar há mais de 7 dias \| Mais antiga 02\/09 \(há 86 dias\) · R\$ 20,00/.test(a)), r.alertas);
+  check('Atenção: Pedreira (só de hoje) e Maglia sem alerta', !r.alertas.some(a => /^(PEDREIRA|MAGLIA)/.test(a)), r.alertas);
   check('nenhum erro de JavaScript', erros.length === 0, erros);
   console.log(`\n${ok} OK, ${falhou} falhou`); await browser.close(); process.exit(falhou ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });
