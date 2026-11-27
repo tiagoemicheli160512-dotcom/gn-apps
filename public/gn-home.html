@@ -23065,6 +23065,9 @@ function renderDashboard() {
   } else if (_dashTab==='bloqueios') {
     content = _buildBloqueiosPanel();
 
+  } else if (_dashTab==='diverg') {
+    content = _buildDivergPanel();
+
   } else if (_dashTab==='vinculos') {
     content = _buildVinculosNFPanel();
 
@@ -23510,6 +23513,135 @@ function _buildVinculosNFPanel() {
     ${linhas || '<div style="font-size:12px;color:var(--t3);padding:10px 0">Nenhum vínculo criado no período.</div>'}
   </div>`;
 }
+// ── 🚨 DIVERGÊNCIAS DE CAIXA pendentes (27/11/2026) ─────────────────────────────────────
+// "Divergências pendentes por loja, da mais antiga pra mais nova." O Financeiro confere no
+// app de RH; quando sobra diferença, a loja tem que verificar e registrar no Caixa que
+// identificou (📝). O que ninguém registrou fica aqui, SEM filtro de período: pendência de
+// setembro continua pendente. A Home da loja só mostra o caixa de ontem e os últimos 30 dias —
+// o grosso (antigo) não aparecia em lugar nenhum. Maglia fora (não foi citada).
+// A loja de cada caso vem do PRÓPRIO fechamento (gn_caixa_fechamento.loja), não da linha onde
+// a conferência está gravada — havia uma cópia solta de 60 conferências da Caxias na linha
+// "SÃO GONÇALO" (userKey), que contada pela linha viraria pendência falsa de São Gonçalo.
+let _divDados = null, _divCarregando = false, _divAberta = null;
+const _divHojeBR = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+const _divDias = (iso, hoje) => Math.round((new Date(hoje + 'T12:00:00Z') - new Date(String(iso).slice(0, 10) + 'T12:00:00Z')) / 86400000);
+const _divMoney = v => 'R$ ' + (Math.round(Math.abs(v) * 100) / 100).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const _divDif = v => (v > 0 ? '+' : '-') + _divMoney(v);
+function _divItens(conf) {
+  const it = (conf && conf.itens) || {}, out = [];
+  Object.keys(it).forEach(k => {
+    if (k === 'bandeiras') Object.entries(it.bandeiras || {}).forEach(([bk, e]) => out.push({ label: (e && e.label) || bk, dif: +(e && e.dif) || 0 }));
+    else out.push({ label: (it[k] && it[k].label) || k, dif: +(it[k] && it[k].dif) || 0 });
+  });
+  return out.filter(e => Math.abs(e.dif) >= 0.01);
+}
+function _divLojas() { return LOJAS_LISTA.filter(k => k !== 'MAGLIA' && k !== LOJA_TESTE); }
+async function _loadDivergencias() {
+  if (_divCarregando) return;
+  _divCarregando = true;
+  const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+  const lojas = _divLojas();
+  const coms = [...new Set(lojas.map(k => LOJA_COM_KEY[k] || k))];
+  const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=in.(${coms.map(c => '"' + encodeURIComponent(c) + '"').join(',')})&select=loja,conf:all_data->caixa_conferencias`, H, 'diverg:conferencias', null);
+  let dados = null;
+  if (rows) {
+    const confs = {};
+    rows.forEach(r => Object.entries(r.conf || {}).forEach(([id, c]) => { if (c && c.tem_divergencia) confs[id] = c; }));
+    const ids = Object.keys(confs);
+    let fechs = [];
+    for (let i = 0; i < ids.length && fechs; i += 80) {
+      const lote = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_caixa_fechamento?id=in.(${ids.slice(i, i + 80).join(',')})&select=id,loja,data,turno`, H, 'diverg:fechamentos', null);
+      fechs = lote ? fechs.concat(lote) : null;
+    }
+    if (fechs) dados = { confs, fechs };
+  }
+  _divDados = { dados, em: Date.now() };
+  _divCarregando = false;
+  if (_dashTab === 'diverg') renderDashboard();
+}
+// Ranking por loja: mais pendências primeiro; empate → a mais antiga primeiro.
+function _divRanking(dados, hoje) {
+  const por = {};
+  _divLojas().forEach(k => { por[k] = { k, nome: LOJA_DISPLAY[k] || k, pend: [], ident: 0 }; });
+  dados.fechs.forEach(f => {
+    const k = _normLoja(f.loja), x = por[k], c = dados.confs[f.id];
+    if (!x || !c) return;
+    if (c.divergencia_resolvida) { x.ident++; return; }
+    const itens = _divItens(c);
+    x.pend.push({ id: f.id, data: f.data, turno: f.turno, dias: _divDias(f.data, hoje), por: c.conferido_por || '', em: c.conferido_em || '', itens,
+      soma: itens.reduce((t, e) => t + Math.abs(e.dif), 0) });
+  });
+  const rk = Object.values(por);
+  rk.forEach(x => { x.pend.sort((a, b) => String(a.data).localeCompare(String(b.data)) || String(a.turno).localeCompare(String(b.turno)));
+    x.soma = x.pend.reduce((t, p) => t + p.soma, 0); x.antiga = x.pend[0] || null; x.ult7 = x.pend.filter(p => p.dias <= 7).length; });
+  return rk.sort((a, b) => b.pend.length - a.pend.length || (a.antiga && b.antiga ? String(a.antiga.data).localeCompare(String(b.antiga.data)) : 0) || a.nome.localeCompare(b.nome));
+}
+function _divIdadeTxt(d) { return d <= 0 ? 'hoje' : d === 1 ? 'ontem' : `há ${d} dias`; }
+function _divToggle(k) { _divAberta = _divAberta === k ? null : k; renderDashboard(); }
+function _buildDivergPanel() {
+  if (!_divDados || Date.now() - _divDados.em > 120000) _loadDivergencias();
+  if (!_divDados) return _skelPanel(4);
+  if (!_divDados.dados) return '<div style="padding:16px;font-size:12px;color:var(--txt-red)">Não deu pra carregar as divergências agora.</div>';
+  const hoje = _divHojeBR(), rk = _divRanking(_divDados.dados, hoje);
+  const com = rk.filter(x => x.pend.length), sem = rk.filter(x => !x.pend.length);
+  const tot = com.reduce((t, x) => t + x.pend.length, 0), soma = com.reduce((t, x) => t + x.soma, 0);
+  const max = Math.max(1, ...com.map(x => x.pend.length));
+  const corIdade = d => d > 30 ? 'var(--txt-red)' : d > 7 ? 'var(--txt-amber)' : 'var(--t2)';
+  const linhas = com.map((x, i) => {
+    const ab = _divAberta === x.k;
+    return `<div class="div-loja" data-loja="${x.k}" style="border-top:1px solid var(--b1)">
+      <div onclick="_divToggle('${x.k}')" style="display:flex;align-items:center;gap:10px;padding:9px 2px;cursor:pointer">
+        <div style="width:24px;text-align:center;font-size:12px;font-weight:900;color:${i < 3 ? 'var(--txt-red)' : 'var(--t3)'}">${i + 1}º</div>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
+            <span style="font-size:12.5px;font-weight:800;color:var(--t1)">${window.escapeHtml(x.nome)}</span>
+            <span class="div-pend" style="font-size:13px;font-weight:900;color:var(--txt-red);white-space:nowrap">${x.pend.length} pendente${x.pend.length === 1 ? '' : 's'}</span>
+          </div>
+          <div style="height:6px;background:var(--fill-sutil);border-radius:4px;margin:4px 0 3px;overflow:hidden"><div style="height:100%;width:${Math.round(x.pend.length / max * 100)}%;background:#dc2626;border-radius:4px"></div></div>
+          <div class="div-resumo" style="font-size:10.5px;color:var(--t3)">Mais antiga: <b style="color:${corIdade(x.antiga.dias)}">${_carnesDM(x.antiga.data)} (${_divIdadeTxt(x.antiga.dias)})</b> · ${_divMoney(x.soma)} em diferenças${x.ult7 ? ` · ${x.ult7} na última semana` : ''} · ${x.ident} já identificada${x.ident === 1 ? '' : 's'}</div>
+        </div>
+        <span style="color:var(--t3);font-size:12px">${ab ? '▾' : '▸'}</span>
+      </div>
+      ${ab ? `<div class="div-casos" style="padding:0 4px 10px 36px">${x.pend.map(p => `<div class="div-caso" style="padding:5px 0;border-bottom:1px dashed var(--b1)">
+          <div style="display:flex;justify-content:space-between;gap:8px;font-size:11.5px"><b style="color:var(--t1)">${_carnesDM(p.data)} · ${window.escapeHtml(p.turno || '')}</b><span style="color:${corIdade(p.dias)};font-weight:800;white-space:nowrap">${_divIdadeTxt(p.dias)}</span></div>
+          ${p.itens.map(e => `<div style="display:flex;justify-content:space-between;gap:8px;font-size:10.5px;color:var(--t2)"><span>${window.escapeHtml(e.label)}</span><b style="white-space:nowrap">${_divDif(e.dif)}</b></div>`).join('')}
+          ${p.por || p.em ? `<div style="font-size:9.5px;color:var(--t3)">Conferido${p.por ? ' por ' + window.escapeHtml(p.por) : ''}${p.em ? ' em ' + _carnesDM(new Date(p.em).toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })) : ''}</div>` : ''}
+        </div>`).join('')}</div>` : ''}
+    </div>`;
+  }).join('');
+  return _reportBtnsRowHtml('Diverg') +
+    `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:12px 14px;margin-bottom:12px">
+      <div style="font-size:13px;font-weight:800;color:var(--t1)">🚨 Divergências de caixa pendentes</div>
+      <div style="font-size:10.5px;color:var(--t3);line-height:1.5;margin:2px 0 8px">Caixas em que o Financeiro achou diferença e a loja ainda não registrou que identificou (no app Caixa › Fechar › 📝 Marcar como identificado). Todas as datas, da loja com mais pendências pra com menos. Toque na loja pra ver cada caixa, da mais antiga pra mais nova, com o que divergiu.</div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:11.5px;color:var(--t2);margin-bottom:4px"><span class="div-tot"><b style="color:var(--txt-red)">${tot}</b> pendente${tot === 1 ? '' : 's'} na rede</span><span><b>${_divMoney(soma)}</b> em diferenças</span><span><b>${com.length}</b> de ${rk.length} lojas</span></div>
+      ${linhas || '<div style="font-size:12px;color:var(--txt-green);padding:10px 0">✓ Nenhuma divergência pendente.</div>'}
+      ${sem.length && com.length ? `<div class="div-sem" style="font-size:10.5px;color:var(--txt-green);border-top:1px solid var(--b1);padding-top:8px;margin-top:2px">✓ Sem pendência: ${sem.map(x => window.escapeHtml(x.nome)).join(' · ')}</div>` : ''}
+    </div>`;
+}
+function _divRelatorioTexto(wpp) {
+  if (!_divDados || !_divDados.dados) return null;
+  const hoje = _divHojeBR(), rk = _divRanking(_divDados.dados, hoje), com = rk.filter(x => x.pend.length);
+  const b = t => wpp ? '*' + t + '*' : t;
+  const tot = com.reduce((t, x) => t + x.pend.length, 0);
+  let msg = `${b('🚨 Divergências de caixa pendentes')} — ${_carnesDM(hoje)}\n${tot} caixa${tot === 1 ? '' : 's'} sem identificação · ${_divMoney(com.reduce((t, x) => t + x.soma, 0))} em diferenças\n`;
+  com.forEach((x, i) => {
+    msg += `\n${b((i + 1) + 'º ' + x.nome)} — ${x.pend.length} pendente${x.pend.length === 1 ? '' : 's'} · mais antiga ${_carnesDM(x.antiga.data)} (${_divIdadeTxt(x.antiga.dias)})\n`;
+    x.pend.forEach(p => { msg += `   ${_carnesDM(p.data)} ${p.turno || ''}: ${p.itens.map(e => e.label + ' ' + _divDif(e.dif)).join(', ')}\n`; });
+  });
+  const sem = rk.filter(x => !x.pend.length);
+  if (sem.length) msg += `\n${b('Sem pendência')}: ${sem.map(x => x.nome).join(', ')}\n`;
+  msg += `\nPara tirar da lista: app Caixa › Fechar › 📝 Marcar como identificado.\n`;
+  return { msg, titulo: 'Divergências de caixa pendentes — ' + _carnesDM(hoje), com, tot };
+}
+function gerarWppDiverg() { const r = _divRelatorioTexto(true); if (!r) { alert('Aguarde os dados carregarem.'); return; } window.open('https://wa.me/?text=' + encodeURIComponent(r.msg), '_blank'); }
+function gerarPDFDiverg() {
+  const r = _divRelatorioTexto(false); if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  window.gnRelatorioPDF({ titulo: r.titulo, texto: r.msg.split('\n').slice(1).join('\n'),
+    kpis: [{ label: 'Pendentes na rede', valor: String(r.tot), sub: r.com.length + ' lojas' },
+           { label: 'Mais pendências', valor: r.com[0] ? r.com[0].nome : '—', sub: r.com[0] ? r.com[0].pend.length + ' caixas' : '' }] });
+}
+async function enviarPDFDivergWpp() { await _pdfWppComo(gerarPDFDiverg); }
+
 let _acompNode = null;
 // Home da loja (25–26/11/2026, "a home que falo é essa das lojas"): gerentes e subgerentes
 // acompanham a própria unidade; o mestre, a loja que está navegando. Mesma tela e mesma
@@ -23542,7 +23674,7 @@ function _buildAcompPanel() {
 }
 const DASH_GRUPOS = [
   { g: 'vendas',   rot: '📈 Vendas',   abas: [['fat', '↓ Faturamento'], ['att', '⚠ Atenção'], ['bi', '📊 BI'], ['metas', '⚙ Metas']] },
-  { g: 'caixa',    rot: '🧾 Caixa',    abas: [['cancel', '🧾 Cancel. e transf.'], ['sem10', '💸 Sem 10%']] },
+  { g: 'caixa',    rot: '🧾 Caixa',    abas: [['diverg', '🚨 Divergências'], ['cancel', '🧾 Cancel. e transf.'], ['sem10', '💸 Sem 10%']] },
   { g: 'equipe',   rot: '👥 Equipe',   abas: [['presenca', '👤 Presença'], ['folgas', '📅 Folgas'], ['ocorr', '⚠ Ocorrências'], ['ferias', '🏖 Férias'], ['xadrez', '🔀 Xadrez'], ['banco', '⏱ Banco'], ['extra', '👷 Extra']] },
   { g: 'operacao', rot: '🛠 Operação', abas: [['acomp', '📊 Acompanhamento'], ['bloqueios', '🔒 Bloqueios'], ['vinculos', '🔗 Vínculos NF'], ['barris', '🍺 Barris'], ['carnes', '🥩 Carnes'], ['vendidos', '🧾 Vendidos'], ['avarias', '⚠️ Avarias'], ['trios', '🎵 Trios'], ['semlanc', '✅ Validações'], ['utensent', '🍴 Utensílios'], ['emprest', '⇄ Transferências']] },
   { g: 'dre',      rot: '💰 DRE',      abas: [['dre', '💰 DRE']] },

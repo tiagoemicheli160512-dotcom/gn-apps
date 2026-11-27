@@ -80,12 +80,13 @@ const estado = page => page.evaluate(() => {
     // 26/11/2026: + 'acomp' (Operação › 📊 Acompanhamento diário de carnes e bebidas) — 23.
     // 26/11/2026: + 'bloqueios' (Operação › 🔒 ranking das lojas que mais travaram) — 24.
     // 27/11/2026: + 'vinculos' (Operação › 🔗 conferência dos vínculos de nota) — 25.
-    const esperadas = ['fat', 'att', 'cancel', 'sem10', 'presenca', 'folgas', 'ocorr', 'ferias', 'xadrez', 'bi', 'acomp', 'bloqueios', 'vinculos', 'barris', 'carnes', 'vendidos', 'avarias', 'trios', 'semlanc', 'utensent', 'emprest', 'banco', 'extra', 'dre', 'metas'];
-    check('as 25 abas (24 de antes + Vínculos NF) estão nos grupos, cada uma uma vez só', ids.length === 25 && esperadas.every(x => ids.filter(y => y === x).length === 1), JSON.stringify(ids));
+    // 27/11/2026: + 'diverg' (Caixa › 🚨 divergências do Financeiro pendentes) — 26.
+    const esperadas = ['fat', 'att', 'diverg', 'cancel', 'sem10', 'presenca', 'folgas', 'ocorr', 'ferias', 'xadrez', 'bi', 'acomp', 'bloqueios', 'vinculos', 'barris', 'carnes', 'vendidos', 'avarias', 'trios', 'semlanc', 'utensent', 'emprest', 'banco', 'extra', 'dre', 'metas'];
+    check('as 26 abas (25 de antes + Divergências) estão nos grupos, cada uma uma vez só', ids.length === 26 && esperadas.every(x => ids.filter(y => y === x).length === 1), JSON.stringify(ids));
     // Cada aba abre e marca o grupo certo.
     const r = await page.evaluate(esp => esp.map(t => { _setDashTab(t); const on = document.querySelector('.dash-grupo.on'); const aba = document.querySelector('#dash-tabs .dash-tab.on');
       return { t, grupo: on && on.dataset.grupo, abaOk: _dashGrupoDe(t).abas.length < 2 || !!aba }; }), esperadas);
-    check('abrir qualquer aba acende o grupo dela e marca a aba', r.every(x => x.grupo === (({ fat: 'vendas', att: 'vendas', bi: 'vendas', metas: 'vendas', cancel: 'caixa', sem10: 'caixa', dre: 'dre', acomp: 'operacao', bloqueios: 'operacao', vinculos: 'operacao', barris: 'operacao', carnes: 'operacao', vendidos: 'operacao', avarias: 'operacao', trios: 'operacao', semlanc: 'operacao', utensent: 'operacao', emprest: 'operacao' })[x.t] || 'equipe') && x.abaOk), JSON.stringify(r));
+    check('abrir qualquer aba acende o grupo dela e marca a aba', r.every(x => x.grupo === (({ fat: 'vendas', att: 'vendas', bi: 'vendas', metas: 'vendas', diverg: 'caixa', cancel: 'caixa', sem10: 'caixa', dre: 'dre', acomp: 'operacao', bloqueios: 'operacao', vinculos: 'operacao', barris: 'operacao', carnes: 'operacao', vendidos: 'operacao', avarias: 'operacao', trios: 'operacao', semlanc: 'operacao', utensent: 'operacao', emprest: 'operacao' })[x.t] || 'equipe') && x.abaOk), JSON.stringify(r));
     await ctx.close();
   }
 
