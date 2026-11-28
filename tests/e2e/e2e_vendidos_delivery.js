@@ -59,7 +59,10 @@ async function abrir(browser, linhas) {
   check('a tela de assinar também mostra o delivery', /dos quais no delivery \(iFood \+ 99\): Carne de Sol 1,6 kg · Coca 12 un/.test(ass), ass.slice(0, 300));
   await a.page.fill('#gv-nome', 'Rayanne'); await a.page.fill('#gv-senha', '1'); await a.page.click('#gv-ok');
   for (let i = 0; i < 100 && !a.banco.posts.length; i++) await a.page.waitForTimeout(100);   // espera o envio de verdade
-  if (!a.banco.posts.length) console.log('   (diagnóstico) nada enviado; tela:', await a.page.evaluate(() => { const o = document.getElementById('gn-vend-overlay'); return o ? o.innerText.replace(/\s+/g, ' ').slice(0, 300) : 'sem overlay'; }));
+  // Falhou no CI 1× (28/11/2026) com tudo "{}" — nada tinha sido enviado ainda, mas o motivo
+  // ficava só no log bruto. Agora é uma verificação própria, com a tela e os erros no resumo.
+  const telaAss = a.banco.posts.length ? '' : await a.page.evaluate(() => { const o = document.getElementById('gn-vend-overlay'); return o ? o.innerText.replace(/\s+/g, ' ').slice(0, 300) : 'sem overlay'; });
+  check('a assinatura envia o lançamento (em até 10 s)', a.banco.posts.length > 0, { tela: telaAss, erros: a.erros.slice(0, 3) });
   const b = a.banco.posts[0] || {};
   const it = b.itens || {};
   check('grava q = salão + delivery e qd = delivery (carne de sol 14 / 4; Coca 42 / 12)', it.p_cs2 && it.p_cs2.q === 14 && it.p_cs2.qd === 4 && it.coca_lata.q === 42 && it.coca_lata.qd === 12, it);
