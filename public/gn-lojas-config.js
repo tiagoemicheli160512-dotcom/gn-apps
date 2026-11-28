@@ -486,6 +486,82 @@ window.gnDeleteFotoStorage = async function(supaUrl, supaKey, url) {
 
 // Escapa texto livre antes de inserir em innerHTML (nomes, observações, motivos etc.)
 // — evita que caracteres como <, >, & quebrem o layout ou injetem HTML.
+// Redesenho automático sem atropelar quem está usando (28/11/2026).
+// Vários apps redesenham a tela inteira sozinhos (sincronização a cada 20–25 s, alerta a cada
+// 15 s, carga do Painel terminando): o que estava sendo DIGITADO sumia (pool do rateio, Campo
+// Grande) e a leitura voltava pro topo. gnPreservarUI(container, redesenhar) guarda o campo em
+// que a pessoa está — valor, cursor, foco — e a rolagem da página; redesenha; e devolve. Só o
+// campo FOCADO é preservado: depois de um clique em "Salvar"/"Criar" o foco já saiu do campo, e
+// o redesenho que limpa o formulário de propósito continua limpando.
+window.gnPreservarUI = function (container, redesenhar, opts) {
+  opts = opts || {};
+  var chave = function (el) {
+    if (el.id) return '#' + el.id;
+    var dono = el.closest && el.closest('[data-id],[data-loja],[data-k]');
+    var base = dono ? (dono.getAttribute('data-id') || dono.getAttribute('data-loja') || dono.getAttribute('data-k')) : '';
+    var attrs = Array.prototype.filter.call(el.attributes, function (a) { return a.name.indexOf('data-') === 0; })
+      .map(function (a) { return a.name + '=' + a.value; }).join(',');
+    return [base, el.tagName, el.className, attrs, el.name || '', el.placeholder || ''].join('|');
+  };
+  var achar = function (raiz, k, n) {
+    var achados = Array.prototype.filter.call(raiz.querySelectorAll('input,textarea,select'), function (x) { return chave(x) === k; });
+    return achados[n] || null;
+  };
+  var foco = null, ae = document.activeElement;
+  try {
+    // Só campo de DIGITAR (ver gnDigitandoEm): seletor, data e caixa de marcar mudam com um toque e
+    // o redesenho tem que mostrar o valor novo — devolver o antigo desfazia a escolha (mês do Painel).
+    if (container && ae && ae !== document.body && container.contains(ae) && window.gnDigitandoEm && window.gnDigitandoEm(container)) {
+      var k = chave(ae);
+      var irmaos = Array.prototype.filter.call(container.querySelectorAll('input,textarea,select'), function (x) { return chave(x) === k; });
+      foco = { k: k, n: irmaos.indexOf(ae), v: ae.value, c: ae.checked, s: null, e: null };
+      try { foco.s = ae.selectionStart; foco.e = ae.selectionEnd; } catch (e) {}
+    }
+  } catch (e) { foco = null; }
+  var sx = window.scrollX, sy = window.scrollY;
+  redesenhar();
+  try {
+    if (foco && container) {
+      var el = achar(container, foco.k, Math.max(0, foco.n));
+      if (el) {
+        if (el.type === 'checkbox' || el.type === 'radio') el.checked = foco.c;
+        else if (el.value !== foco.v) el.value = foco.v;
+        el.focus({ preventScroll: true });
+        try { if (foco.s != null) el.setSelectionRange(foco.s, foco.e); } catch (e) {}
+      }
+    }
+    if (opts.rolagem !== false && Math.abs(window.scrollY - sy) > 1) window.scrollTo(sx, sy);
+  } catch (e) {}
+};
+
+// Adiar o redesenho automático enquanto a pessoa DIGITA (28/11/2026). Redesenhar tira o campo
+// da tela — e o navegador trata isso como "saiu do campo": o app gravava o valor pela metade
+// (pool do rateio: 1500 em vez de 15000). Se há um campo de digitação focado dentro do
+// container, não redesenha agora: marca e refaz logo depois que a pessoa sair do campo.
+// Seletor, caixa de marcar e data não contam — mudam com um toque e têm que refletir na hora.
+window.gnDigitandoEm = function (container) {
+  var a = document.activeElement;
+  if (!container || !a || a === document.body || !container.contains(a)) return false;
+  if (a.tagName === 'TEXTAREA') return true;
+  if (a.tagName !== 'INPUT') return false;
+  return ['text', 'search', 'number', 'tel', 'email', 'url', 'password', ''].indexOf(String(a.type || '').toLowerCase()) >= 0;
+};
+window.gnAdiarSeDigitando = function (container, refazer) {
+  if (!window.gnDigitandoEm(container)) return false;
+  if (!container.__gnAdiado) {
+    container.__gnAdiado = true;
+    container.addEventListener('focusout', function aoSair() {
+      setTimeout(function () {
+        if (window.gnDigitandoEm(container)) return;            // pulou pra outro campo: espera mais
+        container.removeEventListener('focusout', aoSair);
+        container.__gnAdiado = false;
+        try { refazer(); } catch (e) {}
+      }, 0);
+    });
+  }
+  return true;
+};
+
 window.escapeHtml = function(str) {
   if (str == null) return '';
   return String(str)

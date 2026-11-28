@@ -1093,6 +1093,7 @@ let _dashFat     = null; // {lojaKey: total} for selected period
 let _dashFatPrev = null; // {lojaKey: total} for previous period
 let _dashManut7 = {};        // manutenções pendentes há 7 dias, por loja (tendência)
 let _dashCaixaSemConf7 = {}; // caixas sem conferência há 7 dias, por loja (tendência)
+let _dashUltimaAba = null;   // aba do último redesenho do Painel (pra saber se é a mesma)
 let _dashFatPrevFeriados = []; // feriados nacionais nos dias comparados do período anterior (e não no atual)
 let _dashFatComp = null; // {lojaKey: total} do período ATUAL só com os dias já fechados (sem hoje) — é o que se compara com _dashFatPrev
 let _dashFatPrevParcial = false; // true quando _dashFatPrev foi cortado nos mesmos dias já decorridos do período atual
@@ -6757,7 +6758,7 @@ function _mostrarAlertaUrgenteOverlay() {
   }).join('');
   // "Resolver todos" saiu: confirmar leitura em lote é o contrário do que a mudança quer —
   // cada aviso tem que ser lido um a um, e cada pessoa confirma a sua.
-  el.innerHTML = `<div class="alerta-urgente-banner">
+  const _htmlAlerta = `<div class="alerta-urgente-banner">
     <div class="titulo">${_alertasUrgentesAtivos.length > 1 ? _alertasUrgentesAtivos.length + ' avisos pra ler' : 'Aviso pra ler'}</div>
     ${itensHtml}
     <div style="color:#fff;opacity:.8;font-size:10px;line-height:1.45;margin-top:10px;border-top:1px solid rgba(255,255,255,.25);padding-top:9px">
@@ -6765,6 +6766,15 @@ function _mostrarAlertaUrgenteOverlay() {
       o aviso só é encerrado quando todos os destinatários lerem.
     </div>
   </div>`;
+  // A checagem roda a cada 15 s. Reescrever o aviso igual jogava a leitura de volta pro topo
+  // (28/11/2026: "quando atualiza volta lá pro início"). Só redesenha se mudou algo, e aí
+  // devolve a rolagem de onde a pessoa estava lendo.
+  if (el._htmlAlerta !== _htmlAlerta) {
+    const ban = el.querySelector('.alerta-urgente-banner'), topBan = ban ? ban.scrollTop : 0, topEl = el.scrollTop;
+    el.innerHTML = _htmlAlerta; el._htmlAlerta = _htmlAlerta;
+    const ban2 = el.querySelector('.alerta-urgente-banner');
+    if (ban2) ban2.scrollTop = topBan; el.scrollTop = topEl;
+  }
 }
 
 function _esconderAlertaUrgenteOverlay() {
@@ -18869,6 +18879,19 @@ async function _vendCadSalvar(btn) {
   try { await _vendCadGravar([it]); renderDashboard(); }
   catch (e) { (window.gnLogError || (() => {}))('vendidos:cadastro', e); alert('Não deu pra salvar agora. Tente de novo.'); btn.disabled = false; btn.textContent = 'Salvar'; }
 }
+// Item novo vai pro FIM do grupo (28/11/2026). Antes nascia com ordem 99 — e os que vinham das
+// fichas com 1, 2, 3…, que caíam no meio dos já cadastrados ("o prato novo sobe pro topo").
+function _vendProxOrdem(grupo) {
+  const cad = (_vendGerData && _vendGerData.cadastro) || [];
+  return cad.filter(c => c.grupo === grupo).reduce((m, c) => Math.max(m, +c.ordem || 0), 0) + 1;
+}
+// Depois de criar: leva a tela até o item novo e põe o cursor no primeiro campo a preencher,
+// em vez de deixar a pessoa procurando onde ele foi parar.
+function _vendIrParaItem(id) {
+  const box = document.querySelector(`.vc-item[data-id="${id}"]`); if (!box) return;
+  box.scrollIntoView({ block: 'center' });
+  const campo = box.querySelector('.vc-g, .vc-ml, .vc-nome'); if (campo) campo.focus({ preventScroll: true });
+}
 async function _vendCadNovo() {
   if (!_vendPodeEditar()) return;
   const grupo = document.getElementById('vc-novo-grupo').value, nome = document.getElementById('vc-novo-nome').value.trim();
@@ -18876,8 +18899,15 @@ async function _vendCadNovo() {
   const id = grupo + '_' + Date.now().toString(36);
   // Nasce INATIVO quando ainda falta dado (gramatura/ml): não entra no formulário das lojas
   // até alguém completar e marcar ativo — senão a loja lançaria prato que não pesa nada.
-  const it = { id, grupo, nome, ativo: grupo === 'coca', gramas: {}, ml: grupo === 'chopp' ? null : null, chopp_tipo: grupo === 'chopp' ? 'CLARO' : null, ordem: 99, codigo_pdv: null };
-  try { await _vendCadGravar([it]); _vendCadAberto = true; renderDashboard(); }
+  const it = { id, grupo, nome, ativo: grupo === 'coca', gramas: {}, ml: grupo === 'chopp' ? null : null, chopp_tipo: grupo === 'chopp' ? 'CLARO' : null, ordem: _vendProxOrdem(grupo), codigo_pdv: null };
+  try {
+    await _vendCadGravar([it]); _vendCadAberto = true;
+    const campoNome = document.getElementById('vc-novo-nome'); if (campoNome) campoNome.value = '';
+    // Ação da pessoa: redesenha já (o adiamento de gnAdiarSeDigitando é pra recarga no fundo).
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    renderDashboard();
+    _vendIrParaItem(id);
+  }
   catch (e) { alert('Não deu pra criar agora. Tente de novo.'); }
 }
 
@@ -18953,7 +18983,8 @@ async function _vendSugAdicionar() {
   if (!marc.length) { alert('Marque pelo menos um prato.'); return; }
   const susp = marc.map(x => ({ x, g: _vendGramasSuspeitas(x.gramas) })).filter(y => y.g.length);
   if (susp.length && !confirm(`⚠ Gramatura muito baixa (abaixo de ${VEND_GRAMA_MIN} g — quase sempre erro de digitação na ficha):\n\n${susp.map(y => '• ' + y.x.nome + ': ' + y.g.join(', ')).join('\n')}\n\nAdicionar assim mesmo? (Dá pra corrigir depois no cadastro.)`)) return;
-  const itens = marc.map((x, k) => ({ id: 'prato_' + x.cod, grupo: 'prato', nome: x.nome, codigo_pdv: x.cod, gramas: x.gramas, ativo: true, ordem: k + 1, ml: null, chopp_tipo: null }));
+  const base = _vendProxOrdem('prato');
+  const itens = marc.map((x, k) => ({ id: 'prato_' + x.cod, grupo: 'prato', nome: x.nome, codigo_pdv: x.cod, gramas: x.gramas, ativo: true, ordem: base + k, ml: null, chopp_tipo: null }));
   try { await _vendCadGravar(itens); _vendSugestoes = null; _vendCadAberto = true; renderDashboard(); }
   catch (e) { alert('Não deu pra adicionar agora. Tente de novo.'); }
 }
@@ -22942,6 +22973,9 @@ function _dashCardDetalhe(k, html) {
 function renderDashboard() {
   const el = document.getElementById('dash-section');
   if (!el || el.style.display === 'none') return;
+  // Alguém digitando num campo do Painel (gramatura, meta, DRE…): o redesenho espera ele sair
+  // do campo — senão o que foi digitado some (28/11/2026). Ver gnAdiarSeDigitando.
+  if (window.gnAdiarSeDigitando && window.gnAdiarSeDigitando(el, renderDashboard)) return;
   _loadMetas();
   // O Painel inteiro é UMA atribuição de innerHTML. Qualquer card que estourasse levava o
   // painel todo junto — a tela ficava vazia, sem título, sem erro visível, e só voltava com
@@ -23278,7 +23312,7 @@ function renderDashboard() {
   const updTxt = _dashLoadedAt
     ? `${String(_dashLoadedAt.getHours()).padStart(2,'0')}:${String(_dashLoadedAt.getMinutes()).padStart(2,'0')}`
     : null;
-  el.innerHTML=`
+  const _dashHtml=`
     <div class="dash-wrap">
       <div class="dash-titulo" style="display:flex;align-items:center;gap:10px;padding:12px 0 14px;border-bottom:1px solid rgba(0,0,0,.06);margin-bottom:14px">
         <span class="dash-titulo-ico" style="width:32px;height:32px;border-radius:10px;background:rgba(250,204,21,.12);border:1px solid rgba(250,204,21,.22);display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">📊</span>
@@ -23308,6 +23342,14 @@ function renderDashboard() {
       ${(_dashTab!=='metas'&&_dashTab!=='folgas'&&_dashTab!=='semlanc'&&_dashTab!=='utensent'&&_dashTab!=='emprest'&&_dashTab!=='ferias'&&_dashTab!=='xadrez'&&_dashTab!=='barris'&&_dashTab!=='carnes'&&_dashTab!=='acomp'&&_dashTab!=='vendidos'&&_dashTab!=='bi'&&_dashTab!=='trios'&&_dashTab!=='banco'&&_dashTab!=='extra'&&_dashTab!=='dre')?periodRow:''}
       ${content}
     </div>`;
+  // Redesenho sem atropelar quem está usando (28/11/2026): carga que termina no fundo,
+  // salvar de outro card etc. redesenham o Painel inteiro — o campo que estava sendo digitado
+  // (ex.: gramatura no cadastro dos Vendidos) voltava vazio. Mantém o campo focado e, na
+  // MESMA aba, a rolagem; trocar de aba continua indo pra onde a aba nova manda.
+  const _mesmaAba = _dashUltimaAba === _dashTab;
+  if (window.gnPreservarUI) window.gnPreservarUI(el, () => { el.innerHTML = _dashHtml; }, { rolagem: _mesmaAba });
+  else el.innerHTML = _dashHtml;
+  _dashUltimaAba = _dashTab;
   _dashTabsDepoisDeDesenhar();
   _painelTopoOrganizar();
   _updateHdrBell();
