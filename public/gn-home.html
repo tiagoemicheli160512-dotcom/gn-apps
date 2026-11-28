@@ -1091,6 +1091,8 @@ function _dashSemanaOff() {
 function _dashMetaDe(k) { return _metaMensalPara(_dashMetas[k] || 0, (_dashRangeOf(_dashOff()) || {}).dates); }
 let _dashFat     = null; // {lojaKey: total} for selected period
 let _dashFatPrev = null; // {lojaKey: total} for previous period
+let _dashManut7 = {};        // manutenções pendentes há 7 dias, por loja (tendência)
+let _dashCaixaSemConf7 = {}; // caixas sem conferência há 7 dias, por loja (tendência)
 let _dashFatPrevFeriados = []; // feriados nacionais nos dias comparados do período anterior (e não no atual)
 let _dashFatComp = null; // {lojaKey: total} do período ATUAL só com os dias já fechados (sem hoje) — é o que se compara com _dashFatPrev
 let _dashFatPrevParcial = false; // true quando _dashFatPrev foi cortado nos mesmos dias já decorridos do período atual
@@ -6839,21 +6841,35 @@ function _manutParadasDaLoja(chkRows, lojaAllData, hojeISO, old5) {
 // itens do RH (37 contra 72 em 07/11/2026).
 // manutRows: checklist_diario dos últimos 30 dias (data desc), com `loja`.
 // lojasOfRows: gn_lojas com `loja` (chave de comissões) e all_data.manut_oficial_items.
+// Tendência de um acúmulo (28/11/2026): "28" sozinho não diz se a loja está zerando ou
+// acumulando. Compara com o que havia 7 dias atrás, com os mesmos dados.
+const TEND_DIAS = 7;
+function _isoMenosDias(iso, n) { const d = new Date(iso + 'T12:00:00'); d.setDate(d.getDate() - n); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+function _tendTxt(agora, antes) {
+  if (antes == null || isNaN(antes)) return '';
+  const d = agora - antes;
+  return d < 0 ? ` · ▼ ${-d} em ${TEND_DIAS} dias` : d > 0 ? ` · ▲ ${d} em ${TEND_DIAS} dias` : ` · = igual há ${TEND_DIAS} dias`;
+}
 function _manutRedeResumo(manutRows, lojasOfRows, hojeISO) {
   const old5 = new Date(); old5.setDate(old5.getDate() - 5);
   const chkPor = {}, allPor = {};
   (manutRows || []).forEach(r => { const k = _normLoja(r.loja); (chkPor[k] = chkPor[k] || []).push(r); });
   (lojasOfRows || []).forEach(lr => { const k = _COM_KEY_TO_LOJA[lr.loja]; if (k) allPor[k] = lr.all_data || {}; });
-  const porLoja = {}, paradaPorLoja = {};
+  const porLoja = {}, paradaPorLoja = {}, porLoja7 = {};
+  const d7 = _isoMenosDias(hojeISO, TEND_DIAS);
   let total = 0, paradas = 0;
   LOJAS_LISTA.forEach(k => {
     const pend = _manutPendentesDaLoja(chkPor[k], allPor[k], hojeISO);
     const par = pend.filter(m => m._data && new Date(m._data + 'T00:00:00') < old5).length;
     porLoja[k] = pend.length; total += pend.length;
+    // Há 7 dias: o check-list até aquele dia; item do RH só se já existia (o RH não guarda
+    // QUANDO resolveu — resolvido depois conta como resolvido nos dois lados).
+    const ofic = (allPor[k] && Array.isArray(allPor[k].manut_oficial_items)) ? { manut_oficial_items: allPor[k].manut_oficial_items.filter(m => !m.created_at || m.created_at.slice(0, 10) <= d7) } : {};
+    porLoja7[k] = _manutPendentesDaLoja((chkPor[k] || []).filter(r => r.data_operacao <= d7), ofic, d7).length;
     if (par) paradaPorLoja[k] = par;
     paradas += par;
   });
-  return { porLoja, total, paradaPorLoja, paradas };
+  return { porLoja, total, paradaPorLoja, paradas, porLoja7 };
 }
 // Busca e calcula uma vez por minuto: o chip e o atalho pedem juntos ao abrir a Home.
 let _manutRedeCache = null;
@@ -13418,6 +13434,7 @@ async function _loadDashAll() {
     _dashFeriasTodas = feriasTodas;
 
     _dashManut = _manutRede.porLoja;
+    _dashManut7 = _manutRede.porLoja7 || {};
     _dashChk   = new Set((chkRows||[]).map(r=>_normLoja(r.loja)).filter(l=>LOJAS_LISTA.includes(l)));
 
     // Buffet/rodízio: soma as quantidades de todos os caixas (os dois turnos) do período
@@ -13599,6 +13616,19 @@ async function _loadDashAll() {
       caixaSemConferencia[lk].push({ data: r.data, turno: r.turno });
     });
     _dashCaixaSemConferencia = caixaSemConferencia;
+    // Tendência: quantos estavam sem conferência há 7 dias — mesma janela de baixo (30 dias),
+    // prazo de 3 dias contado daquela data, e conferência feita DEPOIS dela ainda não valia.
+    const old3ISO7 = _isoMenosDias(old3ISO, TEND_DIAS), d7ISO = _isoMenosDias(hoje, TEND_DIAS);
+    const caixaSemConf7 = {};
+    (caixaFechadosRows||[]).forEach(r=>{
+      const lk = _normLoja(r.loja);
+      if (!LOJAS_LISTA.includes(lk) || r.data > old3ISO7) return;
+      const c = (confPorLojaCom[LOJA_COM_KEY[lk] || lk] || {})[r.id];
+      if (c && c.conferido_em && new Date(c.conferido_em).toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }) <= d7ISO) return;
+      if (c && !c.conferido_em) return;
+      caixaSemConf7[lk] = (caixaSemConf7[lk] || 0) + 1;
+    });
+    _dashCaixaSemConf7 = caixaSemConf7;
     // Cru do raio-x — ver os `let` lá em cima. Nenhuma consulta nova além de cancelRows.
     _dashComissoesAll = comissoesAllRows || [];
     _dashLojasAll     = lojasOfRows || [];
@@ -21158,7 +21188,7 @@ function _computeAlertas() {
     // Manutenção numa linha só (28/11/2026): "28 pendentes" e "22 paradas há mais de 5 dias"
     // eram dois alertas da mesma fila. Parada há mais de 5 dias deixa a linha urgente.
     const mPend=_dashManut?(_dashManut[k]||0):0, mPar=_dashManutParada?(_dashManutParada[k]||0):0, mTot=Math.max(mPend,mPar);
-    if(mTot>0) alerts.push({sev:mPar>0?0:1,cor:mPar>0?'#ef4444':'#f97316',ico:'🔧',tipo:'manut',msg:`${nome} com ${mTot} manut. pendente${mTot>1?'s':''}${mPar>0?` · ${mPar} parada${mPar>1?'s':''} há mais de 5 dias`:''}`,sub:'Toque no banner de manutenção pra ver',loja:k});
+    if(mTot>0) alerts.push({sev:mPar>0?0:1,cor:mPar>0?'#ef4444':'#f97316',ico:'🔧',tipo:'manut',msg:`${nome} com ${mTot} manut. pendente${mTot>1?'s':''}${mPar>0?` · ${mPar} parada${mPar>1?'s':''} há mais de 5 dias`:''}${_tendTxt(mPend,_dashManut7[k])}`,sub:'Toque no banner de manutenção pra ver',loja:k});
     if(_dashChk&&!_dashChk.has(k))alerts.push({sev:2,cor:'#60a5fa',ico:'📋',msg:`${nome} sem checklist hoje`,sub:'Checklist do dia não enviado',loja:k});
     if(!v)alerts.push({sev:3,cor:'var(--t4)',ico:'⚠️',msg:`${nome} sem faturamento no período`,sub:'Dados não enviados',loja:k});
     if(_dashXmlPendentes&&_dashXmlPendentes.has(k)) alerts.push({sev:2,cor:'#ef4444',ico:'📄',msg:`${nome} sem XML do mês enviado`,sub:'Pendente pra contabilidade',loja:k});
@@ -21182,7 +21212,7 @@ function _computeAlertas() {
     const contratosLoja=_dashContratosVencendo?(_dashContratosVencendo[k]||[]):[];
     if(contratosLoja.length){const nVenc=contratosLoja.filter(c=>c.vencido).length;alerts.push({sev:nVenc>0?1:2,cor:nVenc>0?'#f87171':'#f59e0b',ico:'📝',msg:`${nome} com ${contratosLoja.length} contrato${contratosLoja.length>1?'s':''} ${nVenc>0?'vencido(s) ou vencendo':'vencendo'}`,sub:contratosLoja.slice(0,3).map(c=>`${c.nome} (${c.vencido?'venceu em':'vence em'} ${c.fimContrato})`).join(' · ')+(contratosLoja.length>3?` +${contratosLoja.length-3}`:''),loja:k});}
     const caixaLoja=_dashCaixaSemConferencia?(_dashCaixaSemConferencia[k]||[]):[];
-    if(caixaLoja.length) alerts.push({sev:2,cor:'#38bdf8',ico:'💰',msg:`${nome} com ${caixaLoja.length} fechamento${caixaLoja.length>1?'s':''} de caixa sem conferência`,sub:caixaLoja.slice(0,3).map(c=>`${c.data} (${c.turno})`).join(' · ')+(caixaLoja.length>3?` +${caixaLoja.length-3}`:''),loja:k});
+    if(caixaLoja.length) alerts.push({sev:2,cor:'#38bdf8',ico:'💰',msg:`${nome} com ${caixaLoja.length} fechamento${caixaLoja.length>1?'s':''} de caixa sem conferência${_tendTxt(caixaLoja.length,_dashCaixaSemConf7[k]||0)}`,sub:caixaLoja.slice(0,3).map(c=>`${c.data} (${c.turno})`).join(' · ')+(caixaLoja.length>3?` +${caixaLoja.length-3}`:''),loja:k});
     const perdidasLoja=_dashVisitasPerdidas?(_dashVisitasPerdidas[k]||[]):[];
     if(perdidasLoja.length) alerts.push({sev:2,cor:'#f59e0b',ico:'📅',msg:`${nome} com ${perdidasLoja.length} visita${perdidasLoja.length>1?'s':''} planejada${perdidasLoja.length>1?'s':''} não confirmada${perdidasLoja.length>1?'s':''}`,sub:'Últimos 14 dias: '+perdidasLoja.slice(0,3).map(d=>d.split('-').reverse().join('/')).join(' · ')+(perdidasLoja.length>3?` +${perdidasLoja.length-3}`:''),loja:k});
   });
@@ -23692,12 +23722,20 @@ async function _loadDivergencias() {
 // Ranking por loja: mais pendências primeiro; empate → a mais antiga primeiro.
 function _divRanking(dados, hoje) {
   const por = {};
-  _divLojas().forEach(k => { por[k] = { k, nome: LOJA_DISPLAY[k] || k, pend: [], ident: 0 }; });
+  _divLojas().forEach(k => { por[k] = { k, nome: LOJA_DISPLAY[k] || k, pend: [], ident: 0, pend7: 0 }; });
   dados.fechs.forEach(f => {
     const k = _normLoja(f.loja), x = por[k], c = dados.confs[f.id];
     if (!x || !c) return;
-    if (c.divergencia_resolvida) { x.ident++; return; }
+    if (c.divergencia_resolvida) {
+      x.ident++;
+      const r = c.divergencia_resolvida, d7 = _isoMenosDias(hoje, TEND_DIAS), dia = iso => iso ? new Date(iso).toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }) : null;
+      // Identificada nos últimos 7 dias → há 7 dias ainda estava pendente.
+      if (c.conferido_em && dia(c.conferido_em) <= d7 && (!r.resolvido_em || dia(r.resolvido_em) > d7)) x.pend7++;
+      return;
+    }
     const itens = _divItens(c);
+    // Pendente há 7 dias: já conferida até lá e ainda sem identificação naquela data.
+    if (c.conferido_em && new Date(c.conferido_em).toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }) <= _isoMenosDias(hoje, TEND_DIAS)) x.pend7++;
     x.pend.push({ id: f.id, data: f.data, turno: f.turno, dias: _divDias(f.data, hoje), por: c.conferido_por || '', em: c.conferido_em || '', itens,
       soma: itens.reduce((t, e) => t + Math.abs(e.dif), 0) });
   });
@@ -23717,7 +23755,7 @@ function _divAlertas(k, nome) {
   if (!velhas.length) return [];
   const soma = velhas.reduce((t, p) => t + p.soma, 0);
   return [{ sev: 1, cor: '#dc2626', ico: '🚨', loja: k, tipo: 'diverg',
-    msg: `${nome} com ${velhas.length} divergência${velhas.length === 1 ? '' : 's'} de caixa sem identificar há mais de ${DIV_ALERTA_DIAS} dias`,
+    msg: `${nome} com ${velhas.length} divergência${velhas.length === 1 ? '' : 's'} de caixa sem identificar há mais de ${DIV_ALERTA_DIAS} dias${_tendTxt(x.pend.length, x.pend7).replace('·', '· total')}`,
     sub: `Mais antiga ${_carnesDM(velhas[0].data)} (${_divIdadeTxt(velhas[0].dias)}) · ${_divMoney(soma)} em diferenças — ver Caixa › 🚨 Divergências` }];
 }
 function _divIdadeTxt(d) { return d <= 0 ? 'hoje' : d === 1 ? 'ontem' : `há ${d} dias`; }
@@ -23742,7 +23780,7 @@ function _buildDivergPanel() {
             <span class="div-pend" style="font-size:13px;font-weight:900;color:var(--txt-red);white-space:nowrap">${x.pend.length} pendente${x.pend.length === 1 ? '' : 's'}</span>
           </div>
           <div style="height:6px;background:var(--fill-sutil);border-radius:4px;margin:4px 0 3px;overflow:hidden"><div style="height:100%;width:${Math.round(x.pend.length / max * 100)}%;background:#dc2626;border-radius:4px"></div></div>
-          <div class="div-resumo" style="font-size:10.5px;color:var(--t3)">Mais antiga: <b style="color:${corIdade(x.antiga.dias)}">${_carnesDM(x.antiga.data)} (${_divIdadeTxt(x.antiga.dias)})</b> · ${_divMoney(x.soma)} em diferenças${x.ult7 ? ` · ${x.ult7} na última semana` : ''} · ${x.ident} já identificada${x.ident === 1 ? '' : 's'}</div>
+          <div class="div-resumo" style="font-size:10.5px;color:var(--t3)"><span class="div-tend" style="font-weight:800;color:${x.pend.length > x.pend7 ? 'var(--txt-red)' : x.pend.length < x.pend7 ? 'var(--txt-green)' : 'var(--t3)'}">${_tendTxt(x.pend.length, x.pend7).replace(/^ · /, '')}</span> · Mais antiga: <b style="color:${corIdade(x.antiga.dias)}">${_carnesDM(x.antiga.data)} (${_divIdadeTxt(x.antiga.dias)})</b> · ${_divMoney(x.soma)} em diferenças${x.ult7 ? ` · ${x.ult7} na última semana` : ''} · ${x.ident} já identificada${x.ident === 1 ? '' : 's'}</div>
         </div>
         <span style="color:var(--t3);font-size:12px">${ab ? '▾' : '▸'}</span>
       </div>
