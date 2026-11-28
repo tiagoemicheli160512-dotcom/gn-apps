@@ -23228,6 +23228,9 @@ function renderDashboard() {
   } else if (_dashTab==='diverg') {
     content = _buildDivergPanel();
 
+  } else if (_dashTab==='nota') {
+    content = _buildNotaPanel();
+
   } else if (_dashTab==='vinculos') {
     content = _buildVinculosNFPanel();
 
@@ -23824,6 +23827,134 @@ function gerarPDFDiverg() {
 }
 async function enviarPDFDivergWpp() { await _pdfWppComo(gerarPDFDiverg); }
 
+// ── 🏆 NOTA DE DISCIPLINA OPERACIONAL (28/11/2026) ──────────────────────────────────────
+// Uma nota de 0 a 100 por loja, juntando o que hoje fica espalhado em várias abas — o que é
+// cobrável DA LOJA (a conferência de caixa é do Financeiro, por isso não entra). Começa em 100
+// e desconta, com teto por item pra um problema só não zerar a nota:
+//   bloqueios na semana · divergência de caixa sem identificar há +7 dias · manutenção parada
+//   há +5 dias · NF da semana fechada · empréstimo com o prazo de 3 dias vencido.
+// Maglia fora (não citada).
+const NOTA_REGRAS = [
+  { k: 'bloq',   rot: '🔒 Bloqueios na semana',                   por: 4, max: 30 },
+  { k: 'diverg', rot: '🚨 Divergências de caixa (+7 dias)',        por: 2, max: 25 },
+  { k: 'manut',  rot: '🔧 Manutenções paradas (+5 dias)',          por: 2, max: 20 },
+  { k: 'nf',     rot: '🧾 NF da semana fechada',                   por: 0, max: 15 },
+  { k: 'emp',    rot: '⇄ Empréstimo com prazo vencido',            por: 5, max: 10 },
+];
+let _notaDados = null, _notaCarregando = false, _notaAberta = null;
+// Loja que está devendo a confirmação de um empréstimo com o prazo de 3 dias vencido (ou null).
+function _emprestDevedorVencido(t, hoje) {
+  if (!t || t.quitado || t.contestacao || t.pagDinheiroAvariaId || t.pagDinheiroOrigem || t.pagDinheiroDestino) return null;
+  if (!!t.confirmadoDestino === !!t.confirmadoOrigem) return null;
+  const devedor = t.confirmadoDestino ? t.origem : t.destino;
+  const marcado = t.confirmadoDestino ? t.confirmadoDestinoEm : t.confirmadoOrigemEm;
+  const DESDE = '2026-11-27';
+  let ini = marcado ? new Date(marcado).toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }) : DESDE;
+  if (ini < DESDE) ini = DESDE;
+  return hoje > _isoMenosDias(ini, -3) ? _normLoja(devedor) : null;
+}
+// Cálculo puro (testável): entradas já carregadas → [{k, nome, nota, itens:{k:{n, pts, txt}}}], melhor primeiro.
+function _notaCalcular(e) {
+  const lojas = LOJAS_LISTA.filter(k => k !== 'MAGLIA' && k !== LOJA_TESTE);
+  const bloq = {}; (e.bloqRows || []).forEach(r => { const k = _normLoja(r.loja); bloq[k] = (bloq[k] || 0) + 1; });
+  const div = {}; (e.divRk || []).forEach(x => { div[x.k] = x.pend.filter(p => p.dias > DIV_ALERTA_DIAS).length; });
+  const emp = {}; (e.emprest || []).forEach(t => { const k = _emprestDevedorVencido(t, e.hoje); if (k) emp[k] = (emp[k] || 0) + 1; });
+  return lojas.map(k => {
+    const itens = {};
+    const conta = (key, n, txt) => { const R = NOTA_REGRAS.find(r => r.k === key); itens[key] = { n, pts: Math.min(R.max, n * R.por), txt }; };
+    conta('bloq', bloq[k] || 0, (bloq[k] || 0) + ' caso(s)');
+    conta('diverg', div[k] || 0, (div[k] || 0) + ' sem identificar');
+    const mp = (e.manutParada || {})[k] || 0; conta('manut', mp, mp + ' parada(s)');
+    // NF: mesma leitura do alerta do Atenção (_nfSemanaAlertas).
+    let nfPts = 0, nfTxt = 'em dia';
+    const d = e.nfSemana;
+    if (d) {
+      const r = d.rec[LOJA_SLUG_HOME[k]] || { valor: 0 }, n = d.nf[k] || { valor: 0 };
+      const recV = Number(r.valor) || 0, nfV = Number(n.valor) || 0;
+      if (recV > 0 && nfV < recV * NF_SEMANA_MINIMO) { nfPts = 15; nfTxt = 'NF abaixo do recebido'; }
+      else if (recV === 0 && nfV === 0) { nfPts = 10; nfTxt = 'sem entrega nem NF'; }
+      else if (recV === 0 && nfV > 0) { nfPts = 5; nfTxt = 'NF sem confirmar entrega'; }
+    } else nfTxt = 'sem dado';
+    itens.nf = { n: nfPts ? 1 : 0, pts: nfPts, txt: nfTxt };
+    conta('emp', emp[k] || 0, (emp[k] || 0) + ' vencido(s)');
+    const desconto = Object.values(itens).reduce((s, i) => s + i.pts, 0);
+    return { k, nome: LOJA_DISPLAY[k] || k, nota: Math.max(0, 100 - desconto), itens };
+  }).sort((a, b) => b.nota - a.nota || a.nome.localeCompare(b.nome));
+}
+function _notaSemanaIni(hoje) { const d = new Date(hoje + 'T12:00:00'); const dw = (d.getDay() + 6) % 7; d.setDate(d.getDate() - dw); return d.toISOString().slice(0, 10); }
+async function _loadNota() {
+  if (_notaCarregando) return;
+  _notaCarregando = true;
+  try {
+    const hoje = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }), seg = _notaSemanaIni(hoje);
+    const H = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+    const [bloqRows] = await Promise.all([
+      window.gnFetchJson(`${SB_URL}/rest/v1/gn_travas_registro?dia=gte.${seg}&dia=lte.${hoje}&select=loja,tipo,dia`, H, 'nota:bloqueios', null),
+      (!_divDados || !_divDados.dados) ? _loadDivergencias() : null,
+      (!_emprestPainel || !_emprestPainel.lista) ? _loadEmprestPainel() : null,
+    ]);
+    const divOk = _divDados && _divDados.dados;
+    _notaDados = { em: Date.now(), hoje, seg, ok: bloqRows !== null && !!divOk,
+      rk: _notaCalcular({ hoje, bloqRows: bloqRows || [], divRk: divOk ? _divRanking(_divDados.dados, hoje) : [],
+        manutParada: _dashManutParada || {}, nfSemana: _dashNfSemana, emprest: (_emprestPainel && _emprestPainel.lista) || [] }) };
+  } catch (e) { window.gnLogError && window.gnLogError('nota', e); _notaDados = { em: Date.now(), ok: false, rk: [] }; }
+  finally { _notaCarregando = false; if (_dashTab === 'nota') renderDashboard(); }
+}
+function _notaCor(n) { return n >= 85 ? 'var(--txt-green)' : n >= 65 ? 'var(--txt-amber)' : 'var(--txt-red)'; }
+function _notaToggle(k) { _notaAberta = _notaAberta === k ? null : k; renderDashboard(); }
+function _buildNotaPanel() {
+  // Manutenção e NF vêm da carga do Painel: sem ela a nota sairia "boa" por falta de dado.
+  if (!_dashFat || _dashManutParada === null) return _skelPanel(4);
+  if (!_notaDados || Date.now() - _notaDados.em > 120000) _loadNota();
+  if (!_notaDados) return _skelPanel(4);
+  if (!_notaDados.ok) return '<div style="padding:16px;font-size:12px;color:var(--txt-red)">Não deu pra carregar tudo pra calcular a nota agora.</div>';
+  const rk = _notaDados.rk, media = rk.length ? Math.round(rk.reduce((s, x) => s + x.nota, 0) / rk.length) : 0;
+  const linhas = rk.map((x, i) => {
+    const ab = _notaAberta === x.k;
+    const piores = Object.entries(x.itens).filter(([, it]) => it.pts > 0).sort((a, b) => b[1].pts - a[1].pts);
+    return `<div class="nota-loja" data-loja="${x.k}" style="border-top:1px solid var(--b1)">
+      <div onclick="_notaToggle('${x.k}')" style="display:flex;align-items:center;gap:10px;padding:9px 2px;cursor:pointer">
+        <div style="width:24px;text-align:center;font-size:12px;font-weight:900;color:var(--t3)">${i + 1}º</div>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
+            <span style="font-size:12.5px;font-weight:800;color:var(--t1)">${window.escapeHtml(x.nome)}</span>
+            <span class="nota-val" style="font-size:16px;font-weight:900;color:${_notaCor(x.nota)}">${x.nota}</span>
+          </div>
+          <div style="height:6px;background:var(--fill-sutil);border-radius:4px;margin:4px 0 3px;overflow:hidden"><div style="height:100%;width:${x.nota}%;background:${_notaCor(x.nota)};border-radius:4px"></div></div>
+          <div class="nota-resumo" style="font-size:10.5px;color:var(--t3)">${piores.length ? piores.slice(0, 2).map(([k, it]) => `${NOTA_REGRAS.find(r => r.k === k).rot.split(' ')[0]} ${window.escapeHtml(it.txt)} (−${it.pts})`).join(' · ') : '✓ nada a descontar'}</div>
+        </div>
+        <span style="color:var(--t3);font-size:12px">${ab ? '▾' : '▸'}</span>
+      </div>
+      ${ab ? `<div class="nota-itens" style="padding:0 4px 10px 36px">${NOTA_REGRAS.map(R => { const it = x.itens[R.k]; return `<div style="display:flex;justify-content:space-between;gap:8px;font-size:11px;padding:3px 0;border-bottom:1px dashed var(--b1)"><span style="color:var(--t1)">${R.rot}</span><span style="color:var(--t2);white-space:nowrap">${window.escapeHtml(it.txt)} · <b style="color:${it.pts ? 'var(--txt-red)' : 'var(--txt-green)'}">${it.pts ? '−' + it.pts : '0'}</b></span></div>`; }).join('')}</div>` : ''}
+    </div>`;
+  }).join('');
+  return _reportBtnsRowHtml('Nota') + `<div style="background:var(--s2);border:1px solid var(--b1);border-radius:14px;padding:12px 14px;margin-bottom:12px">
+      <div style="font-size:13px;font-weight:800;color:var(--t1)">🏆 Nota de disciplina operacional</div>
+      <div style="font-size:10.5px;color:var(--t2);line-height:1.5;margin:2px 0 8px">Começa em 100 e desconta o que é da loja: ${NOTA_REGRAS.map(R => R.rot.replace(/^\S+\s/, '') + (R.por ? ` (−${R.por} cada, até −${R.max})` : ` (até −${R.max})`)).join(' · ')}. Bloqueios da semana (desde ${_carnesDM(_notaDados.seg)}); o resto é a situação de agora. Toque na loja pra ver a conta.</div>
+      <div style="font-size:11.5px;color:var(--t2);margin-bottom:4px">Média da rede: <b style="color:${_notaCor(media)}">${media}</b></div>
+      ${linhas}
+    </div>`;
+}
+function _notaRelatorioTexto(wpp) {
+  if (!_notaDados || !_notaDados.ok) return null;
+  const b = t => wpp ? '*' + t + '*' : t, rk = _notaDados.rk;
+  let msg = `${b('🏆 Nota de disciplina operacional')} — ${_carnesDM(_notaDados.hoje)}\nComeça em 100 e desconta o que é da loja.\n`;
+  rk.forEach((x, i) => {
+    const desc = NOTA_REGRAS.map(R => x.itens[R.k]).map((it, j) => it.pts ? `${NOTA_REGRAS[j].rot.replace(/^\S+\s/, '')}: ${it.txt} (−${it.pts})` : '').filter(Boolean);
+    msg += `\n${b((i + 1) + 'º ' + x.nome + ' — ' + x.nota)}\n${desc.length ? desc.map(d => '   ' + d).join('\n') : '   nada a descontar'}\n`;
+  });
+  return { msg, titulo: 'Nota de disciplina — ' + _carnesDM(_notaDados.hoje), rk };
+}
+function gerarWppNota() { const r = _notaRelatorioTexto(true); if (!r) { alert('Aguarde os dados carregarem.'); return; } window.open('https://wa.me/?text=' + encodeURIComponent(r.msg), '_blank'); }
+function gerarPDFNota() {
+  const r = _notaRelatorioTexto(false); if (!r) { alert('Aguarde os dados carregarem.'); return; }
+  const media = r.rk.length ? Math.round(r.rk.reduce((s, x) => s + x.nota, 0) / r.rk.length) : 0;
+  window.gnRelatorioPDF({ titulo: r.titulo, texto: r.msg.split('\n').slice(1).join('\n'),
+    kpis: [{ label: 'Média da rede', valor: String(media) }, { label: 'Melhor', valor: r.rk[0] ? r.rk[0].nome : '—', sub: r.rk[0] ? String(r.rk[0].nota) : '' },
+           { label: 'Pior', valor: r.rk.length ? r.rk[r.rk.length - 1].nome : '—', sub: r.rk.length ? String(r.rk[r.rk.length - 1].nota) : '' }] });
+}
+async function enviarPDFNotaWpp() { await _pdfWppComo(gerarPDFNota); }
+
 let _acompNode = null;
 // Home da loja (25–26/11/2026, "a home que falo é essa das lojas"): gerentes e subgerentes
 // acompanham a própria unidade; o mestre, a loja que está navegando. Mesma tela e mesma
@@ -23858,7 +23989,7 @@ const DASH_GRUPOS = [
   { g: 'vendas',   rot: '📈 Vendas',   abas: [['fat', '↓ Faturamento'], ['att', '⚠ Atenção'], ['bi', '📊 BI'], ['metas', '⚙ Metas']] },
   { g: 'caixa',    rot: '🧾 Caixa',    abas: [['diverg', '🚨 Divergências'], ['cancel', '🧾 Cancel. e transf.'], ['sem10', '💸 Sem 10%']] },
   { g: 'equipe',   rot: '👥 Equipe',   abas: [['presenca', '👤 Presença'], ['folgas', '📅 Folgas'], ['ocorr', '⚠ Ocorrências'], ['ferias', '🏖 Férias'], ['xadrez', '🔀 Xadrez'], ['banco', '⏱ Banco'], ['extra', '👷 Extra']] },
-  { g: 'operacao', rot: '🛠 Operação', abas: [['acomp', '📊 Acompanhamento'], ['bloqueios', '🔒 Bloqueios'], ['vinculos', '🔗 Vínculos NF'], ['barris', '🍺 Barris'], ['carnes', '🥩 Carnes'], ['vendidos', '🧾 Vendidos'], ['avarias', '⚠️ Avarias'], ['trios', '🎵 Trios'], ['semlanc', '✅ Validações'], ['utensent', '🍴 Utensílios'], ['emprest', '⇄ Transferências']] },
+  { g: 'operacao', rot: '🛠 Operação', abas: [['nota', '🏆 Nota'], ['acomp', '📊 Acompanhamento'], ['bloqueios', '🔒 Bloqueios'], ['vinculos', '🔗 Vínculos NF'], ['barris', '🍺 Barris'], ['carnes', '🥩 Carnes'], ['vendidos', '🧾 Vendidos'], ['avarias', '⚠️ Avarias'], ['trios', '🎵 Trios'], ['semlanc', '✅ Validações'], ['utensent', '🍴 Utensílios'], ['emprest', '⇄ Transferências']] },
   { g: 'dre',      rot: '💰 DRE',      abas: [['dre', '💰 DRE']] },
 ];
 const _dashGrupoUltima = {};
