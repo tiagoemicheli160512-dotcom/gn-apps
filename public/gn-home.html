@@ -1091,6 +1091,8 @@ function _dashSemanaOff() {
 function _dashMetaDe(k) { return _metaMensalPara(_dashMetas[k] || 0, (_dashRangeOf(_dashOff()) || {}).dates); }
 let _dashFat     = null; // {lojaKey: total} for selected period
 let _dashFatPrev = null; // {lojaKey: total} for previous period
+let _dashFatPrevFeriados = []; // feriados nacionais nos dias comparados do período anterior (e não no atual)
+let _dashFatComp = null; // {lojaKey: total} do período ATUAL só com os dias já fechados (sem hoje) — é o que se compara com _dashFatPrev
 let _dashFatPrevParcial = false; // true quando _dashFatPrev foi cortado nos mesmos dias já decorridos do período atual
 let _dashManut   = null; // {lojaKey: pendingCount}
 let _dashChk     = null; // Set of lojas that sent checklist today
@@ -13294,9 +13296,16 @@ async function _loadDashAll() {
   // decorridos no atual, pra comparação ser dia-a-dia equivalente.
   // Quantos dias do período atual já começaram (vale pra semana, mês, trimestre e dia).
   const _hojeIsoDec = (d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'))(new Date());
-  const diasDecorridos = range.dates.filter(d => d <= _hojeIsoDec).length;
+  // 28/11/2026 — HOJE não entra na comparação: o faturamento do dia só chega no fechamento,
+  // então num sábado de manhã a semana atual tinha o sábado em R$ 0 contra o sábado passado
+  // inteiro (o maior dia) e as 11 lojas apareciam "caindo 36–50%". Compara só os dias já
+  // fechados, dos dois lados. Sem nenhum dia fechado (segunda, ou o Diário de hoje), não
+  // compara — melhor "—" que uma queda falsa.
+  const curCompDates = range.isCurrent ? range.dates.filter(d => d < _hojeIsoDec) : range.dates;
+  const diasDecorridos = curCompDates.length;
   const prevRangeCompDates = range.isCurrent ? prevRange.dates.slice(0, diasDecorridos) : prevRange.dates;
   const precisaCompSeparada = prevRangeCompDates.length !== prevRange.dates.length;
+  const precisaCurComp = range.isCurrent && curCompDates.length > 0 && curCompDates.length !== range.dates.length;
   // Data local (não UTC) — toISOString() usa UTC, então a partir de ~21h no horário do
   // Brasil (UTC-3) "hoje" já virava o dia seguinte, fazendo o card Visitas do Dia mostrar
   // a visita de amanhã e o CHK Hoje não bater com o checklist do dia certo.
@@ -13321,10 +13330,11 @@ async function _loadDashAll() {
     const comKeysAll = Object.values(LOJA_COM_KEY).join(',');
     const catorze = new Date(); catorze.setDate(catorze.getDate()-14);
     const from14 = catorze.toISOString().slice(0,10);
-    const [fatCur, fatPrv, fatPrvComp, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows, comissoesAllRows, bhConfigRows, cancelRows, caixaFechadosRows, alertasUrgentesRows, visitasPassadasRows, provisoesRows, carnesRows, trioAgendaOntemRows, bhMesesRows, buffetRows, presencaRows, correcaoRows] = await Promise.all([
+    const [fatCur, fatPrv, fatPrvComp, fatCurComp, fat2, fat3, manutRows, chkRows, lojasOfRows, fatDia, comDia, visitasChkRows, visitasManutRows, comissoesAllRows, bhConfigRows, cancelRows, caixaFechadosRows, alertasUrgentesRows, visitasPassadasRows, provisoesRows, carnesRows, trioAgendaOntemRows, bhMesesRows, buffetRows, presencaRows, correcaoRows] = await Promise.all([
       _fetchFatLongo(range.dates).catch(e=>{ _errCb('fatCur')(e); return {}; }),
       _fetchFatLongo(prevRange.dates).catch(e=>{ _errCb('fatPrv')(e); return {}; }),
-      precisaCompSeparada ? _fetchFatLongo(prevRangeCompDates).catch(e=>{ _errCb('fatPrvComp')(e); return {}; }) : Promise.resolve(null),
+      precisaCompSeparada ? (prevRangeCompDates.length ? _fetchFatLongo(prevRangeCompDates).catch(e=>{ _errCb('fatPrvComp')(e); return {}; }) : Promise.resolve(null)) : Promise.resolve(null),
+      precisaCurComp ? _fetchFatLongo(curCompDates).catch(e=>{ _errCb('fatCurComp')(e); return null; }) : Promise.resolve(null),
       _fetchFatLongo(range2.dates).catch(e=>{ _errCb('fat2')(e); return {}; }),
       _fetchFatLongo(range3.dates).catch(e=>{ _errCb('fat3')(e); return {}; }),
       window.gnFetchJson(`${SB_URL}/rest/v1/checklist_diario?select=data_operacao,loja,manutencao&data_operacao=gte.${from30}&order=data_operacao.desc`, H, 'dash:manutRows', []),
@@ -13369,6 +13379,12 @@ async function _loadDashAll() {
     ]);
     if (_dashChaveCarga() !== _chaveCarga) { _dashLoadDeNovo = true; return; }   // período trocou no meio
     _dashFat = fatCur; _dashFatPrev = precisaCompSeparada ? fatPrvComp : fatPrv;
+    // Lado atual da comparação: só os dias fechados. Nenhum dia fechado → sem comparação.
+    _dashFatComp = !range.isCurrent ? fatCur : curCompDates.length === 0 ? null : (precisaCurComp ? fatCurComp : fatCur);
+    if (_dashFatComp === null) _dashFatPrev = null;
+    // Feriado só de um lado explica a variação (20/11/2026, Consciência Negra: R$ 232 mil
+    // contra R$ 133 mil de uma sexta comum) — vai junto da comparação, em vez de parecer queda.
+    _dashFatPrevFeriados = _dashFeriadosSoNoAnterior(curCompDates, prevRangeCompDates);
     _dashFatPrevParcial = precisaCompSeparada;
     _dashFatDia = fatDia.byDay || {}; _dashFatDiaLoja = fatDia.byLojaDay || {};
     _dashComDia = comDia.totals || Array(7).fill(0); _dashComDiaLoja = comDia.byLoja || {};
@@ -14870,13 +14886,23 @@ function _buildBiTab(fat, maxVal, loading) {
   `;
 }
 
+// Valor do período ATUAL que entra na comparação com _dashFatPrev: só os dias já fechados
+// (ver _loadDashAll, 28/11/2026). Fora do período em andamento é o próprio faturamento.
+function _dashFeriadosSoNoAnterior(cur, prev) {
+  const fer = d => DATAS_ESPECIAIS_BASE.find(x => x.data === d && x.tipo === 'nacional');
+  const naAtual = (cur || []).some(d => fer(d));
+  return naAtual ? [] : (prev || []).map(fer).filter(Boolean);
+}
+function _dashFeriadoTxt() { return _dashFatPrevFeriados.length ? ' · anterior teve feriado: ' + _dashFatPrevFeriados.map(f => f.nome + ' ' + f.data.slice(8, 10) + '/' + f.data.slice(5, 7)).join(', ') : ''; }
+function _dashFatCompDe(k) { const c = _dashFatComp || _dashFat; return c ? (c[k] || 0) : 0; }
 function _buildKPIRow() {
   if(!_dashFat) return `<div class="kpi-row">${['Faturamento','CHK Hoje'].map(lbl=>`<div class="kpi-tile"><div class="kpi-tile-lbl">${lbl}</div><div class="kpi-tile-val">${_skelBar('70%','16px')}</div></div>`).join('')}</div>`;
   const fat=_dashFat, fatP=_dashFatPrev;
   const lojasConsolidado=_lojasFatConsolidado();
   const total=lojasConsolidado.reduce((s,k)=>s+(fat[k]||0),0);
   const totalP=fatP?lojasConsolidado.reduce((s,k)=>s+(fatP[k]||0),0):0;
-  const delta=totalP>0?Math.round((total-totalP)/totalP*100):null;
+  const totalComp=lojasConsolidado.reduce((s,k)=>s+_dashFatCompDe(k),0);
+  const delta=totalP>0?Math.round((totalComp-totalP)/totalP*100):null;
   const dStr=delta===null?'—':(delta>=0?'+':'')+delta+'%';
   const dClr=delta===null?'var(--t4)':delta>=0?'#4ade80':'#f87171';
   let mSum=0,mN=0;
@@ -14894,7 +14920,7 @@ function _buildKPIRow() {
   </div>`;
   const totalPStr=totalP>0?_fmtBRLs(totalP):null;
   const _nLivre=_dashPer==='livre'?_dashRangeOf(_dashOff()).dias:0;
-  const anteriorLbl=_dashPer==='dia'?'mesmo dia da semana passada':_dashPer==='livre'?(_nLivre===1?'dia anterior':`${_nLivre} dias anteriores`):_dashFatPrevParcial?'mesmos dias · anterior':'anterior';
+  const anteriorLbl=_dashPer==='dia'?'mesmo dia da semana passada':_dashPer==='livre'?(_nLivre===1?'dia anterior':`${_nLivre} dias anteriores`):_dashFatPrevParcial?'até ontem · mesmos dias do anterior':'anterior';
   // Herdado do antigo card "Faturamento total": quem do consolidado está sem venda no
   // período (a Maglia não conta — não é do consolidado).
   const semDados=lojasConsolidado.filter(k=>!(fat[k]>0));
@@ -14904,7 +14930,7 @@ function _buildKPIRow() {
   // meta só vira quadro quando existe — sem meta cadastrada era um quadro inteiro dizendo
   // "— configure em Metas"; vira uma linha com o atalho.
   const varCor=delta===null?'var(--t3)':delta>=0?'#15803d':'#dc2626';
-  const varHtml=delta!==null?`<b style="color:${varCor}">${delta>=0?'▲':'▼'} ${Math.abs(delta)}%</b> vs ${totalPStr||'—'} (${anteriorLbl})`:'';
+  const varHtml=delta!==null?`<b style="color:${varCor}">${delta>=0?'▲':'▼'} ${Math.abs(delta)}%</b> vs ${totalPStr||'—'} (${anteriorLbl})${_dashFatPrevFeriados.length?`<br><span class="kpi-feriado" style="color:var(--txt-amber);font-weight:700">⚠ ${_dashFeriadoTxt().replace(/^ · /,'')}</span>`:''}`:(_dashFat&&_dashFatComp===null&&_dashFatPrev===null?'<span style="color:var(--t3)">comparação a partir do 1º dia fechado</span>':'');
   const metaTile=avgM!==null?`<div style="grid-column:1/-1">${t('% Média Meta',avgM+'%',`${stAbove}/${stMN} acima da meta`,mClr)}</div>`:'';
   const metaAviso=avgM===null&&(_dashPer==='sem'||_dashPer==='mes')?`<div class="kpi-meta-aviso" onclick="_setDashTab('metas')" style="grid-column:1/-1;cursor:pointer;font-size:10.5px;color:var(--t3);padding:2px 2px 0">🎯 Nenhuma meta cadastrada — <b style="color:var(--t2)">configurar ›</b></div>`:'';
   return `<div class="kpi-row">
@@ -14922,7 +14948,7 @@ function _buildBarChart(sorted) {
     const cor=COR_LOJA[k]||'#888';
     const meta=_dashMetaDe(k)||0;
     const vP=fatP?(fatP[k]||0):0;
-    const d=vP>0?Math.round((v-vP)/vP*100):null;
+    const d=vP>0?Math.round((_dashFatCompDe(k)-vP)/vP*100):null;
     const dClr=d===null?'var(--t4)':d>=0?'#4ade80':'#f87171';
     const mp=meta>0?Math.min(100,v/meta*100):null;
     const bc=mp!==null?(mp>=100?'#4ade80':mp>=75?'#fbbf24':'#f87171'):cor;
@@ -14947,7 +14973,7 @@ function _buildTableView(sorted) {
     const v=fat?(fat[k]||0):0;
     const vP=fatP?(fatP[k]||0):0;
     const meta=_dashMetaDe(k)||0;
-    const d=vP>0?Math.round((v-vP)/vP*100):null;
+    const d=vP>0?Math.round((_dashFatCompDe(k)-vP)/vP*100):null;
     const mp=meta>0?Math.round(v/meta*100):null;
     const mpC=mp===null?'var(--t4)':mp>=100?'#4ade80':mp>=75?'#fbbf24':'#f87171';
     const dC=d===null?'var(--t4)':d>=0?'#4ade80':'#f87171';
@@ -21122,8 +21148,10 @@ function _computeAlertas() {
     const vP=fatP?(fatP[k]||0):0;
     const meta=metas[k]||0;
     const nome=LOJA_DISPLAY[k]||k;
-    const d=vP>0?Math.round((v-vP)/vP*100):null;
-    if(d!==null&&d<=-15) alerts.push({sev:0,cor:'#f87171',ico:'📉',msg:`${nome} caiu ${Math.abs(d)}% vs período anterior`,sub:`${_fmtBRLs(v)} vs ${_fmtBRLs(vP)} ant.`,loja:k});
+    const vC=_dashFatCompDe(k);
+    const d=vP>0?Math.round((vC-vP)/vP*100):null;
+    // Com feriado só no anterior a queda é esperada: continua aparecendo, mas não como urgente.
+    if(d!==null&&d<=-15) alerts.push({sev:_dashFatPrevFeriados.length?2:0,cor:'#f87171',ico:'📉',msg:`${nome} caiu ${Math.abs(d)}% vs período anterior`,sub:`${_fmtBRLs(vC)} vs ${_fmtBRLs(vP)} ant.${_dashFatPrevParcial?' (até ontem, mesmos dias)':''}${_dashFeriadoTxt()}`,loja:k});
     if(meta>0&&v>0){const mp=Math.round(v/meta*100);if(mp<60)alerts.push({sev:1,cor:'#fbbf24',ico:'🎯',msg:`${nome} em ${mp}% da meta`,sub:`${_fmtBRLs(v)} de ${_fmtBRLs(meta)}`,loja:k});}
     if(_dashManut&&(_dashManut[k]||0)>0)alerts.push({sev:1,cor:'#f97316',ico:'🔧',msg:`${nome} com ${_dashManut[k]} manut. pendente${_dashManut[k]>1?'s':''}`,sub:'Toque no banner para ver',loja:k});
     if(_dashChk&&!_dashChk.has(k))alerts.push({sev:2,cor:'#60a5fa',ico:'📋',msg:`${nome} sem checklist hoje`,sub:'Checklist do dia não enviado',loja:k});
@@ -22918,7 +22946,7 @@ function renderDashboard() {
       if(_dashViewMode==='table'){
         let va=0,vb=0;
         if(_dashSortBy==='fat'){va=fat?(fat[a]||0):0;vb=fat?(fat[b]||0):0;}
-        else if(_dashSortBy==='delta'){const pa=_dashFatPrev&&(_dashFatPrev[a]||0)>0?((fat?fat[a]||0:0)-(_dashFatPrev[a]||0))/(_dashFatPrev[a]||1):0;const pb=_dashFatPrev&&(_dashFatPrev[b]||0)>0?((fat?fat[b]||0:0)-(_dashFatPrev[b]||0))/(_dashFatPrev[b]||1):0;va=pa;vb=pb;}
+        else if(_dashSortBy==='delta'){const pa=_dashFatPrev&&(_dashFatPrev[a]||0)>0?(_dashFatCompDe(a)-(_dashFatPrev[a]||0))/(_dashFatPrev[a]||1):0;const pb=_dashFatPrev&&(_dashFatPrev[b]||0)>0?(_dashFatCompDe(b)-(_dashFatPrev[b]||0))/(_dashFatPrev[b]||1):0;va=pa;vb=pb;}
         else if(_dashSortBy==='meta'){const ma=_dashMetaDe(a)||0,mb=_dashMetaDe(b)||0;va=ma>0?(fat?(fat[a]||0):0)/ma:-1;vb=mb>0?(fat?(fat[b]||0):0)/mb:-1;}
         else if(_dashSortBy==='nome'){return _dashSortDir==='asc'?(LOJA_DISPLAY[a]||a).localeCompare(LOJA_DISPLAY[b]||b):(LOJA_DISPLAY[b]||b).localeCompare(LOJA_DISPLAY[a]||a);}
         return _dashSortDir==='asc'?va-vb:vb-va;
@@ -22958,7 +22986,7 @@ function renderDashboard() {
         // % vs prev period
         let diffHtml='';
         if(hasData&&vP>0){
-          const d=Math.round((v-vP)/vP*100);
+          const d=Math.round((_dashFatCompDe(k)-vP)/vP*100);
           // 07/11/2026: no celular a variação quebrava no hífen — "R$ 113,8k -" numa linha
           // e "18%" na outra (e "R$" sozinho em cima de "47,7k"). Sinal de menos de verdade
           // (U+2212), nowrap na variação e espaço inseparável no valor: se não couber, a
