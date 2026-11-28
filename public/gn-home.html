@@ -13444,6 +13444,8 @@ async function _loadDashAll() {
     _dashBloqSeguidos = await _loadBloqSeguidos();
     // Divergência de caixa parada há mais de 7 dias (Caixa › 🚨 Divergências) — complemento.
     await _loadDivergencias();
+    // Pagamento de empréstimo em dinheiro parado há mais de 3 dias — complemento.
+    await _loadDinheiroParado();
     window._chipDetail.dashXml = { title: '📄 Lojas sem XML do mês enviado',
       lines: [...xmlPend].map(l=>({ nome: LOJA_DISPLAY[l] || l })) };
 
@@ -16838,7 +16840,7 @@ async function _loadEmprestPainel() {
           const a = porId.get(t.id);
           if (!a) { porId.set(t.id, Object.assign({}, t)); return; }
           FLAGS.forEach(f => { a[f] = !!a[f] || !!t[f]; });
-          ['dataQuitacao', 'formaQuitacao', 'pagDinheiroAvariaId', 'confirmadoDestinoEm', 'confirmadoOrigemEm', 'contestacao'].forEach(f => { if (!a[f] && t[f]) a[f] = t[f]; });
+          ['dataQuitacao', 'formaQuitacao', 'pagDinheiroAvariaId', 'confirmadoDestinoEm', 'confirmadoOrigemEm', 'contestacao', 'pagDinheiroOrigemEm', 'pagDinheiroDestinoEm'].forEach(f => { if (!a[f] && t[f]) a[f] = t[f]; });
         });
       });
     });
@@ -16851,10 +16853,64 @@ async function _loadEmprestPainel() {
     if (_dashTab === 'emprest') renderDashboard();
   }
 }
+// ── 💵 Pagamento de empréstimo em dinheiro parado (27/11/2026) ───────────────────────────
+// Combinado em dinheiro, o empréstimo passa por: as duas lojas aceitarem → Compras definir o
+// valor (avaria tipo transferencia_dinheiro, status pendente) → Financeiro validar no app RH
+// (status loja_confirmou). No Painel tudo aparecia como "em validação", e havia casos parados
+// há 35–51 dias sem ninguém saber de quem era a vez. Alerta no Atenção quando a etapa está
+// parada há mais de 3 dias (mesmo prazo das devoluções), dizendo QUEM tem que agir.
+const DINHEIRO_PARADO_DIAS = 3;
+let _dashDinheiroAv = {};   // {avariaId: avaria} — só das avarias de pagamento de empréstimo
+function _dinheiroEtapa(t) {
+  if (!t || t.quitado || !(t.pagDinheiroAvariaId || t.pagDinheiroOrigem || t.pagDinheiroDestino)) return null;
+  const nm = k => LOJA_DISPLAY[k] || k;
+  const dias = iso => { const d = new Date(iso); return isNaN(d) ? null : Math.max(0, Math.floor((Date.now() - d.getTime()) / 864e5)); };
+  if (!t.pagDinheiroAvariaId) {
+    const falta = t.pagDinheiroDestino && !t.pagDinheiroOrigem ? t.origem : t.destino;
+    const desde = (falta === t.origem ? t.pagDinheiroDestinoEm : t.pagDinheiroOrigemEm) || t.data;
+    return { quem: `${nm(falta)} aceitar (app Lojas › Empréstimos)`, loja: falta, dias: dias(desde) };
+  }
+  const av = _dashDinheiroAv[t.pagDinheiroAvariaId];
+  if (!av) return null;
+  if (av.status === 'pendente') return { quem: 'Compras definir o valor', loja: t.destino, dias: dias(av.ts) };
+  if (av.status === 'loja_confirmou') return { quem: 'Financeiro validar (app RH › Avarias)', loja: t.destino, dias: dias(av.loja_conf_ts || av.ts) };
+  return null;
+}
+async function _loadDinheiroParado() {
+  try {
+    if (!_emprestPainel || !_emprestPainel.lista) await _loadEmprestPainel();
+    const lista = (_emprestPainel && _emprestPainel.lista) || [];
+    const destinos = [...new Set(lista.filter(t => !t.quitado && t.pagDinheiroAvariaId).map(t => t.destino))];
+    const av = {};
+    if (destinos.length) {
+      const rows = await window.gnFetchJson(`${SB_URL}/rest/v1/gn_lojas?loja=in.(${destinos.map(k => '"' + encodeURIComponent(k) + '"').join(',')})&select=loja,av:all_data->avariasAll`,
+        { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY }, 'dinheiroParado', []);
+      (rows || []).forEach(r => Object.values((r.av && typeof r.av === 'object') ? r.av : {}).forEach(l => (Array.isArray(l) ? l : []).forEach(a => { if (a && a.id && a.tipo === 'transferencia_dinheiro') av[a.id] = a; })));
+    }
+    _dashDinheiroAv = av;
+  } catch (e) { window.gnLogError && window.gnLogError('dinheiroParado', e); }
+}
+function _dinheiroParadoAlertas(k) {
+  const lista = (_emprestPainel && _emprestPainel.lista) || [];
+  const out = [];
+  lista.forEach(t => {
+    const e = _dinheiroEtapa(t);
+    if (!e || e.loja !== k || e.dias == null || e.dias <= DINHEIRO_PARADO_DIAS) return;
+    out.push({ sev: 2, cor: '#a855f7', ico: '💵', loja: k, tipo: 'dinheiro',
+      msg: `Pagamento em dinheiro parado há ${e.dias} dias: ${t.insumo} (${LOJA_DISPLAY[t.origem] || t.origem} → ${LOJA_DISPLAY[t.destino] || t.destino})`,
+      sub: `Falta ${e.quem} — ver Operação › ⇄ Transferências` });
+  });
+  return out;
+}
 // Situação de um empréstimo, do jeito que as duas lojas veem no app Lojas.
 function _emprestSituacao(t) {
   if (t.quitado) return { k: 'quitado', txt: `✅ devolvido${t.dataQuitacao ? ' em ' + String(t.dataQuitacao).slice(8, 10) + '/' + String(t.dataQuitacao).slice(5, 7) : ''}${t.formaQuitacao ? ' (' + t.formaQuitacao + ')' : ''}`, cor: 'var(--txt-green)' };
-  if (t.pagDinheiroAvariaId || t.pagDinheiroOrigem || t.pagDinheiroDestino) return { k: 'dinheiro', txt: '💵 pagamento em dinheiro em validação', cor: 'var(--txt-purple)' };
+  if (t.pagDinheiroAvariaId || t.pagDinheiroOrigem || t.pagDinheiroDestino) {
+    // Quem está devendo o próximo passo (27/11/2026) — "em validação" escondia que às vezes
+    // é a outra LOJA que ainda não aceitou. Vem do _loadDinheiroParado (precisa da avaria).
+    const e = _dinheiroEtapa(t);
+    return { k: 'dinheiro', txt: e ? `💵 pagamento em dinheiro — falta ${e.quem}${e.dias != null ? ' · parado há ' + e.dias + ' dia' + (e.dias === 1 ? '' : 's') : ''}` : '💵 pagamento em dinheiro em validação', cor: 'var(--txt-purple)' };
+  }
   const nm = k => LOJA_DISPLAY[k] || k;
   // Contestação (27/11/2026): a loja respondeu "não recebi"/"não devolvi" no app Lojas — sai
   // da trava e fica aqui pra gestão resolver com as duas.
@@ -21076,6 +21132,7 @@ function _computeAlertas() {
     alerts.push(..._nfSemanaAlertas(k, nome));
     alerts.push(..._bloqSeguidosAlertas(k, nome));
     alerts.push(..._divAlertas(k, nome));
+    alerts.push(..._dinheiroParadoAlertas(k));
     const visitasLoja=_dashVisitasAndamento?(_dashVisitasAndamento[k]||[]):[];
     if(visitasLoja.length){
       // Visita em andamento há 10h+ (seguidas, mesmo dia) vira alerta urgente em vez do
